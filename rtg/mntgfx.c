@@ -639,9 +639,6 @@ uint32 monitor_switch(__reg("a0") struct RTGBoard* b,__reg("d0")  uint16 state) 
 
 
 void rect_fill(__reg("a0") struct RTGBoard* b,__reg("a1")  struct RenderInfo* r,__reg("d0")  uint16 x,__reg("d1")  uint16 y,__reg("d2")  uint16 w,__reg("d3")  uint16 h,__reg("d4")  uint32 color) {
-  uint16 i=0;
-  uint8* ptr;
-  uint8 color8;
   uint16 pitch = 1024;
   MNTZZ9KRegs* registers = b->registers;
   uint8* gfxmem = (uint8*)b->memory;
@@ -679,7 +676,7 @@ void rect_copy(__reg("a0") struct RTGBoard* b,__reg("a1")  struct RenderInfo* r,
   uint16 pitch = 1024;
   uint32 color_format = b->color_format;
   uint8* gfxmem = (uint8*)b->memory;
-  uint32 offset = 0, y1, y3;
+  uint32 offset = 0;
   
   if (w<1 || h<1) return;
   
