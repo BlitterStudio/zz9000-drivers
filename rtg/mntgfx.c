@@ -119,9 +119,9 @@ BPTR __saveds CloseLib(__reg("a6") struct MNTGFXBase *MNTGFXBase)
 {
   MNTGFXBase->libNode.lib_OpenCnt--;
 
-  if(!MNTGFXBase->libNode.lib_OpenCnt) {
-    if(MNTGFXBase->libNode.lib_Flags & LIBF_DELEXP) {
-      return( ExpungeLib(MNTGFXBase) );
+  if (!MNTGFXBase->libNode.lib_OpenCnt) {
+    if (MNTGFXBase->libNode.lib_Flags & LIBF_DELEXP) {
+      return (ExpungeLib(MNTGFXBase));
     }
   }
   return 0;
@@ -159,11 +159,14 @@ ULONG ExtFuncLib(void)
   return 0;
 }
 
-static int zorro_version = 0;
+static LONG zorro_version = 0;
+static LONG hwrev = 0;
+static LONG fwrev_major = 0;
+static LONG fwrev_minor = 0;
+static LONG fwrev = 0;
 
 int FindCard(__reg("a0") struct RTGBoard* b) {
   struct ConfigDev* cd = NULL;
-  uint16 fwrev = 0;
   struct ExpansionBase *ExpansionBase = NULL;
   struct ExecBase *SysBase = *(struct ExecBase **)4L;
 
@@ -175,14 +178,25 @@ int FindCard(__reg("a0") struct RTGBoard* b) {
   zorro_version = 0;
   if ((cd = (struct ConfigDev*)FindConfigDev(cd,0x6d6e,0x4))) zorro_version = 3;
   else if ((cd = (struct ConfigDev*)FindConfigDev(cd,0x6d6e,0x3))) zorro_version = 2;
-
+  
   // Find Z3 or Z2 model
   if (zorro_version>=2) {
-    KPrintF("ZZ9000.card: MNT ZZ9000 found.\n");
+
     b->memory = (uint8*)(cd->cd_BoardAddr)+0x10000;
     b->memory_size = cd->cd_BoardSize-0x10000;
     b->registers = (uint8*)(cd->cd_BoardAddr);
-    fwrev = ((uint16*)b->registers)[0];
+    hwrev = ((uint16*)b->registers)[0];
+    fwrev = ((uint16*)b->registers)[0xc0/2];
+    fwrev_major = fwrev>>8;
+    fwrev_minor = fwrev&0xff;
+
+    char buf[128];
+
+    KPrintF(LibraryID);
+    KPrintF("ZZ9000.card: MNT ZZ9000 found. Zorro version %ld.\n", zorro_version);
+    KPrintF("ZZ9000.card: HW Revision: %ld.\n", hwrev);
+    KPrintF("ZZ9000.card: FW Revision Major: %ld.\n", fwrev_major);
+    KPrintF("ZZ9000.card: FW Revision Minor: %ld.\n", fwrev_minor);
     
     return 1;
   } else {
@@ -258,10 +272,12 @@ int InitCard(__reg("a0") struct RTGBoard* b) {
   //b->fn_p2c = rect_p2c;
   b->fn_rect_fill = (void*)rect_fill;
   b->fn_rect_copy = (void*)rect_copy;
-  if (zorro_version == 3) {
-    b->fn_rect_pattern = (void*)rect_pattern;
+  if (zorro_version == 3 && fwrev >= (1<<8|1)) {
+    // introduced in fw 1.1
     // accelerated text drawing
     b->fn_rect_template = (void*)rect_template;
+    // accelerated pattern drawing
+    b->fn_rect_pattern = (void*)rect_pattern;
   }
   //b->fn_rect_copy_nomask = rect_copy_nomask; // TODO: what is this used for?
   
