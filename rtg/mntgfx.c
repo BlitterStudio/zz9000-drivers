@@ -12,7 +12,7 @@
  * https://spdx.org/licenses/GPL-3.0-or-later.html
  */
 
-/* REVISION 1.0 */
+/* REVISION 1.1 */
 
 #include "mntgfx.h"
 #include "zz9000.h"
@@ -29,12 +29,14 @@
 #include <exec/initializers.h>
 #include <clib/debug_protos.h>
 
+#include <string.h>
+
 static ULONG LibStart(void) {
   return(-1);
 }
 
 static const char LibraryName[] = "ZZ9000.card";
-static const char LibraryID[]   = "$VER: ZZ9000.card 1.0 (2019-07-30)\r\n";
+static const char LibraryID[]   = "$VER: ZZ9000.card 1.1 (2019-08-20)\r\n";
 
 __saveds struct MNTGFXBase* OpenLib( __reg("a6") struct MNTGFXBase *MNTGFXBase);
 BPTR __saveds CloseLib( __reg("a6") struct MNTGFXBase *MNTGFXBase);
@@ -102,7 +104,7 @@ __saveds struct MNTGFXBase* InitLib(__reg("a6") struct ExecBase      *sysbase,
                                           __reg("d0") struct MNTGFXBase   *exb)
 {
   MNTGFXBase = exb;
-  return(MNTGFXBase);
+  return MNTGFXBase;
 }
 
 __saveds struct MNTGFXBase* OpenLib(__reg("a6") struct MNTGFXBase *MNTGFXBase)
@@ -110,7 +112,7 @@ __saveds struct MNTGFXBase* OpenLib(__reg("a6") struct MNTGFXBase *MNTGFXBase)
   MNTGFXBase->libNode.lib_OpenCnt++;
   MNTGFXBase->libNode.lib_Flags &= ~LIBF_DELEXP;
 
-  return(MNTGFXBase);
+  return MNTGFXBase;
 }
 
 BPTR __saveds CloseLib(__reg("a6") struct MNTGFXBase *MNTGFXBase)
@@ -122,7 +124,7 @@ BPTR __saveds CloseLib(__reg("a6") struct MNTGFXBase *MNTGFXBase)
       return( ExpungeLib(MNTGFXBase) );
     }
   }
-  return(NULL);
+  return 0;
 }
 
 BPTR __saveds ExpungeLib(__reg("a6") struct MNTGFXBase *exb)
@@ -149,13 +151,15 @@ BPTR __saveds ExpungeLib(__reg("a6") struct MNTGFXBase *exb)
   }
 
   MNTGFXBase->libNode.lib_Flags |= LIBF_DELEXP;
-  return(NULL);
+  return 0;
 }
 
 ULONG ExtFuncLib(void)
 {
-  return(NULL);
+  return 0;
 }
+
+static int zorro_version = 0;
 
 int FindCard(__reg("a0") struct RTGBoard* b) {
   struct ConfigDev* cd = NULL;
@@ -168,8 +172,12 @@ int FindCard(__reg("a0") struct RTGBoard* b) {
     return 0;
   }
 
+  zorro_version = 0;
+  if ((cd = (struct ConfigDev*)FindConfigDev(cd,0x6d6e,0x4))) zorro_version = 3;
+  else if ((cd = (struct ConfigDev*)FindConfigDev(cd,0x6d6e,0x3))) zorro_version = 2;
+
   // Find Z3 or Z2 model
-  if ((cd = (struct ConfigDev*)FindConfigDev(cd,0x6d6e,0x4)) || (cd = (struct ConfigDev*)FindConfigDev(cd,0x6d6e,0x3))) {
+  if (zorro_version>=2) {
     KPrintF("ZZ9000.card: MNT ZZ9000 found.\n");
     b->memory = (uint8*)(cd->cd_BoardAddr)+0x10000;
     b->memory_size = cd->cd_BoardSize-0x10000;
@@ -194,7 +202,7 @@ int InitCard(__reg("a0") struct RTGBoard* b) {
   b->chip_type = 3;
   b->controller_type = 3;
 
-  b->flags = (1<<20)|(1<<12)|(1<<26); // indisplaychain, flickerfixer, directaccess
+  b->flags = (1<<20)|(1<<12)|(1<<26); // indisplaychain, flickerfixer, directaccess, hwsprite(1)
   b->color_formats = 1|2|512|1024|2048;
   b->sprite_flags = 0;
   b->bits_per_channel = 8;
@@ -250,9 +258,13 @@ int InitCard(__reg("a0") struct RTGBoard* b) {
   //b->fn_p2c = rect_p2c;
   b->fn_rect_fill = (void*)rect_fill;
   b->fn_rect_copy = (void*)rect_copy;
-  //b->fn_rect_pattern = rect_pattern;
-  //b->fn_rect_template = rect_template; // text drawing!
-  //b->fn_rect_copy_nomask = rect_copy_nomask; // used for window copying?
+  if (zorro_version == 3) {
+    b->fn_rect_pattern = (void*)rect_pattern;
+    // accelerated text drawing
+    b->fn_rect_template = (void*)rect_template;
+  }
+  //b->fn_rect_copy_nomask = rect_copy_nomask; // TODO: what is this used for?
+  
   b->fn_blitter_wait = (void*)blitter_wait;
 
   b->fn_get_pixelclock_index = (void*)get_pixelclock_index;
@@ -269,10 +281,10 @@ int InitCard(__reg("a0") struct RTGBoard* b) {
   b->fn_set_clear_mask = (void*)set_clear_mask;
   b->fn_set_read_plane = (void*)set_read_plane;
   
-  /*b->fn_sprite_setup = sprite_setup;
-  b->fn_sprite_xy = sprite_xy;
-  b->fn_sprite_bitmap = sprite_bitmap;
-  b->fn_sprite_colors = sprite_colors;*/
+  //b->fn_sprite_setup = nop;
+  //b->fn_sprite_xy = nop;
+  //b->fn_sprite_bitmap = nop;
+  //b->fn_sprite_colors = nop;
   
   return 1;
 }
@@ -321,6 +333,10 @@ void pan(__reg("a0") struct RTGBoard* b,__reg("a1") uint8* mem,__reg("d0")  uint
 
   zzwrite16(registers, &registers->pan_ptr_hi, offhi);
   zzwrite16(registers, &registers->pan_ptr_lo, offlo);
+
+  for (int i=0; i<10; i++) {
+    fix_vsync(registers);
+  }
 }
 
 void set_memory_mode(__reg("a0") struct RTGBoard* b,__reg("d7")  uint16 format) {
@@ -709,7 +725,131 @@ void rect_copy(__reg("a0") struct RTGBoard* b,__reg("a1")  struct RenderInfo* r,
   zzwrite16(registers, &registers->blitter_dst_hi, (offset&0xffff0000)>>16);
   zzwrite16(registers, &registers->blitter_dst_lo, offset&0xffff);
 
-  zzwrite16(registers, &registers->blitter_op_copyrect, 2);
+  zzwrite16(registers, &registers->blitter_op_copyrect, 1);
+}
+
+void rect_template(__reg("a0") struct RTGBoard* b, __reg("a1") struct RenderInfo* r, __reg("a2") struct Template* t,
+                   __reg("d0") uint16 x, __reg("d1") uint16 y, __reg("d2") uint16 w, __reg("d3") uint16 h,
+                   __reg("d4") uint32 mask, __reg("d7") uint32 format) {
+  MNTZZ9KRegs* registers = b->registers;
+  uint16 pitch = 1024;
+  uint32 color_format = b->color_format;
+  uint8* gfxmem = (uint8*)b->memory;
+  uint32 offset = 0;
+  
+  if (w<1 || h<1) return;
+  if (!t) return; // something about special ptrs?
+  
+  if (r) {
+    pitch = r->pitch;
+    color_format = r->color_format;
+    gfxmem = (uint8*)r->memory;
+  } else {
+    return;
+  }
+  color_format = rtg_to_mnt_colormode(color_format);
+
+  uint32_t fg_color = t->fg_pen;
+  uint32_t bg_color = t->bg_pen;
+  uint32_t draw_mode = t->draw_mode;
+  
+  offset = (r->memory-(b->memory));
+  zzwrite16(registers, &registers->blitter_dst_hi, (offset&0xffff0000)>>16);
+  zzwrite16(registers, &registers->blitter_dst_lo, offset&0xffff);
+
+  // FIXME won't work for z2
+  // we need to reserve some memory at the end of the reachable card space or shuffle around ETH space
+  
+  // 0x00df0000 template area
+  // 0x00e00000 videocap start
+
+  // FIXME magic numbers and no limits
+  uint32_t zz_template_addr = 0x00df0000 - 0x200000;
+  memcpy((uint8_t*)(((uint32_t)b->memory)+zz_template_addr), t->memory, t->pitch*h);
+
+  // for 8 bit mode:
+  // 16 writes + memcpy (2 writes for 8*8 character) = 18 writes.
+  // 16 writes for the expansion of 8*8 character in amiga software. doesn't seem worth it :|
+  
+  zzwrite16(registers, &registers->blitter_src_hi, (zz_template_addr&0xffff0000)>>16);
+  zzwrite16(registers, &registers->blitter_src_lo, zz_template_addr&0xffff);
+
+  zzwrite16(registers, &registers->blitter_rgb_hi, fg_color>>16);
+  zzwrite16(registers, &registers->blitter_rgb_lo, fg_color&0xffff);
+
+  zzwrite16(registers, &registers->blitter_rgb2_hi, bg_color>>16);
+  zzwrite16(registers, &registers->blitter_rgb2_lo, bg_color&0xffff);
+  
+  zzwrite16(registers, &registers->blitter_src_pitch, t->pitch);
+  zzwrite16(registers, &registers->blitter_row_pitch, pitch);
+  zzwrite16(registers, &registers->blitter_colormode, color_format|(draw_mode<<8));
+  zzwrite16(registers, &registers->blitter_x1, x);
+  zzwrite16(registers, &registers->blitter_y1, y);
+  zzwrite16(registers, &registers->blitter_x2, x+w-1);
+  zzwrite16(registers, &registers->blitter_y2, y+h-1);
+  zzwrite16(registers, &registers->blitter_x3, t->xo);
+  //zzwrite16(registers, &registers->blitter_y3, t->yo);
+  
+  zzwrite16(registers, &registers->blitter_op_filltemplate, mask);
+}
+
+void rect_pattern(__reg("a0") struct RTGBoard* b, __reg("a1") struct RenderInfo* r, __reg("a2") struct Pattern* pat,
+                  __reg("d0") uint16 x, __reg("d1") uint16 y, __reg("d2") uint16 w, __reg("d3") uint16 h,
+                  __reg("d4") uint8 mask, __reg("d7") uint32 format) {
+  MNTZZ9KRegs* registers = b->registers;
+  uint16 pitch = 1024;
+  uint32 color_format = b->color_format;
+  uint8* gfxmem = (uint8*)b->memory;
+  uint32 offset = 0;
+  
+  if (w<1 || h<1) return;
+  if (!pat) return; // something about special ptrs?
+  
+  if (r) {
+    pitch = r->pitch;
+    color_format = r->color_format;
+    gfxmem = (uint8*)r->memory;
+  } else {
+    return;
+  }
+  color_format = rtg_to_mnt_colormode(color_format);
+
+  uint32_t fg_color = pat->fg_pen;
+  uint32_t bg_color = pat->bg_pen;
+  uint32_t draw_mode = pat->draw_mode;
+  
+  offset = (r->memory-(b->memory));
+  zzwrite16(registers, &registers->blitter_dst_hi, (offset&0xffff0000)>>16);
+  zzwrite16(registers, &registers->blitter_dst_lo, offset&0xffff);
+
+  // FIXME won't work for z2
+  // 0x00df0000 template area
+  // 0x00e00000 videocap start
+
+  // FIXME magic numbers and no limits
+  uint32_t zz_template_addr = 0x00df0000 - 0x200000;
+  memcpy((uint8_t*)(((uint32_t)b->memory)+zz_template_addr), pat->memory, 2*(1<<pat->size));
+  
+  zzwrite16(registers, &registers->blitter_src_hi, (zz_template_addr&0xffff0000)>>16);
+  zzwrite16(registers, &registers->blitter_src_lo, zz_template_addr&0xffff);
+
+  zzwrite16(registers, &registers->blitter_rgb_hi, fg_color>>16);
+  zzwrite16(registers, &registers->blitter_rgb_lo, fg_color&0xffff);
+
+  zzwrite16(registers, &registers->blitter_rgb2_hi, bg_color>>16);
+  zzwrite16(registers, &registers->blitter_rgb2_lo, bg_color&0xffff);
+  
+  zzwrite16(registers, &registers->blitter_src_pitch, 16);
+  zzwrite16(registers, &registers->blitter_row_pitch, pitch);
+  zzwrite16(registers, &registers->blitter_colormode, color_format|(draw_mode<<8));
+  zzwrite16(registers, &registers->blitter_x1, x);
+  zzwrite16(registers, &registers->blitter_y1, y);
+  zzwrite16(registers, &registers->blitter_x2, x+w-1);
+  zzwrite16(registers, &registers->blitter_y2, y+h-1);
+  zzwrite16(registers, &registers->blitter_x3, pat->xo);
+  zzwrite16(registers, &registers->blitter_y3, pat->yo);
+  
+  zzwrite16(registers, &registers->blitter_op_filltemplate, (1<<pat->size)|0x8000);
 }
 
 void blitter_wait(__reg("a0") struct RTGBoard* b) {

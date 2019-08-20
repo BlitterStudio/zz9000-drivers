@@ -90,8 +90,8 @@ struct RenderInfo {
 struct Template {
   uint8* memory;
   uint16 pitch;
-  uint16 xo;
-  uint16 yo;
+  uint8  xo;
+  uint8  draw_mode;
   uint32 fg_pen;
   uint32 bg_pen;
 };
@@ -103,7 +103,7 @@ struct Pattern {
   uint32 fg_pen;
   uint32 bg_pen;
   uint8 size;
-  uint8 mode;
+  uint8 draw_mode;
 };
 
 struct RTGBoard {
