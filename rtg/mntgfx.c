@@ -12,7 +12,7 @@
  * https://spdx.org/licenses/GPL-3.0-or-later.html
  */
 
-/* REVISION 1.1 */
+/* REVISION 1.2 */
 
 #include "mntgfx.h"
 #include "zz9000.h"
@@ -20,6 +20,7 @@
 #include <proto/exec.h>
 #include <proto/expansion.h>
 #include <proto/dos.h>
+#include <proto/intuition.h>
 
 #include <exec/types.h>
 #include <exec/memory.h>
@@ -36,7 +37,7 @@ static ULONG LibStart(void) {
 }
 
 static const char LibraryName[] = "ZZ9000.card";
-static const char LibraryID[]   = "$VER: ZZ9000.card 1.1 (2019-08-20)\r\n";
+static const char LibraryID[]   = "$VER: ZZ9000.card 1.2 (2019-08-21)\r\n";
 
 __saveds struct MNTGFXBase* OpenLib( __reg("a6") struct MNTGFXBase *MNTGFXBase);
 BPTR __saveds CloseLib( __reg("a6") struct MNTGFXBase *MNTGFXBase);
@@ -164,14 +165,25 @@ static LONG hwrev = 0;
 static LONG fwrev_major = 0;
 static LONG fwrev_minor = 0;
 static LONG fwrev = 0;
+static LONG scandoubler_800x600 = 0;
 
 int FindCard(__reg("a0") struct RTGBoard* b) {
   struct ConfigDev* cd = NULL;
   struct ExpansionBase *ExpansionBase = NULL;
+  struct DOSBase *DOSBase = NULL;
+  struct IntuitionBase *IntuitionBase = NULL;
   struct ExecBase *SysBase = *(struct ExecBase **)4L;
 
   if ((ExpansionBase = (struct ExpansionBase*)OpenLibrary("expansion.library",0L))==NULL) {
     KPrintF("ZZ9000.card: Failed to open expansion.library!\n");
+    return 0;
+  }
+  if ((DOSBase = (struct DOSBase*)OpenLibrary("dos.library",0L))==NULL) {
+    KPrintF("ZZ9000.card: Failed to open dos.library!\n");
+    return 0;
+  }
+  if ((IntuitionBase = (struct IntuitionBase*)OpenLibrary("intuition.library",0L))==NULL) {
+    KPrintF("ZZ9000.card: Failed to open intuition.library!\n");
     return 0;
   }
 
@@ -183,20 +195,40 @@ int FindCard(__reg("a0") struct RTGBoard* b) {
   if (zorro_version>=2) {
 
     b->memory = (uint8*)(cd->cd_BoardAddr)+0x10000;
-    b->memory_size = cd->cd_BoardSize-0x10000;
+    if (zorro_version==2) {
+      b->memory_size = cd->cd_BoardSize-0x10000;
+    } else {
+      // 13.8 MB for Z3 (safety, will be expanded later)
+      // one full HD screen @8bit ~ 2MB
+      b->memory_size = 0xdf0000-0x10000;
+    }
     b->registers = (uint8*)(cd->cd_BoardAddr);
     hwrev = ((uint16*)b->registers)[0];
     fwrev = ((uint16*)b->registers)[0xc0/2];
     fwrev_major = fwrev>>8;
     fwrev_minor = fwrev&0xff;
 
-    char buf[128];
-
     KPrintF(LibraryID);
     KPrintF("ZZ9000.card: MNT ZZ9000 found. Zorro version %ld.\n", zorro_version);
     KPrintF("ZZ9000.card: HW Revision: %ld.\n", hwrev);
     KPrintF("ZZ9000.card: FW Revision Major: %ld.\n", fwrev_major);
     KPrintF("ZZ9000.card: FW Revision Minor: %ld.\n", fwrev_minor);
+
+    if (fwrev_major<=1 && fwrev_minor<2) {
+      char *alert = "\x00\x14\x14ZZ9000.card v1.2 needs at least firmware (BOOT.bin) v1.2.\x00\x00";
+      DisplayAlert(RECOVERY_ALERT, alert, 52);
+      return 0;
+    }
+    
+    BPTR f;
+    if ((f = Open("ENV:ZZ9000-VCAP-800x600", MODE_OLDFILE))) {
+      Close(f);
+      KPrintF("ZZ9000.card: 800x600 60hz scandoubler mode.\n");
+      scandoubler_800x600 = 1;
+    } else {
+      KPrintF("ZZ9000.card: 720x576 50hz scandoubler mode.\n");
+      scandoubler_800x600 = 0;
+    }
     
     return 1;
   } else {
@@ -319,16 +351,8 @@ uint32 enable_display(__reg("a0") struct RTGBoard* b,__reg("d0")  uint16 enabled
 void memory_alloc(__reg("a0") struct RTGBoard* b,__reg("d0")  uint32 len,__reg("d1")  uint16 s1,__reg("d2")  uint16 s2) {
 }
 
-void zzwrite16(MNTZZ9KRegs* regbase, u16* reg, u16 value) {
-  struct ExecBase *SysBase = *(struct ExecBase **)4L;
-  Disable();
-  volatile u16* busy = (volatile u16*)((uint32)regbase+0x1000);
-  while (*busy) {
-  }
+inline void zzwrite16(MNTZZ9KRegs* regbase, u16* reg, u16 value) {
   *reg = value;
-  while (*busy) {
-  }
-  Enable();
 }
 
 void fix_vsync(MNTZZ9KRegs* registers) {  
@@ -349,10 +373,6 @@ void pan(__reg("a0") struct RTGBoard* b,__reg("a1") uint8* mem,__reg("d0")  uint
 
   zzwrite16(registers, &registers->pan_ptr_hi, offhi);
   zzwrite16(registers, &registers->pan_ptr_lo, offlo);
-
-  for (int i=0; i<10; i++) {
-    fix_vsync(registers);
-  }
 }
 
 void set_memory_mode(__reg("a0") struct RTGBoard* b,__reg("d7")  uint16 format) {
@@ -425,98 +445,21 @@ void init_modeline(MNTZZ9KRegs* registers, uint16 w, uint16 h) {
   
   if (w==1280 && h==720) {
     mode = 0;
-    hmax=1980;
-    vmax=750;
-    hstart=1720;
-    hend=1760;
-    vstart=725;
-    vend=730;
-    polarity=0;
-  } else if (w==800) {
-    mode=1;
-    hmax=1056;
-    vmax=628;
-    hstart=840;
-    hend=968;
-    vstart=601;
-    vend=605;
-    polarity=0;
+  } else if (w==800 && h==600) {
+    mode = 1;
   } else if (w==640 && h==480) {
     mode = 2;
-    hmax=800;
-    vmax=525;
-    hstart=656;
-    hend=752;
-    vstart=490;
-    vend=492;
-    polarity=0;
-  } else if (w==1024) {
+  } else if (w==1024 && h==768) {
     mode = 3;
-    hmax=1344;
-    vmax=806;
-    hstart=1048;
-    hend=1184;
-    vstart=771;
-    vend=777;
-    polarity=1;
   } else if (w==1280 && h==1024) {
     mode = 4;
-    hmax=1688;
-    vmax=1066;
-    hstart=1328;
-    hend=1440;
-    vstart=1025;
-    vend=1028;
-    polarity=0;
   } else if (w==1920 && h==1080) {
     mode = 5;
-    hmax=2640;
-    vmax=1125;
-    hstart=2448;
-    hend=2492;
-    vstart=1084;
-    vend=1089;
-    polarity=0;
   } else if (w==720 && h==576) {
     mode = 6;
-    hmax=864;
-    vmax=625;
-    hstart=732;
-    hend=796;
-    vstart=581;
-    vend=586;
-    polarity=1;
   }
 
   zzwrite16(registers, &registers->mode, mode);
-  
-  *(u16*)((uint32)registers+0x1000) = vmax;
-  *(u16*)((uint32)registers+0x1002) = hmax;
-  *(u16*)((uint32)registers+0x1004) = 6; // OP_MAX
-  *(u16*)((uint32)registers+0x1004) = 0; // NOP
-  
-  *(u16*)((uint32)registers+0x1000) = hstart;
-  *(u16*)((uint32)registers+0x1002) = hend;
-  *(u16*)((uint32)registers+0x1004) = 7; // OP_HS
-  *(u16*)((uint32)registers+0x1004) = 0; // NOP
-
-  *(u16*)((uint32)registers+0x1000) = vstart;
-  *(u16*)((uint32)registers+0x1002) = vend;
-  *(u16*)((uint32)registers+0x1004) = 8; // OP_VS
-  *(u16*)((uint32)registers+0x1004) = 0; // NOP
-  
-  *(u16*)((uint32)registers+0x1000) = 0;
-  *(u16*)((uint32)registers+0x1002) = polarity;
-  *(u16*)((uint32)registers+0x1004) = 10; // OP_POLARITY
-  *(u16*)((uint32)registers+0x1004) = 0; // NOP
-
-  // FIXME
-  for (volatile int i=0; i<50000; i++) {
-    // wait...
-    fix_vsync(registers);
-  }
-}
-void init_mode_pitch(MNTZZ9KRegs* registers, uint16 w, uint16 colormode) {
 }
 
 void init_mode(__reg("a0") struct RTGBoard* b,__reg("a1")  struct ModeInfo* m,__reg("d0")  int16 border) {
@@ -556,6 +499,8 @@ void init_mode(__reg("a0") struct RTGBoard* b,__reg("a1")  struct ModeInfo* m,__
   zzwrite16(registers, &registers->hdiv, hdiv);
   zzwrite16(registers, &registers->vdiv, vdiv);
   
+  init_modeline(registers, w, h);
+  
   // video control op: scale
   *(u16*)((uint32)registers+0x1000) = 0;
   *(u16*)((uint32)registers+0x1002) = scale;
@@ -563,18 +508,16 @@ void init_mode(__reg("a0") struct RTGBoard* b,__reg("a1")  struct ModeInfo* m,__
   *(u16*)((uint32)registers+0x1004) = 0; // NOP
 
   // video control op: dimensions
-  *(u16*)((uint32)registers+0x1000) = h;
+  /**(u16*)((uint32)registers+0x1000) = h;
   *(u16*)((uint32)registers+0x1002) = w;
   *(u16*)((uint32)registers+0x1004) = 2; // OP_DIMENSIONS
-  *(u16*)((uint32)registers+0x1004) = 0; // NOP
+  *(u16*)((uint32)registers+0x1004) = 0; // NOP*/
   
   // video control op: colormode
   *(u16*)((uint32)registers+0x1000) = 0;
   *(u16*)((uint32)registers+0x1002) = colormode;
   *(u16*)((uint32)registers+0x1004) = 1; // OP_COLORMODE
   *(u16*)((uint32)registers+0x1004) = 0; // NOP
-
-  init_modeline(registers, w, h);
 }
 
 void set_palette(__reg("a0") struct RTGBoard* b,__reg("d0")  uint16 idx,__reg("d1")  uint16 len) {
@@ -621,17 +564,24 @@ uint32 monitor_switch(__reg("a0") struct RTGBoard* b,__reg("d0")  uint16 state) 
   MNTZZ9KRegs* registers = b->registers;
   
   if (state==0) {
-    // capture amiga video to 16bit
+    // capture 24 bit amiga video to 0xe00000
     zzwrite16(registers, &registers->pan_ptr_hi, 0xe0);
     zzwrite16(registers, &registers->pan_ptr_lo, 0x0000);
 
     int w = 720;
     int h = 576;
     int colormode = MNTVA_COLOR_32BIT;
+
+    if (scandoubler_800x600) {
+      w = 800;
+      h = 600;
+    }
     
     zzwrite16(registers, &registers->hdiv, 1);
     zzwrite16(registers, &registers->vdiv, 2);
   
+    init_modeline(registers, w, h);
+    
     // video control op: scale
     *(u16*)((uint32)registers+0x1000) = 0;
     *(u16*)((uint32)registers+0x1002) = 2; // vertical doubling
@@ -639,20 +589,20 @@ uint32 monitor_switch(__reg("a0") struct RTGBoard* b,__reg("d0")  uint16 state) 
     *(u16*)((uint32)registers+0x1004) = 0; // NOP
     
     // video control op: dimensions
-    *(u16*)((uint32)registers+0x1000) = h;
+    /**(u16*)((uint32)registers+0x1000) = h;
     *(u16*)((uint32)registers+0x1002) = w;
     *(u16*)((uint32)registers+0x1004) = 2; // OP_DIMENSIONS
-    *(u16*)((uint32)registers+0x1004) = 0; // NOP
+    *(u16*)((uint32)registers+0x1004) = 0; // NOP*/
   
     // video control op: colormode
     *(u16*)((uint32)registers+0x1000) = 0;
     *(u16*)((uint32)registers+0x1002) = colormode;
     *(u16*)((uint32)registers+0x1004) = 1; // OP_COLORMODE
     *(u16*)((uint32)registers+0x1004) = 0; // NOP
-    
+
+    // firmware will remember the selected mode
     *(u16*)((uint32)registers+0x1006) = 1; // capture mode
-  
-    init_modeline(registers, w, h);
+    
   } else {
     // rtg mode
     *(u16*)((uint32)registers+0x1006) = 0; // capture mode
@@ -661,8 +611,7 @@ uint32 monitor_switch(__reg("a0") struct RTGBoard* b,__reg("d0")  uint16 state) 
   }
 
   // FIXME
-  for (volatile int i=0; i<50000; i++) {
-    // wait...
+  for (volatile int i=0; i<100; i++) {
     fix_vsync(registers);
   }
   
