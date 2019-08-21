@@ -566,8 +566,14 @@ uint32 monitor_switch(__reg("a0") struct RTGBoard* b,__reg("d0")  uint16 state) 
   if (state==0) {
     // capture 24 bit amiga video to 0xe00000
     zzwrite16(registers, &registers->pan_ptr_hi, 0xe0);
-    zzwrite16(registers, &registers->pan_ptr_lo, 0x0000);
-
+    
+    if (scandoubler_800x600) {
+      // slightly adjusted centering
+      zzwrite16(registers, &registers->pan_ptr_lo, 0x0bd0);
+    } else {
+      zzwrite16(registers, &registers->pan_ptr_lo, 0x0000);
+    }
+    
     int w = 720;
     int h = 576;
     int colormode = MNTVA_COLOR_32BIT;
