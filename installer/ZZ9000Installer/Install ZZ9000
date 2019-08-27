@@ -1,21 +1,4 @@
 
-(if (exists "Libs:Picasso96/ZZ9000.card")
-	 (if (askbool (prompt "A previous version of ZZ9000 graphics driver was found. Do you want to remove it?") (help "You can skip this if you want to reinstall."))
-(
-	(delete "Devs:Monitors/ZZ9000" 
-		(prompt "Delete ZZ9000 RTG Monitor file.") 
-		(help "Deletes Devs:Monitors/ZZ9000.")
-		(confirm)
-		(infos))
-
-	(delete "Libs:Picasso96/ZZ9000.card" 
-		(prompt "Delete ZZ9000 RTG card driver.") 
-		(help "Deletes Libs:Picasso96/ZZ9000.card")
-		(confirm)
-		(infos))
-)
-))
-
 (if (askbool (prompt "Do you want to install the P96 graphics driver for ZZ9000?")
    (help "")) (
 
@@ -27,7 +10,7 @@
 (set #zzmonexists (and (exists "Devs:Monitors/ZZ9000.info") (exists "Devs:Monitors/ZZ9000")))
 
 (if (or (not (or #monexists #zzmonexists)) (< #rtgmajor 40))
-	(abort "Please install P96 2.0+ first and select *Altais* as the graphics card.\n\nYou can either use the old shareware version of Picasso96 on Aminet or the updated P96 by Individual Computers. To purchase it, you first have to register at https://icomp.de/shop-icomp/en/register.html, and then login to their shop. P96 will then appear as a product.")
+        (abort "Please install P96 2.0+ first and select *Altais* as the graphics card.\n\nYou can either use the old shareware version of Picasso96 on Aminet or the updated P96 by Individual Computers. To purchase it, you first have to register at https://icomp.de/shop-icomp/en/register.html, and then login to their shop. P96 will then appear as a product.")
 )
 
 (message "P96 rtg.library version " #rtgmajor "." #rtgminor " detected. This is fine.")
@@ -41,7 +24,7 @@
 
 (complete 10)
 
-(if #monexists
+(if (not #zzmonexists)
 (copyfiles 
    (prompt "Copy Monitor File (Enables Graphics Driver)")
    (help "This will create the ZZ9000 Monitor file from the Altais Monitor file. It enables the ZZ9000 screen modes.")
@@ -53,10 +36,10 @@
 
 (if #monexists
    (delete "Devs:Monitors/Altais" 
-	(prompt "Delete Altais Monitor.") 
-	(help "Delete the Altais Monitor file that was used to create the ZZ9000 Monitor file.")
-	(confirm)
-	(infos)))
+        (prompt "Delete Altais Monitor.") 
+        (help "Delete the Altais Monitor file that was used to create the ZZ9000 Monitor file.")
+        (confirm)
+        (infos)))
 
 (complete 20)
 
@@ -71,7 +54,7 @@
 
 (complete 30)
 
-(if (not (exists "Devs:Picasso96Settings.bak"))
+(if (and (exists "Devs:Picasso96Settings") (not (exists "Devs:Picasso96Settings.bak")))
 (copyfiles
    (prompt "Create a backup up your old P96 Configuration (Devs:Picasso96Settings.bak)")
    (help "It will be copied to Devs:Picasso96Settings.bak")
@@ -90,32 +73,29 @@
    (confirm))
 ))
 
+(if (askbool (prompt "Does your monitor support 50Hz modes? If not, we'll create ENVARC:ZZ9000-VCAP-800x600 to switch the scandoubler to 60Hz.")
+    (help "The default scandoubler mode is 720x576 50Hz."))
+
+    (delete "ENVARC:ZZ9000-VCAP-800x600" (prompt "Delete any existing 800x600/60Hz flag.")
+        (help ""))
+
+    (textfile (prompt "Creating ENVARC:ZZ9000-VCAP-800x600") (help "")
+        (append "1")
+        (dest "ENVARC:ZZ9000-VCAP-800x600")))
+
 (complete 50)
-
-(if (exists "Devs:Networks/ZZ9000Net.device")
-	 (if (askbool (prompt "A previous version of ZZ9000 Ethernet driver was found. Do you want to remove it?") (help "You can skip this if you want to reinstall."))
-(
-	(delete "Devs:Networks/ZZ9000Net.device" 
-		(prompt "Delete ZZ9000 Ethernet driver.") 
-		(help "Deletes Devs:Networks/ZZ9000Net.device.")
-		(confirm)
-		(infos))
-
-	(delete "Devs:NetInterfaces/ZZ9000Net" 
-		(prompt "Delete ZZ9000 RoadShow NetInterface file.") 
-		(help "Deletes Devs:NetInterfaces/ZZ9000Net.")
-		(confirm)
-		(infos))
-)
-))
 
 (if (askbool (prompt "Do you want to install the SANA-II Ethernet driver for ZZ9000? This requires an existing Installation of RoadShow, MiamiDX or similar.") (help ""))
 
 (
 
-(set #mac (askstring (prompt "Please enter your unique Ethernet MAC address that is printed in your user manual. Usually you just have to adjust the last 2 digits.") (help "If you want to change your MAC address later, edit ENVARC:ZZ9K_MAC") (default "68:82:f2:00:01:00") ))
+(set #mac (askstring 
+   (prompt "Please enter your unique Ethernet MAC address that is printed in your user manual. You just have to adjust the last 2 digits.") 
+   (help "If you want to change your MAC address later, edit ENVARC:ZZ9K_MAC") 
+   (default "68:82:f2:00:01:00") ))
 
-(textfile (prompt "Saving your MAC address in ENVARC:ZZ9K_MAC") (help "") (append #mac) (dest "ENVARC:ZZ9K_MAC"))
+(textfile (prompt "Saving your MAC address in ENVARC:ZZ9K_MAC") 
+   (help "") (append #mac) (dest "ENVARC:ZZ9K_MAC"))
 
 
 (copyfiles 
