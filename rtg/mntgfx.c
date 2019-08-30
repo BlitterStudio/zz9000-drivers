@@ -12,7 +12,7 @@
  * https://spdx.org/licenses/GPL-3.0-or-later.html
  */
 
-/* REVISION 1.3b */
+/* REVISION 1.3c */
 
 #include "mntgfx.h"
 #include "zz9000.h"
@@ -37,7 +37,7 @@ static ULONG LibStart(void) {
 }
 
 static const char LibraryName[] = "ZZ9000.card";
-static const char LibraryID[]   = "$VER: ZZ9000.card 1.3b (2019-08-30)\r\n";
+static const char LibraryID[]   = "$VER: ZZ9000.card 1.3c (2019-08-30)\r\n";
 
 __saveds struct MNTGFXBase* OpenLib( __reg("a6") struct MNTGFXBase *MNTGFXBase);
 BPTR __saveds CloseLib( __reg("a6") struct MNTGFXBase *MNTGFXBase);
