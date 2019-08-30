@@ -13,13 +13,16 @@ Execute build.sh to create ZZ9000.card. ZZ9000.card goes into Libs:Picasso96 on 
 
 ## Network
 
-The network drivers will reside in the "net" folder once the proper licenses have been sorted out for some source files. The driver is SANA-II compatible. Execute build.sh to create ZZ9000Net.device. ZZ9000Net.device goes into Devs:Networks on the target device.
+The network drivers reside in the "net" folder. The driver is SANA-II compatible. Execute build.sh to create ZZ9000Net.device. ZZ9000Net.device goes into Devs:Networks on the target device.
 
 # License / Copyright
 
 Copyright (C) 2016-2019, Lukas F. Hartmann <lukas@mntre.com>
 MNT Research GmbH, Berlin
 https://mntre.com
+
+Network driver based on work by
+(C) 2018 Henryk Richter <henryk.richter@gmx.net>
 
 SPDX-License-Identifier: GPL-3.0-or-later
 https://spdx.org/licenses/GPL-3.0-or-later.html
