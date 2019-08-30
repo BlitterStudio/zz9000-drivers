@@ -12,7 +12,7 @@
  * https://spdx.org/licenses/GPL-3.0-or-later.html
  */
 
-/* REVISION 1.3 */
+/* REVISION 1.3b */
 
 #include "mntgfx.h"
 #include "zz9000.h"
@@ -37,7 +37,7 @@ static ULONG LibStart(void) {
 }
 
 static const char LibraryName[] = "ZZ9000.card";
-static const char LibraryID[]   = "$VER: ZZ9000.card 1.3 (2019-08-27)\r\n";
+static const char LibraryID[]   = "$VER: ZZ9000.card 1.3b (2019-08-30)\r\n";
 
 __saveds struct MNTGFXBase* OpenLib( __reg("a6") struct MNTGFXBase *MNTGFXBase);
 BPTR __saveds CloseLib( __reg("a6") struct MNTGFXBase *MNTGFXBase);
@@ -196,7 +196,7 @@ int FindCard(__reg("a0") struct RTGBoard* b) {
 
     b->memory = (uint8*)(cd->cd_BoardAddr)+0x10000;
     if (zorro_version==2) {
-      b->memory_size = cd->cd_BoardSize-0x10000;
+      b->memory_size = cd->cd_BoardSize-0x20000;
     } else {
       // 13.8 MB for Z3 (safety, will be expanded later)
       // one full HD screen @8bit ~ 2MB
@@ -304,8 +304,8 @@ int InitCard(__reg("a0") struct RTGBoard* b) {
   //b->fn_p2c = rect_p2c;
   b->fn_rect_fill = (void*)rect_fill;
   b->fn_rect_copy = (void*)rect_copy;
-  if (zorro_version == 3 && fwrev >= (1<<8|1)) {
-    // introduced in fw 1.1
+  if (fwrev >= (1<<8|3)) {
+    // introduced in fw 1.1 (z3) / fw 1.3b (z2)
     // accelerated text drawing
     b->fn_rect_template = (void*)rect_template;
     // accelerated pattern drawing
@@ -371,7 +371,8 @@ uint16 rtg_to_mnt_colormode(uint16 format) {
   } else if (format==9 || format==8) {
     return MNTVA_COLOR_32BIT;
   } else if (format==0) {
-    return MNTVA_COLOR_1BIT;
+    // NYI, should be planar (1 bit?)
+    return MNTVA_COLOR_8BIT;
   } else if (format==0xb || format==0xd || format==5) {
     return MNTVA_COLOR_15BIT;
   }
@@ -415,10 +416,7 @@ void set_clock(__reg("a0") struct RTGBoard* b) {
 uint16 calc_pitch_bytes(uint16 w, uint16 colormode) {
   uint16 pitch = w;
 
-  if (colormode == MNTVA_COLOR_1BIT) {
-    // monochrome, 16 pixels per word
-    pitch = w>>3;
-  } else if (colormode == MNTVA_COLOR_15BIT) {
+  if (colormode == MNTVA_COLOR_15BIT) {
     pitch = w<<1;
   } else {
     pitch = w<<colormode;
@@ -684,15 +682,18 @@ void rect_template(__reg("a0") struct RTGBoard* b, __reg("a1") struct RenderInfo
   offset = (r->memory-(b->memory));
   zzwrite16(registers, &registers->blitter_dst_hi, (offset&0xffff0000)>>16);
   zzwrite16(registers, &registers->blitter_dst_lo, offset&0xffff);
-
-  // FIXME won't work for z2
-  // we need to reserve some memory at the end of the reachable card space or shuffle around ETH space
   
-  // 0x00df0000 template area
-  // 0x00e00000 videocap start
-
   // FIXME magic numbers and no limits
-  uint32_t zz_template_addr = 0x00df0000 - 0x200000;
+  uint32_t zz_template_addr;
+
+  if (zorro_version == 3) {
+    // 0x00df0000 template area
+    // 0x00e00000 videocap start
+    zz_template_addr = 0x00df0000 - 0x200000;
+  } else {
+    zz_template_addr = b->memory_size;
+  }
+
   memcpy((uint8_t*)(((uint32_t)b->memory)+zz_template_addr), t->memory, t->pitch*h);
   
   zzwrite16(registers, &registers->blitter_src_hi, (zz_template_addr&0xffff0000)>>16);
@@ -712,7 +713,6 @@ void rect_template(__reg("a0") struct RTGBoard* b, __reg("a1") struct RenderInfo
   zzwrite16(registers, &registers->blitter_x2, x+w-1);
   zzwrite16(registers, &registers->blitter_y2, y+h-1);
   zzwrite16(registers, &registers->blitter_x3, t->xo);
-  //zzwrite16(registers, &registers->blitter_y3, t->yo);
   
   zzwrite16(registers, &registers->blitter_op_filltemplate, mask);
 }
@@ -745,13 +745,18 @@ void rect_pattern(__reg("a0") struct RTGBoard* b, __reg("a1") struct RenderInfo*
   offset = (r->memory-(b->memory));
   zzwrite16(registers, &registers->blitter_dst_hi, (offset&0xffff0000)>>16);
   zzwrite16(registers, &registers->blitter_dst_lo, offset&0xffff);
-
-  // FIXME won't work for z2
-  // 0x00df0000 template area
-  // 0x00e00000 videocap start
+  
+  uint32_t zz_template_addr = 0;
 
   // FIXME magic numbers and no limits
-  uint32_t zz_template_addr = 0x00df0000 - 0x200000;
+  if (zorro_version == 3) {
+    // 0x00df0000 template area
+    // 0x00e00000 videocap start
+    zz_template_addr = 0x00df0000 - 0x200000;
+  } else {
+    zz_template_addr = b->memory_size;
+  }
+
   memcpy((uint8_t*)(((uint32_t)b->memory)+zz_template_addr), pat->memory, 2*(1<<pat->size));
   
   zzwrite16(registers, &registers->blitter_src_hi, (zz_template_addr&0xffff0000)>>16);
