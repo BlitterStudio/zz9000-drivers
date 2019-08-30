@@ -22,9 +22,7 @@
 #define MNTVA_COLOR_8BIT     0
 #define MNTVA_COLOR_16BIT565 1
 #define MNTVA_COLOR_32BIT    2
-#define MNTVA_COLOR_1BIT     3
-#define MNTVA_COLOR_15BIT    4
-#define MNTVA_COLOR_BLANK    5
+#define MNTVA_COLOR_15BIT    3
 
 typedef volatile struct MNTZZ9KRegs {
   u16 fw_version; // 00
@@ -59,6 +57,22 @@ typedef volatile struct MNTZZ9KRegs {
   u16 blitter_rgb2_hi; // 34 background/secondary color
   u16 blitter_rgb2_lo; // 36
   
+  u16 un_3[0x24]; // 38..7e
+
+  u16 eth_tx; // 80
+  u16 eth_rx; // 82
+
+  u16 un_4[6]; // 84,86,88,8a,8c,8e
+
+  u16 arm_run_hi; // 90
+  u16 arm_run_lo; // 92
+  u16 arm_argc;   // 94
+  u16 arm_arg[8]; // 96,98,9a,9c..a4
+
+  u16 un_5[5]; // a6..ae
+  
+  u16 arm_event_serial; // b0
+  u16 arm_event_code; // b2
 } MNTZZ9KRegs;
 
 typedef volatile struct MNTZZ9KCXRegs {
@@ -66,7 +80,4 @@ typedef volatile struct MNTZZ9KCXRegs {
   u16 video_control_data_lo; // 02
   u16 video_control_op;      // 04
   u16 videocap_mode;         // 06
-  u16 unused_1;              // 08
-  u16 e7m_psincdec;          // 0a
-  u16 e7m_psen;              // 0c
 } MNTZZ9KCXRegs;
