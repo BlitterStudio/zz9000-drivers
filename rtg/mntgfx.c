@@ -308,12 +308,16 @@ int InitCard(__reg("a0") struct RTGBoard* b) {
   //b->fn_p2c = rect_p2c;
   b->fn_rect_fill = (void*)rect_fill;
   b->fn_rect_copy = (void*)rect_copy;
-  if (fwrev >= (1<<8|3)) {
+  if (fwrev >= (1 << 8 | 3)) {
     // introduced in fw 1.1 (z3) / fw 1.3b (z2)
     // accelerated text drawing
     b->fn_rect_template = (void*)rect_template;
     // accelerated pattern drawing
     b->fn_rect_pattern = (void*)rect_pattern;
+  }
+  if (fwrev >= (1 << 8 | 4)) {
+    // Accelerated line drawing added in FW 1.4
+    b->fn_line = (void *)draw_line;
   }
   //b->fn_rect_copy_nomask = rect_copy_nomask; // TODO: what is this used for?
   
@@ -580,6 +584,34 @@ uint32 monitor_switch(__reg("a0") struct RTGBoard* b,__reg("d0")  uint16 state) 
   return 1-state;
 }
 
+void draw_line(__reg("a0") struct RTGBoard* b,__reg("a1") struct RenderInfo* r,__reg("a2") struct Line* l,__reg("d0") uint16 mask,__reg("d7") uint16 format)
+{
+  if (!l || !r)
+    return;
+
+  uint32_t offset;
+  MNTZZ9KRegs* registers = b->registers;
+
+  offset = (r->memory - b->memory);
+
+  ZZWRITE32(&registers->blitter_dst, offset);
+  zzwrite16(&registers->blitter_row_pitch, r->pitch >> 2);
+
+  zzwrite16(&registers->blitter_colormode, rtg_to_mnt[r->color_format] | (l->draw_mode << 8));
+
+  ZZWRITE32(&registers->blitter_rgb, l->fg_pen);
+
+  ZZWRITE32(&registers->blitter_rgb2, l->bg_pen);
+
+  zzwrite16(&registers->blitter_x1, l->x);
+  zzwrite16(&registers->blitter_y1, l->y);
+  zzwrite16(&registers->blitter_x2, l->dx);
+  zzwrite16(&registers->blitter_y2, l->dy);
+  zzwrite16(&registers->blitter_x3, l->pattern);
+  zzwrite16(&registers->blitter_y3, l->pattern_offset | (l->padding << 8));
+
+  zzwrite16(&registers->blitter_op_draw_line, mask);
+}
 
 void rect_fill(__reg("a0") struct RTGBoard* b,__reg("a1")  struct RenderInfo* r,__reg("d0")  uint16 x,__reg("d1")  uint16 y,__reg("d2")  uint16 w,__reg("d3")  uint16 h,__reg("d4")  uint32 color) {
   MNTZZ9KRegs* registers = b->registers;

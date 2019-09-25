@@ -106,6 +106,20 @@ struct Pattern {
   uint8 draw_mode;
 };
 
+struct Line {
+  int16 x, y;
+  uint16 len;
+  int16 dx, dy;
+  int16 dummy1, dummy2, dummy3;
+  uint16 pattern;
+  uint16 pattern_offset;
+  uint32 fg_pen, bg_pen;
+  BOOL horizontal;
+  uint8 draw_mode;
+  uint8 padding;
+  uint16 x_origin, y_origin;
+};
+
 struct RTGBoard {
   void* registers;
   uint8* memory;

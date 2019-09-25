@@ -56,8 +56,10 @@ typedef volatile struct MNTZZ9KRegs {
   u16 blitter_src_pitch; // 32
   u16 blitter_rgb2_hi; // 34 background/secondary color
   u16 blitter_rgb2_lo; // 36
+  u16 blitter_op_p2c; // 38
+  u16 blitter_op_draw_line; // 3A
   
-  u16 un_3[0x24]; // 38..7e
+  u16 un_3[0x20]; // 3C..7e
 
   u16 eth_tx; // 80
   u16 eth_rx; // 82
