@@ -12,7 +12,7 @@
  * https://spdx.org/licenses/GPL-3.0-or-later.html
  */
 
-/* REVISION 1.3c */
+/* REVISION 1.4 */
 
 #include "mntgfx.h"
 #include "zz9000.h"
@@ -37,7 +37,7 @@ static ULONG LibStart(void) {
 }
 
 static const char LibraryName[] = "ZZ9000.card";
-static const char LibraryID[]   = "$VER: ZZ9000.card 1.3c (2019-08-30)\r\n";
+static const char LibraryID[]   = "$VER: ZZ9000.card 1.4 (2019-09-26)\r\n";
 
 __saveds struct MNTGFXBase* OpenLib( __reg("a6") struct MNTGFXBase *MNTGFXBase);
 BPTR __saveds CloseLib( __reg("a6") struct MNTGFXBase *MNTGFXBase);
@@ -219,7 +219,7 @@ int FindCard(__reg("a0") struct RTGBoard* b) {
     KPrintF("ZZ9000.card: FW Revision Minor: %ld.\n", fwrev_minor);
 
     if (fwrev_major<=1 && fwrev_minor<3) {
-      char *alert = "\x00\x14\x14ZZ9000.card v1.3 needs at least firmware (BOOT.bin) v1.3.\x00\x00";
+      char *alert = "\x00\x14\x14ZZ9000.card v1.4 needs at least firmware (BOOT.bin) v1.3.\x00\x00";
       DisplayAlert(RECOVERY_ALERT, alert, 52);
       return 0;
     }
@@ -352,14 +352,14 @@ int InitCard(__reg("a0") struct RTGBoard* b) {
 void nop() {
 }
 
-void init_dac(__reg("a0") struct RTGBoard* b,__reg("d7")  uint16 format) {
+void init_dac(__reg("a0") struct RTGBoard* b, __reg("d7") uint16 format) {
 }
 
-uint32 enable_display(__reg("a0") struct RTGBoard* b,__reg("d0")  uint16 enabled) {
+uint32 enable_display(__reg("a0") struct RTGBoard* b, __reg("d0") uint16 enabled) {
   return 1;
 }
 
-void memory_alloc(__reg("a0") struct RTGBoard* b,__reg("d0")  uint32 len,__reg("d1")  uint16 s1,__reg("d2")  uint16 s2) {
+void memory_alloc(__reg("a0") struct RTGBoard* b, __reg("d0") uint32 len, __reg("d1") uint16 s1, __reg("d2") uint16 s2) {
 }
 
 inline void zzwrite16(u16* reg, u16 value) {
@@ -394,27 +394,27 @@ uint16_t rtg_to_mnt[16] = {
   0,                    // 0x0F
 };
 
-void pan(__reg("a0") struct RTGBoard* b, __reg("a1") uint8* mem, __reg("d0")  uint16 w, __reg("d1")  int16 x, __reg("d2")  int16 y, __reg("d7")  uint16 format) {
+void pan(__reg("a0") struct RTGBoard* b, __reg("a1") uint8* mem, __reg("d0") uint16 w, __reg("d1") int16 x, __reg("d2") int16 y, __reg("d7") uint16 format) {
   MNTZZ9KRegs* registers = b->registers;
   uint32 offset = (mem - (b->memory)) & 0xFFFFFC00;
 
   ZZWRITE32(&registers->pan_ptr, offset);
 }
 
-void set_memory_mode(__reg("a0") struct RTGBoard* b,__reg("d7")  uint16 format) {
+void set_memory_mode(__reg("a0") struct RTGBoard* b, __reg("d7") uint16 format) {
 }
-void set_read_plane(__reg("a0") struct RTGBoard* b,__reg("d0")  uint8 p) {
+void set_read_plane(__reg("a0") struct RTGBoard* b, __reg("d0") uint8 p) {
 }
-void set_write_mask(__reg("a0") struct RTGBoard* b,__reg("d0")  uint8 m) {
+void set_write_mask(__reg("a0") struct RTGBoard* b, __reg("d0") uint8 m) {
 }
-void set_clear_mask(__reg("a0") struct RTGBoard* b,__reg("d0")  uint8 m) {
+void set_clear_mask(__reg("a0") struct RTGBoard* b, __reg("d0") uint8 m) {
 }
 void vsync_wait(__reg("a0") struct RTGBoard* b) {
 }
 
 static int toggle = 0;
 // FIXME this returned -1 which caused WB to hang after selecting a screenmode!
-int is_vsynced(__reg("a0") struct RTGBoard* b,__reg("d0")  uint8 p) {
+int is_vsynced(__reg("a0") struct RTGBoard* b, __reg("d0") uint8 p) {
   toggle = 1-toggle;
   return toggle;
 }
@@ -442,7 +442,7 @@ uint16 pitch_to_shift(uint16 p) {
   return 0;
 }
 
-uint16 get_pitch(__reg("a0") struct RTGBoard* b,__reg("d0")  uint16 width,__reg("d7")  uint16 format) {
+uint16 get_pitch(__reg("a0") struct RTGBoard* b, __reg("d0") uint16 width, __reg("d7") uint16 format) {
   return calc_pitch_bytes(width, rtg_to_mnt[format]);
 }
 
@@ -470,7 +470,7 @@ void init_modeline(MNTZZ9KRegs* registers, uint16 w, uint16 h, uint8 colormode, 
   zzwrite16(&registers->mode, mode|(colormode<<8)|(scalemode<<12));
 }
 
-void init_mode(__reg("a0") struct RTGBoard* b,__reg("a1")  struct ModeInfo* m,__reg("d0")  int16 border) {
+void init_mode(__reg("a0") struct RTGBoard* b, __reg("a1") struct ModeInfo* m, __reg("d0") int16 border) {
   MNTZZ9KRegs* registers = b->registers;
   uint16 scale = 0;
   uint16 w;
@@ -503,7 +503,7 @@ void init_mode(__reg("a0") struct RTGBoard* b,__reg("a1")  struct ModeInfo* m,__
   init_modeline(registers, w, h, colormode, scale);
 }
 
-void set_palette(__reg("a0") struct RTGBoard* b,__reg("d0")  uint16 idx,__reg("d1")  uint16 len) {
+void set_palette(__reg("a0") struct RTGBoard* b, __reg("d0") uint16 idx, __reg("d1") uint16 len) {
   MNTZZ9KRegs* registers = b->registers;
   int i;
   int j;
@@ -520,11 +520,11 @@ void set_palette(__reg("a0") struct RTGBoard* b,__reg("d0")  uint16 idx,__reg("d
   }
 }
 
-uint32 is_bitmap_compatible(__reg("a0") struct RTGBoard* b,__reg("d7")  uint16 format) {
+uint32 is_bitmap_compatible(__reg("a0") struct RTGBoard* b, __reg("d7") uint16 format) {
   return 0xffffffff;
 }
 
-uint32 map_address(__reg("a0") struct RTGBoard* b,__reg("a1")  uint32 addr) {
+uint32 map_address(__reg("a0") struct RTGBoard* b, __reg("a1") uint32 addr) {
   // align screen buffers
   if (addr>(uint32)b->memory && addr < (((uint32)b->memory) + b->memory_size)) {
     addr=(addr+0x1000)&0xfffff000;
@@ -532,18 +532,18 @@ uint32 map_address(__reg("a0") struct RTGBoard* b,__reg("a1")  uint32 addr) {
   return addr;
 }
 
-uint32 get_pixelclock_index(__reg("a0") struct RTGBoard* b,__reg("a1")  struct ModeInfo* mode,__reg("d0")  int32 clock,__reg("d7")  uint16 format) {
+uint32 get_pixelclock_index(__reg("a0") struct RTGBoard* b, __reg("a1") struct ModeInfo* mode, __reg("d0") int32 clock, __reg("d7") uint16 format) {
   mode->pixel_clock_hz = CLOCK_HZ;
   mode->clock = 0;
   mode->clock_div = 1;
   return 0;
 }
 
-uint32 get_pixelclock_hz(__reg("a0") struct RTGBoard* b,__reg("a1")  struct ModeInfo* mode,__reg("d0")  int32 clock,__reg("d7")  uint16 format) {
+uint32 get_pixelclock_hz(__reg("a0") struct RTGBoard* b, __reg("a1") struct ModeInfo* mode, __reg("d0") int32 clock, __reg("d7") uint16 format) {
   return CLOCK_HZ;
 }
 
-uint32 monitor_switch(__reg("a0") struct RTGBoard* b,__reg("d0")  uint16 state) {
+uint32 monitor_switch(__reg("a0") struct RTGBoard* b, __reg("d0") uint16 state) {
   MNTZZ9KRegs* registers = b->registers;
   
   if (state==0) {
@@ -587,7 +587,7 @@ uint32 monitor_switch(__reg("a0") struct RTGBoard* b,__reg("d0")  uint16 state) 
   return 1-state;
 }
 
-void rect_invert(__reg("a0") struct RTGBoard* b,__reg("a1") struct RenderInfo* r,__reg("d0") uint16 x, __reg("d1") uint16 y,__reg("d2") uint16 w,__reg("d3") uint16 h,__reg("d4") uint8 mask,__reg("d7") uint16 format)
+void rect_invert(__reg("a0") struct RTGBoard* b, __reg("a1") struct RenderInfo* r, __reg("d0") uint16 x, __reg("d1") uint16 y, __reg("d2") uint16 w, __reg("d3") uint16 h, __reg("d4") uint8 mask, __reg("d7") uint16 format)
 {
   if (!b || !r)
     return;
@@ -607,7 +607,7 @@ void rect_invert(__reg("a0") struct RTGBoard* b,__reg("a1") struct RenderInfo* r
   zzwrite16(&registers->blitter_op_invertrect, mask);
 }
 
-void rect_p2c(__reg("a0") struct RTGBoard* b,__reg("a1") struct BitMap* bm,__reg("a2") struct RenderInfo* r,__reg("d0") uint16 x,__reg("d1") uint16 y,__reg("d2") uint16 dx,__reg("d3") uint16 dy,__reg("d4") uint16 w,__reg("d5") uint16 h,__reg("d6") uint8 minterm,__reg("d7") uint8 mask)
+void rect_p2c(__reg("a0") struct RTGBoard* b, __reg("a1") struct BitMap* bm, __reg("a2") struct RenderInfo* r, __reg("d0") uint16 x, __reg("d1") uint16 y, __reg("d2") uint16 dx, __reg("d3") uint16 dy, __reg("d4") uint16 w, __reg("d5") uint16 h, __reg("d6") uint8 minterm, __reg("d7") uint8 mask)
 {
   if (!b || !r)
     return;
@@ -657,7 +657,7 @@ void rect_p2c(__reg("a0") struct RTGBoard* b,__reg("a1") struct BitMap* bm,__reg
   zzwrite16(&registers->blitter_op_p2c, mask | bm->Depth << 8);
 }
 
-void draw_line(__reg("a0") struct RTGBoard* b,__reg("a1") struct RenderInfo* r,__reg("a2") struct Line* l,__reg("d0") uint16 mask,__reg("d7") uint16 format)
+void draw_line(__reg("a0") struct RTGBoard* b, __reg("a1") struct RenderInfo* r, __reg("a2") struct Line* l, __reg("d0") uint16 mask, __reg("d7") uint16 format)
 {
   if (!l || !r)
     return;
@@ -686,7 +686,7 @@ void draw_line(__reg("a0") struct RTGBoard* b,__reg("a1") struct RenderInfo* r,_
   zzwrite16(&registers->blitter_op_draw_line, mask);
 }
 
-void rect_fill(__reg("a0") struct RTGBoard* b,__reg("a1")  struct RenderInfo* r,__reg("d0")  uint16 x,__reg("d1")  uint16 y,__reg("d2")  uint16 w,__reg("d3")  uint16 h,__reg("d4")  uint32 color) {
+void rect_fill(__reg("a0") struct RTGBoard* b, __reg("a1") struct RenderInfo* r, __reg("d0") uint16 x, __reg("d1") uint16 y, __reg("d2") uint16 w, __reg("d3") uint16 h, __reg("d4") uint32 color) {
   MNTZZ9KRegs* registers = b->registers;
   uint32 offset = 0;
 
@@ -706,7 +706,7 @@ void rect_fill(__reg("a0") struct RTGBoard* b,__reg("a1")  struct RenderInfo* r,
   zzwrite16(&registers->blitter_op_fillrect, 1);
 }
 
-void rect_copy(__reg("a0") struct RTGBoard* b,__reg("a1")  struct RenderInfo* r,__reg("d0")  uint16 x,__reg("d1")  uint16 y,__reg("d2")  uint16 dx,__reg("d3")  uint16 dy,__reg("d4")  uint16 w,__reg("d5")  uint16 h,__reg("d6")  uint8 m,__reg("d7")  uint16 format) {
+void rect_copy(__reg("a0") struct RTGBoard* b, __reg("a1") struct RenderInfo* r, __reg("d0") uint16 x, __reg("d1") uint16 y, __reg("d2") uint16 dx, __reg("d3") uint16 dy, __reg("d4") uint16 w, __reg("d5") uint16 h, __reg("d6") uint8 m, __reg("d7") uint16 format) {
   MNTZZ9KRegs* registers = b->registers;
   uint32 offset = 0;
   
