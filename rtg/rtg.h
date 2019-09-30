@@ -232,8 +232,8 @@ struct RTGBoard {
   void* fn_line_fallback;
   void* fn_rect_copy_nomask;
   void* fn_rect_copy_nomask_fallback;
-  void* f42;
-  void* f43;
+  void* fn_p2d;
+  void* fn_p2d_fallback;
   void* f44; // res0
   void* f45;
   void* f46;
