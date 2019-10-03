@@ -607,6 +607,7 @@ void draw_line(__reg("a0") struct RTGBoard* b, __reg("a1") struct RenderInfo* r,
   zzwrite16(&registers->blitter_y1, l->y);
   zzwrite16(&registers->blitter_x2, l->dx);
   zzwrite16(&registers->blitter_y2, l->dy);
+  zzwrite16(&registers->blitter_user1, l->len);
   zzwrite16(&registers->blitter_x3, l->pattern);
   zzwrite16(&registers->blitter_y3, l->pattern_offset | (l->padding << 8));
 
