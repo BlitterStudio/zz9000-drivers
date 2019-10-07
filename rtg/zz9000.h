@@ -58,8 +58,17 @@ typedef volatile struct MNTZZ9KRegs {
   u16 blitter_rgb2_lo; // 36
   u16 blitter_op_p2c; // 38
   u16 blitter_op_draw_line; // 3a
+  u16 blitter_op_p2d; // 3c
+  u16 blitter_op_invertrect; // 3e
+
+  // Reusing other register-accessible variables was getting a bit cluttered, and somewhat
+  // of a coding hazard. Four additional user values should help for the time being.
+  u16 blitter_user1; // 40
+  u16 blitter_user2; // 42
+  u16 blitter_user3; // 44
+  u16 blitter_user4; // 46
   
-  u16 un_3[0x22]; // 3c..7e
+  u16 un_3[0x1A]; // 48..7e
 
   u16 eth_tx; // 80
   u16 eth_rx; // 82
