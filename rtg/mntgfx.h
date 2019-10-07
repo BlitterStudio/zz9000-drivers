@@ -57,6 +57,7 @@ uint32 get_pixelclock_index(__reg("a0") struct RTGBoard* b,__reg("a1") struct Mo
 uint32 get_pixelclock_hz(__reg("a0") struct RTGBoard* b,__reg("a1") struct ModeInfo* mode,__reg("d0") int32 clock,__reg("d7") uint16 format);
 uint32 monitor_switch(__reg("a0") struct RTGBoard* b,__reg("d0") uint16 state);
 void rect_p2c(__reg("a0") struct RTGBoard* b,__reg("a1") struct BitMap* bm,__reg("a2") struct RenderInfo* r,__reg("d0") uint16 x,__reg("d1") uint16 y,__reg("d2") uint16 dx,__reg("d3") uint16 dy,__reg("d4") uint16 w,__reg("d5") uint16 h,__reg("d6") uint8 minterm,__reg("d7") uint8 mask);
+void rect_invert(__reg("a0") struct RTGBoard* b,__reg("a1") struct RenderInfo* r,__reg("d0") uint16 x, __reg("d1") uint16 y,__reg("d2") uint16 w,__reg("d3") uint16 h,__reg("d4") uint8 mask,__reg("d7") uint16 format);
 void draw_line(__reg("a0") struct RTGBoard* b,__reg("a1") struct RenderInfo* r,__reg("a2") struct Line* l,__reg("d0") uint16 mask,__reg("d7") uint16 format);
 void rect_fill(__reg("a0") struct RTGBoard* b,__reg("a1") struct RenderInfo* r,__reg("d0") uint16 x,__reg("d1") uint16 y,__reg("d2") uint16 w,__reg("d3") uint16 h,__reg("d4") uint32 color);
 void rect_copy(__reg("a0") struct RTGBoard* b,__reg("a1") struct RenderInfo* r,__reg("d0") uint16 x,__reg("d1") uint16 y,__reg("d2") uint16 dx,__reg("d3") uint16 dy,__reg("d4") uint16 w,__reg("d5") uint16 h,__reg("d6") uint8 m,__reg("d7") uint16 format);
@@ -64,7 +65,7 @@ void rect_template(__reg("a0") struct RTGBoard* b, __reg("a1") struct RenderInfo
                    __reg("d0") uint16 x, __reg("d1") uint16 y, __reg("d2") uint16 w, __reg("d3") uint16 h,
                    __reg("d4") uint32 mask, __reg("d7") uint32 format);
 void rect_pattern(__reg("a0") struct RTGBoard* b,__reg("a1") struct RenderInfo* r,__reg("a2") struct Pattern* pat,__reg("d0") uint16 x,__reg("d1") uint16 y,__reg("d2") uint16 w,__reg("d3") uint16 h,__reg("d4") uint8 mask,__reg("d7") uint32 format);
-void rect_copy_nomask(__reg("a0") struct RTGBoard* b,__reg("a1") struct RenderInfo* sr,__reg("a2") struct RenderInfo* dr,__reg("d0") uint16 x,__reg("d1") uint16 y,__reg("d2") uint16 dx,__reg("d3") uint16 dy,__reg("d4") uint16 w,__reg("d5") uint16 h,__reg("d6") uint8 opcode,__reg("d7") uint32 format);
+void rect_copy_nomask(__reg("a0") struct RTGBoard* b,__reg("a1") struct RenderInfo* sr,__reg("a2") struct RenderInfo* dr,__reg("d0") uint16 x,__reg("d1") uint16 y,__reg("d2") uint16 dx,__reg("d3") uint16 dy,__reg("d4") uint16 w,__reg("d5") uint16 h,__reg("d6") uint8 opcode,__reg("d7") uint16 format);
 void blitter_wait(__reg("a0") struct RTGBoard* b);
 
 void sprite_setup(__reg("a0") struct RTGBoard* b,__reg("d0") uint32 enable);

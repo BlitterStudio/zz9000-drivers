@@ -318,6 +318,11 @@ int InitCard(__reg("a0") struct RTGBoard* b) {
   if (fwrev >= (1 << 8 | 4)) {
     // Accelerated line drawing added in FW 1.4
     b->fn_line = (void *)draw_line;
+    // Accelerated Planar2Chunky/Direct and
+    // InvertRect added in FW 1.4/1.5
+    b->fn_p2c = (void *)rect_p2c;
+    b->fn_rect_invert = (void *)rect_invert;
+    b->fn_rect_copy_nomask = (void *)rect_copy_nomask;
   }
   //b->fn_rect_copy_nomask = rect_copy_nomask; // TODO: what is this used for?
   
@@ -584,6 +589,76 @@ uint32 monitor_switch(__reg("a0") struct RTGBoard* b, __reg("d0") uint16 state) 
   return 1-state;
 }
 
+void rect_invert(__reg("a0") struct RTGBoard* b,__reg("a1") struct RenderInfo* r,__reg("d0") uint16 x, __reg("d1") uint16 y,__reg("d2") uint16 w,__reg("d3") uint16 h,__reg("d4") uint8 mask,__reg("d7") uint16 format)
+{
+  if (!b || !r)
+    return;
+  
+  MNTZZ9KRegs* registers = b->registers;
+  uint32_t offset = (r->memory - b->memory);
+
+  ZZWRITE32(&registers->blitter_dst, offset);
+  zzwrite16(&registers->blitter_row_pitch, r->pitch >> 2);
+  zzwrite16(&registers->blitter_colormode, rtg_to_mnt[r->color_format]);
+
+  zzwrite16(&registers->blitter_x1, x);
+  zzwrite16(&registers->blitter_y1, y);
+  zzwrite16(&registers->blitter_x2, x + w - 1);
+  zzwrite16(&registers->blitter_y2, y + h - 1);
+  
+  zzwrite16(&registers->blitter_op_invertrect, mask);
+}
+
+void rect_p2c(__reg("a0") struct RTGBoard* b,__reg("a1") struct BitMap* bm,__reg("a2") struct RenderInfo* r,__reg("d0") uint16 x,__reg("d1") uint16 y,__reg("d2") uint16 dx,__reg("d3") uint16 dy,__reg("d4") uint16 w,__reg("d5") uint16 h,__reg("d6") uint8 minterm,__reg("d7") uint8 mask)
+{
+  if (!b || !r)
+    return;
+
+  uint32_t offset = (r->memory - b->memory);
+  uint32_t zz_template_addr = 0x00df0000 - 0x200000;
+  MNTZZ9KRegs* registers = b->registers;
+  uint16_t zz_mask = mask;
+  uint8_t cur_plane = 0x01;
+  
+  ZZWRITE32(&registers->blitter_dst, offset);
+  zzwrite16(&registers->blitter_row_pitch, r->pitch >> 2);
+  zzwrite16(&registers->blitter_colormode, rtg_to_mnt[r->color_format] | (minterm << 8));
+
+  if (zorro_version != 3) {
+    zz_template_addr = b->memory_size;
+  }
+  ZZWRITE32(&registers->blitter_src, zz_template_addr);
+  zzwrite16(&registers->blitter_src_pitch, bm->BytesPerRow);
+  zzwrite16(&registers->blitter_user1, bm->Rows);
+
+  uint16 plane_size = bm->BytesPerRow * bm->Rows;
+
+  for (int16 i = 0; i < bm->Depth; i++) {
+    if ((uint32_t)bm->Planes[i] == 0xFFFFFFFF) {
+      memset((uint8_t*)(((uint32_t)b->memory)+zz_template_addr), 0xFF, plane_size);
+    }
+    else if (bm->Planes[i] != NULL) {
+      memcpy((uint8_t*)(((uint32_t)b->memory)+zz_template_addr), bm->Planes[i], plane_size);
+    }
+    else {
+      zz_mask &= (cur_plane ^ 0xFF);
+    }
+    cur_plane <<= 1;
+    zz_template_addr += plane_size;
+  }
+
+  zzwrite16(&registers->blitter_x1, x);
+  zzwrite16(&registers->blitter_y1, y);
+  zzwrite16(&registers->blitter_x2, dx);
+  zzwrite16(&registers->blitter_y2, dy);
+  zzwrite16(&registers->blitter_x3, w);
+  zzwrite16(&registers->blitter_y3, h);
+
+  zzwrite16(&registers->blitter_user2, zz_mask);
+
+  zzwrite16(&registers->blitter_op_p2c, mask | bm->Depth << 8);
+}
+
 void draw_line(__reg("a0") struct RTGBoard* b, __reg("a1") struct RenderInfo* r, __reg("a2") struct Line* l, __reg("d0") uint16 mask, __reg("d7") uint16 format)
 {
   if (!l || !r)
@@ -659,6 +734,36 @@ void rect_copy(__reg("a0") struct RTGBoard* b, __reg("a1") struct RenderInfo* r,
   ZZWRITE32(&registers->blitter_dst, offset);
 
   zzwrite16(&registers->blitter_op_copyrect, 1);
+}
+
+void rect_copy_nomask(__reg("a0") struct RTGBoard* b,__reg("a1") struct RenderInfo* sr,__reg("a2") struct RenderInfo* dr,__reg("d0") uint16 x,__reg("d1") uint16 y,__reg("d2") uint16 dx,__reg("d3") uint16 dy,__reg("d4") uint16 w,__reg("d5") uint16 h,__reg("d6") uint8 opcode,__reg("d7") uint16 format)
+{
+  MNTZZ9KRegs* registers = b->registers;
+  uint32 offset = 0;
+  
+  if (w<1 || h<1) return;
+  if (!sr || !dr) return;
+
+
+  zzwrite16(&registers->blitter_y1, dy);
+  zzwrite16(&registers->blitter_y2, dy + h - 1);
+  zzwrite16(&registers->blitter_y3, y);
+  
+  zzwrite16(&registers->blitter_x1, dx);
+  zzwrite16(&registers->blitter_x2, dx + w - 1);
+  zzwrite16(&registers->blitter_x3, x);
+
+  zzwrite16(&registers->blitter_colormode, rtg_to_mnt[dr->color_format]);
+  
+  zzwrite16(&registers->blitter_src_pitch, sr->pitch >> 2);
+  offset = (sr->memory - (b->memory));
+  ZZWRITE32(&registers->blitter_src, offset);
+
+  zzwrite16(&registers->blitter_row_pitch, dr->pitch >> 2);
+  offset = (dr->memory - (b->memory));
+  ZZWRITE32(&registers->blitter_dst, offset);
+
+  zzwrite16(&registers->blitter_op_copyrect, 2);
 }
 
 void rect_template(__reg("a0") struct RTGBoard* b, __reg("a1") struct RenderInfo* r, __reg("a2") struct Template* t,
