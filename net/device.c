@@ -259,6 +259,13 @@ __saveds LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
               D(("ZZ9000Net: INT6 server registered\n"));
               ret = 0;
               ok = 1;
+              
+              // enable HW interrupt
+              USHORT hw_config = *(USHORT*)(ZZ9K_REGS+0x04);
+              hw_config |= 1;
+              *(volatile USHORT*)(ZZ9K_REGS+0x04) = hw_config;
+              
+              D(("ZZ9000Net: ZZ interrupt enabled\n"));
             } else {
               D(("ZZ9000Net: failed to alloc INT6 struct\n"));
               ret = IOERR_OPENFAIL;
@@ -315,6 +322,13 @@ __saveds BPTR DevClose(   ASMR(a1) struct IORequest *ioreq        ASMREG(a1),
 	db->db_Lib.lib_OpenCnt--;
 
   if (db->db_Lib.lib_OpenCnt == 0) {
+    // disable HW interrupt
+    USHORT hw_config = *(USHORT*)(ZZ9K_REGS+0x04);
+    hw_config &= 0xfffe;
+    *(volatile USHORT*)(ZZ9K_REGS+0x04) = hw_config;
+              
+    D(("ZZ9000Net: ZZ interrupt disabled\n"));
+              
     Forbid();
     if (db->db_int6) {
       D(("ZZ9000Net: Remove IntServer...\n"));
@@ -635,6 +649,10 @@ __saveds void frame_proc() {
   wmask = SIGBREAKF_CTRL_F | SIGBREAKF_CTRL_C;
 
   ULONG old_serial = 0;
+  ULONG recv = 0;
+
+  // wait for the first packet
+  recv = Wait(wmask);
   
   while (1) {
     struct IOSana2Req *ior;
@@ -642,8 +660,6 @@ __saveds void frame_proc() {
     
     // wait for signal from our interrupt handler
     // remove this to use polled-IO
-    
-    ULONG recv = Wait(wmask);
 
     if (recv & SIGBREAKF_CTRL_C) {
       D(("ZZ9000Net: process end\n"));
@@ -678,14 +694,16 @@ __saveds void frame_proc() {
       ReleaseSemaphore(&db->db_ReadListSem);
 
       if (!processed) {
-        D(("UNPR %ld\n",(LONG)packet_type));
+        //D(("UNPR %ld\n",(LONG)packet_type));
       }
       
       // mark this frame as accepted
       volatile USHORT* reg = (volatile USHORT*)(ZZ9K_REGS+0x82); // FIXME receive_frame reg
       *reg = 1;
+    } else {
+      // if there are no more new packets, idle until the next interrupt
+      recv = Wait(wmask);
     }
-    
   }
 }
 
