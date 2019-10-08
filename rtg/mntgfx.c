@@ -204,7 +204,7 @@ int FindCard(__reg("a0") struct RTGBoard* b) {
     } else {
       // 13.8 MB for Z3 (safety, will be expanded later)
       // one full HD screen @8bit ~ 2MB
-      b->memory_size = 0xdf0000-0x10000;
+      b->memory_size = 0x3000000 - 0x10000;
     }
     b->registers = (uint8*)(cd->cd_BoardAddr);
     hwrev = ((uint16*)b->registers)[0];
