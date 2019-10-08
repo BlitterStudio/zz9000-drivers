@@ -28,8 +28,8 @@ typedef volatile struct MNTZZ9KRegs {
   u16 fw_version; // 00
   u16 mode;       // 02
   u16 config;     // 04 misc config bits
-  u16 screen_w;   // 06
-  u16 screen_h;   // 08
+  u16 sprite_x;   // 06
+  u16 sprite_y;   // 08
 
   u16 pan_ptr_hi; // 0a
   u16 pan_ptr_lo; // 0c

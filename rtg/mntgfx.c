@@ -252,7 +252,7 @@ int InitCard(__reg("a0") struct RTGBoard* b) {
   b->chip_type = 3;
   b->controller_type = 3;
 
-  b->flags = (1<<20)|(1<<12)|(1<<26); // indisplaychain, flickerfixer, directaccess, hwsprite(1)
+  b->flags = (1<<20)|(1<<12)|(1<<26)|1; // indisplaychain, flickerfixer, directaccess, hwsprite(1)
   b->color_formats = 1|2|512|1024|2048;
   b->sprite_flags = 0;
   b->bits_per_channel = 8;
@@ -340,10 +340,10 @@ int InitCard(__reg("a0") struct RTGBoard* b) {
   b->fn_set_clear_mask = (void*)set_clear_mask;
   b->fn_set_read_plane = (void*)set_read_plane;
   
-  //b->fn_sprite_setup = nop;
-  //b->fn_sprite_xy = nop;
-  //b->fn_sprite_bitmap = nop;
-  //b->fn_sprite_colors = nop;
+  b->fn_sprite_setup = (void*)sprite_setup;
+  b->fn_sprite_xy = (void*)sprite_xy;
+  b->fn_sprite_bitmap = (void*)nop;
+  b->fn_sprite_colors = (void*)nop;
   
   return 1;
 }
@@ -856,4 +856,19 @@ void rect_pattern(__reg("a0") struct RTGBoard* b, __reg("a1") struct RenderInfo*
 }
 
 void blitter_wait(__reg("a0") struct RTGBoard* b) {
+}
+
+void sprite_xy(__reg("a0") struct RTGBoard* b) {
+  MNTZZ9KRegs* registers = b->registers;
+
+  zzwrite16(&registers->sprite_x, b->cursor_x);
+  zzwrite16(&registers->sprite_y, b->cursor_y);
+}
+
+void sprite_setup(__reg("a0") struct RTGBoard* b, __reg("d0") uint32 enable) {
+  MNTZZ9KRegs* registers = b->registers;
+  if (!enable) {
+    zzwrite16(&registers->sprite_x, 2000);
+    zzwrite16(&registers->sprite_y, 2000);
+  }
 }
