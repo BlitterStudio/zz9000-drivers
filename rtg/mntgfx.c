@@ -342,8 +342,8 @@ int InitCard(__reg("a0") struct RTGBoard* b) {
   
   b->fn_sprite_setup = (void*)sprite_setup;
   b->fn_sprite_xy = (void*)sprite_xy;
-  b->fn_sprite_bitmap = (void*)nop;
-  b->fn_sprite_colors = (void*)nop;
+  b->fn_sprite_bitmap = (void*)sprite_bitmap;
+  b->fn_sprite_colors = (void*)sprite_colors;
   
   return 1;
 }
@@ -852,10 +852,40 @@ void sprite_xy(__reg("a0") struct RTGBoard* b) {
   zzwrite16(&registers->sprite_y, b->cursor_y);
 }
 
-void sprite_setup(__reg("a0") struct RTGBoard* b, __reg("d0") uint32 enable) {
+void sprite_setup(__reg("a0") struct RTGBoard* b, __reg("d0") uint8 enable) {
   MNTZZ9KRegs* registers = b->registers;
   if (!enable) {
     zzwrite16(&registers->sprite_x, 2000);
     zzwrite16(&registers->sprite_y, 2000);
   }
+}
+
+void sprite_bitmap(__reg("a0") struct RTGBoard* b, __reg("d7") uint16 format)
+{
+  MNTZZ9KRegs* registers = b->registers;
+  uint32_t zz_template_addr = 0x00df0000 - 0x200000;
+  if (zorro_version != 3) {
+    zz_template_addr = b->memory_size;
+  }
+
+  ZZWRITE32(&registers->blitter_src, zz_template_addr);
+
+  uint16_t data_size = ((b->cursor_w / 8) * 2) * (b->cursor_h);
+  memcpy((uint8_t*)(((uint32_t)b->memory)+zz_template_addr), b->cursor_sprite_bitmap+2, data_size);
+
+  zzwrite16(&registers->blitter_x1, b->cursor_xo);
+  zzwrite16(&registers->blitter_y1, b->cursor_yo);
+  zzwrite16(&registers->blitter_x2, b->cursor_w);
+  zzwrite16(&registers->blitter_y2, b->cursor_h);
+
+  zzwrite16(&registers->sprite_bitmap, 0);
+}
+
+void sprite_colors(__reg("a0") struct RTGBoard* b, __reg("d0") uint8 idx, __reg("d1") uint8 red, __reg("d2") uint8 green, __reg("d3") uint8 blue, __reg("d7") uint16 format)
+{
+  MNTZZ9KRegs* registers = b->registers;
+  
+  zzwrite16(&registers->blitter_user1, red);
+  zzwrite16(&registers->blitter_user2, blue | (green << 8));
+  zzwrite16(&registers->sprite_colors, idx + 1);
 }

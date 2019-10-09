@@ -68,8 +68,7 @@ void rect_pattern(__reg("a0") struct RTGBoard* b,__reg("a1") struct RenderInfo* 
 void rect_copy_nomask(__reg("a0") struct RTGBoard* b,__reg("a1") struct RenderInfo* sr,__reg("a2") struct RenderInfo* dr,__reg("d0") uint16 x,__reg("d1") uint16 y,__reg("d2") uint16 dx,__reg("d3") uint16 dy,__reg("d4") uint16 w,__reg("d5") uint16 h,__reg("d6") uint8 opcode,__reg("d7") uint16 format);
 void blitter_wait(__reg("a0") struct RTGBoard* b);
 
-void sprite_setup(__reg("a0") struct RTGBoard* b,__reg("d0") uint32 enable);
+void sprite_setup(__reg("a0") struct RTGBoard* b,__reg("d0") uint8 enable);
 void sprite_xy(__reg("a0") struct RTGBoard* b);
-void sprite_bitmap(__reg("a0") struct RTGBoard* b);
-void sprite_colors(__reg("a0") struct RTGBoard* b,__reg("d0") uint8 idx,__reg("d1") 
-                   uint8 red,__reg("d2") uint8 green,__reg("d3") uint8 blue);
+void sprite_bitmap(__reg("a0") struct RTGBoard* b,__reg("d7") uint16 format);
+void sprite_colors(__reg("a0") struct RTGBoard* b,__reg("d0") uint8 idx,__reg("d1") uint8 red,__reg("d2") uint8 green,__reg("d3") uint8 blue, __reg("d7") uint16 format);
