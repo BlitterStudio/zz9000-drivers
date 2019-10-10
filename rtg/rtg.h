@@ -217,7 +217,7 @@ struct RTGBoard {
   void* f24;
   void* f25;
   void* fn_p2c;
-  void* fn_p2c_fallback;
+  void (*fn_p2c_fallback)(__reg("a0") struct RTGBoard* b, __reg("a1") struct BitMap* bm, __reg("a2") struct RenderInfo* r, __reg("d0") uint16 x, __reg("d1") uint16 y, __reg("d2") uint16 dx, __reg("d3") uint16 dy, __reg("d4") uint16 w, __reg("d5") uint16 h, __reg("d6") uint8 minterm, __reg("d7") uint8 mask);
   void* fn_rect_fill;
   void* fn_rect_fill_fallback;
   void* fn_rect_invert;

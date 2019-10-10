@@ -612,12 +612,19 @@ void rect_p2c(__reg("a0") struct RTGBoard* b, __reg("a1") struct BitMap* bm, __r
   if (!b || !r)
     return;
 
+  uint16 plane_size = bm->BytesPerRow * bm->Rows;
+
+  if (plane_size * bm->Depth > 0xFFFF) {
+    b->fn_p2c_fallback(b, bm, r, x, y, dx, dy, w, h, minterm, mask);
+    return;
+  }
+
   uint32_t offset = (r->memory - b->memory);
   uint32_t zz_template_addr = 0x00df0000 - 0x200000;
   MNTZZ9KRegs* registers = b->registers;
   uint16_t zz_mask = mask;
   uint8_t cur_plane = 0x01;
-  
+
   ZZWRITE32(&registers->blitter_dst, offset);
   zzwrite16(&registers->blitter_row_pitch, r->pitch >> 2);
   zzwrite16(&registers->blitter_colormode, rtg_to_mnt[r->color_format] | (minterm << 8));
@@ -628,8 +635,6 @@ void rect_p2c(__reg("a0") struct RTGBoard* b, __reg("a1") struct BitMap* bm, __r
   ZZWRITE32(&registers->blitter_src, zz_template_addr);
   zzwrite16(&registers->blitter_src_pitch, bm->BytesPerRow);
   zzwrite16(&registers->blitter_user1, bm->Rows);
-
-  uint16 plane_size = bm->BytesPerRow * bm->Rows;
 
   for (int16 i = 0; i < bm->Depth; i++) {
     if ((uint32_t)bm->Planes[i] == 0xFFFFFFFF) {
@@ -884,7 +889,7 @@ void sprite_bitmap(__reg("a0") struct RTGBoard* b, __reg("d7") uint16 format)
 void sprite_colors(__reg("a0") struct RTGBoard* b, __reg("d0") uint8 idx, __reg("d1") uint8 red, __reg("d2") uint8 green, __reg("d3") uint8 blue, __reg("d7") uint16 format)
 {
   MNTZZ9KRegs* registers = b->registers;
-  
+
   zzwrite16(&registers->blitter_user1, red);
   zzwrite16(&registers->blitter_user2, blue | (green << 8));
   zzwrite16(&registers->sprite_colors, idx + 1);
