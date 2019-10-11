@@ -879,7 +879,7 @@ void sprite_bitmap(__reg("a0") struct RTGBoard* b, __reg("d7") uint16 format)
 
   ZZWRITE32(&registers->blitter_src, zz_template_addr);
 
-  uint16_t data_size = ((b->cursor_w / 8) * 2) * (b->cursor_h);
+  uint16_t data_size = ((b->cursor_w >> 3) * 2) * (b->cursor_h);
   memcpy((uint8_t*)(((uint32_t)b->memory)+zz_template_addr), b->cursor_sprite_bitmap+2, data_size);
 
   zzwrite16(&registers->blitter_x1, b->cursor_xo);
