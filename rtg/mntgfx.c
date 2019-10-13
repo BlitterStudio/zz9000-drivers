@@ -86,6 +86,8 @@ static const struct Resident ROMTag = {
   (APTR)&InitTab
 };
 
+#define Z3_TEMPLATE_ADDR 0xbf0000;
+
 #define ZZWRITE32(b, c) \
   zzwrite16(b##_hi, ((uint16 *)&c)[0]); \
   zzwrite16(b##_lo, ((uint16 *)&c)[1]);
@@ -620,7 +622,7 @@ void rect_p2c(__reg("a0") struct RTGBoard* b, __reg("a1") struct BitMap* bm, __r
   }
 
   uint32_t offset = (r->memory - b->memory);
-  uint32_t zz_template_addr = 0x00df0000 - 0x200000;
+  uint32_t zz_template_addr = Z3_TEMPLATE_ADDR;
   MNTZZ9KRegs* registers = b->registers;
   uint16_t zz_mask = mask;
   uint8_t cur_plane = 0x01;
@@ -779,7 +781,7 @@ void rect_template(__reg("a0") struct RTGBoard* b, __reg("a1") struct RenderInfo
   ZZWRITE32(&registers->blitter_dst, offset);
   
   // FIXME magic numbers and no limits
-  uint32_t zz_template_addr = 0x00df0000 - 0x200000;
+  uint32_t zz_template_addr = Z3_TEMPLATE_ADDR;
 
   if (zorro_version != 3) {
     zz_template_addr = b->memory_size;
@@ -817,7 +819,7 @@ void rect_pattern(__reg("a0") struct RTGBoard* b, __reg("a1") struct RenderInfo*
   ZZWRITE32(&registers->blitter_dst, offset);
   
   // FIXME magic numbers and no limits
-  uint32_t zz_template_addr = 0x00df0000 - 0x200000;
+  uint32_t zz_template_addr = Z3_TEMPLATE_ADDR;
 
   if (zorro_version != 3) {
     zz_template_addr = b->memory_size;
@@ -868,7 +870,7 @@ void sprite_setup(__reg("a0") struct RTGBoard* b, __reg("d0") uint8 enable) {
 void sprite_bitmap(__reg("a0") struct RTGBoard* b, __reg("d7") uint16 format)
 {
   MNTZZ9KRegs* registers = b->registers;
-  uint32_t zz_template_addr = 0x00df0000 - 0x200000;
+  uint32_t zz_template_addr = Z3_TEMPLATE_ADDR;
   if (zorro_version != 3) {
     zz_template_addr = b->memory_size;
   }
