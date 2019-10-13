@@ -86,7 +86,8 @@ static const struct Resident ROMTag = {
   (APTR)&InitTab
 };
 
-#define Z3_TEMPLATE_ADDR 0xbf0000;
+// Place scratch area right after framebuffer? Might be a horrible idea.
+#define Z3_TEMPLATE_ADDR 0x3200000 //0xbf0000;
 
 #define ZZWRITE32(b, c) \
   zzwrite16(b##_hi, ((uint16 *)&c)[0]); \
@@ -614,9 +615,9 @@ void rect_p2c(__reg("a0") struct RTGBoard* b, __reg("a1") struct BitMap* bm, __r
   if (!b || !r)
     return;
 
-  uint16 plane_size = bm->BytesPerRow * bm->Rows;
-
-  if (plane_size * bm->Depth > 0xFFFF) {
+  uint32 plane_size = bm->BytesPerRow * bm->Rows;
+  
+  if (plane_size * bm->Depth > 0xFFFF && zorro_version != 3) {
     b->fn_p2c_fallback(b, bm, r, x, y, dx, dy, w, h, minterm, mask);
     return;
   }
@@ -631,29 +632,38 @@ void rect_p2c(__reg("a0") struct RTGBoard* b, __reg("a1") struct BitMap* bm, __r
   zzwrite16(&registers->blitter_row_pitch, r->pitch >> 2);
   zzwrite16(&registers->blitter_colormode, rtg_to_mnt[r->color_format] | (minterm << 8));
 
+  uint16 line_size = (w >> 3) + 2;
+  uint32 output_plane_size = line_size * h;
+  uint16 x_offset = (x >> 3);
+
   if (zorro_version != 3) {
     zz_template_addr = b->memory_size;
   }
   ZZWRITE32(&registers->blitter_src, zz_template_addr);
-  zzwrite16(&registers->blitter_src_pitch, bm->BytesPerRow);
-  zzwrite16(&registers->blitter_user1, bm->Rows);
+  zzwrite16(&registers->blitter_src_pitch, line_size);
 
   for (int16 i = 0; i < bm->Depth; i++) {
+    uint16 x_offset = (x >> 3);
     if ((uint32_t)bm->Planes[i] == 0xFFFFFFFF) {
-      memset((uint8_t*)(((uint32_t)b->memory)+zz_template_addr), 0xFF, plane_size);
+      memset((uint8_t*)(((uint32_t)b->memory)+zz_template_addr), 0xFF, output_plane_size);
     }
     else if (bm->Planes[i] != NULL) {
-      memcpy((uint8_t*)(((uint32_t)b->memory)+zz_template_addr), bm->Planes[i], plane_size);
+      uint8* bmp_mem = (uint8*)bm->Planes[i] + (y * bm->BytesPerRow) + x_offset;
+      uint8* zz_dest = (uint8*)(((uint32_t)b->memory)+zz_template_addr);
+      for (int16 y_line = 0; y_line < h; y_line++) {
+        memcpy(zz_dest, bmp_mem, line_size);
+        zz_dest += line_size;
+        bmp_mem += bm->BytesPerRow;
+      }
     }
     else {
       zz_mask &= (cur_plane ^ 0xFF);
     }
     cur_plane <<= 1;
-    zz_template_addr += plane_size;
+    zz_template_addr += output_plane_size;
   }
 
-  zzwrite16(&registers->blitter_x1, x);
-  zzwrite16(&registers->blitter_y1, y);
+  zzwrite16(&registers->blitter_x1, x & 0x07);
   zzwrite16(&registers->blitter_x2, dx);
   zzwrite16(&registers->blitter_y2, dy);
   zzwrite16(&registers->blitter_x3, w);
