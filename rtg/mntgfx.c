@@ -813,10 +813,6 @@ void rect_pattern(__reg("a0") struct RTGBoard* b, __reg("a1") struct RenderInfo*
   if (w<1 || h<1) return;
   if (!pat) return; // something about special ptrs?
   
-  uint32_t fg_color = pat->fg_pen;
-  uint32_t bg_color = pat->bg_pen;
-  uint32_t draw_mode = pat->draw_mode;
-  
   uint32 offset = (r->memory - (b->memory));
   ZZWRITE32(&registers->blitter_dst, offset);
   
@@ -827,16 +823,16 @@ void rect_pattern(__reg("a0") struct RTGBoard* b, __reg("a1") struct RenderInfo*
     zz_template_addr = b->memory_size;
   }
 
-  memcpy((uint8_t*)(((uint32_t)b->memory)+zz_template_addr), pat->memory, 2*(1<<pat->size));
+  memcpy((uint8_t*)(((uint32_t)b->memory) + zz_template_addr), pat->memory, 2 * (1 << pat->size));
   
   ZZWRITE32(&registers->blitter_src, zz_template_addr);
 
   ZZWRITE32(&registers->blitter_rgb, pat->fg_pen);
   ZZWRITE32(&registers->blitter_rgb2, pat->bg_pen);
 
-  zzwrite16(&registers->blitter_src_pitch, 16);
+  zzwrite16(&registers->blitter_user1, mask);
   zzwrite16(&registers->blitter_row_pitch, r->pitch);
-  zzwrite16(&registers->blitter_colormode, rtg_to_mnt[r->color_format] | (draw_mode << 8));
+  zzwrite16(&registers->blitter_colormode, rtg_to_mnt[r->color_format] | (pat->draw_mode << 8));
   zzwrite16(&registers->blitter_x1, x);
   zzwrite16(&registers->blitter_y1, y);
   zzwrite16(&registers->blitter_x2, w);
@@ -844,7 +840,7 @@ void rect_pattern(__reg("a0") struct RTGBoard* b, __reg("a1") struct RenderInfo*
   zzwrite16(&registers->blitter_x3, pat->xo);
   zzwrite16(&registers->blitter_y3, pat->yo);
   
-  zzwrite16(&registers->blitter_op_filltemplate, (1<<pat->size)|0x8000);
+  zzwrite16(&registers->blitter_op_filltemplate, (1 << pat->size) | 0x8000);
 }
 
 void blitter_wait(__reg("a0") struct RTGBoard* b) {
