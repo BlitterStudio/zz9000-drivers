@@ -120,6 +120,11 @@ struct Line {
   uint16 x_origin, y_origin;
 };
 
+struct ColorIndexMapping {
+  uint32   mask;
+  uint32   colors[256];
+};
+
 struct RTGBoard {
   void* registers;
   uint8* memory;
@@ -233,7 +238,7 @@ struct RTGBoard {
   void* fn_rect_copy_nomask;
   void* fn_rect_copy_nomask_fallback;
   void* fn_p2d;
-  void* fn_p2d_fallback;
+  void (*fn_p2d_fallback)(__reg("a0") struct RTGBoard* b, __reg("a1") struct BitMap* bm, __reg("a2") struct RenderInfo* r, __reg("a3") struct ColorIndexMapping* cim, __reg("d0") uint16 x, __reg("d1") uint16 y, __reg("d2") uint16 dx, __reg("d3") uint16 dy, __reg("d4") uint16 w, __reg("d5") uint16 h, __reg("d6") uint8 minterm, __reg("d7") uint8 mask);
   void* f44; // res0
   void* f45;
   void* f46;
