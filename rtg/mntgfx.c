@@ -942,14 +942,7 @@ void sprite_xy(__reg("a0") struct RTGBoard* b) {
 
 void sprite_setup(__reg("a0") struct RTGBoard* b, __reg("d0") uint8 enable) {
   MNTZZ9KRegs* registers = b->registers;
-  if (!enable) {
-    zzwrite16(&registers->sprite_bitmap, 2);
-    //zzwrite16(&registers->sprite_x, 2000);
-    //zzwrite16(&registers->sprite_y, 2000);
-  }
-  else {
-    zzwrite16(&registers->sprite_bitmap, 1);
-  }
+  zzwrite16(&registers->sprite_bitmap, 1);
 }
 
 void sprite_bitmap(__reg("a0") struct RTGBoard* b, __reg("d7") uint16 format)
