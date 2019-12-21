@@ -85,6 +85,18 @@
 
 (complete 50)
 
+(if (askbool (prompt "Do you want to install the USB Storage driver for ZZ9000? Warning: It is still in beta. Don't use it to store important data!") (help ""))
+(
+(copyfiles 
+   (prompt "Install ZZ9000USBStorage.device")
+   (help "This will install the disk driver for ZZ9000's USB mass storage functionality.")
+   (source "Devs/ZZ9000USBStorage.device")
+   (dest "Devs:")
+   (confirm))
+))
+
+(complete 60)
+
 (if (askbool (prompt "Do you want to install the SANA-II Ethernet driver for ZZ9000? This requires an existing Installation of RoadShow, MiamiDX or similar.") (help ""))
 
 (

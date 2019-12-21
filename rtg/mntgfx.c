@@ -37,7 +37,7 @@ static ULONG LibStart(void) {
 }
 
 static const char LibraryName[] = "ZZ9000.card";
-static const char LibraryID[]   = "$VER: ZZ9000.card 1.4 (2019-09-26)\r\n";
+static const char LibraryID[]   = "$VER: ZZ9000.card 1.5 (2019-12-17)\r\n";
 
 __saveds struct MNTGFXBase* OpenLib( __reg("a6") struct MNTGFXBase *MNTGFXBase);
 BPTR __saveds CloseLib( __reg("a6") struct MNTGFXBase *MNTGFXBase);
@@ -221,8 +221,8 @@ int FindCard(__reg("a0") struct RTGBoard* b) {
     KPrintF("ZZ9000.card: FW Revision Major: %ld.\n", fwrev_major);
     KPrintF("ZZ9000.card: FW Revision Minor: %ld.\n", fwrev_minor);
 
-    if (fwrev_major<=1 && fwrev_minor<3) {
-      char *alert = "\x00\x14\x14ZZ9000.card v1.4 needs at least firmware (BOOT.bin) v1.3.\x00\x00";
+    if (fwrev_major<=1 && fwrev_minor<5) {
+      char *alert = "\x00\x14\x14ZZ9000.card v1.5 needs at least firmware (BOOT.bin) v1.5.\x00\x00";
       DisplayAlert(RECOVERY_ALERT, alert, 52);
       return 0;
     }
@@ -469,6 +469,8 @@ void init_modeline(MNTZZ9KRegs* registers, uint16 w, uint16 h, uint8 colormode, 
     mode = 5;
   } else if (w==720 && h==576) {
     mode = 6;
+  } else if (w==640 && h==512) {
+    mode = 9;
   }
 
   zzwrite16(&registers->mode, mode|(colormode<<8)|(scalemode<<12));

@@ -44,7 +44,7 @@ LINK = vlink -bamigahunk -x -s -mrel -Cvbcc -Bstatic -nostdlib #-Rshort
 #LINKEXE = vlink -bamigahunk -x -s -mrel -Cvbcc -Bstatic
 LINKEXE = vc +aos68k
 #LINK = $(CCX) -nostdlib
-CFLAGS  = -Os -+ -sc -c99 -cpu=$(CPU)
+CFLAGS  = -O2 -+ -sc -c99 -cpu=$(CPU)
 CFLAGS2 = -Os -+ -sc -c99 -cpu=$(CPU2)
 
 else
