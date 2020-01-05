@@ -37,7 +37,7 @@ static ULONG LibStart(void) {
 }
 
 static const char LibraryName[] = "ZZ9000.card";
-static const char LibraryID[]   = "$VER: ZZ9000.card 1.5 (2019-12-17)\r\n";
+static const char LibraryID[]   = "$VER: ZZ9000.card 1.5.1 (2020-01-05)\r\n";
 
 __saveds struct MNTGFXBase* OpenLib( __reg("a6") struct MNTGFXBase *MNTGFXBase);
 BPTR __saveds CloseLib( __reg("a6") struct MNTGFXBase *MNTGFXBase);
@@ -87,7 +87,9 @@ static const struct Resident ROMTag = {
 };
 
 // Place scratch area right after framebuffer? Might be a horrible idea.
-#define Z3_TEMPLATE_ADDR 0x3200000 //0xbf0000;
+#define Z3_TEMPLATE_ADDR 0x3200000
+#define ZZVMODE_800x600 1
+#define ZZVMODE_720x576 6
 
 #define ZZWRITE32(b, c) \
   zzwrite16(b##_hi, ((uint16 *)&c)[0]); \
@@ -226,15 +228,18 @@ int FindCard(__reg("a0") struct RTGBoard* b) {
       DisplayAlert(RECOVERY_ALERT, alert, 52);
       return 0;
     }
-    
+
+    MNTZZ9KRegs* registers = b->registers;
     BPTR f;
     if ((f = Open("ENV:ZZ9000-VCAP-800x600", MODE_OLDFILE))) {
       Close(f);
       KPrintF("ZZ9000.card: 800x600 60hz scandoubler mode.\n");
       scandoubler_800x600 = 1;
+      registers->videocap_vmode = ZZVMODE_800x600; // 60hz
     } else {
       KPrintF("ZZ9000.card: 720x576 50hz scandoubler mode.\n");
       scandoubler_800x600 = 0;
+      registers->videocap_vmode = ZZVMODE_720x576; // 50hz
     }
     
     return 1;
@@ -482,8 +487,7 @@ void init_mode(__reg("a0") struct RTGBoard* b, __reg("a1") struct ModeInfo* m, _
   uint16 w;
   uint16 h;
   uint16 colormode;
-  uint16 hdiv=1, vdiv=1;
-
+  
   b->mode_info = m;
   b->border = border;
 
