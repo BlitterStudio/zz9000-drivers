@@ -35,7 +35,8 @@ uint16 sdcmd_read_blocks(void* registers, uint8* data, uint32 block, uint32 len)
   uint32 offset=0;
   uint32 num_blocks=1;
   volatile struct MNTUSBSRegs* regs = (volatile struct MNTUSBSRegs*)registers;
-  
+
+  Forbid();
   while (i<len) {
     offset = i<<SD_SECTOR_SHIFT;
 
@@ -60,6 +61,8 @@ uint16 sdcmd_read_blocks(void* registers, uint8* data, uint32 block, uint32 len)
 
     i += num_blocks;
   }
+  Permit();
+  
   return 0;
 }
 
@@ -70,6 +73,7 @@ uint16 sdcmd_write_blocks(void* registers, uint8* data, uint32 block, uint32 len
   uint32 num_blocks=1;
   struct MNTUSBSRegs* regs = (struct MNTUSBSRegs*)registers;
   
+  Forbid();
   while (i<len) {
     offset = i<<SD_SECTOR_SHIFT;
     
@@ -94,6 +98,8 @@ uint16 sdcmd_write_blocks(void* registers, uint8* data, uint32 block, uint32 len
     
     i += num_blocks;
   }
+  Permit();
+  
   return 0;
 }
 
