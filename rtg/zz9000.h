@@ -33,7 +33,7 @@ typedef volatile struct MNTZZ9KRegs {
 
   u16 pan_ptr_hi; // 0a
   u16 pan_ptr_lo; // 0c
-  u16 hdiv;       // 0e
+  u16 videocap_vmode; // 0e
   u16 blitter_x1; // 10
   u16 blitter_y1; // 12
   u16 blitter_x2; // 14
