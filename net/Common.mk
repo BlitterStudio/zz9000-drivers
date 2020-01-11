@@ -27,9 +27,10 @@ compiler_vcc = 1
 # prefix for system includes (ASM)
 # native AmigaOS compilation: set PREFX=GG: or PREFX=ADE:, depending on toolchain
 ###############################################################################
-PREFX  = /home/mntmn/code/vbcc/targets/m68k-amigaos
+PREFX  = $(VBCC)/targets/m68k-amigaos
 #PREFX = gg:
-SYSINC = "-I$(PREFX)/include -I$(PREFX)/include2"
+SYSINC ?= "-I$(PREFX)/include -I$(PREFX)/include2"
+SYSLIB ?= "-L$(PREFX)/lib"
 
 ###############################################################################
 #
@@ -40,7 +41,7 @@ ifeq ($(compiler_vcc),1)
 
 # VBCC (use explicit vlink line for LINK= if complaints about R_PC happen)
 CCX  = vc +aos68k $(SYSINC)
-LINK = vlink -bamigahunk -x -s -mrel -Cvbcc -Bstatic -nostdlib #-Rshort 
+LINK = vlink -bamigahunk -x -s -mrel -Cvbcc -Bstatic -nostdlib $(SYSLIB) #-Rshort
 #LINKEXE = vlink -bamigahunk -x -s -mrel -Cvbcc -Bstatic
 LINKEXE = vc +aos68k
 #LINK = $(CCX) -nostdlib
