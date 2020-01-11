@@ -29,6 +29,7 @@
 #include <exec/errors.h>
 #include <exec/interrupts.h>
 #include <exec/tasks.h>
+#include <hardware/intbits.h>
 #include <string.h>
 
 #ifdef HAVE_VERSION_H
@@ -192,6 +193,17 @@ __saveds struct Device *DevInit( ASMR(d0) DEVBASEP                  ASMREG(d0),
 		D(("ZZ9000Net: Could not open dos.library.\n"));
 	}
 
+	{
+		BPTR fh;
+		if ((fh=Open("ENV:ZZ9K_INT2",MODE_OLDFILE))) {
+			D(("ZZ9000Net: Using INT2 mode.\n"));
+			Close(fh);
+			db->db_Flags |= DEVF_INT2MODE;
+		} else {
+			D(("ZZ9000Net: Using INT6 mode (default).\n"));
+		}
+	}
+
 	/* no hardware found, reject init */
 	return (ok > 0) ? (struct Device*)db : (0);
 }
@@ -228,35 +240,34 @@ __saveds LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
         D(("ZZ9000Net: Starting Process\n"));
         if (db->db_Proc = CreateNewProcTags(NP_Entry, frame_proc, NP_Name,
                                               frame_proc_name, TAG_DONE)) {
+          InitSemaphore(&db->db_ProcExitSem);
+
           init.error = 1;
           init.db = db;
           init.msg.mn_Length = sizeof(init);
           init.msg.mn_ReplyPort = port;
 
-          Delay(50);
-          
           D(("ZZ9000Net: handover db: %lx\n",init.db));
-          
+
           PutMsg(&db->db_Proc->pr_MsgPort, (struct Message*)&init);
           WaitPort(port);
 
           if (!init.error) {
             ok = 1;
-          
-            // Register Interrupt (INT6) server
-            if (db->db_int6 = AllocMem(sizeof(struct Interrupt), MEMF_PUBLIC|MEMF_CLEAR)) {
-              db->db_int6->is_Node.ln_Type = NT_INTERRUPT;
-              db->db_int6->is_Node.ln_Pri = -60;
-              db->db_int6->is_Node.ln_Name = "ZZ9000Net";
-              db->db_int6->is_Data = (APTR)db;
-              db->db_int6->is_Code = dev_isr;
 
-              // 13 = INTB_EXTER
+            // Register Interrupt server
+            if (db->db_interrupt = AllocMem(sizeof(struct Interrupt), MEMF_PUBLIC|MEMF_CLEAR)) {
+              db->db_interrupt->is_Node.ln_Type = NT_INTERRUPT;
+              db->db_interrupt->is_Node.ln_Pri = -60;
+              db->db_interrupt->is_Node.ln_Name = "ZZ9000Net";
+              db->db_interrupt->is_Data = (APTR)db;
+              db->db_interrupt->is_Code = dev_isr;
+
               Disable();
-              AddIntServer(13, db->db_int6);
+              AddIntServer((db->db_Flags & DEVF_INT2MODE) ? INTB_PORTS : INTB_EXTER, db->db_interrupt);
               Enable();
         
-              D(("ZZ9000Net: INT6 server registered\n"));
+              D(("ZZ9000Net: Interrupt server registered, using INT%ld\n",(db->db_Flags & DEVF_INT2MODE) ? 2L : 6L));
               ret = 0;
               ok = 1;
               
@@ -267,10 +278,14 @@ __saveds LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
               
               D(("ZZ9000Net: ZZ interrupt enabled\n"));
             } else {
-              D(("ZZ9000Net: failed to alloc INT6 struct\n"));
+              D(("ZZ9000Net: failed to alloc struct Interrupt\n"));
               ret = IOERR_OPENFAIL;
               ok = 0;
-              // FIXME end process
+
+              Signal((struct Task*)db->db_Proc, SIGBREAKF_CTRL_C);
+              // this will block until the process has really quit and released the semaphore
+              ObtainSemaphore(&db->db_ProcExitSem);
+              ReleaseSemaphore(&db->db_ProcExitSem);
             }
           } else {
             D(("ZZ9000Net:process startup error\n"));
@@ -329,18 +344,21 @@ __saveds BPTR DevClose(   ASMR(a1) struct IORequest *ioreq        ASMREG(a1),
               
     D(("ZZ9000Net: ZZ interrupt disabled\n"));
               
-    Forbid();
-    if (db->db_int6) {
+    if (db->db_interrupt) {
       D(("ZZ9000Net: Remove IntServer...\n"));
-      RemIntServer(13, db->db_int6);
-      db->db_int6 = 0;
+      Forbid();
+      RemIntServer((db->db_Flags & DEVF_INT2MODE) ? INTB_PORTS : INTB_EXTER, db->db_interrupt);
+      db->db_interrupt = 0;
+      Permit();
     }
     if (db->db_Proc) {
       D(("ZZ9000Net: End Proc...\n"));
       Signal((struct Task*)db->db_Proc, SIGBREAKF_CTRL_C);
       db->db_Proc = 0;
+
+      ObtainSemaphore(&db->db_ProcExitSem);
+      ReleaseSemaphore(&db->db_ProcExitSem);
     }
-    Permit();
   }
 
 	ioreq->io_Device = (0);
@@ -630,22 +648,25 @@ __saveds void frame_proc() {
   ULONG wmask;
   
   D(("ZZ9000Net: frame_proc()\n"));
-  
-  struct Process* proc;
+
   struct ProcInit* init;
 
   {
     struct { void *db_SysBase; } *db = (void*)0x4;
+    struct Process* proc;
 
     proc = (struct Process*)FindTask(NULL);
     WaitPort(&proc->pr_MsgPort);
     init = (struct ProcInit*)GetMsg(&proc->pr_MsgPort);
-  
-    init->error = 0;
-    ReplyMsg((struct Message*)init);
   }
-  
+
   struct devbase* db = init->db;
+
+  init->error = 0;
+  db = init->db;
+  ObtainSemaphore(&db->db_ProcExitSem);
+  ReplyMsg((struct Message*)init);
+
   wmask = SIGBREAKF_CTRL_F | SIGBREAKF_CTRL_C;
 
   ULONG old_serial = 0;
@@ -705,5 +726,8 @@ __saveds void frame_proc() {
       recv = Wait(wmask);
     }
   }
+
+  Forbid();
+  ReleaseSemaphore(&db->db_ProcExitSem);
 }
 
