@@ -9,9 +9,9 @@
 #define _INC_VERSION_H
 
 #define DEVICEVERSION  1
-#define DEVICEREVISION 1
+#define DEVICEREVISION 2
 #define DEVICEEXTRA
 /* #define DEVICEEXTRA Beta */
-#define DEVICEDATE     19.08.2019
+#define DEVICEDATE     07.02.2020
 
 #endif
