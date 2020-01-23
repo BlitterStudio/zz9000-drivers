@@ -418,15 +418,19 @@ void set_write_mask(__reg("a0") struct RTGBoard* b, __reg("d0") uint8 m) {
 }
 void set_clear_mask(__reg("a0") struct RTGBoard* b, __reg("d0") uint8 m) {
 }
-void vsync_wait(__reg("a0") struct RTGBoard* b) {
+
+int is_vsynced(__reg("a0") struct RTGBoard* b, __reg("d0") uint8 p) {
+  uint32 vblank_state = ((uint16*)b->registers)[REG_ZZ_VBLANK_STATUS / 2];
+  return vblank_state;  
 }
 
-static int toggle = 0;
-// FIXME this returned -1 which caused WB to hang after selecting a screenmode!
-int is_vsynced(__reg("a0") struct RTGBoard* b, __reg("d0") uint8 p) {
-  toggle = 1-toggle;
-  return toggle;
+void vsync_wait(__reg("a0") struct RTGBoard* b) {
+  uint32 vblank_state = ((volatile uint16*)b->registers)[REG_ZZ_VBLANK_STATUS / 2];
+  while(vblank_state == 0) {
+    vblank_state = ((volatile uint16*)b->registers)[REG_ZZ_VBLANK_STATUS / 2];
+  }
 }
+
 void set_clock(__reg("a0") struct RTGBoard* b) {
 }
 
