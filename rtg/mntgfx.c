@@ -164,6 +164,8 @@ BPTR __saveds ExpungeLib(__reg("a6") struct MNTGFXBase *exb)
   return 0;
 }
 
+int disable_vsync_reg = 0;
+
 ULONG ExtFuncLib(void)
 {
   return 0;
@@ -227,6 +229,11 @@ int FindCard(__reg("a0") struct RTGBoard* b) {
       char *alert = "\x00\x14\x14ZZ9000.card v1.5 needs at least firmware (BOOT.bin) v1.5.\x00\x00";
       DisplayAlert(RECOVERY_ALERT, alert, 52);
       return 0;
+    }
+    if (fwrev_minor < 6) {
+      char *alert = "\x00\x14\x14Vsync register is disabled, requires at least firmware (BOOT.bin) v1.6.\x00\x00";
+      DisplayAlert(RECOVERY_ALERT, alert, 52);
+      disable_vsync_reg = 1;
     }
 
     MNTZZ9KRegs* registers = b->registers;
@@ -419,12 +426,22 @@ void set_write_mask(__reg("a0") struct RTGBoard* b, __reg("d0") uint8 m) {
 void set_clear_mask(__reg("a0") struct RTGBoard* b, __reg("d0") uint8 m) {
 }
 
+static int toggle = 0;
+
 int is_vsynced(__reg("a0") struct RTGBoard* b, __reg("d0") uint8 p) {
+  if (disable_vsync_reg) {
+    toggle = 1-toggle;
+    return toggle;
+  }
+
   uint32 vblank_state = ((uint16*)b->registers)[REG_ZZ_VBLANK_STATUS / 2];
   return vblank_state;  
 }
 
 void vsync_wait(__reg("a0") struct RTGBoard* b) {
+  if (disable_vsync_reg)
+    return;
+
   uint32 vblank_state = ((volatile uint16*)b->registers)[REG_ZZ_VBLANK_STATUS / 2];
   while(vblank_state == 0) {
     vblank_state = ((volatile uint16*)b->registers)[REG_ZZ_VBLANK_STATUS / 2];
