@@ -12,7 +12,7 @@
  * https://spdx.org/licenses/GPL-3.0-or-later.html
  */
 
-/* REVISION 1.4 */
+/* REVISION 1.6 */
 
 #include "mntgfx.h"
 #include "zz9000.h"
@@ -37,7 +37,7 @@ static ULONG LibStart(void) {
 }
 
 static const char LibraryName[] = "ZZ9000.card";
-static const char LibraryID[]   = "$VER: ZZ9000.card 1.5.1 (2020-01-05)\r\n";
+static const char LibraryID[]   = "$VER: ZZ9000.card 1.6.0 (2020-06-07)\r\n";
 
 __saveds struct MNTGFXBase* OpenLib( __reg("a6") struct MNTGFXBase *MNTGFXBase);
 BPTR __saveds CloseLib( __reg("a6") struct MNTGFXBase *MNTGFXBase);
@@ -225,15 +225,10 @@ int FindCard(__reg("a0") struct RTGBoard* b) {
     KPrintF("ZZ9000.card: FW Revision Major: %ld.\n", fwrev_major);
     KPrintF("ZZ9000.card: FW Revision Minor: %ld.\n", fwrev_minor);
 
-    if (fwrev_major<=1 && fwrev_minor<5) {
-      char *alert = "\x00\x14\x14ZZ9000.card v1.5 needs at least firmware (BOOT.bin) v1.5.\x00\x00";
+    if (fwrev_major<=1 && fwrev_minor<6) {
+      char *alert = "\x00\x14\x14ZZ9000.card v1.6 needs at least firmware (BOOT.bin) v1.6.\x00\x00";
       DisplayAlert(RECOVERY_ALERT, alert, 52);
       return 0;
-    }
-    if (fwrev_minor < 6) {
-      char *alert = "\x00\x14\x14Vsync register is disabled, requires at least firmware (BOOT.bin) v1.6.\x00\x00";
-      DisplayAlert(RECOVERY_ALERT, alert, 52);
-      disable_vsync_reg = 1;
     }
 
     MNTZZ9KRegs* registers = b->registers;
