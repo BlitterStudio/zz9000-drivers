@@ -54,23 +54,25 @@ struct DevUnit {
 	APTR	du_hwp2;
 };
 
+#define DEVF_INT2MODE		(1L << 0)
 
 struct devbase {
-	struct  Library db_Lib;
-	BPTR 	db_SegList; /* from Device Init */
+	struct Library db_Lib;
+	BPTR db_SegList; /* from Device Init */
 
-	ULONG		 db_Flags;   /* misc */
-	struct Library	*db_SysBase; /* Exec Base */
-  struct Library	*db_DOSBase;
-	struct Library  *db_UtilityBase;
-	struct Library  *db_ExpansionBase;
-  struct Interrupt *db_int6;
+	ULONG db_Flags;   /* misc */
+	struct Library *db_SysBase; /* Exec Base */
+	struct Library *db_DOSBase;
+	struct Library *db_UtilityBase;
+	struct Library *db_ExpansionBase;
+	struct Interrupt *db_interrupt;
 
-  struct List db_ReadList;
-  struct SignalSemaphore db_ReadListSem;
-  struct Process* db_Proc;
+	struct List db_ReadList;
+	struct SignalSemaphore db_ReadListSem;
+	struct Process* db_Proc;
+	struct SignalSemaphore db_ProcExitSem;
 
-	struct DevUnit	db_Units[MAX_UNITS]; /* unused in construct */
+	struct DevUnit db_Units[MAX_UNITS]; /* unused in construct */
 };
 
 #ifndef DEVBASETYPE
