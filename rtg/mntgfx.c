@@ -87,7 +87,8 @@ static const struct Resident ROMTag = {
 };
 
 // Place scratch area right after framebuffer? Might be a horrible idea.
-#define Z3_TEMPLATE_ADDR 0x3200000
+#define Z3_GFXDATA_ADDR  (0x3200000 - 0x10000)
+#define Z3_TEMPLATE_ADDR (0x3201000 - 0x10000)
 #define ZZVMODE_800x600 1
 #define ZZVMODE_720x576 6
 
@@ -164,7 +165,7 @@ BPTR __saveds ExpungeLib(__reg("a6") struct MNTGFXBase *exb)
   return 0;
 }
 
-int disable_vsync_reg = 0;
+int new_vsync_reg = 0;
 
 ULONG ExtFuncLib(void)
 {
@@ -280,14 +281,14 @@ int InitCard(__reg("a0") struct RTGBoard* b) {
   b->max_bitmap_h_24bit = max;
   b->max_bitmap_h_32bit = max;
 
-  max = 1920;
+  max = 3840;
   b->max_res_w_planar = max;
   b->max_res_w_clut = max;
   b->max_res_w_16bit = max;
   b->max_res_w_24bit = max;
   b->max_res_w_32bit = max;
 
-  max = 1080;
+  max = 2160;
   b->max_res_h_planar = max;
   b->max_res_h_clut = max;
   b->max_res_h_16bit = max;
@@ -333,6 +334,12 @@ int InitCard(__reg("a0") struct RTGBoard* b) {
     b->fn_p2d = (void *)rect_p2d;
     b->fn_rect_invert = (void *)rect_invert;
     b->fn_rect_copy_nomask = (void *)rect_copy_nomask;
+  }
+  if (fwrev >= (1 << 8 | 7)) {
+    new_vsync_reg = 1;
+    if (zorro_version == 3) {
+      b->fn_line = (void *)draw_line_dma;
+    }
   }
   
   b->fn_blitter_wait = (void*)blitter_wait;
@@ -424,22 +431,35 @@ void set_clear_mask(__reg("a0") struct RTGBoard* b, __reg("d0") uint8 m) {
 static int toggle = 0;
 
 int is_vsynced(__reg("a0") struct RTGBoard* b, __reg("d0") uint8 p) {
-  if (disable_vsync_reg) {
-    toggle = 1-toggle;
-    return toggle;
+  uint32 vblank_state;
+
+  if (!new_vsync_reg) {
+    vblank_state = ((uint16*)b->registers)[REG_ZZ_VBLANK_STATUS / 2];
+  }
+  else {
+    vblank_state = ((uint16*)b->registers)[0x800];
   }
 
-  uint32 vblank_state = ((uint16*)b->registers)[REG_ZZ_VBLANK_STATUS / 2];
   return vblank_state;  
 }
 
 void vsync_wait(__reg("a0") struct RTGBoard* b) {
-  if (disable_vsync_reg)
+  if (!new_vsync_reg) {
+    uint32 vblank_state = ((volatile uint16*)b->registers)[REG_ZZ_VBLANK_STATUS / 2];
+    while(vblank_state == 0) {
+      vblank_state = ((volatile uint16*)b->registers)[REG_ZZ_VBLANK_STATUS / 2];
+    }
     return;
+  }
 
-  uint32 vblank_state = ((volatile uint16*)b->registers)[REG_ZZ_VBLANK_STATUS / 2];
+  uint32 vblank_state = ((volatile uint16*)b->registers)[0x800];
+
+  while(vblank_state != 0) {
+    vblank_state = ((volatile uint16*)b->registers)[0x800];
+  }
+
   while(vblank_state == 0) {
-    vblank_state = ((volatile uint16*)b->registers)[REG_ZZ_VBLANK_STATUS / 2];
+    vblank_state = ((volatile uint16*)b->registers)[0x800];
   }
 }
 
@@ -492,6 +512,10 @@ void init_modeline(MNTZZ9KRegs* registers, uint16 w, uint16 h, uint8 colormode, 
     mode = 6;
   } else if (w==640 && h==512) {
     mode = 9;
+  } else if (w==1600 && h==1200 && new_vsync_reg) {
+    mode = 10;
+  } else if (w==2560 && h==1440 && new_vsync_reg) {
+    mode = 11;
   }
 
   zzwrite16(&registers->mode, mode|(colormode<<8)|(scalemode<<12));
@@ -799,6 +823,61 @@ void draw_line(__reg("a0") struct RTGBoard* b, __reg("a1") struct RenderInfo* r,
   zzwrite16(&registers->blitter_y3, l->pattern_offset | (l->padding << 8));
 
   zzwrite16(&registers->blitter_op_draw_line, mask);
+}
+
+void draw_line_dma(__reg("a0") struct RTGBoard* b, __reg("a1") struct RenderInfo* r, __reg("a2") struct Line* l, __reg("d0") uint16 mask, __reg("d7") uint16 format)
+{
+  if (!l || !r)
+    return;
+
+  uint32_t offset;
+  MNTZZ9KRegs* registers = b->registers;
+  volatile struct GFXData* gfxdata = (volatile struct GFXData*)(((uint32)b->memory)+(uint32)Z3_GFXDATA_ADDR);
+  volatile uint32* data_p = (volatile uint32*)(((uint32)b->memory)+(uint32)Z3_GFXDATA_ADDR);
+
+  offset = (uint32)gfxdata;
+  ZZWRITE32(&registers->blitter_dst, offset);
+  offset = (uint32)data_p;
+  ZZWRITE32(&registers->blitter_src, offset);
+
+  gfxdata->offset[GFXDATA_DST] = (r->memory - b->memory);
+  //((volatile uint32*)data_p)[0] = (r->memory - b->memory);
+  //ZZWRITE32(&registers->blitter_dst, offset);
+  gfxdata->pitch[GFXDATA_DST] = (r->pitch >> 2);
+  //zzwrite16(&registers->blitter_row_pitch, r->pitch >> 2);
+
+  gfxdata->u8_user[GFXDATA_U8_COLORMODE] = (uint8)rtg_to_mnt[r->color_format];
+  gfxdata->u8_user[GFXDATA_U8_LINE_DRAWMODE] = l->draw_mode;
+  gfxdata->u8_user[GFXDATA_U8_LINE_PATTERN_OFFSET] = l->pattern_offset;
+  gfxdata->u8_user[GFXDATA_U8_LINE_PADDING] = l->padding;
+  //zzwrite16(&registers->blitter_colormode, rtg_to_mnt[r->color_format] | (l->draw_mode << 8));
+
+  gfxdata->rgb[0] = l->fg_pen;
+  gfxdata->rgb[1] = l->bg_pen;
+  //ZZWRITE32(&registers->blitter_rgb, l->fg_pen);
+  //ZZWRITE32(&registers->blitter_rgb2, l->bg_pen);
+
+  gfxdata->x[0] = l->x;
+  gfxdata->x[1] = l->dx;
+  gfxdata->y[0] = l->y;
+  gfxdata->y[1] = l->dy;
+
+  gfxdata->user[0] = l->len;
+  gfxdata->user[1] = l->pattern;
+  gfxdata->user[2] = ((l->pattern_offset << 8) | l->padding);
+
+  gfxdata->mask = mask;
+
+  zzwrite16(&registers->blitter_dma_op, OP_DRAWLINE);
+  //zzwrite16(&registers->blitter_x1, l->x);
+  //zzwrite16(&registers->blitter_y1, l->y);
+  //zzwrite16(&registers->blitter_x2, l->dx);
+  //zzwrite16(&registers->blitter_y2, l->dy);
+  //zzwrite16(&registers->blitter_user1, l->len);
+  //zzwrite16(&registers->blitter_x3, l->pattern);
+  //zzwrite16(&registers->blitter_y3, l->pattern_offset | (l->padding << 8));
+
+  //zzwrite16(&registers->blitter_op_draw_line, mask);
 }
 
 void rect_fill(__reg("a0") struct RTGBoard* b, __reg("a1") struct RenderInfo* r, __reg("d0") uint16 x, __reg("d1") uint16 y, __reg("d2") uint16 w, __reg("d3") uint16 h, __reg("d4") uint32 color, __reg("d5") uint8 mask) {

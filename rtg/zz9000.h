@@ -71,8 +71,9 @@ typedef volatile struct MNTZZ9KRegs {
   u16 sprite_bitmap; // 48
   u16 sprite_colors; // 4a
   u16 vblank_status; // 4c
+  u16 blitter_dma_op; // 4e
   
-  u16 un_3[0x17]; // 4e..7e
+  u16 un_3[0x16]; // 50..7e
   
   u16 eth_tx; // 80
   u16 eth_rx; // 82
@@ -141,7 +142,7 @@ enum zz_reg_offsets {
   REG_ZZ_SPRITE_BITMAP  = 0x48,
   REG_ZZ_SPRITE_COLORS  = 0x4A,
   REG_ZZ_VBLANK_STATUS  = 0x4C,
-  REG_ZZ_UNUSED_REG4E   = 0x4E,
+  REG_ZZ_DMA_OP         = 0x4E,
 
   REG_ZZ_UNUSED_REG50   = 0x50,
   REG_ZZ_UNUSED_REG52   = 0x52,

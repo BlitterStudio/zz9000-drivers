@@ -320,3 +320,31 @@ struct RTGBoard {
   int32 default_formats;
 };
 
+enum gfx_dma_op {
+  OP_NONE,
+  OP_DRAWLINE,
+  OP_NUM,
+};
+
+enum gfxdata_offsets {
+  GFXDATA_DST,
+  GFXDATA_SRC,
+};
+
+enum gfxdata_u8_types {
+  GFXDATA_U8_COLORMODE,
+  GFXDATA_U8_LINE_DRAWMODE,
+  GFXDATA_U8_LINE_PATTERN_OFFSET,
+  GFXDATA_U8_LINE_PADDING,
+};
+
+#pragma pack(4)
+volatile struct GFXData {
+  uint32 offset[2];
+  uint32 rgb[2];
+  uint16 x[4], y[4];
+  uint16 user[4];
+  uint16 pitch[4];
+  uint8 u8_user[8];
+  uint8 op, mask, minterm, u8offset;
+};
