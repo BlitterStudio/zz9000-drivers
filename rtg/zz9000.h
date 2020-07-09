@@ -71,9 +71,33 @@ typedef volatile struct MNTZZ9KRegs {
   u16 sprite_bitmap; // 48
   u16 sprite_colors; // 4a
   u16 vblank_status; // 4c
-  u16 blitter_dma_op; // 4e
   
-  u16 un_3[0x16]; // 50..7e
+  //u16 un_3[0x17]; // 4e..7e
+  u16 un_4e;
+  u16 un_50;
+  u16 un_52;
+  u16 un_54;
+  u16 un_56;
+  u16 un_58;
+  u16 blitter_dma_op; // 5a
+  u16 un_5C;
+  u16 un_5E;
+  u16 un_60;
+  u16 un_62;
+  u16 un_64;
+  u16 un_66;
+  u16 un_68;
+  u16 un_6A;
+  u16 un_6C;
+  u16 un_6E;
+  u16 un_70;
+  u16 un_72;
+  u16 un_74;
+  u16 un_76;
+  u16 un_78;
+  u16 un_7A;
+  u16 un_7C;
+  u16 un_7E;
   
   u16 eth_tx; // 80
   u16 eth_rx; // 82
@@ -142,14 +166,14 @@ enum zz_reg_offsets {
   REG_ZZ_SPRITE_BITMAP  = 0x48,
   REG_ZZ_SPRITE_COLORS  = 0x4A,
   REG_ZZ_VBLANK_STATUS  = 0x4C,
-  REG_ZZ_DMA_OP         = 0x4E,
+  REG_ZZ_UNUSED_REG4E   = 0x4E,
 
   REG_ZZ_UNUSED_REG50   = 0x50,
   REG_ZZ_UNUSED_REG52   = 0x52,
   REG_ZZ_UNUSED_REG54   = 0x54,
   REG_ZZ_UNUSED_REG56   = 0x56,
   REG_ZZ_UNUSED_REG58   = 0x58,
-  REG_ZZ_UNUSED_REG5A   = 0x5A,
+  REG_ZZ_DMA_OP         = 0x5A,
   REG_ZZ_UNUSED_REG5C   = 0x5C,
   REG_ZZ_UNUSED_REG5E   = 0x5E,
 
