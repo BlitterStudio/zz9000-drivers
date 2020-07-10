@@ -41,6 +41,7 @@ void nop();
 void init_dac(__reg("a0") struct RTGBoard* b, __reg("d7") uint16 format);
 uint32 enable_display(__reg("a0") struct RTGBoard* b, __reg("d0") uint16 enabled);
 void pan(__reg("a0") struct RTGBoard* b,__reg("a1") uint8* mem,__reg("d0") uint16 w,__reg("d1") int16 x,__reg("d2") int16 y,__reg("d7") uint16 format);
+void pan_dma(__reg("a0") struct RTGBoard* b,__reg("a1") uint8* mem,__reg("d0") uint16 w,__reg("d1") int16 x,__reg("d2") int16 y,__reg("d7") uint16 format);
 void set_memory_mode(__reg("a0") struct RTGBoard* b,__reg("d7") uint16 format);
 void set_read_plane(__reg("a0") struct RTGBoard* b,__reg("d0") uint8 p);
 void set_write_mask(__reg("a0") struct RTGBoard* b,__reg("d0") uint8 m);
@@ -82,5 +83,8 @@ void blitter_wait(__reg("a0") struct RTGBoard* b);
 
 void sprite_setup(__reg("a0") struct RTGBoard* b,__reg("d0") uint8 enable);
 void sprite_xy(__reg("a0") struct RTGBoard* b);
+void sprite_xy_dma(__reg("a0") struct RTGBoard* b);
 void sprite_bitmap(__reg("a0") struct RTGBoard* b,__reg("d7") uint16 format);
+void sprite_bitmap_dma(__reg("a0") struct RTGBoard* b,__reg("d7") uint16 format);
 void sprite_colors(__reg("a0") struct RTGBoard* b,__reg("d0") uint8 idx,__reg("d1") uint8 red,__reg("d2") uint8 green,__reg("d3") uint8 blue, __reg("d7") uint16 format);
+void sprite_colors_dma(__reg("a0") struct RTGBoard* b,__reg("d0") uint8 idx,__reg("d1") uint8 red,__reg("d2") uint8 green,__reg("d3") uint8 blue, __reg("d7") uint16 format);
