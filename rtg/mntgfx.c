@@ -109,6 +109,7 @@ void waitclick() {
 }
 
 static struct MNTGFXBase *MNTGFXBase;
+char dummies[128];
 
 __saveds struct MNTGFXBase* InitLib(__reg("a6") struct ExecBase      *sysbase,
                                           __reg("a0") BPTR            seglist,
@@ -430,6 +431,10 @@ uint16_t rtg_to_mnt[16] = {
   0,                    // 0x0F
 };
 
+// Optional dummy read for tricking the 68k cache on processors with occasional garbage output on screen
+//#define dmy_cache memcpy(dummies, (uint32_t *)(uint32_t)0x7F00000, 4);
+#define dmy_cache
+
 void pan(__reg("a0") struct RTGBoard* b, __reg("a1") uint8* mem, __reg("d0") uint16 w, __reg("d1") int16 x, __reg("d2") int16 y, __reg("d7") uint16 format) {
   MNTZZ9KRegs* registers = b->registers;
   uint32 offset = (mem - (b->memory)) & 0xFFFFFC00;
@@ -438,6 +443,7 @@ void pan(__reg("a0") struct RTGBoard* b, __reg("a1") uint8* mem, __reg("d0") uin
 }
 
 void pan_dma(__reg("a0") struct RTGBoard* b, __reg("a1") uint8* mem, __reg("d0") uint16 w, __reg("d1") int16 x, __reg("d2") int16 y, __reg("d7") uint16 format) {
+  dmy_cache
   gfxdata->offset[0] = (mem - (b->memory)) & 0xFFFFFC00;
 
   zzwrite16(&registers->blitter_dma_op, OP_PAN);
@@ -686,6 +692,7 @@ void rect_invert_dma(__reg("a0") struct RTGBoard* b, __reg("a1") struct RenderIn
   if (!b || !r)
     return;
 
+  dmy_cache
   gfxdata->offset[GFXDATA_DST] = (r->memory - b->memory);
   gfxdata->pitch[GFXDATA_DST] = (r->pitch >> 2);
 
@@ -779,6 +786,7 @@ void rect_p2d_dma(__reg("a0") struct RTGBoard* b, __reg("a1") struct BitMap* bm,
   if (!b || !r)
     return;
 
+  dmy_cache
   uint32 plane_size = bm->BytesPerRow * bm->Rows;
 
   if (plane_size * bm->Depth > 0xFFFF && zorro_version != 3) {
@@ -914,6 +922,7 @@ void rect_p2c_dma(__reg("a0") struct RTGBoard* b, __reg("a1") struct BitMap* bm,
   if (!b || !r)
     return;
 
+  dmy_cache
   uint32 plane_size = bm->BytesPerRow * bm->Rows;
   
   if (plane_size * bm->Depth > 0xFFFF && zorro_version != 3) {
@@ -1010,6 +1019,7 @@ void draw_line_dma(__reg("a0") struct RTGBoard* b, __reg("a1") struct RenderInfo
   if (!l || !r)
     return;
 
+  dmy_cache
   gfxdata->offset[GFXDATA_DST] = (r->memory - b->memory);
   gfxdata->pitch[GFXDATA_DST] = (r->pitch >> 2);
 
@@ -1058,6 +1068,7 @@ void rect_fill_dma(__reg("a0") struct RTGBoard* b, __reg("a1") struct RenderInfo
   if (!r) return;
   if (w<1 || h<1) return;
 
+  dmy_cache
   gfxdata->offset[GFXDATA_DST] = (r->memory - b->memory);
   gfxdata->pitch[GFXDATA_DST] = (r->pitch >> 2);
 
@@ -1103,6 +1114,7 @@ void rect_copy_dma(__reg("a0") struct RTGBoard* b, __reg("a1") struct RenderInfo
   if (w<1 || h<1) return;
   if (!r) return;
 
+  dmy_cache
   gfxdata->x[0] = dx;
   gfxdata->x[1] = w;
   gfxdata->x[2] = x;
@@ -1153,8 +1165,7 @@ void rect_copy_nomask_dma(__reg("a0") struct RTGBoard* b,__reg("a1") struct Rend
   if (w<1 || h<1) return;
   if (!sr || !dr) return;
 
-  MNTZZ9KRegs* registers = b->registers;
-  volatile struct GFXData* gfxdata = (volatile struct GFXData*)(((uint32)b->memory)+(uint32)Z3_GFXDATA_ADDR);
+  dmy_cache
 
   gfxdata->x[0] = dx;
   gfxdata->x[1] = w;
@@ -1226,6 +1237,7 @@ void rect_template_dma(__reg("a0") struct RTGBoard* b, __reg("a1") struct Render
     zz_template_addr = b->memory_size;
   }
 
+  dmy_cache
   gfxdata->x[0] = x;
   gfxdata->x[1] = w;
   gfxdata->x[2] = t->xo;
@@ -1301,6 +1313,7 @@ void rect_pattern_dma(__reg("a0") struct RTGBoard* b, __reg("a1") struct RenderI
     zz_template_addr = b->memory_size;
   }
 
+  dmy_cache
   gfxdata->x[0] = x;
   gfxdata->x[1] = w;
   gfxdata->x[2] = pat->xo;
@@ -1336,6 +1349,7 @@ void sprite_xy(__reg("a0") struct RTGBoard* b) {
 }
 
 void sprite_xy_dma(__reg("a0") struct RTGBoard* b) {
+  dmy_cache
   gfxdata->x[0] = b->cursor_x;
   gfxdata->y[0] = b->cursor_y;
 
@@ -1373,6 +1387,7 @@ void sprite_bitmap(__reg("a0") struct RTGBoard* b, __reg("d7") uint16 format)
 
 void sprite_bitmap_dma(__reg("a0") struct RTGBoard* b, __reg("d7") uint16 format)
 {
+  dmy_cache
   uint32_t zz_template_addr = Z3_TEMPLATE_ADDR;
   if (zorro_version != 3) {
     zz_template_addr = b->memory_size;
@@ -1405,8 +1420,7 @@ void sprite_colors(__reg("a0") struct RTGBoard* b, __reg("d0") uint8 idx, __reg(
 
 void sprite_colors_dma(__reg("a0") struct RTGBoard* b, __reg("d0") uint8 idx, __reg("d1") uint8 red, __reg("d2") uint8 green, __reg("d3") uint8 blue, __reg("d7") uint16 format)
 {
-  MNTZZ9KRegs* registers = b->registers;
-
+  dmy_cache
   ((char *)&gfxdata->rgb[0])[0] = blue;
   ((char *)&gfxdata->rgb[0])[1] = green;
   ((char *)&gfxdata->rgb[0])[2] = red;
