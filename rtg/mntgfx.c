@@ -88,7 +88,7 @@ static const struct Resident ROMTag = {
 
 // Place scratch area right after framebuffer? Might be a horrible idea.
 #define Z3_GFXDATA_ADDR  (0x3200000 - 0x10000)
-#define Z3_TEMPLATE_ADDR (0x3201000 - 0x10000)
+#define Z3_TEMPLATE_ADDR (0x3210000 - 0x10000)
 #define ZZVMODE_800x600 1
 #define ZZVMODE_720x576 6
 
@@ -432,8 +432,11 @@ uint16_t rtg_to_mnt[16] = {
 };
 
 // Optional dummy read for tricking the 68k cache on processors with occasional garbage output on screen
-//#define dmy_cache memcpy(dummies, (uint32_t *)(uint32_t)0x7F00000, 4);
-#define dmy_cache
+#ifdef DUMMY_CACHE_READ
+  #define dmy_cache memcpy(dummies, (uint32_t *)(uint32_t)0x7F00000, 4);
+#else
+  #define dmy_cache
+#endif
 
 void pan(__reg("a0") struct RTGBoard* b, __reg("a1") uint8* mem, __reg("d0") uint16 w, __reg("d1") int16 x, __reg("d2") int16 y, __reg("d7") uint16 format) {
   MNTZZ9KRegs* registers = b->registers;

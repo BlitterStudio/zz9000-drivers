@@ -335,7 +335,16 @@ enum gfx_dma_op {
   OP_SPRITE_XY,
   OP_SPRITE_COLOR,
   OP_SPRITE_BITMAP,
+  OP_SPRITE_CLUT_BITMAP,
   OP_NUM,
+};
+
+enum gfx_acc_op {
+  ACC_OP_NONE,
+  ACC_OP_BUFFER_FLIP,
+  ACC_OP_BUFFER_CLEAR,
+  ACC_OP_BLIT_RECT,
+  ACC_OP_NUM,
 };
 
 enum gfxdata_offsets {
@@ -359,4 +368,8 @@ volatile struct GFXData {
   uint16 pitch[4];
   uint8 u8_user[8];
   uint8 op, mask, minterm, u8offset;
+  uint8 clut1[768];
+  uint8 clut2[768];
+  uint8 clut3[768];
+  uint8 clut4[768];
 };
