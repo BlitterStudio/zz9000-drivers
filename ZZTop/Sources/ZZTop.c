@@ -23,17 +23,21 @@
 #include <clib/gadtools_protos.h>
 #include <clib/expansion_protos.h>
 
+#include <clib/timer_protos.h>
+
 #include <stdio.h>
 
 #include "zz9000.h"
 
-struct Gadget *gads[6];
+struct Gadget *gads[8];
 
 #define MYGAD_ZORROVER	(0)
 #define MYGAD_FWVER		(1)
 #define MYGAD_TEMP		(2)
-#define MYGAD_BTN_REFRESH	(3)
-#define MYGAD_BTN_TEST		(4)
+#define MYGAD_VAUX		(3)
+#define MYGAD_VINT		(4)
+//#define MYGAD_BTN_REFRESH	(5)
+#define MYGAD_BTN_TEST		(5)
 
 struct TextAttr Topaz80 = { "topaz.font", 8, 0, 0, };
 
@@ -47,6 +51,10 @@ volatile UBYTE* zz_regs;
 int zorro_version = 0;
 
 char txt_buf[64];
+
+struct timerequest * timerio;
+struct MsgPort *timerport;
+struct Library *TimerBase;
 
 void errorMessage(STRPTR error)
 {
@@ -63,21 +71,46 @@ float zz_get_temperature(void)
 	float temp = (float)(zz_get_reg(REG_ZZ_TEMPERATURE));
 	return temp/10.0;
 }
-
+float zz_get_voltage_aux(void)
+{
+	float vaux = (float)(zz_get_reg(REG_ZZ_VOLTAGE_AUX));
+	return vaux/100.0;
+}
+float zz_get_voltage_int(void)
+{
+	float vint = (float)(zz_get_reg(REG_ZZ_VOLTAGE_INT));
+	return vint/100.0;
+}
+float t_old=0;
 void refresh_zz_info(struct Window* win)
 {
 	UWORD fwrev = zz_get_reg(REG_ZZ_FW_VERSION);
 	int fwrev_major = fwrev>>8;
-   int fwrev_minor = fwrev&0xff;
+	int fwrev_minor = fwrev&0xff;
 	float t = zz_get_temperature();
+	float vaux=zz_get_voltage_aux();
+	float vint=zz_get_voltage_int();
+
+	float t_filt;
+	if(t_old==0)
+		t_filt=t;
+	else
+		t_filt=0.1*t+0.9*t_old;
+	t_old=t_filt;
 
 	GT_SetGadgetAttrs(gads[MYGAD_ZORROVER], win, NULL, GTIN_Number, zorro_version, TAG_END);
 
 	sprintf(txt_buf, "ZZ9000 %d.%d", fwrev_major, fwrev_minor);
 	GT_SetGadgetAttrs(gads[MYGAD_FWVER], win, NULL, GTST_String, txt_buf, TAG_END);
 
-	sprintf(txt_buf, "%.1f", t);
+	sprintf(txt_buf, "%.1f", t_filt);
 	GT_SetGadgetAttrs(gads[MYGAD_TEMP], win, NULL, GTST_String, txt_buf, TAG_END);
+
+	sprintf(txt_buf, "%.2f", vaux);
+	GT_SetGadgetAttrs(gads[MYGAD_VAUX], win, NULL, GTST_String, txt_buf, TAG_END);
+
+	sprintf(txt_buf, "%.2f", vint);
+	GT_SetGadgetAttrs(gads[MYGAD_VINT], win, NULL, GTST_String, txt_buf, TAG_END);
 }
 
 ULONG zz_perform_memtest(struct Window* win)
@@ -118,10 +151,10 @@ VOID handleGadgetEvent(struct Window *win, struct Gadget *gad, ULONG code)
 {
 	switch (gad->GadgetID)
 	{
-		case MYGAD_BTN_REFRESH: {
-			refresh_zz_info(win);
-			break;
-		}
+//		case MYGAD_BTN_REFRESH: {
+//			refresh_zz_info(win);
+//			break;
+//		}
 		case MYGAD_BTN_TEST: {
 			zz_perform_memtest(win);
 			break;
@@ -136,8 +169,8 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
 	gad = CreateContext(glistptr);
 
-	ng.ng_LeftEdge   = 20;
-	ng.ng_TopEdge    = 90+topborder;
+	ng.ng_LeftEdge   = 20+70;
+	ng.ng_TopEdge    = 90+topborder+20+20;
 	ng.ng_Width      = 100;
 	ng.ng_Height     = 14;
 	ng.ng_GadgetText = "Bus Test";
@@ -146,13 +179,13 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 	ng.ng_GadgetID   = MYGAD_BTN_TEST;
 	ng.ng_Flags      = 0;
 
-	gads[MYGAD_BTN_REFRESH] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
-                    TAG_END);
-
-	ng.ng_LeftEdge	= 160;
-	ng.ng_GadgetID   = MYGAD_BTN_REFRESH;
-	ng.ng_GadgetText = "Refresh";
-
+//	gads[MYGAD_BTN_REFRESH] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+//                    TAG_END);
+//
+//	ng.ng_LeftEdge	= 160;
+//	ng.ng_GadgetID   = MYGAD_BTN_REFRESH;
+//	ng.ng_GadgetText = "Refresh";
+//
 	gads[MYGAD_BTN_TEST] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
                     TAG_END);
 
@@ -181,6 +214,22 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
                     GTST_String, "",
                     TAG_END);
 
+	ng.ng_TopEdge	= 80+topborder;
+	ng.ng_GadgetID	= MYGAD_VAUX;
+	ng.ng_GadgetText = "Aux Voltage V";
+
+	gads[MYGAD_VAUX] = gad = CreateGadget(STRING_KIND, gad, &ng,
+                    GTST_String, "",
+                    TAG_END);
+
+	ng.ng_TopEdge	= 100+topborder;
+	ng.ng_GadgetID	= MYGAD_VINT;
+	ng.ng_GadgetText = "Core Voltage V";
+
+	gads[MYGAD_VINT] = gad = CreateGadget(STRING_KIND, gad, &ng,
+                    GTST_String, "",
+                    TAG_END);
+
 	return(gad);
 }
 
@@ -192,9 +241,35 @@ VOID process_window_events(struct Window *mywin)
 	struct Gadget *gad;
 	BOOL terminated = FALSE;
 
-	while (!terminated) {
-		Wait (1U << mywin->UserPort->mp_SigBit);
+	if((timerport = CreateMsgPort())) {
+		if((timerio=(struct timerequest *)CreateIORequest(timerport, sizeof(struct timerequest)))) {
+			if(OpenDevice((STRPTR) TIMERNAME, UNIT_MICROHZ, (struct IORequest *) timerio,0) == 0) {
+				TimerBase = (struct Library *)timerio->tr_node.io_Device;
+			}
+			else {
+				DeleteIORequest((struct IORequest *)timerio);
+				DeleteMsgPort(timerport);
+			}
+		}
+		else {
+			DeleteMsgPort(timerport);
+		}
+	}
+	if(!TimerBase) {
+		errorMessage("Can't open timer.device");
+		return;
+	}
+	timerio->tr_node.io_Command = TR_ADDREQUEST;
+	timerio->tr_time.tv_secs = 1;
+	timerio->tr_time.tv_micro = 0;
+	SendIO((struct IORequest *) timerio);
 
+	while (!terminated) {
+		Wait ((1U << mywin->UserPort->mp_SigBit) | (1U << timerport->mp_SigBit) );
+
+		if ((!terminated) && (1U << timerport->mp_SigBit)) {
+			refresh_zz_info(mywin);
+		}
 		while ((!terminated) && (imsg = GT_GetIMsg(mywin->UserPort))) {
 			gad = (struct Gadget *)imsg->IAddress;
 
@@ -228,6 +303,17 @@ VOID process_window_events(struct Window *mywin)
 					break;
 			}
 		}
+		timerio->tr_node.io_Command = TR_ADDREQUEST;
+		timerio->tr_time.tv_secs = 1;
+		timerio->tr_time.tv_micro = 0;
+		SendIO((struct IORequest *) timerio);
+	}
+	if(TimerBase) {
+		WaitIO((struct IORequest *) timerio);
+		CloseDevice((struct IORequest *) timerio);
+		DeleteIORequest((struct IORequest *) timerio);
+		DeleteMsgPort(timerport);
+		TimerBase = NULL;
 	}
 }
 
@@ -254,10 +340,10 @@ VOID gadtoolsWindow(VOID) {
 					errorMessage("createAllGadgets() failed");
 				else {
 					if (NULL == (mywin = OpenWindowTags(NULL,
-							WA_Title,     "MNT ZZTop 1.0",
+							WA_Title,     "MNT ZZTop 1.1",
 							WA_Gadgets,   glist,      WA_AutoAdjust,    TRUE,
 							WA_Width,       280,      WA_MinWidth,       280,
-							WA_InnerHeight, 120,      WA_MinHeight,      120,
+							WA_InnerHeight, 160,      WA_MinHeight,      160,
 							WA_DragBar,    TRUE,      WA_DepthGadget,   TRUE,
 							WA_Activate,   TRUE,      WA_CloseGadget,   TRUE,
 							WA_SizeGadget, FALSE,     WA_SimpleRefresh, TRUE,
@@ -284,10 +370,10 @@ VOID gadtoolsWindow(VOID) {
 	}
 }
 
-int main(void) {
+void main(void) {
 	if (!(ExpansionBase = (struct Library*)OpenLibrary("expansion.library",0L))) {
 		errorMessage("Requires expansion.library");
-		return 1;
+		return;
 	}
 
 	zz_cd = (struct ConfigDev*)FindConfigDev(zz_cd,0x6d6e,0x3);
@@ -300,7 +386,7 @@ int main(void) {
 			zorro_version = 3;
 		} else {
 			errorMessage("MNT ZZ9000 not found.\n");
-			return 2;
+			return;
 		}
 	}
 
@@ -324,5 +410,5 @@ int main(void) {
 		CloseLibrary(IntuitionBase);
 	}
 
-	return 0;
+	return;
 }
