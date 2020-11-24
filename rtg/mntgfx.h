@@ -88,3 +88,6 @@ void sprite_bitmap(__reg("a0") struct RTGBoard* b,__reg("d7") uint16 format);
 void sprite_bitmap_dma(__reg("a0") struct RTGBoard* b,__reg("d7") uint16 format);
 void sprite_colors(__reg("a0") struct RTGBoard* b,__reg("d0") uint8 idx,__reg("d1") uint8 red,__reg("d2") uint8 green,__reg("d3") uint8 blue, __reg("d7") uint16 format);
 void sprite_colors_dma(__reg("a0") struct RTGBoard* b,__reg("d0") uint8 idx,__reg("d1") uint8 red,__reg("d2") uint8 green,__reg("d3") uint8 blue, __reg("d7") uint16 format);
+
+void set_split_pos(__reg("a0") struct RTGBoard* b, __reg("d0") int16 pos);
+void set_split_pos_dma(__reg("a0") struct RTGBoard* b, __reg("d0") int16 pos);

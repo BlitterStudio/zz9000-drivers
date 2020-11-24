@@ -242,7 +242,7 @@ struct RTGBoard {
   void* f44; // res0
   void* f45;
   void* f46;
-  void* f47;
+  void* fn_set_split_pos;
   void* f48;
   void* f49;
   void* f50;
@@ -318,58 +318,12 @@ struct RTGBoard {
   struct MinList unknown7;
 
   int32 default_formats;
-};
 
-enum gfx_dma_op {
-  OP_NONE,
-  OP_DRAWLINE,
-  OP_FILLRECT,
-  OP_COPYRECT,
-  OP_COPYRECT_NOMASK,
-  OP_RECT_TEMPLATE,
-  OP_RECT_PATTERN,
-  OP_P2C,
-  OP_P2D,
-  OP_INVERTRECT,
-  OP_PAN,
-  OP_SPRITE_XY,
-  OP_SPRITE_COLOR,
-  OP_SPRITE_BITMAP,
-  OP_SPRITE_CLUT_BITMAP,
-  OP_NUM,
-};
+  uint8* mouse_image_buffer;
 
-enum gfx_acc_op {
-  ACC_OP_NONE,
-  ACC_OP_BUFFER_FLIP,
-  ACC_OP_BUFFER_CLEAR,
-  ACC_OP_BLIT_RECT,
-  ACC_OP_NUM,
-};
-
-enum gfxdata_offsets {
-  GFXDATA_DST,
-  GFXDATA_SRC,
-};
-
-enum gfxdata_u8_types {
-  GFXDATA_U8_COLORMODE,
-  GFXDATA_U8_DRAWMODE,
-  GFXDATA_U8_LINE_PATTERN_OFFSET,
-  GFXDATA_U8_LINE_PADDING,
-};
-
-#pragma pack(4)
-volatile struct GFXData {
-  uint32 offset[2];
-  uint32 rgb[2];
-  uint16 x[4], y[4];
-  uint16 user[4];
-  uint16 pitch[4];
-  uint8 u8_user[8];
-  uint8 op, mask, minterm, u8offset;
-  uint8 clut1[768];
-  uint8 clut2[768];
-  uint8 clut3[768];
-  uint8 clut4[768];
+  struct ViewPort* back_viewport;
+  struct BitMap* back_bitmap;
+  struct BitMapExtra* back_bitmap_extra;
+  int16 y_split;
+  uint32 max_planar_memory;
 };

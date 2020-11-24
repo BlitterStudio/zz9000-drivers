@@ -258,6 +258,12 @@ int FindCard(__reg("a0") struct RTGBoard* b) {
   }
 }
 
+#define HWSPRITE 1
+#define VGASPLIT (1 << 6)
+#define FLICKERFIXER (1 << 12)
+#define INDISPLAYCHAIN (1 << 20)
+#define DIRECTACCESS (1 << 26)
+
 int InitCard(__reg("a0") struct RTGBoard* b) {
   int max;
   struct ExecBase *SysBase = *(struct ExecBase **)4L;
@@ -269,7 +275,7 @@ int InitCard(__reg("a0") struct RTGBoard* b) {
   b->chip_type = 3;
   b->controller_type = 3;
 
-  b->flags = (1<<20)|(1<<12)|(1<<26)|1; // indisplaychain, flickerfixer, directaccess, hwsprite(1)
+  b->flags = HWSPRITE | VGASPLIT | INDISPLAYCHAIN | FLICKERFIXER | DIRECTACCESS;
   b->color_formats = 1|2|512|1024|2048;
   b->sprite_flags = 0;
   b->bits_per_channel = 8;
@@ -379,6 +385,9 @@ int InitCard(__reg("a0") struct RTGBoard* b) {
       b->fn_sprite_xy = (void*)sprite_xy_dma;
       b->fn_sprite_bitmap = (void*)sprite_bitmap_dma;
       b->fn_sprite_colors = (void*)sprite_colors_dma;
+      b->fn_set_split_pos = (void*)set_split_pos_dma;
+    } else {
+      b->fn_set_split_pos = (void*)set_split_pos;
     }
   }
 
@@ -1431,4 +1440,17 @@ void sprite_colors_dma(__reg("a0") struct RTGBoard* b, __reg("d0") uint8 idx, __
   gfxdata->u8offset = idx + 1;
 
   zzwrite16(&registers->blitter_dma_op, OP_SPRITE_COLOR);
+}
+
+void set_split_pos(__reg("a0") struct RTGBoard* b, __reg("d0") int16 pos)
+{
+  ZZWRITE32(&registers->blitter_src, b->current_bitmap->Planes[0]);
+  zzwrite16(&registers->blitter_set_split_pos, pos);
+}
+
+void set_split_pos_dma(__reg("a0") struct RTGBoard* b, __reg("d0") int16 pos)
+{
+  gfxdata->y[0] = pos;
+  gfxdata->offset[0] = (uint32)b->current_bitmap->Planes[0];
+  zzwrite16(&registers->blitter_dma_op, OP_SET_SPLIT_POS);
 }
