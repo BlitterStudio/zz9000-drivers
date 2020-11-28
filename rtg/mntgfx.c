@@ -92,6 +92,7 @@ static const struct Resident ROMTag = {
 #define ZZVMODE_800x600 1
 #define ZZVMODE_720x576 6
 
+#define zzwrite16(a, b) *a = b;
 #define ZZWRITE32(b, c) \
   zzwrite16(b##_hi, ((uint16 *)&c)[0]); \
   zzwrite16(b##_lo, ((uint16 *)&c)[1]);
@@ -183,6 +184,11 @@ static LONG scandoubler_800x600 = 0;
 static struct GFXData *gfxdata;
 MNTZZ9KRegs* registers;
 
+#define LOADLIB(a, b) if ((a = (struct a*)OpenLibrary(b,0L))==NULL) { \
+    KPrintF("ZZ9000.card: Failed to open %s!\n", b); \
+    return 0; \
+  } \
+
 int FindCard(__reg("a0") struct RTGBoard* b) {
   struct ConfigDev* cd = NULL;
   struct ExpansionBase *ExpansionBase = NULL;
@@ -190,18 +196,9 @@ int FindCard(__reg("a0") struct RTGBoard* b) {
   struct IntuitionBase *IntuitionBase = NULL;
   struct ExecBase *SysBase = *(struct ExecBase **)4L;
 
-  if ((ExpansionBase = (struct ExpansionBase*)OpenLibrary("expansion.library",0L))==NULL) {
-    KPrintF("ZZ9000.card: Failed to open expansion.library!\n");
-    return 0;
-  }
-  if ((DOSBase = (struct DOSBase*)OpenLibrary("dos.library",0L))==NULL) {
-    KPrintF("ZZ9000.card: Failed to open dos.library!\n");
-    return 0;
-  }
-  if ((IntuitionBase = (struct IntuitionBase*)OpenLibrary("intuition.library",0L))==NULL) {
-    KPrintF("ZZ9000.card: Failed to open intuition.library!\n");
-    return 0;
-  }
+  LOADLIB(ExpansionBase, "expansion.library");
+  LOADLIB(DOSBase, "dos.library");
+  LOADLIB(IntuitionBase, "intuition.library");
 
   zorro_version = 0;
   if ((cd = (struct ConfigDev*)FindConfigDev(cd,0x6d6e,0x4))) zorro_version = 3;
@@ -264,6 +261,11 @@ int FindCard(__reg("a0") struct RTGBoard* b) {
 #define INDISPLAYCHAIN (1 << 20)
 #define DIRECTACCESS (1 << 26)
 
+// Values assigned to the ZZ9000 card since P96 3.0
+#define ZZ9K_BOARDTYPE 27
+#define ZZ9K_CHIPTYPE 19
+#define ZZ9K_GCTYPE 16
+
 int InitCard(__reg("a0") struct RTGBoard* b) {
   int max;
   struct ExecBase *SysBase = *(struct ExecBase **)4L;
@@ -271,52 +273,27 @@ int InitCard(__reg("a0") struct RTGBoard* b) {
   b->self = MNTGFXBase;
   b->exec = SysBase;
   b->name = "ZZ9000";
-  b->type = 14;
-  b->chip_type = 3;
-  b->controller_type = 3;
+  b->type = ZZ9K_BOARDTYPE;
+  b->chip_type = ZZ9K_CHIPTYPE;
+  b->controller_type = ZZ9K_GCTYPE;
 
   b->flags = HWSPRITE | VGASPLIT | INDISPLAYCHAIN | FLICKERFIXER | DIRECTACCESS;
-  b->color_formats = 1|2|512|1024|2048;
+  b->color_formats = 1 | 2 | 512 | 1024 | 2048;
   b->sprite_flags = 0;
   b->bits_per_channel = 8;
 
-  max = 8191;
-  b->max_bitmap_w_planar = max;
-  b->max_bitmap_w_clut = max;
-  b->max_bitmap_w_16bit = max;
-  b->max_bitmap_w_24bit = max;
-  b->max_bitmap_w_32bit = max;
-
-  b->max_bitmap_h_planar = max;
-  b->max_bitmap_h_clut = max;
-  b->max_bitmap_h_16bit = max;
-  b->max_bitmap_h_24bit = max;
-  b->max_bitmap_h_32bit = max;
-
-  max = 3840;
-  b->max_res_w_planar = max;
-  b->max_res_w_clut = max;
-  b->max_res_w_16bit = max;
-  b->max_res_w_24bit = max;
-  b->max_res_w_32bit = max;
-
-  max = 2160;
-  b->max_res_h_planar = max;
-  b->max_res_h_clut = max;
-  b->max_res_h_16bit = max;
-  b->max_res_h_24bit = max;
-  b->max_res_h_32bit = max;
+  for (int i = 0; i < rtg_color_num; i++) {
+    b->max_bitmap_w[i] = 8192;
+    b->max_bitmap_h[i] = 8192;
+    b->max_res_w[i] = 2560;
+    b->max_res_h[i] = 1440;
+    b->num_pixelclocks[i] = 1;
+  }
+  b->clock_ram = CLOCK_HZ;
 
   // no alloc yet
   //b->max_alloc = 0;
   //b->max_alloc_part = 0;
-
-  b->clock_ram = CLOCK_HZ;
-  b->num_pixelclocks_planar = 1;
-  b->num_pixelclocks_clut = 1;
-  b->num_pixelclocks_16bit = 1;
-  b->num_pixelclocks_24bit = 1;
-  b->num_pixelclocks_32bit = 1;
 
   b->fn_init_dac = (void*)init_dac;
   b->fn_init_mode = (void*)init_mode;
@@ -394,22 +371,23 @@ int InitCard(__reg("a0") struct RTGBoard* b) {
   return 1;
 }
 
-// placeholder function
-void nop() {
-}
-
 void init_dac(__reg("a0") struct RTGBoard* b, __reg("d7") uint16 format) {
+}
+void set_memory_mode(__reg("a0") struct RTGBoard* b, __reg("d7") uint16 format) {
+}
+void set_read_plane(__reg("a0") struct RTGBoard* b, __reg("d0") uint8 p) {
+}
+void set_write_mask(__reg("a0") struct RTGBoard* b, __reg("d0") uint8 m) {
+}
+void set_clear_mask(__reg("a0") struct RTGBoard* b, __reg("d0") uint8 m) {
+}
+void memory_alloc(__reg("a0") struct RTGBoard* b, __reg("d0") uint32 len, __reg("d1") uint16 s1, __reg("d2") uint16 s2) {
+}
+void set_clock(__reg("a0") struct RTGBoard* b) {
 }
 
 uint32 enable_display(__reg("a0") struct RTGBoard* b, __reg("d0") uint16 enabled) {
   return 1;
-}
-
-void memory_alloc(__reg("a0") struct RTGBoard* b, __reg("d0") uint32 len, __reg("d1") uint16 s1, __reg("d2") uint16 s2) {
-}
-
-inline void zzwrite16(u16* reg, u16 value) {
-  *reg = value;
 }
 
 void fix_vsync(MNTZZ9KRegs* registers) {  
@@ -461,15 +439,6 @@ void pan_dma(__reg("a0") struct RTGBoard* b, __reg("a1") uint8* mem, __reg("d0")
   zzwrite16(&registers->blitter_dma_op, OP_PAN);
 }
 
-void set_memory_mode(__reg("a0") struct RTGBoard* b, __reg("d7") uint16 format) {
-}
-void set_read_plane(__reg("a0") struct RTGBoard* b, __reg("d0") uint8 p) {
-}
-void set_write_mask(__reg("a0") struct RTGBoard* b, __reg("d0") uint8 m) {
-}
-void set_clear_mask(__reg("a0") struct RTGBoard* b, __reg("d0") uint8 m) {
-}
-
 static int toggle = 0;
 
 int is_vsynced(__reg("a0") struct RTGBoard* b, __reg("d0") uint8 p) {
@@ -503,9 +472,6 @@ void vsync_wait(__reg("a0") struct RTGBoard* b) {
   while(vblank_state == 0) {
     vblank_state = ((volatile uint16*)b->registers)[0x800];
   }
-}
-
-void set_clock(__reg("a0") struct RTGBoard* b) {
 }
 
 uint16 calc_pitch_bytes(uint16 w, uint16 colormode) {
