@@ -442,6 +442,8 @@ void pan_dma(__reg("a0") struct RTGBoard* b, __reg("a1") uint8* mem, __reg("d0")
   b->offset_x = x;
   b->offset_y = y;
 
+  gfxdata->x[0] = x;
+  gfxdata->y[0] = y;
   zzwrite16(&registers->blitter_dma_op, OP_PAN);
 }
 
@@ -1385,9 +1387,9 @@ void sprite_bitmap_dma(__reg("a0") struct RTGBoard* b, __reg("d7") uint16 format
   else
     memcpy((uint8_t*)(((uint32_t)b->memory)+zz_template_addr), b->cursor_sprite_bitmap+2, data_size);
 
-  gfxdata->x[0] = b->cursor_xo;
+  gfxdata->x[0] = b->offset_x;
   gfxdata->x[1] = b->cursor_w;
-  gfxdata->y[0] = b->cursor_yo;
+  gfxdata->y[0] = b->offset_y;
   gfxdata->y[1] = b->cursor_h;
 
   zzwrite16(&registers->blitter_dma_op, OP_SPRITE_BITMAP);
