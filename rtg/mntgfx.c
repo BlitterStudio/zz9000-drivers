@@ -429,12 +429,18 @@ void pan(__reg("a0") struct RTGBoard* b, __reg("a1") uint8* mem, __reg("d0") uin
   MNTZZ9KRegs* registers = b->registers;
   uint32 offset = (mem - (b->memory)) & 0xFFFFFC00;
 
+  b->offset_x = x;
+  b->offset_y = y;
+
   ZZWRITE32(&registers->pan_ptr, offset);
 }
 
 void pan_dma(__reg("a0") struct RTGBoard* b, __reg("a1") uint8* mem, __reg("d0") uint16 w, __reg("d1") int16 x, __reg("d2") int16 y, __reg("d7") uint16 format) {
   dmy_cache
   gfxdata->offset[0] = (mem - (b->memory)) & 0xFFFFFC00;
+
+  b->offset_x = x;
+  b->offset_y = y;
 
   zzwrite16(&registers->blitter_dma_op, OP_PAN);
 }
@@ -1319,17 +1325,17 @@ void rect_pattern_dma(__reg("a0") struct RTGBoard* b, __reg("a1") struct RenderI
 void blitter_wait(__reg("a0") struct RTGBoard* b) {
 }
 
-void sprite_xy(__reg("a0") struct RTGBoard* b) {
+void sprite_xy(__reg("a0") struct RTGBoard* b, __reg("d0") int16 x, __reg("d1") int16 y, __reg("d7") uint16 format) {
   MNTZZ9KRegs* registers = b->registers;
 
-  zzwrite16(&registers->sprite_x, b->cursor_x);
-  zzwrite16(&registers->sprite_y, b->cursor_y);
+  zzwrite16(&registers->sprite_x, x);
+  zzwrite16(&registers->sprite_y, y);
 }
 
-void sprite_xy_dma(__reg("a0") struct RTGBoard* b) {
+void sprite_xy_dma(__reg("a0") struct RTGBoard* b, __reg("d0") int16 x, __reg("d1") int16 y, __reg("d7") uint16 format) {
   dmy_cache
-  gfxdata->x[0] = b->cursor_x;
-  gfxdata->y[0] = b->cursor_y;
+  gfxdata->x[0] = x;
+  gfxdata->y[0] = y;
 
   zzwrite16(&registers->blitter_dma_op, OP_SPRITE_XY);
 }
@@ -1410,12 +1416,16 @@ void sprite_colors_dma(__reg("a0") struct RTGBoard* b, __reg("d0") uint8 idx, __
 
 void set_split_pos(__reg("a0") struct RTGBoard* b, __reg("d0") int16 pos)
 {
+  b->y_split = pos;
+
   ZZWRITE32(&registers->blitter_src, b->current_bitmap->Planes[0]);
   zzwrite16(&registers->blitter_set_split_pos, pos);
 }
 
 void set_split_pos_dma(__reg("a0") struct RTGBoard* b, __reg("d0") int16 pos)
 {
+  b->y_split = pos;
+
   gfxdata->y[0] = pos;
   gfxdata->offset[0] = (uint32)b->current_bitmap->Planes[0];
   zzwrite16(&registers->blitter_dma_op, OP_SET_SPLIT_POS);

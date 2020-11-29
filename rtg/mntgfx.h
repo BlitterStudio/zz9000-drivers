@@ -82,8 +82,8 @@ void rect_copy_nomask_dma(__reg("a0") struct RTGBoard* b,__reg("a1") struct Rend
 void blitter_wait(__reg("a0") struct RTGBoard* b);
 
 void sprite_setup(__reg("a0") struct RTGBoard* b,__reg("d0") uint8 enable);
-void sprite_xy(__reg("a0") struct RTGBoard* b);
-void sprite_xy_dma(__reg("a0") struct RTGBoard* b);
+void sprite_xy(__reg("a0") struct RTGBoard* b, __reg("d0") int16 x, __reg("d1") int16 y, __reg("d7") uint16 format);
+void sprite_xy_dma(__reg("a0") struct RTGBoard* b, __reg("d0") int16 x, __reg("d1") int16 y, __reg("d7") uint16 format);
 void sprite_bitmap(__reg("a0") struct RTGBoard* b,__reg("d7") uint16 format);
 void sprite_bitmap_dma(__reg("a0") struct RTGBoard* b,__reg("d7") uint16 format);
 void sprite_colors(__reg("a0") struct RTGBoard* b,__reg("d0") uint8 idx,__reg("d1") uint8 red,__reg("d2") uint8 green,__reg("d3") uint8 blue, __reg("d7") uint16 format);
