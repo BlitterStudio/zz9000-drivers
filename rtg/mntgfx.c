@@ -92,7 +92,12 @@ static const struct Resident ROMTag = {
 #define ZZVMODE_800x600 1
 #define ZZVMODE_720x576 6
 
-#define zzwrite16(a, b) *a = b;
+inline void zzwrite16(u16* reg, u16 value) {
+  *reg = value;
+}
+
+#define ZZWRITE16(a, b) *a = b;
+
 #define ZZWRITE32(b, c) \
   zzwrite16(b##_hi, ((uint16 *)&c)[0]); \
   zzwrite16(b##_lo, ((uint16 *)&c)[1]);

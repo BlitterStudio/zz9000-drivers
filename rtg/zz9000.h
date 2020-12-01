@@ -329,5 +329,3 @@ struct GFXData {
   uint8 clut3[768];
   uint8 clut4[768];
 };
-
-#define ZZWRITE16(a, r, v) *(volatile short*)((unsigned int)a+r) = (volatile short)v;
