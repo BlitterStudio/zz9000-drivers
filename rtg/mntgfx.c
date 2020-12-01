@@ -349,6 +349,7 @@ int InitCard(__reg("a0") struct RTGBoard* b) {
   if (fwrev >= (1 << 8 | 7)) {
     new_vsync_reg = 1;
     if (zorro_version == 3) {
+#ifndef DISABLE_DMA_RTG
       b->fn_line = (void *)draw_line_dma;
       b->fn_rect_fill = (void *)rect_fill_dma;
       b->fn_rect_copy = (void *)rect_copy_dma;
@@ -363,6 +364,9 @@ int InitCard(__reg("a0") struct RTGBoard* b) {
       b->fn_sprite_bitmap = (void*)sprite_bitmap_dma;
       b->fn_sprite_colors = (void*)sprite_colors_dma;
       b->fn_set_split_pos = (void*)set_split_pos_dma;
+#else
+      b->fn_set_split_pos = (void*)set_split_pos;
+#endif
     } else {
       b->fn_set_split_pos = (void*)set_split_pos;
     }
