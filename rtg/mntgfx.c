@@ -1440,8 +1440,9 @@ void set_split_pos(__reg("a0") struct RTGBoard* b, __reg("d0") int16 pos)
 void set_split_pos_dma(__reg("a0") struct RTGBoard* b, __reg("d0") int16 pos)
 {
   b->y_split = pos;
+  u32 offset = ((u32)b->current_bitmap->Planes[0]) - ((u32)b->memory);
 
+  gfxdata->offset[0] = offset;
   gfxdata->y[0] = pos;
-  gfxdata->offset[0] = (uint32)b->current_bitmap->Planes[0];
   zzwrite16(&registers->blitter_dma_op, OP_SET_SPLIT_POS);
 }
