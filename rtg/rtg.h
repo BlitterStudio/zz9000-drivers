@@ -29,7 +29,8 @@ enum RTG_COLOR_MODES {
   rtg_color_clut,
   rtg_color_16bit,
   rtg_color_24bit,
-  rtg_color_32bit
+  rtg_color_32bit,
+  rtg_color_num,
 };
 
 #define RTG_COLOR_FORMAT_PLANAR 0
@@ -160,39 +161,18 @@ struct RTGBoard {
   uint16 number;
   uint16 color_formats;
 
-  uint16 max_bitmap_w_planar;
-  uint16 max_bitmap_w_clut;
-  uint16 max_bitmap_w_16bit;
-  uint16 max_bitmap_w_24bit;
-  uint16 max_bitmap_w_32bit;
+  uint16 max_bitmap_w[rtg_color_num];
+  uint16 max_bitmap_h[rtg_color_num];
 
-  uint16 max_bitmap_h_planar;
-  uint16 max_bitmap_h_clut;
-  uint16 max_bitmap_h_16bit;
-  uint16 max_bitmap_h_24bit;
-  uint16 max_bitmap_h_32bit;
+  uint16 max_res_w[rtg_color_num];
 
-  uint16 max_res_w_planar;
-  uint16 max_res_w_clut;
-  uint16 max_res_w_16bit;
-  uint16 max_res_w_24bit;
-  uint16 max_res_w_32bit;
-
-  uint16 max_res_h_planar;
-  uint16 max_res_h_clut;
-  uint16 max_res_h_16bit;
-  uint16 max_res_h_24bit;
-  uint16 max_res_h_32bit;
+  uint16 max_res_h[rtg_color_num];
 
   uint32 max_alloc;
   uint32 max_alloc_part;
 
   uint32 clock_ram;
-  uint32 num_pixelclocks_planar;
-  uint32 num_pixelclocks_clut;
-  uint32 num_pixelclocks_16bit;
-  uint32 num_pixelclocks_24bit;
-  uint32 num_pixelclocks_32bit;
+  uint32 num_pixelclocks[rtg_color_num];
 
   // driver defined function hooks
   
@@ -242,7 +222,7 @@ struct RTGBoard {
   void* f44; // res0
   void* f45;
   void* f46;
-  void* f47;
+  void* fn_set_split_pos;
   void* f48;
   void* f49;
   void* f50;
@@ -318,5 +298,12 @@ struct RTGBoard {
   struct MinList unknown7;
 
   int32 default_formats;
-};
 
+  uint8* mouse_image_buffer;
+
+  struct ViewPort* back_viewport;
+  struct BitMap* back_bitmap;
+  struct BitMapExtra* back_bitmap_extra;
+  int16 y_split;
+  uint32 max_planar_memory;
+};

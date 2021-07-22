@@ -72,7 +72,32 @@ typedef volatile struct MNTZZ9KRegs {
   u16 sprite_colors; // 4a
   u16 vblank_status; // 4c
   
-  u16 un_3[0x17]; // 4e..7e
+  //u16 un_3[0x17]; // 4e..7e
+  u16 un_4e;
+  u16 un_50;
+  u16 un_52;
+  u16 un_54;
+  u16 un_56;
+  u16 un_58;
+  u16 blitter_dma_op; // 5a
+  u16 blitter_acc_op;
+  u16 blitter_set_split_pos;
+  u16 un_60;
+  u16 un_62;
+  u16 un_64;
+  u16 un_66;
+  u16 un_68;
+  u16 un_6A;
+  u16 un_6C;
+  u16 un_6E;
+  u16 un_70;
+  u16 un_72;
+  u16 un_74;
+  u16 un_76;
+  u16 un_78;
+  u16 un_7A;
+  u16 un_7C;
+  u16 un_7E;
   
   u16 eth_tx; // 80
   u16 eth_rx; // 82
@@ -148,9 +173,9 @@ enum zz_reg_offsets {
   REG_ZZ_UNUSED_REG54   = 0x54,
   REG_ZZ_UNUSED_REG56   = 0x56,
   REG_ZZ_UNUSED_REG58   = 0x58,
-  REG_ZZ_UNUSED_REG5A   = 0x5A,
-  REG_ZZ_UNUSED_REG5C   = 0x5C,
-  REG_ZZ_UNUSED_REG5E   = 0x5E,
+  REG_ZZ_DMA_OP         = 0x5A,
+  REG_ZZ_ACC_OP         = 0x5C,
+  REG_ZZ_SET_SPLIT_POS  = 0x5E,
 
   REG_ZZ_UNUSED_REG60   = 0x60,
   REG_ZZ_UNUSED_REG62   = 0x62,
@@ -241,4 +266,66 @@ enum zz_reg_offsets {
   REG_ZZ_UNUSED_REGFA   = 0xFA,
   REG_ZZ_DEBUG          = 0xFC,
   REG_ZZ_UNUSED_REGFE   = 0xFE,
+};
+
+enum gfx_dma_op {
+  OP_NONE,
+  OP_DRAWLINE,
+  OP_FILLRECT,
+  OP_COPYRECT,
+  OP_COPYRECT_NOMASK,
+  OP_RECT_TEMPLATE,
+  OP_RECT_PATTERN,
+  OP_P2C,
+  OP_P2D,
+  OP_INVERTRECT,
+  OP_PAN,
+  OP_SPRITE_XY,
+  OP_SPRITE_COLOR,
+  OP_SPRITE_BITMAP,
+  OP_SPRITE_CLUT_BITMAP,
+  OP_ETH_USB_OFFSETS,
+  OP_SET_SPLIT_POS,
+  OP_NUM,
+};
+
+enum gfx_acc_op {
+  ACC_OP_NONE,
+  ACC_OP_BUFFER_FLIP,
+  ACC_OP_BUFFER_CLEAR,
+  ACC_OP_BLIT_RECT,
+  ACC_OP_ALLOC_SURFACE,
+  ACC_OP_FREE_SURFACE,
+  ACC_OP_SET_BPP_CONVERSION_TABLE,
+  ACC_OP_DRAW_LINE,
+  ACC_OP_FILL_RECT,
+  ACC_OP_NUM,
+};
+
+enum gfxdata_offsets {
+  GFXDATA_DST,
+  GFXDATA_SRC,
+};
+
+enum gfxdata_u8_types {
+  GFXDATA_U8_COLORMODE,
+  GFXDATA_U8_DRAWMODE,
+  GFXDATA_U8_LINE_PATTERN_OFFSET,
+  GFXDATA_U8_LINE_PADDING,
+};
+
+#pragma pack(4)
+struct GFXData {
+  uint32 offset[2];
+  uint32 rgb[2];
+  uint16 x[4], y[4];
+  uint16 user[4];
+  uint16 pitch[4];
+  uint8 u8_user[8];
+  uint8 op, mask, minterm, u8offset;
+  uint32_t u32_user[8];
+  uint8 clut1[768];
+  uint8 clut2[768];
+  uint8 clut3[768];
+  uint8 clut4[768];
 };
