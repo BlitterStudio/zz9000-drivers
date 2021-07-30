@@ -1217,7 +1217,7 @@ void SetSpriteColor (__REGA0(struct BoardInfo *b), __REGD0(UBYTE idx), __REGD1(U
 
 void SetSplitPosition (__REGA0(struct BoardInfo *b),__REGD0(SHORT pos)) {
 	b->YSplit = pos;
-	uint32_t offset = ((uint32_t)b->backBitMap->Planes[0]) - ((uint32_t)b->MemoryBase);
+	uint32_t offset = ((uint32_t)b->VisibleBitMap->Planes[0]) - ((uint32_t)b->MemoryBase);
 #ifdef DMARTG
 	gfxdata->offset[0] = offset;
 	gfxdata->y[0] = pos;
