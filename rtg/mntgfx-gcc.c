@@ -301,7 +301,7 @@ int __attribute__((used)) InitCard(__REGA0(struct BoardInfo* b)) {
 	b->PaletteChipType = PCT_S3ViRGE;
 	b->GraphicsControllerType = GCT_S3ViRGE;
 
-	b->Flags = BIF_INDISPLAYCHAIN | BIF_GRANTDIRECTACCESS | BIF_HARDWARESPRITE | BIF_FLICKERFIXER | BIF_VGASCREENSPLIT;
+	b->Flags = BIF_INDISPLAYCHAIN | BIF_GRANTDIRECTACCESS | BIF_HARDWARESPRITE | BIF_FLICKERFIXER | BIF_VGASCREENSPLIT | BIF_PALETTESWITCH;
 	b->RGBFormats = 1 | 2 | 512 | 1024 | 2048;
 	b->SoftSpriteFlags = 0;
 	b->BitsPerCannon = 8;
@@ -547,7 +547,7 @@ void SetColorArray (__REGA0(struct BoardInfo *b), __REGD0(UWORD start), __REGD1(
 	}
 	
 	for(int i = start; i < j; i++) {
-		unsigned long xrgb = ((uint32_t)i << 24) | ((uint32_t)b->CLUT[i].Red << 16) | ((uint32_t)b->CLUT[i].Green << 8) | ((uint32_t)b->CLUT[i].Blue);
+		unsigned long xrgb = ((uint32_t)(i & 0xFF) << 24) | ((uint32_t)b->CLUT[(i & 0xFF)].Red << 16) | ((uint32_t)b->CLUT[(i & 0xFF)].Green << 8) | ((uint32_t)b->CLUT[(i & 0xFF)].Blue);
 
 		*(volatile uint16_t*)((uint32_t)registers + 0x1000) = xrgb >> 16;
 		*(volatile uint16_t*)((uint32_t)registers + 0x1002) = xrgb & 0xFFFF;

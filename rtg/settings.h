@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 #ifndef settings_H
 #define settings_H
 
