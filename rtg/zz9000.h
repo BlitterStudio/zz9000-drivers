@@ -23,6 +23,7 @@
 #define MNTVA_COLOR_16BIT565 1
 #define MNTVA_COLOR_32BIT    2
 #define MNTVA_COLOR_15BIT    3
+#define MNTVA_COLOR_NO_USE   255
 
 typedef volatile struct MNTZZ9KRegs {
   u16 fw_version; // 00

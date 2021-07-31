@@ -101,23 +101,28 @@ void fix_vsync(MNTZZ9KRegs* registers) {
 	*(volatile uint16_t*)((uint32_t)registers + 0x1002) = 0;
 }
 
-uint16_t rtg_to_mnt[16] = {
-	MNTVA_COLOR_8BIT,     // 0x00
-	MNTVA_COLOR_8BIT,     // 0x01
-	0,                    // 0x02
-	0,                    // 0x03
-	0,                    // 0x04
-	MNTVA_COLOR_15BIT,    // 0x05
-	0,                    // 0x06
-	0,                    // 0x07
-	MNTVA_COLOR_32BIT,    // 0x08
-	MNTVA_COLOR_32BIT,    // 0x09
-	MNTVA_COLOR_16BIT565, // 0x0A
-	MNTVA_COLOR_15BIT,    // 0x0B
-	0,                    // 0x0C
-	MNTVA_COLOR_15BIT,    // 0x0D
-	0,                    // 0x0E
-	0,                    // 0x0F
+uint16_t rtg_to_mnt[21] = {
+	MNTVA_COLOR_8BIT,		// 0x00 -- None
+	MNTVA_COLOR_8BIT,		// 0x01 -- 8BPP CLUT
+	MNTVA_COLOR_NO_USE,		// 0x02 -- 24BPP RGB
+	MNTVA_COLOR_NO_USE,		// 0x03 -- 24BPP BGR
+	MNTVA_COLOR_NO_USE,		// 0x04 -- 16BPP R5G6B5PC
+	MNTVA_COLOR_15BIT,		// 0x05 -- 15BPP R5G5B5PC
+	MNTVA_COLOR_NO_USE,		// 0x06 -- 32BPP ARGB
+	MNTVA_COLOR_NO_USE,		// 0x07 -- 32BPP ABGR
+	MNTVA_COLOR_32BIT,		// 0x08 -- 32BPP RGBA
+	MNTVA_COLOR_32BIT,		// 0x09 -- 32BPP BGRA
+	MNTVA_COLOR_16BIT565	// 0x0A -- 16BPP R5G6B5
+	MNTVA_COLOR_15BIT,		// 0x0B -- 15BPP R5G5B5
+	MNTVA_COLOR_NO_USE,		// 0x0C -- 16BPP B5G6R5PC
+	MNTVA_COLOR_15BIT,		// 0x0D -- 15BPP B5G5R5PC
+	MNTVA_COLOR_NO_USE,		// 0x0E -- YUV 4:2:2
+	MNTVA_COLOR_NO_USE,		// 0x0F -- YUV 4:1:1
+	MNTVA_COLOR_NO_USE,		// 0x10 -- YUV 4:1:1PC
+	MNTVA_COLOR_NO_USE,		// 0x11 -- YUV 4:2:2 (Duplicate for some reason)
+	MNTVA_COLOR_NO_USE,		// 0x12 -- YUV 4:2:2PC
+	MNTVA_COLOR_NO_USE,		// 0x13 -- YUV 4:2:2 Planar
+	MNTVA_COLOR_NO_USE,		// 0x14 -- YUV 4:2:2PC Planar
 };
 
 static inline void zzwrite16(volatile uint16_t* reg, uint16_t value) {
@@ -191,7 +196,7 @@ BPTR __saveds __attribute__((used)) ExpungeLib(__REGA6(struct GFXBase *exb))
 
 		Remove((struct Node *)exb);
 
-		negsize  = exb->libNode.lib_NegSize;
+		negsize	 = exb->libNode.lib_NegSize;
 		possize  = exb->libNode.lib_PosSize;
 		fullsize = negsize + possize;
 		negptr  -= negsize;
@@ -508,17 +513,21 @@ void SetPanning (__REGA0(struct BoardInfo *b), __REGA1(UBYTE *addr), __REGD0(UWO
 
 #ifdef DMARTG
 	dmy_cache
-	gfxdata->offset[0] = ((uint32_t)addr - (uint32_t)b->MemoryBase) & 0xFFFFFC00;
+	gfxdata->offset[0] = ((uint32_t)addr - (uint32_t)b->MemoryBase);
 
 	gfxdata->x[0] = x_offset;
 	gfxdata->y[0] = y_offset;
+	gfxdata->x[1] = width;
+	gfxdata->u8_user[GFXDATA_U8_COLORMODE] = (uint8)rtg_to_mnt[format & 0xFF];
 	zzwrite16(&registers->blitter_dma_op, OP_PAN);
 #else
 	MNTZZ9KRegs* registers = (MNTZZ9KRegs *)b->RegisterBase;
-	uint32_t offset = ((uint32_t)addr - (uint32_t)b->MemoryBase) & 0xFFFFFC00;
+	uint32_t offset = ((uint32_t)addr - (uint32_t)b->MemoryBase);
 
 	zzwrite16(&registers->blitter_x1, b->XOffset);
 	zzwrite16(&registers->blitter_y1, b->YOffset);
+	zzwrite16(&registers->blitter_x2, width);
+	zzwrite16(&registers->blitter_colormode, rtg_to_mnt[format & 0xFF]);
 	zzwrite32(&registers->pan_ptr_hi, offset);
 #endif
 }
