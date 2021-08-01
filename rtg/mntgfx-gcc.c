@@ -1,4 +1,4 @@
-#include <proto/exec.h>
+f#include <proto/exec.h>
 #include <proto/expansion.h>
 #include <proto/dos.h>
 #include <proto/intuition.h>
@@ -234,10 +234,10 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 	zorro_version = 0;
 	if ((cd = (struct ConfigDev*)FindConfigDev(cd,0x6d6e,0x4))) zorro_version = 3;
 	else if ((cd = (struct ConfigDev*)FindConfigDev(cd,0x6d6e,0x3))) zorro_version = 2;
-	
+
 	// Find Z3 or Z2 model
 	if (zorro_version>=2) {
-		
+
 		b->MemoryBase = (uint8_t*)(cd->cd_BoardAddr)+0x10000;
 		if (zorro_version==2) {
 			b->MemorySize = cd->cd_BoardSize-0x20000;
@@ -283,7 +283,7 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 			scandoubler_800x600 = 0;
 			registers->videocap_vmode = ZZVMODE_720x576; // 50hz
 		}
-		
+
 		return 1;
 	} else {
 		KPrintF("ZZ9000.card: MNT ZZ9000 not found!\n");
@@ -535,30 +535,22 @@ void SetPanning (__REGA0(struct BoardInfo *b), __REGA1(UBYTE *addr), __REGD0(UWO
 void SetColorArray (__REGA0(struct BoardInfo *b), __REGD0(UWORD start), __REGD1(UWORD num)) {
 	if (!b->CLUT)
 		return;
-	
+
 	MNTZZ9KRegs* registers = (MNTZZ9KRegs *)b->RegisterBase;
 	int j = start + num;
+	int op = 3; // OP_PALETTE
 
 	if (start >= 256) {
 		// Select secondary palette if start index is above 255
-		*(volatile uint16_t*)((uint32_t)registers + 0x1000) = 1;
-		*(volatile uint16_t*)((uint32_t)registers + 0x1004) = 18; // OP_PALETTE_SEL
-		*(volatile uint16_t*)((uint32_t)registers + 0x1004) = 0; // NOP
+		op = 19; // OP_PALETTE_HI
 	}
-	
+
 	for(int i = start; i < j; i++) {
 		unsigned long xrgb = ((uint32_t)(i & 0xFF) << 24) | ((uint32_t)b->CLUT[(i & 0xFF)].Red << 16) | ((uint32_t)b->CLUT[(i & 0xFF)].Green << 8) | ((uint32_t)b->CLUT[(i & 0xFF)].Blue);
 
 		*(volatile uint16_t*)((uint32_t)registers + 0x1000) = xrgb >> 16;
 		*(volatile uint16_t*)((uint32_t)registers + 0x1002) = xrgb & 0xFFFF;
-		*(volatile uint16_t*)((uint32_t)registers + 0x1004) = 3; // OP_PALETTE
-		*(volatile uint16_t*)((uint32_t)registers + 0x1004) = 0; // NOP
-	}
-
-	if (start >= 256) {
-		// Reset selected palette to 0
-		*(volatile uint16_t*)((uint32_t)registers + 0x1000) = 0;
-		*(volatile uint16_t*)((uint32_t)registers + 0x1004) = 18; // OP_PALETTE_SEL
+		*(volatile uint16_t*)((uint32_t)registers + 0x1004) = op;
 		*(volatile uint16_t*)((uint32_t)registers + 0x1004) = 0; // NOP
 	}
 }
