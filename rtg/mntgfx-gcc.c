@@ -1,4 +1,20 @@
-f#include <proto/exec.h>
+/*
+ * MNT ZZ9000 Amiga Graphics Card Driver (ZZ9000.card)
+ *
+ * Copyright (C) 2016-2021, Lukas F. Hartmann <lukas@mntre.com>
+ *                          MNT Research GmbH, Berlin
+ *                          https://mntre.com
+ * Copyright (C) 2021,      Bjorn Astrom <beeanyew@gmail.com>
+ *
+ * More Info: https://mntre.com/zz9000
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * GNU General Public License v3.0 or later
+ *
+ * https://spdx.org/licenses/GPL-3.0-or-later.html
+ */
+
+#include <proto/exec.h>
 #include <proto/expansion.h>
 #include <proto/dos.h>
 #include <proto/intuition.h>
