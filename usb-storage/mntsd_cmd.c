@@ -18,6 +18,7 @@
 #include <proto/disk.h>
 #include <proto/expansion.h>
 
+#include <string.h>
 #include "mntsd_cmd.h"
 
 //#define bug(x,args...) kprintf(x ,##args);
@@ -62,21 +63,20 @@ uint16 sdcmd_read_blocks(void* registers, uint8* data, uint32 block, uint32 len)
     i += num_blocks;
   }
   Permit();
-  
+
   return 0;
 }
 
 uint16 sdcmd_write_blocks(void* registers, uint8* data, uint32 block, uint32 len) {
   uint32 i=0, j=0;
   uint32 offset=0;
-  uint16 status=0;
   uint32 num_blocks=1;
   struct MNTUSBSRegs* regs = (struct MNTUSBSRegs*)registers;
-  
+
   Forbid();
   while (i<len) {
     offset = i<<SD_SECTOR_SHIFT;
-    
+
     num_blocks = BLOCKS_AT_ONCE;
     if ((len-i)<BLOCKS_AT_ONCE) {
       num_blocks = len-i;
@@ -84,9 +84,9 @@ uint16 sdcmd_write_blocks(void* registers, uint8* data, uint32 block, uint32 len
 
     for (j=0; j<num_blocks; j++) {
       regs->bufsel = j;
-      memcpy(registers-0xd0+0xa000, data+offset+(j<<SD_SECTOR_SHIFT), 512);   
+      memcpy(registers-0xd0+0xa000, data+offset+(j<<SD_SECTOR_SHIFT), 512);
     }
-    
+
     regs->status = num_blocks;
     regs->tx_hi = ((block+i)>>16);
     regs->tx_lo = (block+i)&0xffff;
@@ -95,11 +95,11 @@ uint16 sdcmd_write_blocks(void* registers, uint8* data, uint32 block, uint32 len
     if (regs->status == 0) {
       return SDERRF_PARAM;
     }
-    
+
     i += num_blocks;
   }
   Permit();
-  
+
   return 0;
 }
 
@@ -114,7 +114,7 @@ uint16 sdcmd_detect() {
 
 uint32 sdcmd_capacity(void* registers) {
   struct MNTUSBSRegs* regs = (struct MNTUSBSRegs*)registers;
-  
+
   if (regs->status == 0) {
     return 0;
   }
