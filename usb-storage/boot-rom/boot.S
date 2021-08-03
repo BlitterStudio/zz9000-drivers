@@ -1,4 +1,16 @@
 main:
+  LVOFindResident = -96
+  RT_INIT = 22
+
+BootPt:
+  lea     DosName(pc),a1         /* 'dos.library',0 */
+  jsr     LVOFindResident(a6)    /* find the DOS resident tag */
+  move.l  d0,a0                  /* in order to bootstrap */
+  move.l  RT_INIT(A0),a0         /* set vector to DOS INIT */
+  jsr     (a0)                   /* and initialize DOS */
+  rts
+
+DiagPt:
 
 /*
 This is the DiagPt / DiagEntry routine.
@@ -16,12 +28,7 @@ a3: configdev (i.e. 00004858)
     struct ExpansionRom cd_Rom; // 16   16bytes
     APTR    cd_BoardAddr; // 32
     ...
-*/
-
-  lea 0x40000000, a5
-  move.w #0xfeed, 0xf2(a5)
-  move.w #0x0d, 0xf0(a5) // cr
-  move.w #0x0a, 0xf0(a5) // lf
+  */
 
   lea cardbase(pc), a1
   move.l a0, (a1)
@@ -56,9 +63,7 @@ a3: configdev (i.e. 00004858)
   move.l a2, d0
   jsr puthex
 
-  // TODO: relocate
   move.l a2, a0
-
   jsr relocatehunk
 
   jsr puthex // segment 0
@@ -101,6 +106,8 @@ cardbase:
   .long 0
 loadaddr:
   .long 0
+DosName:
+  .string "dos.library"
 saddrs:
   .string "brda,cfgd,ladr,[ladr]:\r\n"
 
@@ -282,16 +289,25 @@ relocatehunk:
   addq.l  #SEG_START,d0   // [d0] referenced hunk data address
   move.l  (a3),a1         // pointer to reloc table?!
 
+  move.l d0,d7
+  jsr puthex // print d0 = target segment
+  move.l a1,d0
+  jsr puthex // print a1 = relocation table in this segment
+  move.l d7,d0
+
 .reloc:
   move.l  (a2)+,d1
   add.l   d0,SEG_START(a1,d1.l)
 
-  jsr puthex // print d0 = target segment
   move.l d0,d7
-  move.l a1,d0
-  jsr puthex // print a1 = relocation table in this segment
   move.l d1,d0
   jsr puthex // print d1 = offset of relocation in patch table
+  move.l a1, d0
+  add.l d1, d0
+  add.l SEG_START, d0
+  jsr puthex // print modified address
+  move.l SEG_START(a1,d1.l), d0
+  jsr puthex // print modified data
   move.l d7,d0
 
   subq.l  #1,d3 // number of relocations--
