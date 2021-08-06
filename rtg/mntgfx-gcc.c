@@ -305,6 +305,10 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 			Close(f);
 			zzwrite16(&registers->blitter_user1, CARD_FEATURE_NONSTANDARD_VSYNC);
 			zzwrite16(&registers->set_feature_status, 1);
+		} else if ((f = Open((APTR)"ENV:ZZ9000-NS-VSYNC-NTSC", MODE_OLDFILE))) {
+			Close(f);
+			zzwrite16(&registers->blitter_user1, CARD_FEATURE_NONSTANDARD_VSYNC);
+			zzwrite16(&registers->set_feature_status, 2);
 		} else {
 			zzwrite16(&registers->blitter_user1, CARD_FEATURE_NONSTANDARD_VSYNC);
 			zzwrite16(&registers->set_feature_status, 0);
