@@ -79,14 +79,14 @@ uint32_t block[BLOCK_SIZE/4]; // shared storage for 1 block
 
 void debugstr(void* regs, char* str) {
   while (*str) {
-    *((volatile uint16_t*)(regs-0xd0+0xf0)) = *str;
+    *((volatile uint16_t*)(regs+0xf0)) = *str;
     str++;
   }
 }
 
 void debughex(void* regs, uint32_t val) {
-  *((volatile uint16_t*)(regs-0xd0+0xf2)) = val>>16;
-  *((volatile uint16_t*)(regs-0xd0+0xf2)) = val;
+  *((volatile uint16_t*)(regs+0xf2)) = val>>16;
+  *((volatile uint16_t*)(regs+0xf2)) = val;
 }
 
 void find_partitions(struct Library* ExpansionBase, struct ConfigDev* cd, struct RigidDiskBlock* rdb) {
