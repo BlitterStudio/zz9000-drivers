@@ -97,6 +97,7 @@ a3: configdev (i.e. 00004858)
   move.l 4, a6 // execbase
   jsr -102(a6) // InitResident
   // return code in d0
+  move.l #1, d0
   rts
 
 .align 4
