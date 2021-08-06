@@ -83,7 +83,7 @@ typedef volatile struct MNTZZ9KRegs {
   u16 blitter_dma_op; // 5a
   u16 blitter_acc_op;
   u16 blitter_set_split_pos;
-  u16 un_60;
+  u16 set_feature_status;
   u16 un_62;
   u16 un_64;
   u16 un_66;
@@ -178,7 +178,7 @@ enum zz_reg_offsets {
   REG_ZZ_ACC_OP         = 0x5C,
   REG_ZZ_SET_SPLIT_POS  = 0x5E,
 
-  REG_ZZ_UNUSED_REG60   = 0x60,
+  REG_ZZ_SET_FEATURE    = 0x60,
   REG_ZZ_UNUSED_REG62   = 0x62,
   REG_ZZ_UNUSED_REG64   = 0x64,
   REG_ZZ_UNUSED_REG66   = 0x66,
@@ -267,6 +267,13 @@ enum zz_reg_offsets {
   REG_ZZ_UNUSED_REGFA   = 0xFA,
   REG_ZZ_DEBUG          = 0xFC,
   REG_ZZ_UNUSED_REGFE   = 0xFE,
+};
+
+enum zz9k_card_features {
+  CARD_FEATURE_NONE,
+  CARD_FEATURE_SECONDARY_PALETTE,
+  CARD_FEATURE_NONSTANDARD_VSYNC,
+  CARD_FEATURE_NUM,
 };
 
 enum gfx_dma_op {

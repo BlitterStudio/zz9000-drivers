@@ -101,6 +101,7 @@ static LONG fwrev_major = 0;
 static LONG fwrev_minor = 0;
 static LONG fwrev = 0;
 static LONG scandoubler_800x600 = 0;
+static LONG secondary_palette_enabled = 0;
 
 #ifdef DMARTG
 static volatile struct GFXData *gfxdata;
@@ -298,6 +299,15 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 			KPrintF("ZZ9000.card: 720x576 50hz scandoubler mode.\n");
 			scandoubler_800x600 = 0;
 			registers->videocap_vmode = ZZVMODE_720x576; // 50hz
+		}
+
+		if ((f = Open((APTR)"ENV:ZZ9000-NS-VSYNC", MODE_OLDFILE))) {
+			Close(f);
+			zzwrite16(&registers->blitter_user1, CARD_FEATURE_NONSTANDARD_VSYNC);
+			zzwrite16(&registers->set_feature_status, 1);
+		} else {
+			zzwrite16(&registers->blitter_user1, CARD_FEATURE_NONSTANDARD_VSYNC);
+			zzwrite16(&registers->set_feature_status, 0);
 		}
 
 		return 1;
@@ -558,6 +568,11 @@ void SetColorArray (__REGA0(struct BoardInfo *b), __REGD0(UWORD start), __REGD1(
 
 	if (start >= 256) {
 		// Select secondary palette if start index is above 255
+		if (!secondary_palette_enabled) {
+			zzwrite16(&registers->blitter_user1, CARD_FEATURE_SECONDARY_PALETTE);
+			zzwrite16(&registers->set_feature_status, 1);
+			secondary_palette_enabled = 1;
+		}
 		op = 19; // OP_PALETTE_HI
 	}
 
