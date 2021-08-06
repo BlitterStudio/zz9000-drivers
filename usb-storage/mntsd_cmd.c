@@ -19,10 +19,9 @@
 #include <proto/expansion.h>
 
 #include <string.h>
-#include "mntsd_cmd.h"
+#include <stdint.h>
 
-//#define bug(x,args...) kprintf(x ,##args);
-//#define debug(x,args...) bug("%s:%ld " x "\n", __func__, (unsigned long)__LINE__ ,##args)
+#include "mntsd_cmd.h"
 
 void sd_reset(void* registers) {
   volatile struct MNTUSBSRegs* regs = (volatile struct MNTUSBSRegs*)registers;
@@ -31,13 +30,12 @@ void sd_reset(void* registers) {
 
 #define BLOCKS_AT_ONCE 32
 
-uint16 sdcmd_read_blocks(void* registers, uint8* data, uint32 block, uint32 len) {
-  uint32 i=0, j=0;
-  uint32 offset=0;
-  uint32 num_blocks=1;
+uint16_t sdcmd_read_blocks(void* registers, uint8_t* data, uint32_t block, uint32_t len) {
+  uint32_t i=0;
+  uint32_t offset=0;
+  uint32_t num_blocks=1;
   volatile struct MNTUSBSRegs* regs = (volatile struct MNTUSBSRegs*)registers;
 
-  Forbid();
   while (i<len) {
     offset = i<<SD_SECTOR_SHIFT;
 
@@ -55,25 +53,20 @@ uint16 sdcmd_read_blocks(void* registers, uint8* data, uint32 block, uint32 len)
       return SDERRF_PARAM;
     }
 
-    for (j=0; j<num_blocks; j++) {
-      regs->bufsel = j;
-      memcpy(data+offset+(j<<SD_SECTOR_SHIFT), registers-0xd0+0xa000, 512);
-    }
+    CopyMem(registers-0xd0+0xa000, data+offset, num_blocks*512);
 
     i += num_blocks;
   }
-  Permit();
 
   return 0;
 }
 
-uint16 sdcmd_write_blocks(void* registers, uint8* data, uint32 block, uint32 len) {
-  uint32 i=0, j=0;
-  uint32 offset=0;
-  uint32 num_blocks=1;
+uint16_t sdcmd_write_blocks(void* registers, uint8_t* data, uint32_t block, uint32_t len) {
+  uint32_t i=0;
+  uint32_t offset=0;
+  uint32_t num_blocks=1;
   struct MNTUSBSRegs* regs = (struct MNTUSBSRegs*)registers;
 
-  Forbid();
   while (i<len) {
     offset = i<<SD_SECTOR_SHIFT;
 
@@ -82,10 +75,10 @@ uint16 sdcmd_write_blocks(void* registers, uint8* data, uint32 block, uint32 len
       num_blocks = len-i;
     }
 
-    for (j=0; j<num_blocks; j++) {
-      regs->bufsel = j;
-      memcpy(registers-0xd0+0xa000, data+offset+(j<<SD_SECTOR_SHIFT), 512);
-    }
+    CopyMem(data+offset, registers-0xd0+0xa000, num_blocks*512);
+
+    // TODO: do we need a fence here?
+    //CacheClearU();
 
     regs->status = num_blocks;
     regs->tx_hi = ((block+i)>>16);
@@ -98,21 +91,20 @@ uint16 sdcmd_write_blocks(void* registers, uint8* data, uint32 block, uint32 len
 
     i += num_blocks;
   }
-  Permit();
 
   return 0;
 }
 
-uint16 sdcmd_present() {
+uint16_t sdcmd_present() {
   // FIXME
   return 1;
 }
 
-uint16 sdcmd_detect() {
+uint16_t sdcmd_detect() {
   return 0;
 }
 
-uint32 sdcmd_capacity(void* registers) {
+uint32_t sdcmd_capacity(void* registers) {
   struct MNTUSBSRegs* regs = (struct MNTUSBSRegs*)registers;
 
   if (regs->status == 0) {

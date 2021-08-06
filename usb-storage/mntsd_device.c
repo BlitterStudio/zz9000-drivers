@@ -85,6 +85,7 @@ const char device_name[] = DEVICE_NAME;
 const char device_id_string[] = DEVICE_ID_STRING;
 
 #include "mntsd_cmd.h"
+#include "rdb_partitions.h"
 
 struct SDBase* DevBase;
 
@@ -94,7 +95,7 @@ struct SDBase* DevBase;
 //#define bug(x,args...) kprintf(x ,##args);
 //#define debug(x,args...) bug("%s:%ld " x "\n", __func__, (unsigned long)__LINE__ ,##args)
 
-void SD_InitUnit(struct SDBase* DevBase, int id, uint8* registers);
+void SD_InitUnit(struct SDBase* DevBase, int id, uint8_t* registers);
 LONG SD_PerformIO(struct SDUnit* sdu, struct IORequest *io);
 LONG SD_PerformSCSI(struct SDUnit* sdu, struct IORequest *io);
 
@@ -104,8 +105,8 @@ static struct Library __attribute__((used)) *init_device(uint8_t *seg_list asm("
 {
   struct Library* ExpansionBase;
   struct ConfigDev* cd = NULL;
-  uint8* registers = NULL;
-  uint32 i;
+  uint8_t* registers = NULL;
+  uint32_t i;
 
   SysBase = *(struct ExecBase **)4L;
 
@@ -115,12 +116,12 @@ static struct Library __attribute__((used)) *init_device(uint8_t *seg_list asm("
 
   if (cd = (struct ConfigDev*)FindConfigDev(cd,0x6d6e,0x3)) {
     debug("ZZ9000USBStorage.device found ZZ9000 (Zorro II).\n");
-    registers = ((uint8*)cd->cd_BoardAddr)+0xd0;
+    registers = ((uint8_t*)cd->cd_BoardAddr)+0xd0;
     CloseLibrary(ExpansionBase);
   } else {
     if (cd = (struct ConfigDev*)FindConfigDev(cd,0x6d6e,0x4)) {
       debug("ZZ9000USBStorage.device found ZZ9000 (Zorro III).\n");
-      registers = ((uint8*)cd->cd_BoardAddr)+0xd0;
+      registers = ((uint8_t*)cd->cd_BoardAddr)+0xd0;
       CloseLibrary(ExpansionBase);
     } else {
       debug("ZZ9000USBStorage.device didn't find ZZ9000!\n");
@@ -135,6 +136,9 @@ static struct Library __attribute__((used)) *init_device(uint8_t *seg_list asm("
   DevBase->sd_Device = (struct Device*)dev;
 
   for (i = 0; i < SD_UNITS; i++) SD_InitUnit(DevBase, i, registers);
+
+  // FIXME do this only once, and only at diag time!?
+  parse_rdb(ExpansionBase, cd);
 
   return dev;
 }
@@ -192,7 +196,7 @@ static uint32_t __attribute__((used)) abort_io(struct Library *dev asm("a6"), st
   return IOERR_ABORTED;
 }
 
-void SD_InitUnit(struct SDBase* DevBase, int id, uint8* registers)
+void SD_InitUnit(struct SDBase* DevBase, int id, uint8_t* registers)
 {
   struct SDUnit *sdu = &DevBase->sd_Unit[id];
 
@@ -207,27 +211,27 @@ void SD_InitUnit(struct SDBase* DevBase, int id, uint8* registers)
   }
 }
 
-uint32 SD_ReadWrite(struct SDUnit *sdu, struct IORequest *io, uint32 offset, BOOL is_write)
+uint32_t SD_ReadWrite(struct SDUnit *sdu, struct IORequest *io, uint32_t offset, uint32_t offset_hi, BOOL is_write)
 {
   struct IOStdReq *iostd = (struct IOStdReq *)io;
   struct IOExtTD *iotd = (struct IOExtTD *)io;
 
-  uint8* data;
-  uint32 len, num_blocks;
-  uint32 block, max_addr;
-  uint16 sderr;
+  uint8_t* data;
+  uint32_t len, num_blocks;
+  uint32_t block, max_addr;
+  uint16_t sderr;
 
   if (!sdu || !io) return 0;
 
   data = iotd->iotd_Req.io_Data;
   len = iotd->iotd_Req.io_Length;
 
-  max_addr = 0xffffffff; //SD_CYL_SECTORS * SD_CYLS * SD_SECTOR_BYTES;
-
+  /*max_addr = 0xffffffff; //SD_CYL_SECTORS * SD_CYLS * SD_SECTOR_BYTES;
   // well... if we had 64 bits this would make sense
   if ((offset > max_addr) || (offset+len > max_addr)) {
     return IOERR_BADADDRESS;
-  }
+  }*/
+
   if (data == 0) {
     return IOERR_BADADDRESS;
   }
@@ -236,12 +240,13 @@ uint32 SD_ReadWrite(struct SDUnit *sdu, struct IORequest *io, uint32 offset, BOO
     return IOERR_BADLENGTH;
   }
 
-  block = offset >> SD_SECTOR_SHIFT;
+  // poor man's 64... i mean 41 bit (2TB)
+  block = (offset >> SD_SECTOR_SHIFT) | (offset_hi << (32-SD_SECTOR_SHIFT));
   num_blocks = len >> SD_SECTOR_SHIFT;
   sderr = 0;
 
   if (is_write) {
-    uint32 retries = 10;
+    uint32_t retries = 10;
     do {
       debug("write %lx %lx retry %lx regs %lx",block,num_blocks,retries,sdu->sdu_Registers);
       sderr = sdcmd_write_blocks(sdu->sdu_Registers, data, block, num_blocks);
@@ -288,15 +293,41 @@ uint32 SD_ReadWrite(struct SDUnit *sdu, struct IORequest *io, uint32 offset, BOO
   return 0;
 }
 
+uint16_t ns_support[] = {
+  NSCMD_DEVICEQUERY,
+  CMD_RESET,
+	CMD_READ,
+	CMD_WRITE,
+	CMD_UPDATE,
+	CMD_CLEAR,
+	CMD_START,
+	CMD_STOP,
+	CMD_FLUSH,
+	TD_MOTOR,
+	TD_SEEK,
+	TD_FORMAT,
+	TD_REMOVE,
+	TD_CHANGENUM,
+	TD_CHANGESTATE,
+	TD_PROTSTATUS,
+	TD_GETDRIVETYPE,
+	TD_GETGEOMETRY,
+	HD_SCSICMD,
+	NSCMD_TD_READ64,
+	NSCMD_TD_WRITE64,
+	NSCMD_TD_SEEK64,
+	NSCMD_TD_FORMAT64,
+	0,
+};
+
 LONG SD_PerformIO(struct SDUnit *sdu, struct IORequest *io)
 {
   struct IOStdReq *iostd = (struct IOStdReq *)io;
   struct IOExtTD *iotd = (struct IOExtTD *)io;
   APTR data;
-  uint32 len;
-  uint32 offset;
-  //struct DriveGeometry *geom;
-  uint32 err = IOERR_NOCMD;
+  uint32_t len;
+  uint32_t offset, offset_hi;
+  uint32_t err = IOERR_NOCMD;
 
   if (!io) return err;
   if (!sdu) return err;
@@ -315,6 +346,18 @@ LONG SD_PerformIO(struct SDUnit *sdu, struct IORequest *io)
   //debug("IO %lx Start, io_Flags = %ld, io_Command = %ld (%s)", io, io->io_Flags, io->io_Command, cmd_name(io->io_Command));
 
   switch (io->io_Command) {
+  case NSCMD_DEVICEQUERY: {
+    struct NSDeviceQueryResult *res = (struct NSDeviceQueryResult *)iotd->iotd_Req.io_Data;
+    res->DevQueryFormat = 0;
+    res->SizeAvailable = 16;
+    res->DeviceType = NSDEVTYPE_TRACKDISK;
+    res->DeviceSubType = 0;
+    res->SupportedCommands = ns_support;
+
+    iostd->io_Actual = 16;
+    err = 0;
+    break;
+  }
   case CMD_CLEAR:
     /* Invalidate read buffer */
     iostd->io_Actual = 0;
@@ -352,16 +395,32 @@ LONG SD_PerformIO(struct SDUnit *sdu, struct IORequest *io)
     break;
 
   case TD_FORMAT:
-    offset  = iotd->iotd_Req.io_Offset;
-    err = SD_ReadWrite(sdu, io, offset, 1);
+    offset = iotd->iotd_Req.io_Offset;
+    err = SD_ReadWrite(sdu, io, offset, 0, 1);
     break;
   case CMD_WRITE:
-    offset  = iotd->iotd_Req.io_Offset;
-    err = SD_ReadWrite(sdu, io, offset, 1);
+    offset = iotd->iotd_Req.io_Offset;
+    err = SD_ReadWrite(sdu, io, offset, 0, 1);
     break;
   case CMD_READ:
-    offset  = iotd->iotd_Req.io_Offset;
-    err = SD_ReadWrite(sdu, io, offset, 0);
+    offset = iotd->iotd_Req.io_Offset;
+    err = SD_ReadWrite(sdu, io, offset, 0, 0);
+    break;
+
+  case TD_WRITE64:
+  case NSCMD_TD_WRITE64:
+  case TD_FORMAT64:
+  case NSCMD_TD_FORMAT64:
+    offset = iotd->iotd_Req.io_Offset;
+    offset_hi = iotd->iotd_Req.io_Actual;
+    err = SD_ReadWrite(sdu, io, offset, offset_hi, 1);
+    break;
+
+  case TD_READ64:
+  case NSCMD_TD_READ64:
+    offset = iotd->iotd_Req.io_Offset;
+    offset_hi = iotd->iotd_Req.io_Actual;
+    err = SD_ReadWrite(sdu, io, offset, offset_hi, 0);
     break;
 
   case HD_SCSICMD:
@@ -381,11 +440,11 @@ LONG SD_PerformSCSI(struct SDUnit *sdu, struct IORequest *io)
 {
   struct IOStdReq *iostd = (struct IOStdReq *)io;
   struct SCSICmd *scsi = iostd->io_Data;
-  uint8* registers = sdu->sdu_Registers;
-  uint8* data = (uint8*)scsi->scsi_Data;
-  uint32 i, block, blocks, maxblocks;
+  uint8_t* registers = sdu->sdu_Registers;
+  uint8_t* data = (uint8_t*)scsi->scsi_Data;
+  uint32_t i, block, blocks, maxblocks;
   long err;
-  uint8 r1;
+  uint8_t r1;
 
   /*debug("SCSI len=%ld, cmd = %02lx %02lx %02lx ... (%ld)",
         iostd->io_Length, scsi->scsi_Command[0],
@@ -412,7 +471,7 @@ LONG SD_PerformSCSI(struct SDUnit *sdu, struct IORequest *io)
     break;
   case 0x12:      // INQUIRY
     for (i = 0; i < scsi->scsi_Length; i++) {
-      uint8 val;
+      uint8_t val;
 
       switch (i) {
       case 0: // SCSI device type: direct-access device
@@ -436,7 +495,7 @@ LONG SD_PerformSCSI(struct SDUnit *sdu, struct IORequest *io)
         else if (i >= 16 && i < 32)
           val = "ZZ9000 USB Disk "[i - 16];
         else if (i >= 32 && i < 36)
-          val = "1.5 "[i-32];
+          val = "1.9 "[i-32];
         else if (i >= 36 && i < 44) {
           val = '1';
         } else
@@ -485,6 +544,7 @@ LONG SD_PerformSCSI(struct SDUnit *sdu, struct IORequest *io)
     block = (block << 8) | scsi->scsi_Command[2];
     block = (block << 8) | scsi->scsi_Command[3];
     blocks = scsi->scsi_Command[4];
+
     if (block + blocks > maxblocks) {
       err = IOERR_BADADDRESS;
       break;
@@ -513,7 +573,7 @@ LONG SD_PerformSCSI(struct SDUnit *sdu, struct IORequest *io)
       break;
     }
 
-    block = *((uint32*)&scsi->scsi_Command[2]);
+    block = *((uint32_t*)&scsi->scsi_Command[2]);
 
     if ((scsi->scsi_Command[8] & 1) || block != 0) {
       // PMI Not supported
@@ -526,8 +586,8 @@ LONG SD_PerformSCSI(struct SDUnit *sdu, struct IORequest *io)
       break;
     }
 
-    ((uint32*)data)[0] = sdcmd_capacity(registers)-1;
-    ((uint32*)data)[1] = SD_SECTOR_BYTES;
+    ((uint32_t*)data)[0] = sdcmd_capacity(registers)-1;
+    ((uint32_t*)data)[1] = SD_SECTOR_BYTES;
 
     scsi->scsi_Actual = 8;
     err = 0;
@@ -538,10 +598,12 @@ LONG SD_PerformSCSI(struct SDUnit *sdu, struct IORequest *io)
     data[1] = 0; // MEDIUM TYPE
     data[2] = 0;
     data[3] = 8;
+
     if (maxblocks > (1 << 24))
       blocks = 0xffffff;
     else
       blocks = maxblocks;
+
     data[4] = (blocks >> 16) & 0xff;
     data[5] = (blocks >>  8) & 0xff;
     data[6] = (blocks >>  0) & 0xff;
@@ -596,39 +658,44 @@ LONG SD_PerformSCSI(struct SDUnit *sdu, struct IORequest *io)
       err = 0;
       break;
     case 0x0400: // Rigid Drive Geometry
-      for (i = 0; i < scsi->scsi_Length - 12; i++) {
-        UBYTE val;
+      {
+        uint32_t numblocks = sdcmd_capacity(registers);
+        uint32_t numcyls = numblocks >> 23; // (4096*1024*2)
 
-        switch (i) {
-        case 0: // PAGE CODE
-          val = 0x04;
-          break;
-        case 1: // PAGE LENGTH
-          val = 0x16;
-          break;
-        case 2: // CYLINDERS 23..16
-          val = (SD_CYLS >> 16) & 0xff;
-          break;
-        case 3: // CYLINDERS 15..8
-          val = (SD_CYLS >> 8) & 0xff;
-          break;
-        case 4: //  CYLINDERS 7..0
-          val = (SD_CYLS >> 0) & 0xff;
-          break;
-        case 5: // HEADS
-          val = SD_HEADS;
-          break;
-        default:
-          val = 0;
-          break;
+        for (i = 0; i < scsi->scsi_Length - 12; i++) {
+          UBYTE val;
+
+          switch (i) {
+          case 0: // PAGE CODE
+            val = 0x04;
+            break;
+          case 1: // PAGE LENGTH
+            val = 0x16;
+            break;
+          case 2: // CYLINDERS 23..16
+            val = (numcyls >> 16) & 0xff;
+            break;
+          case 3: // CYLINDERS 15..8
+            val = (numcyls >> 8) & 0xff;
+            break;
+          case 4: //  CYLINDERS 7..0
+            val = (numcyls >> 0) & 0xff;
+            break;
+          case 5: // HEADS
+            val = SD_HEADS;
+            break;
+          default:
+            val = 0;
+            break;
+          }
+
+          data[12 + i] = val;
         }
 
-        data[12 + i] = val;
+        scsi->scsi_Actual = data[0] + 1;
+        err = 0;
+        break;
       }
-
-      scsi->scsi_Actual = data[0] + 1;
-      err = 0;
-      break;
     default:
       err = HFERR_BadStatus;
       break;
