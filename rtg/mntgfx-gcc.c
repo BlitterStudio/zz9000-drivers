@@ -107,7 +107,6 @@ static LONG secondary_palette_enabled = 0;
 static volatile struct GFXData *gfxdata;
 MNTZZ9KRegs* registers;
 #endif
-MNTZZ9KRegs* registers;
 
 void fix_vsync(MNTZZ9KRegs* registers) {
 	// video control op: vsync
@@ -1259,6 +1258,8 @@ void SetSplitPosition (__REGA0(struct BoardInfo *b),__REGD0(SHORT pos)) {
 	gfxdata->y[0] = pos;
 	zzwrite16(&registers->blitter_dma_op, OP_SET_SPLIT_POS);
 #else
+	MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
+
 	zzwrite32(&registers->blitter_src_hi, offset);
 	zzwrite16(&registers->blitter_set_split_pos, pos);
 #endif
