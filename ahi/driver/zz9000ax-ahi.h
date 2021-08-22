@@ -1,0 +1,25 @@
+struct z9ax {
+	struct Task *t_master;
+	struct Library *ahi_base;
+	struct Interrupt *play_soft_int;
+	struct Interrupt *mix_soft_int;
+	struct Process *worker_process;
+	int8_t master_signal;
+	int8_t worker_signal;
+	int8_t play_signal;
+	int8_t mix_signal;
+	int8_t enable_signal;
+	int8_t disable_signal;
+	int8_t pad81;
+	int8_t pad82;
+	uint8_t *samp_buf[8];
+	uint8_t *mix_buf[8];
+	uint32_t mix_freq;
+	uint32_t flags;
+	int32_t monitor_volume, input_gain, output_volume;
+	uint16_t buffer_type;
+	uint16_t pad;
+	uint32_t buffer_size;
+	uint16_t disable_cnt;
+	struct AHIAudioCtrlDrv *audioctrl;
+};
