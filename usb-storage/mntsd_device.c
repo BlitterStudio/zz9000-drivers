@@ -87,8 +87,6 @@ const char device_id_string[] = DEVICE_ID_STRING;
 #include "mntsd_cmd.h"
 #include "rdb_partitions.h"
 
-struct SDBase* DevBase;
-
 #define debug(x,args...) while(0){};
 #define kprintf(x,args...) while(0){};
 
@@ -110,7 +108,7 @@ static struct Library __attribute__((used)) *init_device(uint8_t *seg_list asm("
 
   SysBase = *(struct ExecBase **)4L;
 
-  if (!(ExpansionBase = (struct Library*)OpenLibrary("expansion.library",0L))) {
+  if (!(ExpansionBase = (struct Library*)OpenLibrary((uint8_t*)"expansion.library",0L))) {
     return 0;
   }
 
@@ -130,12 +128,21 @@ static struct Library __attribute__((used)) *init_device(uint8_t *seg_list asm("
     }
   }
 
-  DevBase = AllocMem(sizeof(struct SDBase), MEMF_PUBLIC|MEMF_CLEAR);
+  debugstr(registers-0xd0, "init:1\r\n");
+
+  //DevBase = AllocMem(sizeof(struct SDBase), MEMF_PUBLIC|MEMF_CLEAR);
+  struct SDBase* DevBase = (struct SDBase*)dev;
   if (!DevBase) return 0;
+
+  debugstr(registers-0xd0, "init:2\r\n");
+  debughex(registers-0xd0, DevBase);
+  debughex(registers-0xd0, dev);
 
   DevBase->sd_Device = (struct Device*)dev;
 
   for (i = 0; i < SD_UNITS; i++) SD_InitUnit(DevBase, i, registers);
+
+  debugstr(registers-0xd0, "init:3\r\n");
 
   // FIXME do this only once, and only at diag time!?
   parse_rdb(ExpansionBase, cd);
@@ -152,6 +159,7 @@ static uint8_t* __attribute__((used)) expunge(struct Library *dev asm("a6"))
 static void __attribute__((used)) open(struct Library *dev asm("a6"), struct IOExtTD *iotd asm("a1"), uint32_t unitnum asm("d0"), uint32_t flags asm("d1"))
 {
   int io_err = IOERR_OPENFAIL;
+  struct SDBase* DevBase = (struct SDBase*)dev;
 
   if (iotd && unitnum==0) {
     io_err = 0;
@@ -166,12 +174,14 @@ static void __attribute__((used)) open(struct Library *dev asm("a6"), struct IOE
 
 static uint8_t* __attribute__((used)) close(struct Library *dev asm("a6"), struct IOExtTD *iotd asm("a1"))
 {
+  struct SDBase* DevBase = (struct SDBase*)dev;
   ((struct Library *)DevBase->sd_Device)->lib_OpenCnt--;
   return 0;
 }
 
 static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct IORequest *io asm("a1"))
 {
+  struct SDBase* DevBase = (struct SDBase*)dev;
   struct SDUnit* sdu;
 
   if (!DevBase) return;
@@ -191,6 +201,7 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
 
 static uint32_t __attribute__((used)) abort_io(struct Library *dev asm("a6"), struct IORequest *io asm("a1"))
 {
+  struct SDBase* DevBase = (struct SDBase*)dev;
   if (!io) return IOERR_NOCMD;
   io->io_Error = IOERR_ABORTED;
   return IOERR_ABORTED;
@@ -727,7 +738,7 @@ static uint32_t device_vectors[] = {
 };
 
 const uint32_t auto_init_tables[4] = {
-    sizeof(struct Library),
+    sizeof(struct SDBase),
     (uint32_t)device_vectors,
     0,
     (uint32_t)init_device

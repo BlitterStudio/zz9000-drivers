@@ -75,8 +75,6 @@ struct PartitionBlock {
     uint32_t   pb_EReserved[12];
 };
 
-uint32_t block[BLOCK_SIZE/4]; // shared storage for 1 block
-
 void debugstr(void* regs, char* str) {
   while (*str) {
     *((volatile uint16_t*)(regs+0xf0)) = *str;
@@ -93,6 +91,8 @@ void find_partitions(struct Library* ExpansionBase, struct ConfigDev* cd, struct
     void* regs = (void*)cd->cd_BoardAddr;
     int cur_partition = 0;
     uint8_t tmp;
+
+    uint32_t block[BLOCK_SIZE/4]; // shared storage for 1 block
 
     if (!rdb || rdb->rdb_PartitionList == 0) {
       debugstr(regs, "No partitions on disk.\r\n");
@@ -190,6 +190,8 @@ int parse_rdb(struct Library* ExpansionBase, struct ConfigDev* cd) {
     void* regs = (void*)cd->cd_BoardAddr;
     int i = 0;
 
+    uint32_t block[BLOCK_SIZE/4]; // shared storage for 1 block
+
     debugstr(regs, "Hello from parse_rdb!\r\n");
 
     for (i = 0; i < RDB_BLOCK_LIMIT; i++) {
@@ -223,7 +225,7 @@ rdb_found:;
     find_partitions(ExpansionBase, cd, rdb);
     return 0;
 
-no_rdb_found:;
+no_rdb_found:
     debugstr(regs, "RDB not found!\r\n");
     return -1;
 }
