@@ -14,7 +14,6 @@ BEG:
 S:
 	dc.l	ID_AHIM
 
-
 *** AUDN
 	dc.l	ID_AUDN
 	dc.l	.e-.s
@@ -28,17 +27,17 @@ ModeA:
 	dc.l	ID_AUDM
 	dc.l	.e-.s
 .s
-	dc.l	AHIDB_AudioID,		$000A0001
+	dc.l	AHIDB_AudioID,		$CAFE0000
 
 	dc.l	AHIDB_Volume,		TRUE
-	dc.l	AHIDB_Panning,		TRUE
-	dc.l	AHIDB_Stereo,		FALSE
+	dc.l	AHIDB_Panning,		FALSE
+	dc.l	AHIDB_Stereo,		TRUE
 	dc.l	AHIDB_HiFi,			FALSE
 	dc.l	AHIDB_MultTable,	FALSE
 
 	dc.l	AHIDB_Name,		.name-.s
 	dc.l	TAG_DONE
-.name	dc.b	"ZZ9000AX: 8 bit Mono",0
+.name	dc.b	"ZZ9000AX: 16 bit VS",0
 .e
 	CNOP	0,2
 
@@ -47,7 +46,7 @@ ModeB:
 	dc.l	ID_AUDM
 	dc.l	.e-.s
 .s
-	dc.l	AHIDB_AudioID,		$000A0002
+	dc.l	AHIDB_AudioID,		$CAFE0001
 
 	dc.l	AHIDB_Volume,		TRUE
 	dc.l	AHIDB_Panning,		TRUE
@@ -57,7 +56,7 @@ ModeB:
 
 	dc.l	AHIDB_Name,		.name-.s
 	dc.l	TAG_DONE
-.name	dc.b	"ZZ9000AX: 8 bit Stereo",0
+.name	dc.b	"ZZ9000AX: 16 bit VPS",0
 .e
 	CNOP	0,2
 
@@ -66,7 +65,45 @@ ModeC:
 	dc.l	ID_AUDM
 	dc.l	.e-.s
 .s
-	dc.l	AHIDB_AudioID,		$000A0003
+	dc.l	AHIDB_AudioID,		$CAFE0002
+
+	dc.l	AHIDB_Volume,		TRUE
+	dc.l	AHIDB_Panning,		TRUE
+	dc.l	AHIDB_Stereo,		TRUE
+	dc.l	AHIDB_HiFi,			TRUE
+	dc.l	AHIDB_MultTable,	FALSE
+
+	dc.l	AHIDB_Name,		.name-.s
+	dc.l	TAG_DONE
+.name	dc.b	"ZZ9000AX: 16 bit HVPS",0
+.e
+	CNOP	0,2
+
+*** AUDM
+ModeD:
+	dc.l	ID_AUDM
+	dc.l	.e-.s
+.s
+	dc.l	AHIDB_AudioID,		$CAFE0003
+
+	dc.l	AHIDB_Volume,		TRUE
+	dc.l	AHIDB_Panning,		FALSE
+	dc.l	AHIDB_Stereo,		TRUE
+	dc.l	AHIDB_HiFi,			TRUE
+	dc.l	AHIDB_MultTable,	FALSE
+
+	dc.l	AHIDB_Name,		.name-.s
+	dc.l	TAG_DONE
+.name	dc.b	"ZZ9000AX: 16 bit HVS",0
+.e
+	CNOP	0,2
+
+*** AUDM
+ModeE:
+	dc.l	ID_AUDM
+	dc.l	.e-.s
+.s
+	dc.l	AHIDB_AudioID,		$CAFE0005
 
 	dc.l	AHIDB_Volume,		TRUE
 	dc.l	AHIDB_Panning,		TRUE
@@ -76,26 +113,26 @@ ModeC:
 
 	dc.l	AHIDB_Name,		.name-.s
 	dc.l	TAG_DONE
-.name	dc.b	"ZZ9000AX: 16 bit Mono",0,0
+.name	dc.b	"ZZ9000AX: 16 bit VP",0
 .e
 	CNOP	0,2
 
 *** AUDM
-ModeD:
+ModeF:
 	dc.l	ID_AUDM
 	dc.l	.e-.s
 .s
-	dc.l	AHIDB_AudioID,		$000A0004
+	dc.l	AHIDB_AudioID,		$CAFE0006
 
 	dc.l	AHIDB_Volume,		TRUE
 	dc.l	AHIDB_Panning,		TRUE
 	dc.l	AHIDB_Stereo,		TRUE
 	dc.l	AHIDB_HiFi,			FALSE
-	dc.l	AHIDB_MultTable,	FALSE
+	dc.l	AHIDB_MultTable,	TRUE
 
 	dc.l	AHIDB_Name,		.name-.s
 	dc.l	TAG_DONE
-.name	dc.b	"ZZ9000AX: 16 bit Stereo",0,0
+.name	dc.b	"ZZ9000AX: 16 bit VPST",0
 .e
 	CNOP	0,2
 

@@ -7,6 +7,4 @@ vasmm68k_mot -quiet -phxass -Fhunk -m68020 -o PREFSFILE.uncut prefsfile.a -I/opt
 # remove 0x28 bytes from the start
 dd bs=1 skip=40 if=PREFSFILE.uncut of=PREFSFILE
 
-m68k-amigaos-gcc zz9000ax-ahi.c -O3 -o zz9000ax.audio -Wall -Wextra -Wno-unused-parameter -nostartfiles -m68020 #-ldebug -lamiga
-
-#  -fomit-frame-pointer
+m68k-amigaos-gcc zz9000ax-ahi.c -O3 -o zz9000ax.audio -Wall -Wextra -Wno-unused-parameter -nostartfiles -m68020

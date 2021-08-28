@@ -14,6 +14,7 @@
  */
 
 #include <exec/exec.h>
+#include <exec/memory.h>
 
 #include <graphics/gfx.h>
 #include <graphics/gfxbase.h>
@@ -28,6 +29,7 @@
 #include <proto/dos.h>
 #include <proto/intuition.h>
 #include <proto/utility.h>
+#include <proto/expansion.h>
 
 //#include <proto/ahi.h>
 #include <proto/ahi_sub.h>
@@ -80,8 +82,8 @@ asm("romtag:                                \n"
 inline void WRITESHORT(uint32_t b) {
   //kprintf((uint8_t*)"%lx\n",b);
 
-  //*((volatile uint16_t*)(0x400000f2)) = b;
-  //*((volatile uint16_t*)(0x400000f0)) = 0xa;
+  *((volatile uint16_t*)(0x400000f2)) = b;
+  *((volatile uint16_t*)(0x400000f0)) = 0xa;
 }
 
 inline void WRITELONG(uint32_t b) {
@@ -97,7 +99,7 @@ const char device_id_string[] = DEVICE_ID_STRING;
 
 const uint16_t freqs[] = {
   8000,
-  22050,
+  12000,
   24000,
   48000,
 };
@@ -173,8 +175,6 @@ static uint32_t __attribute__((used)) SoundFunc(struct Hook *hook asm("a0"), str
   return 0;
 }
 
-#define ZZ9K_REGS 0x40000000
-#define AUDIO_BUF ((void*)0x40010000)
 #define AUDIO_BUFSZ 3840*8
 #define INTB_EXTER (13)  /* External interrupt */
 #define INTB_VERTB (5)
@@ -185,14 +185,16 @@ void WorkerProcess()
   struct z9ax* ahi_data = proc->pr_Task.tc_UserData;
   struct AHIAudioCtrlDrv* AudioCtrl = ahi_data->audioctrl;
 
+#ifndef REAL_HARDWARE
   uint8_t* glob_buf = AllocVec(3840*2, MEMF_ANY);
+#endif
 
   ahi_data->worker_signal = AllocSignal(-1);
-  ahi_data->play_signal = AllocSignal(-1);
   ahi_data->enable_signal = AllocSignal(-1);
 
   uint32_t signals = 0;
   uint32_t buf_offset = 0;
+  uint32_t pfreq = 0;
 
   Signal(ahi_data->t_mainproc, 1L << ahi_data->mainproc_signal);
 
@@ -200,75 +202,54 @@ void WorkerProcess()
     signals = Wait(SIGBREAKF_CTRL_C | (1L<<ahi_data->enable_signal));
 
     if (signals & SIGBREAKF_CTRL_C) {
-      debugmsg(0x1001);
       break;
     }
-
-    debugmsg(0x6001);
 
     for (int i=0; i<1; i++) {
       CallHookPkt(AudioCtrl->ahiac_PlayerFunc, AudioCtrl, NULL);
 
-      /*
-1000
-1103
-07d0
-1201
-bb80
-      */
-
-      debugmsg(0x1100 | AudioCtrl->ahiac_Flags);
-      debugmsg(0x1200 | AudioCtrl->ahiac_Channels);
-      //debugmsg(AudioCtrl->ahiac_MixFreq);
+      //debugmsg(0x1100 | AudioCtrl->ahiac_Flags);
+      //debugmsg(0x1200 | AudioCtrl->ahiac_Channels);
 
       if (AudioCtrl->ahiac_PreTimer && AudioCtrl->ahiac_MixerFunc) {
-        //debugmsg(0x2e01);
         if (!(*AudioCtrl->ahiac_PreTimer)()) {
-          //debugmsg(0x2e02);
-          //safecall2(AudioCtrl, AUDIO_BUF+buf_offset);
 #ifdef REAL_HARDWARE
-          CallHookPkt(AudioCtrl->ahiac_MixerFunc, AudioCtrl, AUDIO_BUF+buf_offset);
+          CallHookPkt(AudioCtrl->ahiac_MixerFunc, AudioCtrl, ahi_data->audio_buf_addr+buf_offset);
 #else
           CallHookPkt(AudioCtrl->ahiac_MixerFunc, AudioCtrl, glob_buf);
           uint32_t* xbuf = (uint32_t*)glob_buf;
           kprintf((uint8_t*)"%lx %lx %lx %lx\n", xbuf[0], xbuf[1], xbuf[2], xbuf[3]);
 #endif
-          //debugmsg(0x2e03);
         }
-        //debugmsg(0x2e03);
         (*AudioCtrl->ahiac_PostTimer)();
-      } else {
-        debugmsg(0x2f2f);
       }
+
+      uint32_t bytes = 2*AudioCtrl->ahiac_BuffSamples*(AudioCtrl->ahiac_Flags & AHIACF_STEREO ? 2 : 1);
+
+      if (AudioCtrl->ahiac_PlayerFreq != pfreq) {
+        debugmsg(0x1000);
+        debugmsg(AudioCtrl->ahiac_PlayerFreq>>16);
+        debugmsg(AudioCtrl->ahiac_PlayerFreq);
+        debugmsg(bytes);
+        pfreq = AudioCtrl->ahiac_PlayerFreq;
+      }
+
+      uint32_t scale = 48000/AudioCtrl->ahiac_MixFreq;
+      // scale
+      *((volatile uint16_t*)(ahi_data->hw_addr+0x74)) = scale;
 
 #ifdef REAL_HARDWARE
       // byteswap buffer
-      *((volatile uint16_t*)(0x40000070)) = buf_offset>>8; // (/256)
-#endif
-      uint32_t bytes = 2*AudioCtrl->ahiac_BuffSamples*(AudioCtrl->ahiac_Flags & AHIACF_STEREO ? 2 : 1);
+      *((volatile uint16_t*)(ahi_data->hw_addr+0x70)) = buf_offset>>8; // (/256)
 
-      switch (AudioCtrl->ahiac_BuffType) {
-        case AHIST_M16S:
-        debugmsg(0xeee0);
-        break;
-        case AHIST_M32S:
-        debugmsg(0xeee1);
-        break;
-        case AHIST_S16S:
-        debugmsg(0xeee2);
-        break;
-        case AHIST_S32S:
-        debugmsg(0xeee3);
-        break;
+      int overrun = *((volatile uint16_t*)(ahi_data->hw_addr+0x70));
+      if (overrun == 1) {
+        memset((void*)ahi_data->audio_buf_addr, 0, AUDIO_BUFSZ);
+        buf_offset = 0;
       }
+#endif
 
-      buf_offset+=bytes;
-
-      // going too fast for AHI
-      //if (suspend_playback) {
-      //debugmsg(0x1999);
-        //break;
-      //}
+      buf_offset+=bytes*scale;
 
       if (buf_offset>=AUDIO_BUFSZ) {
         //debugmsg(0xcafe);
@@ -282,10 +263,10 @@ bb80
   ahi_data->enable_signal = -1;
   FreeSignal(ahi_data->worker_signal);
   ahi_data->worker_signal = -1;
-  FreeSignal(ahi_data->play_signal);
-  ahi_data->play_signal = -1;
 
+#ifndef REAL_HARDWARE
   FreeVec(glob_buf);
+#endif
 
   ahi_data->worker_process = NULL;
   Signal((struct Task *)ahi_data->t_mainproc, 1L << ahi_data->mainproc_signal);
@@ -294,20 +275,25 @@ bb80
   debugmsg(0x999f);
 }
 
-void dev_isr(struct z9ax* data asm("a1")) {
-  //USHORT status = *(USHORT*)(ZZ9K_REGS+0x04);
-
-  //debugmsg(0x9999);
+uint32_t dev_isr(struct z9ax* data asm("a1")) {
+  USHORT status = *(USHORT*)(data->hw_addr+0x04);
 
   // audio interrupt signal set?
-  //if (status & 2) {
-  // ack/clear audio interrupt
-  //*(USHORT*)(ZZ9K_REGS+0x04) = 8|32;
-  //debugmsg(0x999a);
+  if (status & 2) {
+    // ack/clear audio interrupt
+    *(USHORT*)(data->hw_addr+0x04) = 8|32;
+    //debugmsg(0x999a);
 
-  if (data->worker_process && !data->disable_cnt) {
-    //debugmsg(0x9999);
-    Signal((struct Task*)data->worker_process, 1L<<data->enable_signal);
+    if (data->worker_process && !data->disable_cnt) {
+      //debugmsg(0x9999);
+      Signal((struct Task*)data->worker_process, 1L<<data->enable_signal);
+    }
+  }
+
+  if (status == 2) {
+    return 1;
+  } else {
+    return 0;
   }
 }
 
@@ -332,16 +318,18 @@ void init_interrupt(struct z9ax* ahi_data) {
 
 #ifdef REAL_HARDWARE
   // enable HW interrupt
-  USHORT hw_config = *(USHORT*)(ZZ9K_REGS+0xf4);
+  USHORT hw_config = *(USHORT*)(ahi_data->hw_addr+0xf4);
   hw_config |= 1;
-  *(volatile USHORT*)(ZZ9K_REGS+0xf4) = hw_config;
+  *(volatile USHORT*)(ahi_data->hw_addr+0xf4) = hw_config;
 #endif
 }
 
-void destroy_interrupt(struct Interrupt* irq) {
+void destroy_interrupt(struct z9ax* ahi_data) {
+  struct Interrupt* irq = &ahi_data->irq;
+
 #ifdef REAL_HARDWARE
   // disable HW interrupt
-  *(volatile USHORT*)(ZZ9K_REGS+0xf4) = 0;
+  *(volatile USHORT*)(ahi_data->hw_addr+0xf4) = 0;
 #endif
 
   Forbid();
@@ -351,30 +339,48 @@ void destroy_interrupt(struct Interrupt* irq) {
 
 static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagList asm("a1"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2"))
 {
-  SysBase = *(struct ExecBase **)4L;
+  SysBase = *(struct ExecBase**)4L;
 
   if (!DOSBase) {
-    DOSBase = (struct DosLibrary *)OpenLibrary((STRPTR)"dos.library",37);
+    DOSBase = (struct DosLibrary*)OpenLibrary((STRPTR)"dos.library",37);
   }
   if (!UtilityBase) {
     // needed for CallHookPkt
-    UtilityBase = (struct UtilityBase *)OpenLibrary((STRPTR)"utility.library",37);
+    UtilityBase = (struct UtilityBase*)OpenLibrary((STRPTR)"utility.library",37);
+  }
+
+  struct ConfigDev* cd;
+  uint32_t hw_addr = 0;
+
+  if ((ExpansionBase = (struct ExpansionBase*) OpenLibrary("expansion.library", 0)) ) {
+    // Find Z2 or Z3 model of MNT ZZ9000
+    if ((cd = (struct ConfigDev*)FindConfigDev(cd,0x6d6e,0x4)) || (cd = (struct ConfigDev*)FindConfigDev(cd,0x6d6e,0x3))) {
+      hw_addr = (uint32_t)cd->cd_BoardAddr;
+
+      // TODO: query for ZZ9000AX
+    } else {
+      // hardware not found
+      CloseLibrary(ExpansionBase);
+      CloseLibrary(UtilityBase);
+      CloseLibrary(DOSBase);
+      return 0; // FIXME correct code?
+    }
+  } else {
+    CloseLibrary(UtilityBase);
+    CloseLibrary(DOSBase);
+    return 0; // FIXME correct code?
   }
 
   debugmsg(0x6000);
   struct z9ax *ahi_data = AllocVec(sizeof(struct z9ax), MEMF_PUBLIC | MEMF_ANY | MEMF_CLEAR);
-  WRITELONG((uint32_t)ahi_data);
-  WRITELONG((uint32_t)AudioCtrl);
 
   AudioCtrl->ahiac_DriverData = ahi_data;
 
-  // this seems to control the buffer size, but not entirely sure how
-  //AudioCtrl->ahiac_MixFreq = 48000;
-
+  ahi_data->hw_addr = hw_addr;
+  ahi_data->audio_buf_addr = hw_addr+0x10000; // FIXME
   ahi_data->audioctrl = AudioCtrl;
   ahi_data->ahi_base = AHIsubBase;
   ahi_data->worker_signal = -1;
-  ahi_data->play_signal = -1;
   ahi_data->enable_signal = -1;
 
   ahi_data->t_mainproc = FindTask(NULL);
@@ -396,7 +402,11 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
     init_interrupt(ahi_data);
   }
 
-  return AHISF_KNOWSTEREO | AHISF_MIXING | AHISF_TIMING;
+  uint32_t scale = 48000/AudioCtrl->ahiac_MixFreq;
+  AudioCtrl->ahiac_BuffSamples = (3840/4)/scale;
+
+  // none of that weird timing plox
+  return AHISF_KNOWSTEREO | AHISF_MIXING; // | AHISF_TIMING;
 }
 
 static void __attribute__((used)) intAHIsub_FreeAudio(struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
@@ -405,7 +415,7 @@ static void __attribute__((used)) intAHIsub_FreeAudio(struct AHIAudioCtrlDrv *Au
   if (AudioCtrl->ahiac_DriverData) {
     struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
 
-    destroy_interrupt(&ahi_data->irq);
+    destroy_interrupt(ahi_data);
 
     if (ahi_data->worker_process) {
       Signal((struct Task *)ahi_data->worker_process, SIGBREAKF_CTRL_C);
@@ -426,9 +436,11 @@ static void __attribute__((used)) intAHIsub_FreeAudio(struct AHIAudioCtrlDrv *Au
 static uint32_t __attribute__((used)) intAHIsub_Stop(uint32_t Flags asm("d0"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
   debugmsg(0x7000);
   if (Flags & AHISF_PLAY) {
-    //struct z9ax *ahi_data = (struct z9ax*)AudioCtrl->ahiac_DriverData;
+    struct z9ax *ahi_data = (struct z9ax*)AudioCtrl->ahiac_DriverData;
     debugmsg(0x7004);
     //suspend_playback = 1;
+
+    memset((void*)ahi_data->audio_buf_addr, 0, AUDIO_BUFSZ);
   }
 
   return AHIE_OK;
@@ -439,10 +451,12 @@ static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), 
   intAHIsub_Stop(flags, AudioCtrl);
 
   if (flags & AHISF_PLAY) {
-    //struct z9ax *ahi_data = (struct z9ax*)AudioCtrl->ahiac_DriverData;
+    struct z9ax *ahi_data = (struct z9ax*)AudioCtrl->ahiac_DriverData;
     // enable playback
     debugmsg(0x4004);
     //suspend_playback = 0;
+
+    memset((void*)ahi_data->audio_buf_addr, 0, AUDIO_BUFSZ);
   }
 
   return AHIE_OK;
@@ -466,7 +480,7 @@ static int32_t __attribute__((used)) intAHIsub_GetAttr(uint32_t attr_ asm("d0"),
     case AHIDB_Index:
       // FIXME!
       for (int i = 0; i < 4; i++) {
-        if (freqs[i] == arg)
+        if (freqs[i] >= arg)
           return i;
       }
       return 3;
@@ -501,7 +515,6 @@ static int32_t __attribute__((used)) intAHIsub_GetAttr(uint32_t attr_ asm("d0"),
     case AHIDB_MinOutputVolume:
       return 0x0;
     case AHIDB_MaxOutputVolume:
-      debugmsg(1021);
       return 0x10000;
     case AHIDB_Inputs:
       return 0;
@@ -539,26 +552,16 @@ static uint32_t __attribute__((used)) intAHIsub_UnloadSound(uint16_t sound asm("
 static void __attribute__((used)) intAHIsub_Enable(struct AHIAudioCtrlDrv *AudioCtrl asm("a2"))
 {
   struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
-  //debugmsg(0x8000);
-  //WRITELONG(ahi_data);
-
   if (ahi_data->disable_cnt > 0) {
     ahi_data->disable_cnt--;
-  }
-
-  if (!ahi_data->disable_cnt) {
-    //suspend_playback = 0;
   }
 }
 
 static void __attribute__((used)) intAHIsub_Disable(struct AHIAudioCtrlDrv *AudioCtrl asm("a2"))
 {
   struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
-  //debugmsg(0x9000);
-  //WRITELONG(ahi_data);
-
-  //suspend_playback = 1;
   ahi_data->disable_cnt++;
+  //memset((void*)ahi_data->audio_buf_addr, 0, AUDIO_BUFSZ);
 }
 
 static void __attribute__((used)) intAHIsub_Update(uint32_t flags asm("d0"), struct AHIAudioCtrlDrv *AudioCtrlDrv asm("a2"))
