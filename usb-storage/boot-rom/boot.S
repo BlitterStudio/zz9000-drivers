@@ -1,4 +1,14 @@
 main:
+RomTagCopy:
+  .short 0x4afc
+  .long 0
+  .long 0
+  .long 0 // flags
+  .long 0
+  .long 0
+  .long 0
+  .short 0 // padding
+
   LVOFindResident = -96
   RT_INIT = 22
 
@@ -30,6 +40,8 @@ a3: configdev (i.e. 00004858)
     ...
   */
 
+  movem.l d0-d7/a0-a6,-(sp)
+
   lea cardbase(pc), a1
   move.l a0, (a1)
   lea loadaddr(pc), a1
@@ -59,6 +71,13 @@ a3: configdev (i.e. 00004858)
   jsr puthex
 
   // zzusb.device is at loadaddr + 0x400
+  lea RomTagCopy, a5
+  // tweak pointer of our romtag copy
+  move.l a2, a4
+  // it starts at loadaddr + 0x20
+  add.l #0x20, a4
+  move.l a4, 2(a5)
+
   add.l #0x400, a2
   move.l a2, d0
   jsr puthex
@@ -75,27 +94,49 @@ a3: configdev (i.e. 00004858)
   jsr puthex
 
   // romtag here
+  lea debromtag, a6
+  jsr puts
+
+  // create our romtag copy from the romtag
+  // that is in the device itself
+  // it has to be at the top or kickstart
+  // won't find it for some reason
+  lea RomTagCopy, a4
+
   move.l 8(d7), d0
   jsr puthex
-  move.l 12(d7), d0
+  move.l 10(d7), d0
   jsr puthex
-  move.l 16(d7), d0
+  move.l 14(d7), d0
+  //
+  move.l d0, 6(a4)
   jsr puthex
-  move.l 20(d7), d0
+  move.l 18(d7), d0
+  move.l d0, 10(a4)
   jsr puthex
-  move.l 24(d7), d0
+  move.l 22(d7), d0
+  move.l d0, 14(a4)
   jsr puthex
-  move.l 28(d7), d0
+  move.l 26(d7), d0
+  move.l d0, 18(a4)
   jsr puthex
-  move.l d7, d0
+  move.l 30(d7), d0
+  move.l d0, 22(a4)
+  jsr puthex
 
-  // add offset to find romtag
-  add.l #8, d0
-  move.l d0, a1
-  moveq.l #0, d1 // no seglist. should we pass it?
+  /*
+romtag
+4afc     matchword
+078052e0 self ptr
+078052fa end of struct
+80 2b 03 00 flags
+078052fe
+0780530b
+07805bdc ptr to autoinit tables
+  */
 
-  move.l 4, a6 // execbase
-  jsr -102(a6) // InitResident
+  movem.l (sp)+, d0-d7/a0-a6
+
   // return code in d0
   move.l #1, d0
   rts
@@ -111,6 +152,8 @@ DosName:
   .string "dos.library"
 saddrs:
   .string "brda,cfgd,ladr,[ladr]:\r\n"
+debinithello:
+  .string "inittest!"
 
 .align 4
 puts:
@@ -369,3 +412,5 @@ debhreloc:
   .string "hreloc\r\n"
 debhend:
   .string "hend\r\n"
+debromtag:
+  .string "romtag\r\n"
