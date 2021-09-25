@@ -75,18 +75,6 @@ struct PartitionBlock {
     uint32_t   pb_EReserved[12];
 };
 
-void debugstr(void* regs, char* str) {
-  while (*str) {
-    *((volatile uint16_t*)(regs+0xf0)) = *str;
-    str++;
-  }
-}
-
-void debughex(void* regs, uint32_t val) {
-  *((volatile uint16_t*)(regs+0xf2)) = val>>16;
-  *((volatile uint16_t*)(regs+0xf2)) = val;
-}
-
 void find_partitions(struct Library* ExpansionBase, struct ConfigDev* cd, struct RigidDiskBlock* rdb) {
     void* regs = (void*)cd->cd_BoardAddr;
     int cur_partition = 0;
@@ -110,7 +98,9 @@ next_partition:;
 
     uint32_t first = block[0];
     if (first != PART_IDENTIFIER) {
-      debugstr(regs, "Not a valid partition.\r\n");
+      debugstr(regs, "Not a valid partition: ");
+      debughex(regs, first);
+      debugstr(regs, "\r\n");
       return;
     }
 
