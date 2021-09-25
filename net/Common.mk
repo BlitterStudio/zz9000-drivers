@@ -19,7 +19,7 @@
 #
 ###############################################################################
 # debug = 1 will include string debugging for terminal/sushi/sashimi
-debug = 1
+debug = 0
 # compiler_vcc = 1 will trigger VBCC, else GCC
 compiler_vcc = 1
 
@@ -41,7 +41,7 @@ ifeq ($(compiler_vcc),1)
 
 # VBCC (use explicit vlink line for LINK= if complaints about R_PC happen)
 CCX  = vc +aos68k $(SYSINC)
-LINK = vlink -bamigahunk -x -s -mrel -Cvbcc -Bstatic -nostdlib $(SYSLIB) #-Rshort
+LINK = vlink -bamigahunk -x -s -mrel -Cvbcc -Bstatic -nostdlib -lamiga $(SYSLIB) #-Rshort
 #LINKEXE = vlink -bamigahunk -x -s -mrel -Cvbcc -Bstatic
 LINKEXE = vc +aos68k
 #LINK = $(CCX) -nostdlib
@@ -128,7 +128,7 @@ endif
 ifeq ($(debug),1)
 CFLAGS  += -DDEBUG -g
 CFLAGS2 += -DDEBUG -g
-LINKLIBS = -L$(PREFX)/lib -ldebug -lamiga
+LINKLIBS = -L$(PREFX)/lib -ldebug
 endif
 
 ###############################################################################

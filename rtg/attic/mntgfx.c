@@ -1,6 +1,6 @@
 /*
  * MNT ZZ9000 Amiga Graphics Card Driver (ZZ9000.card)
- * Copyright (C) 2016-2019, Lukas F. Hartmann <lukas@mntre.com>
+ * Copyright (C) 2016-2021, Lukas F. Hartmann <lukas@mntre.com>
  *                          MNT Research GmbH, Berlin
  *                          https://mntre.com
  *
@@ -11,8 +11,6 @@
  *
  * https://spdx.org/licenses/GPL-3.0-or-later.html
  */
-
-/* REVISION 1.6 */
 
 #include "mntgfx.h"
 #include "zz9000.h"
@@ -37,7 +35,7 @@ static ULONG LibStart(void) {
 }
 
 static const char LibraryName[] = "ZZ9000.card";
-static const char LibraryID[]   = "$VER: ZZ9000.card 1.6.0 (2020-06-07)\r\n";
+static const char LibraryID[]   = "$VER: ZZ9000.card 1.9.0 (2021-07-22)\r\n";
 
 __saveds struct MNTGFXBase* OpenLib( __reg("a6") struct MNTGFXBase *MNTGFXBase);
 BPTR __saveds CloseLib( __reg("a6") struct MNTGFXBase *MNTGFXBase);
@@ -234,8 +232,8 @@ int FindCard(__reg("a0") struct RTGBoard* b) {
     KPrintF("ZZ9000.card: FW Revision Major: %ld.\n", fwrev_major);
     KPrintF("ZZ9000.card: FW Revision Minor: %ld.\n", fwrev_minor);
 
-    if (fwrev_major<=1 && fwrev_minor<6) {
-      char *alert = "\x00\x14\x14ZZ9000.card v1.6 needs at least firmware (BOOT.bin) v1.6.\x00\x00";
+    if (fwrev_major<=1 && fwrev_minor<9) {
+      char *alert = "\x00\x14\x14ZZ9000.card v1.9 needs at least firmware (BOOT.bin) v1.9.\x00\x00";
       DisplayAlert(RECOVERY_ALERT, alert, 52);
       return 0;
     }
@@ -624,24 +622,23 @@ uint32 monitor_switch(__reg("a0") struct RTGBoard* b, __reg("d0") uint16 state) 
   MNTZZ9KRegs* registers = b->registers;
 
   if (state==0) {
-    // capture 24 bit amiga video to 0xe00000
-    zzwrite16(&registers->pan_ptr_hi, 0xe0);
-
-    if (scandoubler_800x600) {
-      // slightly adjusted centering
-      zzwrite16(&registers->pan_ptr_lo, 0x0bd0);
-    } else {
-      zzwrite16(&registers->pan_ptr_lo, 0x0000);
-    }
-
+    // capture 24 bit amiga video
     int w = 720;
     int h = 576;
     int colormode = MNTVA_COLOR_32BIT;
     int scalemode = 2; // vertical line doubling
 
+    // capture to 0xe00000 offset in card memory
+    zzwrite16(&registers->pan_ptr_hi, 0xe0);
+
     if (scandoubler_800x600) {
       w = 800;
       h = 600;
+
+      // slightly adjusted centering
+      zzwrite16(&registers->pan_ptr_lo, 0x0bd0);
+    } else {
+      zzwrite16(&registers->pan_ptr_lo, 0x0000);
     }
 
     init_modeline(registers, w, h, colormode, scalemode);

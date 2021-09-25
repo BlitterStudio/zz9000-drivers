@@ -23,6 +23,7 @@
 #define MNTVA_COLOR_16BIT565 1
 #define MNTVA_COLOR_32BIT    2
 #define MNTVA_COLOR_15BIT    3
+#define MNTVA_COLOR_NO_USE   255
 
 typedef volatile struct MNTZZ9KRegs {
   u16 fw_version; // 00
@@ -46,12 +47,12 @@ typedef volatile struct MNTZZ9KRegs {
   u16 blitter_op_fillrect;  // 22
   u16 blitter_op_copyrect;  // 24
   u16 blitter_op_filltemplate;   // 26
-  
+
   u16 blitter_src_hi; // 28
   u16 blitter_src_lo; // 2a
   u16 blitter_dst_hi; // 2c
   u16 blitter_dst_lo; // 2e
-  
+
   u16 blitter_colormode; // 30 destination colormode
   u16 blitter_src_pitch; // 32
   u16 blitter_rgb2_hi; // 34 background/secondary color
@@ -71,7 +72,7 @@ typedef volatile struct MNTZZ9KRegs {
   u16 sprite_bitmap; // 48
   u16 sprite_colors; // 4a
   u16 vblank_status; // 4c
-  
+
   //u16 un_3[0x17]; // 4e..7e
   u16 un_4e;
   u16 un_50;
@@ -80,9 +81,9 @@ typedef volatile struct MNTZZ9KRegs {
   u16 un_56;
   u16 un_58;
   u16 blitter_dma_op; // 5a
-  u16 blitter_acc_op;
-  u16 blitter_set_split_pos;
-  u16 un_60;
+  u16 blitter_acc_op; // 5c
+  u16 blitter_set_split_pos; // 5e
+  u16 set_feature_status;
   u16 un_62;
   u16 un_64;
   u16 un_66;
@@ -98,7 +99,7 @@ typedef volatile struct MNTZZ9KRegs {
   u16 un_7A;
   u16 un_7C;
   u16 un_7E;
-  
+
   u16 eth_tx; // 80
   u16 eth_rx; // 82
 
@@ -110,7 +111,7 @@ typedef volatile struct MNTZZ9KRegs {
   u16 arm_arg[8]; // 96,98,9a,9c..a4
 
   u16 un_5[5]; // a6..ae
-  
+
   u16 arm_event_serial; // b0
   u16 arm_event_code; // b2
 } MNTZZ9KRegs;
@@ -131,7 +132,7 @@ enum zz_reg_offsets {
   REG_ZZ_PAN_HI         = 0x0A,
   REG_ZZ_PAN_LO         = 0x0C,
   REG_ZZ_VCAP_MODE      = 0x0E,
-  
+
   REG_ZZ_X1             = 0x10,
   REG_ZZ_Y1             = 0x12,
   REG_ZZ_X2             = 0x14,
@@ -177,7 +178,7 @@ enum zz_reg_offsets {
   REG_ZZ_ACC_OP         = 0x5C,
   REG_ZZ_SET_SPLIT_POS  = 0x5E,
 
-  REG_ZZ_UNUSED_REG60   = 0x60,
+  REG_ZZ_SET_FEATURE    = 0x60,
   REG_ZZ_UNUSED_REG62   = 0x62,
   REG_ZZ_UNUSED_REG64   = 0x64,
   REG_ZZ_UNUSED_REG66   = 0x66,
@@ -266,6 +267,13 @@ enum zz_reg_offsets {
   REG_ZZ_UNUSED_REGFA   = 0xFA,
   REG_ZZ_DEBUG          = 0xFC,
   REG_ZZ_UNUSED_REGFE   = 0xFE,
+};
+
+enum zz9k_card_features {
+  CARD_FEATURE_NONE,
+  CARD_FEATURE_SECONDARY_PALETTE,
+  CARD_FEATURE_NONSTANDARD_VSYNC,
+  CARD_FEATURE_NUM,
 };
 
 enum gfx_dma_op {

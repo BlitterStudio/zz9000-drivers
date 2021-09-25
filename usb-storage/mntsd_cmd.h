@@ -1,10 +1,6 @@
 #ifndef MNTSD_H
 #define MNTSD_H
 
-#define uint32 unsigned long
-#define uint8 unsigned char
-#define uint16 unsigned short
-
 #define SD_HEADS         1
 #define SD_CYLS          4096 /* 4096 MB */
 #define SD_TRACK_SECTORS 2048 /* 1 MB */
@@ -33,13 +29,13 @@
 #define TD_FORMAT64   27
 
 struct MNTUSBSRegs {
-  volatile uint16 tx_hi; // d0
-  volatile uint16 tx_lo; // d2
-  volatile uint16 rx_hi; // d4
-  volatile uint16 rx_lo; // d6
-  volatile uint16 status; // d8
-  volatile uint16 bufsel; // da
-  volatile uint32 capacity; // dc
+  volatile uint16_t tx_hi; // d0
+  volatile uint16_t tx_lo; // d2
+  volatile uint16_t rx_hi; // d4
+  volatile uint16_t rx_lo; // d6
+  volatile uint16_t status; // d8
+  volatile uint16_t bufsel; // da
+  volatile uint32_t capacity; // dc
 };
 
 struct SDBase {
@@ -51,11 +47,11 @@ struct SDBase {
         struct  MsgPort unit_MsgPort;
         UBYTE   unit_flags;
                 UNITF_ACTIVE = 1
-                UNITF_INTASK = 2 
+                UNITF_INTASK = 2
         UBYTE   unit_pad;
         UWORD   unit_OpenCnt;
     };*/
-    
+
     BOOL        sdu_Enabled;
 
     void* sdu_Registers;
@@ -68,11 +64,50 @@ struct SDBase {
   } sd_Unit[SD_UNITS];
 };
 
-uint16 sdcmd_read_blocks(void* registers, uint8* data, uint32 block, uint32 len);
-uint16 sdcmd_write_blocks(void* registers, uint8* data, uint32 block, uint32 len);
-uint16 sdcmd_present();
-uint16 sdcmd_detect();
-uint32 sdcmd_capacity(void* registers);
+uint16_t sdcmd_read_blocks(void* registers, uint8_t* data, uint32_t block, uint32_t len);
+uint16_t sdcmd_write_blocks(void* registers, uint8_t* data, uint32_t block, uint32_t len);
+uint16_t sdcmd_present();
+uint16_t sdcmd_detect();
+uint32_t sdcmd_capacity(void* registers);
 void sd_reset(void* regs);
+
+void debugstr(void* regs, char* str);
+void debughex(void* regs, uint32_t val);
+
+/*------------------------------------------------------------------------*/
+/*
+ * $Id: newstyle.h 1.1 1997/05/15 18:53:15 heinz Exp $
+ *
+ * Support header for the New Style Device standard
+ *
+ * (C)1996-1997 by Amiga International, Inc.
+ *
+ */
+/*------------------------------------------------------------------------*/
+
+#define     NSCMD_DEVICEQUERY       0x4000
+#define     NSDEVTYPE_TRACKDISK     5   /* like trackdisk.device */
+
+struct NSDeviceQueryResult {
+    /*
+    ** Standard information, must be reset for every query
+    */
+    ULONG   DevQueryFormat;         /* this is type 0               */
+    ULONG   SizeAvailable;          /* bytes available              */
+
+    /*
+    ** Common information (READ ONLY!)
+    */
+    UWORD   DeviceType;             /* what the device does         */
+    UWORD   DeviceSubType;          /* depends on the main type     */
+    UWORD   *SupportedCommands;     /* 0 terminated list of cmd's   */
+
+    /* May be extended in the future! Check SizeAvailable! */
+};
+
+#define NSCMD_TD_READ64     0xC000
+#define NSCMD_TD_WRITE64    0xC001
+#define NSCMD_TD_SEEK64     0xC002
+#define NSCMD_TD_FORMAT64   0xC003
 
 #endif

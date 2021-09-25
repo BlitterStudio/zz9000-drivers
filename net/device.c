@@ -45,7 +45,7 @@ const UWORD dev_supportedcmds[] = {
 	NSCMD_DEVICEQUERY,
 	CMD_READ,
 	CMD_WRITE,
-	/* ... add all cmds here that are supported by BeginIO */ 
+	/* ... add all cmds here that are supported by BeginIO */
 	0
 };
 
@@ -61,6 +61,7 @@ const struct NSDeviceQueryResult NSDQueryAnswer = {
 #include "device.h"
 #include "macros.h"
 
+// FIXME get rid of global var!
 static ULONG ZZ9K_REGS = 0;
 #define ZZ9K_RX 0x2000
 #define ZZ9K_TX 0x8000
@@ -69,10 +70,24 @@ __saveds void frame_proc();
 char *frame_proc_name = "ZZ9000NetFramer";
 
 // ZZ9000 Interrupt Handler (INT6)
-__saveds void dev_isr(__reg("a1") struct devbase* db) {
-  // signal main process that a packet is available
-  if (db->db_Proc) {
-    Signal((struct Task*)db->db_Proc, SIGBREAKF_CTRL_F);
+__saveds ULONG dev_isr(__reg("a1") struct devbase* db) {
+  USHORT status = *(volatile USHORT*)(ZZ9K_REGS+0x04);
+
+  // ethernet interrupt signal set?
+  if (status & 1) {
+    // ack/clear ethernet interrupt
+    *(volatile USHORT*)(ZZ9K_REGS+0x04) = 8|16;
+
+    // signal main process that a packet is available
+    if (db->db_Proc) {
+      Signal((struct Task*)db->db_Proc, SIGBREAKF_CTRL_F);
+    }
+  }
+
+  if (status == 1) {
+    return 1;
+  } else {
+    return 0;
   }
 }
 
@@ -83,20 +98,20 @@ void set_mac_from_string(UBYTE* buf) {
   for (int i=0; i<6; i++) {
     int c = buf[k];
     int v = 0;
-    
+
     if (c>='0' && c<='9') c-='0';
     else if (c>='a' && c<='f') c=c+10-'a';
     else if (c>='A' && c<='F') c=c+10-'A';
 
     v = c<<4;
     c = buf[k+1];
-    
+
     if (c>='0' && c<='9') c-='0';
     else if (c>='a' && c<='f') c=c+10-'a';
-    else if (c>='A' && c<='F') c=c+10-'A';   
+    else if (c>='A' && c<='F') c=c+10-'A';
 
     HW_MAC[i] = v+c;
-    
+
     k+=3;
   }
 }
@@ -109,8 +124,8 @@ struct ProcInit
    UBYTE pad[2];
 };
 
-__saveds struct Device *DevInit( ASMR(d0) DEVBASEP                  ASMREG(d0), 
-                                   ASMR(a0) BPTR seglist              ASMREG(a0), 
+__saveds struct Device *DevInit( ASMR(d0) DEVBASEP                  ASMREG(d0),
+                                   ASMR(a0) BPTR seglist              ASMREG(a0),
 				   ASMR(a6) struct Library *_SysBase  ASMREG(a6) )
 {
 	UBYTE*p;
@@ -138,7 +153,7 @@ __saveds struct Device *DevInit( ASMR(d0) DEVBASEP                  ASMREG(d0),
         // Find Z2 or Z3 model of MNT ZZ9000
         if ((cd = (struct ConfigDev*)FindConfigDev(cd,0x6d6e,0x4)) || (cd = (struct ConfigDev*)FindConfigDev(cd,0x6d6e,0x3))) {
           BPTR fh;
-          
+
           D(("ZZ9000Net: MNT ZZ9000 found.\n"));
           ZZ9K_REGS = (ULONG)cd->cd_BoardAddr;
 
@@ -149,7 +164,7 @@ __saveds struct Device *DevInit( ASMR(d0) DEVBASEP                  ASMREG(d0),
           HW_MAC[3]=0x00;
           HW_MAC[4]=0x01;
           HW_MAC[5]=0x00;
-                  
+
           if ((fh=Open("ENV:ZZ9K_MAC",MODE_OLDFILE))) {
             UBYTE char_buf[32];
             char* res = FGets(fh,char_buf,18);
@@ -157,17 +172,17 @@ __saveds struct Device *DevInit( ASMR(d0) DEVBASEP                  ASMREG(d0),
               D(("ZZ9000Net: MAC address in ENV:ZZ9K_MAC has invalid syntax.\n"));
             } else {
               D(("ZZ9000Net: Setting MAC address from ENV:ZZ9K_MAC.\n"));
-              set_mac_from_string(char_buf);              
+              set_mac_from_string(char_buf);
             }
             Close(fh);
           }
 
           // FIXME
-          *(USHORT*)(ZZ9K_REGS+0x84) = (HW_MAC[0]<<8)|HW_MAC[1];
-          *(USHORT*)(ZZ9K_REGS+0x84) = (HW_MAC[0]<<8)|HW_MAC[1];
-          *(USHORT*)(ZZ9K_REGS+0x86) = (HW_MAC[2]<<8)|HW_MAC[3];
-          *(USHORT*)(ZZ9K_REGS+0x86) = (HW_MAC[2]<<8)|HW_MAC[3];
-          *(USHORT*)(ZZ9K_REGS+0x88) = (HW_MAC[4]<<8)|HW_MAC[5];
+          *(volatile USHORT*)(ZZ9K_REGS+0x84) = (HW_MAC[0]<<8)|HW_MAC[1];
+          *(volatile USHORT*)(ZZ9K_REGS+0x84) = (HW_MAC[0]<<8)|HW_MAC[1];
+          *(volatile USHORT*)(ZZ9K_REGS+0x86) = (HW_MAC[2]<<8)|HW_MAC[3];
+          *(volatile USHORT*)(ZZ9K_REGS+0x86) = (HW_MAC[2]<<8)|HW_MAC[3];
+          *(volatile USHORT*)(ZZ9K_REGS+0x88) = (HW_MAC[4]<<8)|HW_MAC[5];
 
           ok = 1;
 
@@ -178,7 +193,7 @@ __saveds struct Device *DevInit( ASMR(d0) DEVBASEP                  ASMREG(d0),
       } else {
         D(("ZZ9000Net: failed to open expansion.library!\n"));
       }
-         
+
 			if (!ok) {
 				CloseLibrary(DOSBase);
 				CloseLibrary(UtilityBase);
@@ -208,8 +223,8 @@ __saveds struct Device *DevInit( ASMR(d0) DEVBASEP                  ASMREG(d0),
 	return (ok > 0) ? (struct Device*)db : (0);
 }
 
-__saveds LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1), 
-                         ASMR(d0) ULONG unit                         ASMREG(d0), 
+__saveds LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
+                         ASMR(d0) ULONG unit                         ASMREG(d0),
                          ASMR(d1) ULONG flags                        ASMREG(d1),
                          ASMR(a6) DEVBASEP                           ASMREG(a6) )
 {
@@ -219,7 +234,7 @@ __saveds LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
 	D(("ZZ9000Net: DevOpen for %ld\n",unit));
 
 	db->db_Lib.lib_OpenCnt++; /* avoid Expunge, see below for separate "unit" open count */
-  
+
   if (unit==0 && db->db_Lib.lib_OpenCnt==1) {
     if ((bm = (struct BufferManagement*)AllocVec(sizeof(struct BufferManagement), MEMF_CLEAR|MEMF_PUBLIC))) {
       bm->bm_CopyToBuffer = (BMFunc)GetTagData(S2_CopyToBuff, 0, (struct TagItem *)ioreq->ios2_BufferManagement);
@@ -239,7 +254,7 @@ __saveds LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
       if (port = CreateMsgPort()) {
         D(("ZZ9000Net: Starting Process\n"));
         if (db->db_Proc = CreateNewProcTags(NP_Entry, frame_proc, NP_Name,
-                                              frame_proc_name, TAG_DONE)) {
+                                            frame_proc_name, NP_Priority, 0, TAG_DONE)) {
           InitSemaphore(&db->db_ProcExitSem);
 
           init.error = 1;
@@ -266,16 +281,16 @@ __saveds LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
               Disable();
               AddIntServer((db->db_Flags & DEVF_INT2MODE) ? INTB_PORTS : INTB_EXTER, db->db_interrupt);
               Enable();
-        
+
               D(("ZZ9000Net: Interrupt server registered, using INT%ld\n",(db->db_Flags & DEVF_INT2MODE) ? 2L : 6L));
               ret = 0;
               ok = 1;
-              
+
               // enable HW interrupt
-              USHORT hw_config = *(USHORT*)(ZZ9K_REGS+0x04);
+              USHORT hw_config = *(volatile USHORT*)(ZZ9K_REGS+0x04);
               hw_config |= 1;
               *(volatile USHORT*)(ZZ9K_REGS+0x04) = hw_config;
-              
+
               D(("ZZ9000Net: ZZ interrupt enabled\n"));
             } else {
               D(("ZZ9000Net: failed to alloc struct Interrupt\n"));
@@ -338,12 +353,12 @@ __saveds BPTR DevClose(   ASMR(a1) struct IORequest *ioreq        ASMREG(a1),
 
   if (db->db_Lib.lib_OpenCnt == 0) {
     // disable HW interrupt
-    USHORT hw_config = *(USHORT*)(ZZ9K_REGS+0x04);
+    USHORT hw_config = *(volatile USHORT*)(ZZ9K_REGS+0x04);
     hw_config &= 0xfffe;
     *(volatile USHORT*)(ZZ9K_REGS+0x04) = hw_config;
-              
+
     D(("ZZ9000Net: ZZ interrupt disabled\n"));
-              
+
     if (db->db_interrupt) {
       D(("ZZ9000Net: Remove IntServer...\n"));
       Forbid();
@@ -379,7 +394,7 @@ __saveds BPTR DevExpunge( ASMR(a6) DEVBASEP                        ASMREG(a6) )
 		db->db_Lib.lib_Flags |= LIBF_DELEXP;
 		return (0);
 	}
-  
+
   D(("ZZ9000Net: Remove Device Node...\n"));
   Remove((struct Node*)db);
 
@@ -398,7 +413,7 @@ __saveds VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
 {
 	ULONG unit = (ULONG)ioreq->ios2_Req.io_Unit;
   int mtu;
-  
+
 	ioreq->ios2_Req.io_Message.mn_Node.ln_Type = NT_MESSAGE;
   ioreq->ios2_Req.io_Error = S2ERR_NO_ERROR;
   ioreq->ios2_WireError = S2WERR_GENERIC_ERROR;
@@ -439,7 +454,7 @@ __saveds VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
     }
     break;
   }
-    
+
   case S2_READORPHAN:
     if( !ioreq->ios2_BufferManagement )
 			{
@@ -472,7 +487,7 @@ __saveds VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
       devquery = ioreq->ios2_StatData;
       devquery->DevQueryFormat = 0;        /* "this is format 0" */
       devquery->DeviceLevel = 0;           /* "this spec defines level 0" */
-         
+
       if (devquery->SizeAvailable >= 18) devquery->AddrFieldSize = HW_ADDRFIELDSIZE * 8; /* Bits! */
       if (devquery->SizeAvailable >= 22) devquery->MTU           = 1500;
       if (devquery->SizeAvailable >= 26) devquery->BPS           = 1000*1000*100;
@@ -507,9 +522,9 @@ __saveds LONG DevAbortIO( ASMR(a1) struct IORequest *ioreq        ASMREG(a1),
   struct IOSana2Req* ios2 = (struct IOSana2Req*)ioreq;
 
 	D(("ZZ9000Net: AbortIO on %lx\n",(ULONG)ioreq));
-  
+
   Remove((struct Node*)ioreq);
-  
+
 	ioreq->io_Error = IOERR_ABORTED;
   ios2->ios2_WireError = 0;
 
@@ -520,7 +535,7 @@ __saveds LONG DevAbortIO( ASMR(a1) struct IORequest *ioreq        ASMREG(a1),
 void DevTermIO( DEVBASEP, struct IORequest *ioreq )
 {
   struct IOSana2Req* ios2 = (struct IOSana2Req*)ioreq;
-  
+
   if (!(ios2->ios2_Req.io_Flags & SANA2IOF_QUICK)) {
     ReplyMsg((struct Message *)ioreq);
   } else {
@@ -546,7 +561,7 @@ ULONG read_frame(struct IOSana2Req *req, volatile UBYTE *frame)
   ULONG sz   = ((ULONG)frm[0]<<8)|((ULONG)frm[1]);
   ULONG ser  = ((ULONG)frm[2]<<8)|((ULONG)frm[3]);
   USHORT tp  = ((USHORT)frm[16]<<8)|((USHORT)frm[17]);
-  
+
   if (req->ios2_Req.io_Flags & SANA2IOF_RAW) {
     frame_ptr = frm+4;
     datasize = sz;
@@ -577,10 +592,10 @@ ULONG read_frame(struct IOSana2Req *req, volatile UBYTE *frame)
     req->ios2_Req.io_Error = req->ios2_WireError = 0;
     err = 0;
   }
-  
+
   memcpy(req->ios2_SrcAddr, frame+4+6, HW_ADDRFIELDSIZE);
   memcpy(req->ios2_DstAddr, frame+4, HW_ADDRFIELDSIZE);
-  
+
   //D(("RXSZ %ld\n",(LONG)sz));
   //D(("RXPT %ld\n",(LONG)tp));
 
@@ -599,7 +614,7 @@ ULONG read_frame(struct IOSana2Req *req, volatile UBYTE *frame)
   if (broadcast) {
     req->ios2_Req.io_Flags |= SANA2IOF_BCAST;
   }
-  
+
   req->ios2_PacketType = tp;
 
   return err;
@@ -610,7 +625,7 @@ ULONG write_frame(struct IOSana2Req *req, UBYTE *frame)
    ULONG rc=0;
    struct BufferManagement *bm;
    USHORT sz=0;
-   
+
    if (req->ios2_Req.io_Flags & SANA2IOF_RAW) {
       sz = req->ios2_DataLength;
    } else {
@@ -646,7 +661,7 @@ ULONG write_frame(struct IOSana2Req *req, UBYTE *frame)
 
 __saveds void frame_proc() {
   ULONG wmask;
-  
+
   D(("ZZ9000Net: frame_proc()\n"));
 
   struct ProcInit* init;
@@ -674,11 +689,11 @@ __saveds void frame_proc() {
 
   // wait for the first packet
   recv = Wait(wmask);
-  
+
   while (1) {
     struct IOSana2Req *ior;
     BOOL receiver_found = 0;
-    
+
     // wait for signal from our interrupt handler
     // remove this to use polled-IO
 
@@ -717,7 +732,7 @@ __saveds void frame_proc() {
       if (!processed) {
         //D(("UNPR %ld\n",(LONG)packet_type));
       }
-      
+
       // mark this frame as accepted
       volatile USHORT* reg = (volatile USHORT*)(ZZ9K_REGS+0x82); // FIXME receive_frame reg
       *reg = 1;
@@ -730,4 +745,3 @@ __saveds void frame_proc() {
   Forbid();
   ReleaseSemaphore(&db->db_ProcExitSem);
 }
-

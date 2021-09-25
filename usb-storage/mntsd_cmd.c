@@ -18,10 +18,22 @@
 #include <proto/disk.h>
 #include <proto/expansion.h>
 
+#include <string.h>
+#include <stdint.h>
+
 #include "mntsd_cmd.h"
 
-//#define bug(x,args...) kprintf(x ,##args);
-//#define debug(x,args...) bug("%s:%ld " x "\n", __func__, (unsigned long)__LINE__ ,##args)
+void debugstr(void* regs, char* str) {
+  while (*str) {
+    *((volatile uint16_t*)(regs+0xf0)) = *str;
+    str++;
+  }
+}
+
+void debughex(void* regs, uint32_t val) {
+  *((volatile uint16_t*)(regs+0xf2)) = val>>16;
+  *((volatile uint16_t*)(regs+0xf2)) = val;
+}
 
 void sd_reset(void* registers) {
   volatile struct MNTUSBSRegs* regs = (volatile struct MNTUSBSRegs*)registers;
@@ -30,13 +42,14 @@ void sd_reset(void* registers) {
 
 #define BLOCKS_AT_ONCE 32
 
-uint16 sdcmd_read_blocks(void* registers, uint8* data, uint32 block, uint32 len) {
-  uint32 i=0, j=0;
-  uint32 offset=0;
-  uint32 num_blocks=1;
+uint16_t sdcmd_read_blocks(void* registers, uint8_t* data, uint32_t block, uint32_t len) {
+  uint32_t i=0;
+  uint32_t offset=0;
+  uint32_t num_blocks=1;
   volatile struct MNTUSBSRegs* regs = (volatile struct MNTUSBSRegs*)registers;
+  uint32_t* dbgp;
+  void* r = registers-0xd0;
 
-  Forbid();
   while (i<len) {
     offset = i<<SD_SECTOR_SHIFT;
 
@@ -54,39 +67,43 @@ uint16 sdcmd_read_blocks(void* registers, uint8* data, uint32 block, uint32 len)
       return SDERRF_PARAM;
     }
 
-    for (j=0; j<num_blocks; j++) {
-      regs->bufsel = j;
-      memcpy(data+offset+(j<<SD_SECTOR_SHIFT), registers-0xd0+0xa000, 512);
+    CopyMem(registers-0xd0+0xa000, data+offset, num_blocks*512);
+
+    /*dbgp = (uint32_t*)(data+offset);
+    debugstr(r, "read: ");
+    debughex(r, block);
+    debugstr(r, ":\r\n");
+    for (int j=0;j<512/4;j++) {
+      debughex(r, dbgp[j]);
     }
+    debugstr(r, "\r\n");
+    debugstr(r, "\r\n");*/
 
     i += num_blocks;
   }
-  Permit();
-  
+
   return 0;
 }
 
-uint16 sdcmd_write_blocks(void* registers, uint8* data, uint32 block, uint32 len) {
-  uint32 i=0, j=0;
-  uint32 offset=0;
-  uint16 status=0;
-  uint32 num_blocks=1;
+uint16_t sdcmd_write_blocks(void* registers, uint8_t* data, uint32_t block, uint32_t len) {
+  uint32_t i=0;
+  uint32_t offset=0;
+  uint32_t num_blocks=1;
   struct MNTUSBSRegs* regs = (struct MNTUSBSRegs*)registers;
-  
-  Forbid();
+
   while (i<len) {
     offset = i<<SD_SECTOR_SHIFT;
-    
+
     num_blocks = BLOCKS_AT_ONCE;
     if ((len-i)<BLOCKS_AT_ONCE) {
       num_blocks = len-i;
     }
 
-    for (j=0; j<num_blocks; j++) {
-      regs->bufsel = j;
-      memcpy(registers-0xd0+0xa000, data+offset+(j<<SD_SECTOR_SHIFT), 512);   
-    }
-    
+    CopyMem(data+offset, registers-0xd0+0xa000, num_blocks*512);
+
+    // TODO: do we need a fence here?
+    //CacheClearU();
+
     regs->status = num_blocks;
     regs->tx_hi = ((block+i)>>16);
     regs->tx_lo = (block+i)&0xffff;
@@ -95,26 +112,25 @@ uint16 sdcmd_write_blocks(void* registers, uint8* data, uint32 block, uint32 len
     if (regs->status == 0) {
       return SDERRF_PARAM;
     }
-    
+
     i += num_blocks;
   }
-  Permit();
-  
+
   return 0;
 }
 
-uint16 sdcmd_present() {
+uint16_t sdcmd_present() {
   // FIXME
   return 1;
 }
 
-uint16 sdcmd_detect() {
+uint16_t sdcmd_detect() {
   return 0;
 }
 
-uint32 sdcmd_capacity(void* registers) {
+uint32_t sdcmd_capacity(void* registers) {
   struct MNTUSBSRegs* regs = (struct MNTUSBSRegs*)registers;
-  
+
   if (regs->status == 0) {
     return 0;
   }
