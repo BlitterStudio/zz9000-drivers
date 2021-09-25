@@ -23,6 +23,18 @@
 
 #include "mntsd_cmd.h"
 
+void debugstr(void* regs, char* str) {
+  while (*str) {
+    *((volatile uint16_t*)(regs+0xf0)) = *str;
+    str++;
+  }
+}
+
+void debughex(void* regs, uint32_t val) {
+  *((volatile uint16_t*)(regs+0xf2)) = val>>16;
+  *((volatile uint16_t*)(regs+0xf2)) = val;
+}
+
 void sd_reset(void* registers) {
   volatile struct MNTUSBSRegs* regs = (volatile struct MNTUSBSRegs*)registers;
   regs->status = 0; // reset command
@@ -35,6 +47,8 @@ uint16_t sdcmd_read_blocks(void* registers, uint8_t* data, uint32_t block, uint3
   uint32_t offset=0;
   uint32_t num_blocks=1;
   volatile struct MNTUSBSRegs* regs = (volatile struct MNTUSBSRegs*)registers;
+  uint32_t* dbgp;
+  void* r = registers-0xd0;
 
   while (i<len) {
     offset = i<<SD_SECTOR_SHIFT;
@@ -54,6 +68,16 @@ uint16_t sdcmd_read_blocks(void* registers, uint8_t* data, uint32_t block, uint3
     }
 
     CopyMem(registers-0xd0+0xa000, data+offset, num_blocks*512);
+
+    /*dbgp = (uint32_t*)(data+offset);
+    debugstr(r, "read: ");
+    debughex(r, block);
+    debugstr(r, ":\r\n");
+    for (int j=0;j<512/4;j++) {
+      debughex(r, dbgp[j]);
+    }
+    debugstr(r, "\r\n");
+    debugstr(r, "\r\n");*/
 
     i += num_blocks;
   }

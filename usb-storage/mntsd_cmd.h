@@ -71,6 +71,9 @@ uint16_t sdcmd_detect();
 uint32_t sdcmd_capacity(void* registers);
 void sd_reset(void* regs);
 
+void debugstr(void* regs, char* str);
+void debughex(void* regs, uint32_t val);
+
 /*------------------------------------------------------------------------*/
 /*
  * $Id: newstyle.h 1.1 1997/05/15 18:53:15 heinz Exp $
