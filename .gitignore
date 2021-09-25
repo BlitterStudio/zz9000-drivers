@@ -6,6 +6,9 @@
 *.swp
 *.rom
 *.nodma
+*.audio
+PREFSFILE*
 usb-storage/zzusb-device.h
 usb-storage/boot-rom/zzbootrom.h
+attic
 
