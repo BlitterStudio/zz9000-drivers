@@ -58,7 +58,7 @@ struct ExecBase* SysBase;
 
 #define DEVICE_NAME "zzusb.device"
 #define DEVICE_DATE "(1 Aug 2021)"
-#define DEVICE_ID_STRING "ZZ9000USBStorage " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
+#define DEVICE_ID_STRING "zzusb.device " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
 #define DEVICE_VERSION 43
 #define DEVICE_REVISION 20
 #define DEVICE_PRIORITY 0
@@ -128,21 +128,12 @@ static struct Library __attribute__((used)) *init_device(uint8_t *seg_list asm("
     }
   }
 
-  debugstr(registers-0xd0, "init:1\r\n");
-
-  //DevBase = AllocMem(sizeof(struct SDBase), MEMF_PUBLIC|MEMF_CLEAR);
   struct SDBase* DevBase = (struct SDBase*)dev;
   if (!DevBase) return 0;
-
-  debugstr(registers-0xd0, "init:2\r\n");
-  debughex(registers-0xd0, DevBase);
-  debughex(registers-0xd0, dev);
 
   DevBase->sd_Device = (struct Device*)dev;
 
   for (i = 0; i < SD_UNITS; i++) SD_InitUnit(DevBase, i, registers);
-
-  debugstr(registers-0xd0, "init:3\r\n");
 
   // FIXME do this only once, and only at diag time!?
   parse_rdb(ExpansionBase, cd);
@@ -152,7 +143,6 @@ static struct Library __attribute__((used)) *init_device(uint8_t *seg_list asm("
 
 static uint8_t* __attribute__((used)) expunge(struct Library *dev asm("a6"))
 {
-  // FIXME dealloc DevBase
   return 0;
 }
 
