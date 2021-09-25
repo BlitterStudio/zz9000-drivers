@@ -5,6 +5,7 @@
 *.device
 *.swp
 *.rom
+*.nodma
 usb-storage/zzusb-device.h
 usb-storage/boot-rom/zzbootrom.h
 
