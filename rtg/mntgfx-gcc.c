@@ -2,9 +2,9 @@
  * MNT ZZ9000 Amiga Graphics Card Driver (ZZ9000.card)
  *
  * Copyright (C) 2016-2021, Lukas F. Hartmann <lukas@mntre.com>
- *                          MNT Research GmbH, Berlin
- *                          https://mntre.com
- * Copyright (C) 2021,      Bjorn Astrom <beeanyew@gmail.com>
+ *													MNT Research GmbH, Berlin
+ *													https://mntre.com
+ * Copyright (C) 2021,			Bjorn Astrom <beeanyew@gmail.com>
  *
  * More Info: https://mntre.com/zz9000
  *
@@ -58,18 +58,18 @@ int __attribute__((no_reorder)) _start()
 		return -1;
 }
 
-asm("romtag:                                    \n"
-		"       dc.w    "XSTR(RTC_MATCHWORD)"   \n"
-		"       dc.l    romtag                  \n"
-		"       dc.l    endcode                 \n"
-		"       dc.b    "XSTR(RTF_AUTOINIT)"    \n"
-		"       dc.b    "XSTR(DEVICE_VERSION)"  \n"
-		"       dc.b    "XSTR(NT_LIBRARY)"      \n"
-		"       dc.b    "XSTR(DEVICE_PRIORITY)" \n"
-		"       dc.l    _device_name            \n"
-		"       dc.l    _device_id_string       \n"
-		"       dc.l    _auto_init_tables       \n"
-		"endcode:                               \n");
+asm("romtag:\n"
+    "       dc.w    "XSTR(RTC_MATCHWORD)"   \n"
+    "       dc.l    romtag                  \n"
+    "       dc.l    endcode                 \n"
+    "       dc.b    "XSTR(RTF_AUTOINIT)"    \n"
+    "       dc.b    "XSTR(DEVICE_VERSION)"  \n"
+    "       dc.b    "XSTR(NT_LIBRARY)"      \n"
+    "       dc.b    "XSTR(DEVICE_PRIORITY)" \n"
+    "       dc.l    _device_name            \n"
+    "       dc.l    _device_id_string       \n"
+    "       dc.l    _auto_init_tables       \n"
+    "endcode:                               \n");
 
 char device_name[] = DEVICE_NAME;
 char device_id_string[] = DEVICE_ID_STRING;
@@ -89,7 +89,7 @@ const char *gfxname = "ZZ9000";
 char dummies[128];
 
 // Place scratch area right after framebuffer? Might be a horrible idea.
-#define Z3_GFXDATA_ADDR  (0x3200000 - 0x10000)
+#define Z3_GFXDATA_ADDR	(0x3200000 - 0x10000)
 #define Z3_TEMPLATE_ADDR (0x3210000 - 0x10000)
 #define ZZVMODE_800x600 1
 #define ZZVMODE_720x576 6
@@ -171,8 +171,8 @@ void waitclick() {
 
 
 __saveds struct GFXBase* __attribute__((used)) InitLib(__REGA6(struct ExecBase *sysbase),
-													   __REGA0(BPTR seglist),
-													   __REGD0(struct GFXBase *exb))
+														 __REGA0(BPTR seglist),
+														 __REGD0(struct GFXBase *exb))
 {
 	_gfxbase = exb;
 	SysBase = *(struct ExecBase **)4L;
@@ -213,9 +213,9 @@ BPTR __saveds __attribute__((used)) ExpungeLib(__REGA6(struct GFXBase *exb))
 		Remove((struct Node *)exb);
 
 		negsize	 = exb->libNode.lib_NegSize;
-		possize  = exb->libNode.lib_PosSize;
+		possize	 = exb->libNode.lib_PosSize;
 		fullsize = negsize + possize;
-		negptr  -= negsize;
+		negptr	-= negsize;
 
 		FreeMem(negptr, fullsize);
 		return(seglist);
@@ -330,7 +330,12 @@ int __attribute__((used)) InitCard(__REGA0(struct BoardInfo* b)) {
 	b->PaletteChipType = PCT_S3ViRGE;
 	b->GraphicsControllerType = GCT_S3ViRGE;
 
-	b->Flags |= BIF_GRANTDIRECTACCESS | BIF_HARDWARESPRITE | BIF_FLICKERFIXER | BIF_VGASCREENSPLIT | BIF_PALETTESWITCH | BIF_BLITTER;
+	b->Flags |= BIF_GRANTDIRECTACCESS | BIF_HARDWARESPRITE | BIF_FLICKERFIXER | BIF_VGASCREENSPLIT | BIF_PALETTESWITCH;
+
+	// BIF_BLITTER messes up menus and a bunch of other things!?
+	// | BIF_BLITTER;
+  // theory: it might mess with our template/scratch area
+
 	b->RGBFormats = 1 | 2 | 512 | 1024 | 2048;
 	b->SoftSpriteFlags = 0;
 	b->BitsPerCannon = 8;
@@ -497,40 +502,24 @@ UWORD SetSwitch (__REGA0(struct BoardInfo *b), __REGD0(UWORD enabled)) {
 
 	if (enabled == 0) {
 		// capture 24 bit amiga video to 0xe00000
-		zzwrite16(&registers->pan_ptr_hi, 0xe0);
 
 		if (scandoubler_800x600) {
 			// slightly adjusted centering
-			zzwrite16(&registers->pan_ptr_lo, 0x0bd0);
+			zzwrite16(&registers->pan_ptr_hi, 0x00df);
+			zzwrite16(&registers->pan_ptr_lo, 0xf2f8);
 		} else {
+			zzwrite16(&registers->pan_ptr_hi, 0x00e0);
 			zzwrite16(&registers->pan_ptr_lo, 0x0000);
 		}
 
-		int w = 720;
-		int h = 576;
-		int colormode = MNTVA_COLOR_32BIT;
-		int scalemode = 2; // vertical line doubling
-
-		if (scandoubler_800x600) {
-			w = 800;
-			h = 600;
-		}
-
-		init_modeline(registers, w, h, colormode, scalemode);
-
-		// firmware will remember the selected mode
+		// firmware will detect that we are capturing and viewing the capture area
+		// and switch to the appropriate video mode (VCAP_MODE)
 		*(volatile uint16_t*)((uint32_t)registers + 0x1006) = 1; // capture mode
-
 	} else {
 		// rtg mode
 		*(volatile uint16_t*)((uint32_t)registers + 0x1006) = 0; // capture mode
 
 		SetGC(b, b->ModeInfo, b->Border);
-	}
-
-	// FIXME
-	for (volatile int i=0; i<100; i++) {
-		fix_vsync(registers);
 	}
 
 	return 1 - enabled;
@@ -605,8 +594,8 @@ uint16_t pitch_to_shift(uint16_t p) {
 	if (p == 4096) return 12;
 	if (p == 2048) return 11;
 	if (p == 1024) return 10;
-	if (p == 512)  return 9;
-	if (p == 256)  return 8;
+	if (p == 512) return 9;
+	if (p == 256)	return 8;
 	return 0;
 }
 
@@ -1278,9 +1267,9 @@ static uint32_t device_vectors[] = {
 struct InitTable
 {
 	ULONG LibBaseSize;
-	APTR  FunctionTable;
-	APTR  DataTable;
-	APTR  InitLibTable;
+	APTR FunctionTable;
+	APTR DataTable;
+	APTR InitLibTable;
 };
 
 const uint32_t auto_init_tables[4] = {
