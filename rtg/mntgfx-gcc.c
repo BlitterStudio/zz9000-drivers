@@ -38,9 +38,12 @@
 
 struct GFXBase {
 	struct Library libNode;
+	UBYTE Flags;
+	UBYTE pad;
+	struct ExecBase *ExecBase;
+	struct ExpansionBase *ExpansionBase;
 	BPTR segList;
-	struct ExecBase* sysBase;
-	struct ExpansionBase* expansionBase;
+	char *Name;
 };
 
 #define KPrintF(...)
@@ -85,7 +88,7 @@ __saveds struct GFXBase* InitLib(__REGA6(struct ExecBase *sysbase),
 #define CLOCK_HZ 100000000
 
 static struct GFXBase *_gfxbase;
-const char *gfxname = "ZZ9000";
+char *gfxname = "ZZ9000";
 char dummies[128];
 
 // Place scratch area right after framebuffer? Might be a horrible idea.
@@ -175,6 +178,7 @@ __saveds struct GFXBase* __attribute__((used)) InitLib(__REGA6(struct ExecBase *
 														 __REGD0(struct GFXBase *exb))
 {
 	_gfxbase = exb;
+	_gfxbase->Name = gfxname;
 	SysBase = *(struct ExecBase **)4L;
 	return _gfxbase;
 }
