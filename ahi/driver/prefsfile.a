@@ -30,26 +30,6 @@ ModeA:
 	dc.l	AHIDB_AudioID,		$CAFE0000
 
 	dc.l	AHIDB_Volume,		TRUE
-	dc.l	AHIDB_Panning,		FALSE
-	dc.l	AHIDB_Stereo,		TRUE
-	dc.l	AHIDB_HiFi,			FALSE
-	dc.l	AHIDB_Bits,		16
-	dc.l	AHIDB_MultTable,	FALSE
-
-	dc.l	AHIDB_Name,		.name-.s
-	dc.l	TAG_DONE
-.name	dc.b	"ZZ9000AX: 16-bit Stereo",0
-.e
-	CNOP	0,2
-
-*** AUDM
-ModeB:
-	dc.l	ID_AUDM
-	dc.l	.e-.s
-.s
-	dc.l	AHIDB_AudioID,		$CAFE0001
-
-	dc.l	AHIDB_Volume,		TRUE
 	dc.l	AHIDB_Panning,		TRUE
 	dc.l	AHIDB_Stereo,		TRUE
 	dc.l	AHIDB_HiFi,			FALSE
@@ -58,7 +38,7 @@ ModeB:
 
 	dc.l	AHIDB_Name,		.name-.s
 	dc.l	TAG_DONE
-.name	dc.b	"ZZ9000AX: 16-bit Pan Stereo",0
+.name	dc.b	"ZZ9000AX: 16-bit Stereo",0
 .e
 	CNOP	0,2
 
