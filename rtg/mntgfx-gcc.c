@@ -108,15 +108,6 @@ static volatile struct GFXData *gfxdata;
 MNTZZ9KRegs* registers;
 #endif
 
-void fix_vsync(MNTZZ9KRegs* registers) {
-	// video control op: vsync
-	*(volatile uint16_t*)((uint32_t)registers + 0x1000) = 0;
-	*(volatile uint16_t*)((uint32_t)registers + 0x1002) = 1;
-	*(volatile uint16_t*)((uint32_t)registers + 0x1004) = 5; // OP_VSYNC
-	*(volatile uint16_t*)((uint32_t)registers + 0x1004) = 0;
-	*(volatile uint16_t*)((uint32_t)registers + 0x1002) = 0;
-}
-
 uint16_t rtg_to_mnt[21] = {
 	MNTVA_COLOR_8BIT,		// 0x00 -- None
 	MNTVA_COLOR_8BIT,		// 0x01 -- 8BPP CLUT
@@ -168,7 +159,6 @@ void waitclick() {
 		// wait for left mouse button released
 	}
 }
-
 
 __saveds struct GFXBase* __attribute__((used)) InitLib(__REGA6(struct ExecBase *sysbase),
 														 __REGA0(BPTR seglist),
@@ -568,7 +558,7 @@ void SetColorArray (__REGA0(struct BoardInfo *b), __REGD0(UWORD start), __REGD1(
 		op = 19; // OP_PALETTE_HI
 	}
 
-	for(int i = start; i < j; i++) {
+	for (int i = start; i < j; i++) {
 		unsigned long xrgb = ((uint32_t)(i & 0xFF) << 24) | ((uint32_t)b->CLUT[(i & 0xFF)].Red << 16) | ((uint32_t)b->CLUT[(i & 0xFF)].Green << 8) | ((uint32_t)b->CLUT[(i & 0xFF)].Blue);
 
 		*(volatile uint16_t*)((uint32_t)registers + 0x1000) = xrgb >> 16;
@@ -607,10 +597,6 @@ UWORD CalculateBytesPerRow (__REGA0(struct BoardInfo *b), __REGD0(UWORD width), 
 }
 
 APTR CalculateMemory (__REGA0(struct BoardInfo *b), __REGA1(unsigned long addr), __REGD7(RGBFTYPE format)) {
-	if (addr > (uint32_t)b->MemoryBase && addr < (((uint32_t)b->MemoryBase) + b->MemorySize)) {
-		addr = (addr + 0x1000) & 0xFFFFF000;
-	}
-
 	return (APTR)addr;
 }
 
