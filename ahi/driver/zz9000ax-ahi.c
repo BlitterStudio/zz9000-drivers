@@ -205,7 +205,6 @@ void WorkerProcess() {
 
   uint32_t signals = 0;
   uint32_t buf_offset = 0;
-  uint32_t buf_samples = 0;
 
   Signal(ahi_data->t_mainproc, 1L << ahi_data->mainproc_signal);
 
@@ -226,13 +225,10 @@ void WorkerProcess() {
 #endif
       uint32_t bytes = AudioCtrl->ahiac_BuffSamples << 2; //(AudioCtrl->ahiac_Flags & AHIACF_STEREO ? 2 : 1);
 
-      if (buf_samples != AudioCtrl->ahiac_BuffSamples) {
-        *((volatile uint16_t*)(ahi_data->hw_addr+REG_ZZ_AUDIO_SCALE)) = AudioCtrl->ahiac_BuffSamples;
-        buf_samples = AudioCtrl->ahiac_BuffSamples;
-      }
-
       int overrun = 0;
 #ifdef REAL_HARDWARE
+      *((volatile uint16_t*)(ahi_data->hw_addr+REG_ZZ_AUDIO_SCALE)) = AudioCtrl->ahiac_BuffSamples;
+
       // def. the faster way
       CopyMem((void*)ahi_data->audio_buf_addr, (void*)ahi_data->audio_hw_buf_addr + buf_offset, bytes);
       // byteswap, resample and play buffer
@@ -352,35 +348,11 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
       // ZORRO 3
       zorro = 3;
       hw_addr = (uint32_t)cd->cd_BoardAddr;
-
-      // set tx buffer address to 127 MB offset
-      *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 0;
-      *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = 0x03f0;
-      *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 1;
-      *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = 0x0000;
-      // set rx buffer address to 127 MB offset
-      *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 2;
-      *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = 0x03f2;
-      *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 3;
-      *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = 0x0000;
-      *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 0;
     }
     else if ((cd = (struct ConfigDev*)FindConfigDev(cd,0x6d6e,0x3))) {
       // ZORRO 2
       zorro = 2;
       hw_addr = (uint32_t)cd->cd_BoardAddr;
-
-      // set tx buffer address to 1920 kB offset
-      *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 0;
-      *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = 0x001d;
-      *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 1;
-      *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = 0x0000;
-      // set rx buffer address to 1920 kB offset
-      *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 2;
-      *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = 0x001e;
-      *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 3;
-      *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = 0x0000;
-      *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 0;
     } else {
       // hardware not found
       CloseLibrary((struct Library *)ExpansionBase);
@@ -422,9 +394,39 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
   ahi_data->hw_addr = hw_addr;
   if (zorro == 2) {
     ahi_data->audio_hw_buf_addr = hw_addr + 0x10000 + 0x001d0000;
+
+    Forbid();
+    // set tx buffer address to 1920 kB offset
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 0;
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = 0x001d;
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 1;
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = 0x0000;
+    // set rx buffer address to 1920 kB offset
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 2;
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = 0x001e;
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 3;
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = 0x0000;
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 0;
+    Permit();
   } else if (zorro == 3) {
     ahi_data->audio_hw_buf_addr = hw_addr + 0x10000 + 0x03f00000;
+
+    Forbid();
+    // set tx buffer address to 127 MB offset
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 0;
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = 0x03f0;
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 1;
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = 0x0000;
+    // set rx buffer address to 127 MB offset
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 2;
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = 0x03f2;
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 3;
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = 0x0000;
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 0;
+    Permit();
   }
+
+  memset((void*)ahi_data->audio_hw_buf_addr, 0, AUDIO_BUFSZ);
 
   ahi_data->audioctrl = AudioCtrl;
   ahi_data->ahi_base = AHIsubBase;
