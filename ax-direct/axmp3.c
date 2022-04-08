@@ -44,18 +44,18 @@ static const char procname[] = "axmp3";
 #define REG_ZZ_AUDIO_VAL     0x78
 #define REG_ZZ_DECODER_PARAM 0x7A
 #define REG_ZZ_DECODER_VAL   0x7C
-#define REG_ZZ_DECODE		     0x7E
+#define REG_ZZ_DECODE        0x7E
 #define REG_ZZ_AUDIO_CONFIG  0xF4
 
 struct z9ax {
-	struct Task *t_mainproc;
-	struct Process *worker_process;
+  struct Task *t_mainproc;
+  struct Process *worker_process;
   struct Interrupt irq;
   uint32_t hw_addr;
   uint32_t audio_hw_buf_addr;
-	int8_t mainproc_signal;
-	int8_t enable_signal;
-	int8_t worker_signal;
+  int8_t mainproc_signal;
+  int8_t enable_signal;
+  int8_t worker_signal;
   uint8_t zorro_version;
 
   uint32_t mp3_addr;
