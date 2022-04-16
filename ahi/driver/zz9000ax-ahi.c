@@ -6,6 +6,7 @@
  *                     https://mntre.com
  *
  * Based on code by _Bnu (thanks a ton!) and AHI example drivers.
+ * Modified by Thomas Wenzel (TW)
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * GNU General Public License v3.0 or later
@@ -55,7 +56,7 @@
 
 #define ZZ_BYTES_PER_PERIOD 3840
 #define AUDIO_BUFSZ ZZ_BYTES_PER_PERIOD*8 // TODO: query from hardware
-#define WORKER_PRIORITY 19 // 127
+#define WORKER_PRIORITY 127 // TW: High priority because this is time-critical for high-level access.
 #define INTB_EXTER (13)
 #define INTB_VERTB (5)
 
@@ -70,6 +71,7 @@ struct ExecBase     *SysBase;
 struct UtilityBase  *UtilityBase;
 struct Library      *AHIsubBase  = NULL;
 struct DosLibrary   *DOSBase     = NULL;
+struct z9ax_base    *Z9AXBase;
 //struct GfxBase      *GraphicsBase = NULL;
 
 int __attribute__((no_reorder)) _start()
@@ -106,6 +108,26 @@ inline void WRITELONG(uint32_t b) {
   *((volatile uint16_t*)(0x400000f0)) = 0xa;
 }
 
+// TW: register access routines for cleaner code.
+inline void writeReg(uint32_t Base, uint16_t Reg, uint16_t Val)
+{
+  *((volatile uint16_t*)(Base+Reg)) = Val;
+}
+
+inline uint16_t readReg(uint32_t Base, uint16_t Reg)
+{
+  uint16_t Val;
+  Val = *((volatile uint16_t*)(Base+Reg));
+  return Val;
+}
+
+inline void writeAudioParam(uint32_t Base, uint16_t Param, uint16_t Val)
+{
+  *((volatile uint16_t*)(Base+REG_ZZ_AUDIO_PARAM)) = Param;
+  *((volatile uint16_t*)(Base+REG_ZZ_AUDIO_VAL))   = Val;
+  *((volatile uint16_t*)(Base+REG_ZZ_AUDIO_PARAM)) = 0;
+}
+
 const char device_name[] = DEVICE_NAME;
 const char device_id_string[] = DEVICE_ID_STRING;
 
@@ -129,13 +151,36 @@ const uint16_t freqs[] = {
 
 static uint32_t __attribute__((used)) init (BPTR seg_list asm("a0"), struct Library *dev asm("d0"))
 {
+  struct ConfigDev* cd;
+
   SysBase = *(struct ExecBase **)4L;
+  Z9AXBase = (struct z9ax_base*)dev;
 
   if(!(DOSBase = (struct DosLibrary *)OpenLibrary((STRPTR)"dos.library",0)))
     return 0;
 
   if(!(UtilityBase = (struct UtilityBase *)OpenLibrary((STRPTR)"utility.library",0)))
     return 0;
+
+  if(!(ExpansionBase = (struct ExpansionBase *)OpenLibrary((STRPTR)"expansion.library",0)))
+    return 0;
+
+  // TW: Zorro2/3 detection during early init phase.
+  // Find Z2 or Z3 model of MNT ZZ9000
+  if ((cd = (struct ConfigDev*)FindConfigDev(cd,0x6d6e,0x4))) {
+	// ZORRO 3
+    Z9AXBase->zorro_version = 3;
+    Z9AXBase->hw_addr = (uint32_t)cd->cd_BoardAddr;
+  }
+  else if ((cd = (struct ConfigDev*)FindConfigDev(cd,0x6d6e,0x3))) {
+	// ZORRO 2
+    Z9AXBase->zorro_version = 2;
+    Z9AXBase->hw_addr = (uint32_t)cd->cd_BoardAddr;
+  } else {
+    // Not detected
+    Z9AXBase->zorro_version = 0;
+    Z9AXBase->hw_addr = 0;
+  }
 
   return (uint32_t)dev;
 }
@@ -144,6 +189,7 @@ static uint8_t* __attribute__((used)) expunge(struct Library *libbase asm("a6"))
 {
   if(DOSBase)       { CloseLibrary((struct Library *)DOSBase); DOSBase = NULL; }
   if(UtilityBase)   { CloseLibrary((struct Library *)UtilityBase); UtilityBase = NULL; }
+  if(ExpansionBase) { CloseLibrary((struct Library *)ExpansionBase); ExpansionBase = NULL; }
 
   return 0;
 }
@@ -227,13 +273,22 @@ void WorkerProcess() {
 
       int overrun = 0;
 #ifdef REAL_HARDWARE
+      #if 0
       *((volatile uint16_t*)(ahi_data->hw_addr+REG_ZZ_AUDIO_SCALE)) = AudioCtrl->ahiac_BuffSamples;
+      #else
+      writeReg(ahi_data->hw_addr, REG_ZZ_AUDIO_SCALE, AudioCtrl->ahiac_BuffSamples);
+      #endif
 
       // def. the faster way
       CopyMem((void*)ahi_data->audio_buf_addr, (void*)ahi_data->audio_hw_buf_addr + buf_offset, bytes);
       // byteswap, resample and play buffer
+      #if 0
       *((volatile uint16_t*)(ahi_data->hw_addr+REG_ZZ_AUDIO_SWAB)) = buf_offset>>8; // (/256)
       overrun = *((volatile uint16_t*)(ahi_data->hw_addr+REG_ZZ_AUDIO_SWAB));
+      #else
+      writeReg(ahi_data->hw_addr, REG_ZZ_AUDIO_SWAB, buf_offset>>8);
+      overrun = readReg(ahi_data->hw_addr, REG_ZZ_AUDIO_SWAB);
+      #endif
 #endif
 
       if (overrun == 1) {
@@ -267,7 +322,8 @@ void WorkerProcess() {
   // Multitaking will resume at exit
 }
 
-uint32_t dev_isr(struct z9ax* data asm("a1")) {
+// TW: C interrupt service routine called by ASM wrapper.
+void cdev_isr(struct z9ax* data asm("a1")) {
   USHORT status = *(USHORT*)(data->hw_addr+REG_ZZ_CONFIG);
 
   // audio interrupt signal set?
@@ -275,23 +331,21 @@ uint32_t dev_isr(struct z9ax* data asm("a1")) {
     // ack/clear audio interrupt
     *(USHORT*)(data->hw_addr+REG_ZZ_CONFIG) = 8|32;
 
-    if (data->worker_process && !data->disable_cnt) {
+    if(data->disable_cnt) return;
+    if(data->worker_process && !data->disable_cnt) {
       Signal((struct Task*)data->worker_process, 1L<<data->enable_signal);
     }
   }
-
-  if (status == 2) {
-    return 1;
-  } else {
-    return 0;
-  }
 }
+
+// TW: dev_isr is now an external asm wrapper.
+extern uint32_t dev_isr(struct z9ax* data asm("a1"));
 
 void init_interrupt(struct z9ax* ahi_data) {
   struct Interrupt* irq = &ahi_data->irq;
 
   irq->is_Node.ln_Type = NT_INTERRUPT;
-  irq->is_Node.ln_Pri = -60;
+  irq->is_Node.ln_Pri = 126; // TW: High priority interrupt server because it needs to react quickly.
   irq->is_Node.ln_Name = "ZZ9000AX";
   irq->is_Data = ahi_data;
   irq->is_Code = (void*)dev_isr;
@@ -306,9 +360,15 @@ void init_interrupt(struct z9ax* ahi_data) {
 
 #ifdef REAL_HARDWARE
   // enable HW interrupt
+  #if 0
   USHORT hw_config = *(USHORT*)(ahi_data->hw_addr+REG_ZZ_AUDIO_CONFIG);
   hw_config |= 1;
   *(volatile USHORT*)(ahi_data->hw_addr+REG_ZZ_AUDIO_CONFIG) = hw_config;
+  #else
+  USHORT hw_config = readReg(ahi_data->hw_addr, REG_ZZ_AUDIO_CONFIG);
+  hw_config |= 1;
+  writeReg(ahi_data->hw_addr, REG_ZZ_AUDIO_CONFIG, hw_config);
+  #endif
 #endif
 }
 
@@ -317,7 +377,11 @@ void destroy_interrupt(struct z9ax* ahi_data) {
 
 #ifdef REAL_HARDWARE
   // disable HW interrupt
+  #if 0
   *(volatile USHORT*)(ahi_data->hw_addr+REG_ZZ_AUDIO_CONFIG) = 0;
+  #else
+  writeReg(ahi_data->hw_addr, REG_ZZ_AUDIO_CONFIG, 0);
+  #endif
 #endif
 
   Forbid();
@@ -327,46 +391,13 @@ void destroy_interrupt(struct z9ax* ahi_data) {
 
 static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagList asm("a1"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2"))
 {
-  SysBase = *(struct ExecBase**)4L;
+  // TW: Just take the values from where init() has already stored them.
+  uint32_t hw_addr = Z9AXBase->hw_addr;
+  int zorro = Z9AXBase->zorro_version;
+  if(!hw_addr) return AHIE_UNKNOWN;
+  if(!zorro) return AHIE_UNKNOWN;
 
-  if (!DOSBase) {
-    DOSBase = (struct DosLibrary*)OpenLibrary((STRPTR)"dos.library",37);
-  }
-  if (!UtilityBase) {
-    // needed for CallHookPkt
-    UtilityBase = (struct UtilityBase*)OpenLibrary((STRPTR)"utility.library",37);
-  }
-
-  struct ConfigDev* cd;
-  uint32_t hw_addr = 0;
-  int zorro = 0;
-
-  if ((ExpansionBase = (struct ExpansionBase*) OpenLibrary((STRPTR)"expansion.library", 0)) ) {
-    // Find Z2 or Z3 model of MNT ZZ9000
-    // TODO: query for ZZ9000AX
-    if ((cd = (struct ConfigDev*)FindConfigDev(cd,0x6d6e,0x4))) {
-      // ZORRO 3
-      zorro = 3;
-      hw_addr = (uint32_t)cd->cd_BoardAddr;
-    }
-    else if ((cd = (struct ConfigDev*)FindConfigDev(cd,0x6d6e,0x3))) {
-      // ZORRO 2
-      zorro = 2;
-      hw_addr = (uint32_t)cd->cd_BoardAddr;
-    } else {
-      // hardware not found
-      CloseLibrary((struct Library *)ExpansionBase);
-      CloseLibrary((struct Library *)UtilityBase);
-      CloseLibrary((struct Library *)DOSBase);
-      return AHIE_UNKNOWN;
-    }
-  } else {
-    CloseLibrary((struct Library *)UtilityBase);
-    CloseLibrary((struct Library *)DOSBase);
-    return AHIE_UNKNOWN;
-  }
-
-  int ax_present = *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_CONFIG));
+  int ax_present = readReg(hw_addr, REG_ZZ_AUDIO_CONFIG);
   if (!ax_present) {
     char *alert = "\x00\x14\x14ZZ9000AX not detected. AHI driver will exit.\x00\x00";
     if (!IntuitionBase) {
@@ -397,32 +428,22 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
 
     Forbid();
     // set tx buffer address to 1920 kB offset
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 0;
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = 0x001d;
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 1;
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = 0x0000;
+    writeAudioParam(hw_addr, 0, 0x001d);
+    writeAudioParam(hw_addr, 1, 0x0000);
     // set rx buffer address to 1920 kB offset
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 2;
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = 0x001e;
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 3;
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = 0x0000;
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 0;
+    writeAudioParam(hw_addr, 2, 0x001e);
+    writeAudioParam(hw_addr, 3, 0x0000);
     Permit();
   } else if (zorro == 3) {
     ahi_data->audio_hw_buf_addr = hw_addr + 0x10000 + 0x03f00000;
 
     Forbid();
     // set tx buffer address to 127 MB offset
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 0;
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = 0x03f0;
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 1;
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = 0x0000;
+    writeAudioParam(hw_addr, 0, 0x03f0);
+    writeAudioParam(hw_addr, 1, 0x0000);
     // set rx buffer address to 127 MB offset
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 2;
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = 0x03f2;
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 3;
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = 0x0000;
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 0;
+    writeAudioParam(hw_addr, 2, 0x03f2);
+    writeAudioParam(hw_addr, 3, 0x0000);
     Permit();
   }
 
@@ -485,19 +506,20 @@ static void __attribute__((used)) intAHIsub_FreeAudio(struct AHIAudioCtrlDrv *Au
   }
 }
 
+// TW: Prepared Stop() and Start() to store status in a flag in z9ax.
 static uint32_t __attribute__((used)) intAHIsub_Stop(uint32_t Flags asm("d0"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
+  struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
   if (Flags & AHISF_PLAY) {
-    //suspend_playback = 1;
+    ahi_data->play_start = 1;
   }
 
   return AHIE_OK;
 }
 
 static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
-  intAHIsub_Stop(flags, AudioCtrl);
-
+  struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
   if (flags & AHISF_PLAY) {
-    //suspend_playback = 0;
+    ahi_data->play_start = 0;
   }
 
   return AHIE_OK;
@@ -507,14 +529,15 @@ static int32_t __attribute__((used)) intAHIsub_GetAttr(uint32_t attr_ asm("d0"),
   uint32_t attr = attr_;
   int32_t arg = arg_, def = def_;
 
-  struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
+  // TW: We can't rely on AudioCtrl->ahiac_DriverData being valid during this function call!
 
   switch(attr)
     {
     case AHIDB_Bits:
       return 16;
     case AHIDB_Frequencies:
-      if (ahi_data->zorro_version == 2) {
+      // TW: Take zorro version from z9ax_base because DriverData might still be uninitialized when this function is called.
+      if (Z9AXBase->zorro_version == 2) {
         return ZZ_NUM_FREQS_Z2;
       } else {
         return ZZ_NUM_FREQS_Z3;
@@ -593,7 +616,8 @@ static uint32_t __attribute__((used)) intAHIsub_UnloadSound(uint16_t sound asm("
   return AHIS_UNKNOWN;
 }
 
-static void __attribute__((used)) intAHIsub_Enable(struct AHIAudioCtrlDrv *AudioCtrl asm("a2"))
+// TW: C routines called by ASM wrappers which preserve all registers.
+void __attribute__((used)) cintAHIsub_Enable(struct AHIAudioCtrlDrv *AudioCtrl asm("a2"))
 {
   struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
   if (ahi_data->disable_cnt > 0) {
@@ -601,7 +625,7 @@ static void __attribute__((used)) intAHIsub_Enable(struct AHIAudioCtrlDrv *Audio
   }
 }
 
-static void __attribute__((used)) intAHIsub_Disable(struct AHIAudioCtrlDrv *AudioCtrl asm("a2"))
+void __attribute__((used)) cintAHIsub_Disable(struct AHIAudioCtrlDrv *AudioCtrl asm("a2"))
 {
   struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
   ahi_data->disable_cnt++;
@@ -625,6 +649,9 @@ static uint32_t __attribute__((used)) intAHIsub_SetSound(uint16_t channel asm("d
 {
   return AHIS_UNKNOWN;
 }
+
+extern void __attribute__((used)) intAHIsub_Enable(struct AHIAudioCtrlDrv *AudioCtrl asm("a2"));
+extern void __attribute__((used)) intAHIsub_Disable(struct AHIAudioCtrlDrv *AudioCtrl asm("a2"));
 
 static uint32_t function_table[] = {
   (uint32_t)open,
@@ -653,7 +680,7 @@ static uint32_t function_table[] = {
 };
 
 const uint32_t auto_init_tables[4] = {
-  sizeof(struct z9ax),
+  sizeof(struct z9ax_base), // TW: This is the size of z9ax_base, not the size of the driver data.
   (uint32_t)function_table,
   0,
   (uint32_t)init,
