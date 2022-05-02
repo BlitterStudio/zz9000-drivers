@@ -287,9 +287,9 @@ __saveds LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
               ok = 1;
 
               // enable HW interrupt
-              USHORT hw_config = *(volatile USHORT*)(ZZ9K_REGS+0x04);
-              hw_config |= 1;
-              *(volatile USHORT*)(ZZ9K_REGS+0x04) = hw_config;
+              //USHORT hw_config = *(volatile USHORT*)(ZZ9K_REGS+0x04);
+              //hw_config |= 1;
+              *(volatile USHORT*)(ZZ9K_REGS+0x04) = 1;
 
               D(("ZZ9000Net: ZZ interrupt enabled\n"));
             } else {

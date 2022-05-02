@@ -424,26 +424,40 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
 
   ahi_data->hw_addr = hw_addr;
   if (zorro == 2) {
-    ahi_data->audio_hw_buf_addr = hw_addr + 0x10000 + 0x001d0000;
+    uint32_t offset_tx = 0x001c0000;
+    uint32_t offset_rx = 0x001e0000;
+    ahi_data->audio_hw_buf_addr = hw_addr + 0x10000 + offset_tx;
 
     Forbid();
     // set tx buffer address to 1920 kB offset
-    writeAudioParam(hw_addr, 0, 0x001d);
-    writeAudioParam(hw_addr, 1, 0x0000);
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 0;
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = offset_tx>>16;
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 1;
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = offset_tx&0xffff;
     // set rx buffer address to 1920 kB offset
-    writeAudioParam(hw_addr, 2, 0x001e);
-    writeAudioParam(hw_addr, 3, 0x0000);
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 2;
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = offset_rx>>16;
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 3;
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = offset_rx&0xffff;
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 0;
     Permit();
   } else if (zorro == 3) {
-    ahi_data->audio_hw_buf_addr = hw_addr + 0x10000 + 0x03f00000;
+    uint32_t offset_tx = 0x03f00000;
+    uint32_t offset_rx = 0x03f20000;
+    ahi_data->audio_hw_buf_addr = hw_addr + 0x10000 + offset_tx;
 
     Forbid();
     // set tx buffer address to 127 MB offset
-    writeAudioParam(hw_addr, 0, 0x03f0);
-    writeAudioParam(hw_addr, 1, 0x0000);
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 0;
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = offset_tx>>16;
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 1;
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = offset_tx&0xffff;
     // set rx buffer address to 127 MB offset
-    writeAudioParam(hw_addr, 2, 0x03f2);
-    writeAudioParam(hw_addr, 3, 0x0000);
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 2;
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = offset_rx;
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 3;
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = offset_rx&0xffff;
+    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 0;
     Permit();
   }
 
