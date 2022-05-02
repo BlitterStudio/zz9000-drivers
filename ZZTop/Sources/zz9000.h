@@ -40,7 +40,7 @@ enum zz_reg_offsets {
   REG_ZZ_PAN_HI         = 0x0A,
   REG_ZZ_PAN_LO         = 0x0C,
   REG_ZZ_VCAP_MODE      = 0x0E,
-  
+
   REG_ZZ_X1             = 0x10,
   REG_ZZ_Y1             = 0x12,
   REG_ZZ_X2             = 0x14,
@@ -98,8 +98,8 @@ enum zz_reg_offsets {
   REG_ZZ_UNUSED_REG70   = 0x70,
   REG_ZZ_UNUSED_REG72   = 0x72,
   REG_ZZ_UNUSED_REG74   = 0x74,
-  REG_ZZ_UNUSED_REG76   = 0x76,
-  REG_ZZ_UNUSED_REG78   = 0x78,
+  REG_ZZ_AUDIO_PARAM    = 0x76,
+  REG_ZZ_AUDIO_VAL      = 0x78,
   REG_ZZ_UNUSED_REG7A   = 0x7A,
   REG_ZZ_UNUSED_REG7C   = 0x7C,
   REG_ZZ_UNUSED_REG7E   = 0x7E,
@@ -169,7 +169,7 @@ enum zz_reg_offsets {
 
   REG_ZZ_UNUSED_REGF0   = 0xF0,
   REG_ZZ_UNUSED_REGF2   = 0xF2,
-  REG_ZZ_UNUSED_REGF4   = 0xF4,
+  REG_ZZ_AUDIO_CONFIG   = 0xF4,
   REG_ZZ_UNUSED_REGF6   = 0xF6,
   REG_ZZ_UNUSED_REGF8   = 0xF8,
   REG_ZZ_UNUSED_REGFA   = 0xFA,
