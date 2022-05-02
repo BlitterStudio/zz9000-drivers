@@ -26,6 +26,7 @@
 #include <clib/timer_protos.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "zz9000.h"
 
@@ -39,7 +40,7 @@ struct Gadget *gads[8];
 //#define MYGAD_BTN_REFRESH	(5)
 #define MYGAD_BTN_TEST		(5)
 
-struct TextAttr Topaz80 = { "topaz.font", 8, 0, 0, };
+struct TextAttr Topaz80 = { (STRPTR)"topaz.font", 8, 0, 0, };
 
 struct Library* IntuitionBase;
 struct Library* GfxBase;
@@ -56,7 +57,7 @@ struct timerequest * timerio;
 struct MsgPort *timerport;
 struct Library *TimerBase;
 
-void errorMessage(STRPTR error)
+void errorMessage(char* error)
 {
 	if (error) printf("Error: %s\n", error);
 }
@@ -173,7 +174,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 	ng.ng_TopEdge    = 90+topborder+20+20;
 	ng.ng_Width      = 100;
 	ng.ng_Height     = 14;
-	ng.ng_GadgetText = "Bus Test";
+	ng.ng_GadgetText = (STRPTR)"Bus Test";
 	ng.ng_TextAttr   = &Topaz80;
 	ng.ng_VisualInfo = vi;
 	ng.ng_GadgetID   = MYGAD_BTN_TEST;
@@ -192,7 +193,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 	ng.ng_LeftEdge	= 160;
 	ng.ng_TopEdge	= 20+topborder;
 	ng.ng_GadgetID	= MYGAD_ZORROVER;
-	ng.ng_GadgetText = "Zorro Version";
+	ng.ng_GadgetText = (STRPTR)"Zorro Version";
 
 	gads[MYGAD_ZORROVER] = gad = CreateGadget(INTEGER_KIND, gad, &ng,
                     GTIN_Number, 0,
@@ -200,7 +201,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
 	ng.ng_TopEdge	= 40+topborder;
 	ng.ng_GadgetID	= MYGAD_FWVER;
-	ng.ng_GadgetText = "Firmware Version";
+	ng.ng_GadgetText = (STRPTR)"Firmware Version";
 
 	gads[MYGAD_FWVER] = gad = CreateGadget(STRING_KIND, gad, &ng,
                     GTST_String, "",
@@ -208,7 +209,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
 	ng.ng_TopEdge	= 60+topborder;
 	ng.ng_GadgetID	= MYGAD_TEMP;
-	ng.ng_GadgetText = "Core °C";
+	ng.ng_GadgetText = (STRPTR)"Core °C";
 
 	gads[MYGAD_TEMP] = gad = CreateGadget(STRING_KIND, gad, &ng,
                     GTST_String, "",
@@ -216,7 +217,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
 	ng.ng_TopEdge	= 80+topborder;
 	ng.ng_GadgetID	= MYGAD_VAUX;
-	ng.ng_GadgetText = "Aux Voltage V";
+	ng.ng_GadgetText = (STRPTR)"Aux Voltage V";
 
 	gads[MYGAD_VAUX] = gad = CreateGadget(STRING_KIND, gad, &ng,
                     GTST_String, "",
@@ -224,7 +225,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
 	ng.ng_TopEdge	= 100+topborder;
 	ng.ng_GadgetID	= MYGAD_VINT;
-	ng.ng_GadgetText = "Core Voltage V";
+	ng.ng_GadgetText = (STRPTR)"Core Voltage V";
 
 	gads[MYGAD_VINT] = gad = CreateGadget(STRING_KIND, gad, &ng,
                     GTST_String, "",
@@ -370,10 +371,10 @@ VOID gadtoolsWindow(VOID) {
 	}
 }
 
-void main(void) {
-	if (!(ExpansionBase = (struct Library*)OpenLibrary("expansion.library",0L))) {
+int main(void) {
+	if (!(ExpansionBase = (struct Library*)OpenLibrary((CONST_STRPTR)"expansion.library",0L))) {
 		errorMessage("Requires expansion.library");
-		return;
+		return 0;
 	}
 
 	zz_cd = (struct ConfigDev*)FindConfigDev(zz_cd,0x6d6e,0x3);
@@ -386,21 +387,21 @@ void main(void) {
 			zorro_version = 3;
 		} else {
 			errorMessage("MNT ZZ9000 not found.\n");
-			return;
+			return 0;
 		}
 	}
 
 	zz_regs = (UBYTE*)zz_cd->cd_BoardAddr;
 	CloseLibrary(ExpansionBase);
 
-	if (NULL == (IntuitionBase = OpenLibrary("intuition.library", 37)))
-		errorMessage( "Requires V37 intuition.library");
+	if (NULL == (IntuitionBase = OpenLibrary((CONST_STRPTR)"intuition.library", 37)))
+		errorMessage("Requires V37 intuition.library");
 	else {
-		if (NULL == (GfxBase = OpenLibrary("graphics.library", 37)))
-			errorMessage( "Requires V37 graphics.library");
+		if (NULL == (GfxBase = OpenLibrary((CONST_STRPTR)"graphics.library", 37)))
+			errorMessage("Requires V37 graphics.library");
 		else {
-			if (NULL == (GadToolsBase = OpenLibrary("gadtools.library", 37)))
-				errorMessage( "Requires V37 gadtools.library");
+			if (NULL == (GadToolsBase = OpenLibrary((CONST_STRPTR)"gadtools.library", 37)))
+				errorMessage("Requires V37 gadtools.library");
 			else {
 				gadtoolsWindow();
 				CloseLibrary(GadToolsBase);
@@ -410,5 +411,5 @@ void main(void) {
 		CloseLibrary(IntuitionBase);
 	}
 
-	return;
+	return 0;
 }
