@@ -250,34 +250,10 @@ ULONG zz_perform_memtest_rand(uint32_t offset, int rep)
 	return errors;
 }
 
-ULONG zz_perform_memtest_delaywrites() {
-	volatile uint16_t* d1 = (volatile uint16_t*)(zz_cd->cd_BoardAddr+0x8c);
-	volatile uint16_t* d2 = (volatile uint16_t*)(zz_cd->cd_BoardAddr+0x8e);
-	volatile uint16_t* fclr = (volatile uint16_t*)(zz_cd->cd_BoardAddr+0x1034);
-	volatile uint32_t* fres = (volatile uint32_t*)(zz_cd->cd_BoardAddr+0x1030);
-
-	uint16_t rounds = 0xffff;
-
-	printf("zz_perform_memtest_delaywrites...\n");
-
-	// set delay to 0
-	*d1 = 0;
-
-	// clear counter
-	*fclr = 1;
-
-	for (int i = 0; i < rounds; i++) {
-		*d2 = i;
-	}
-	printf("Done. Result: 0x%lx (should be: 0x%x)\n", *fres, rounds);
-
-	return 0;
-}
-
 ULONG zz_perform_memtest_fpgareg() {
 	volatile uint16_t* d1 = (volatile uint16_t*)(zz_cd->cd_BoardAddr+0x1030);
 	volatile uint16_t* d2 = (volatile uint16_t*)(zz_cd->cd_BoardAddr+0x1034);
-	volatile uint32_t* dr = (volatile uint32_t*)(zz_cd->cd_BoardAddr+0x1030);
+	volatile uint16_t* dr = (volatile uint16_t*)(zz_cd->cd_BoardAddr+0x1030);
 
 	printf("zz_perform_memtest_fpgareg...\n");
 
@@ -295,8 +271,7 @@ ULONG zz_perform_memtest_multi() {
 	uint32_t offset = 0x100000;
 	zz_perform_memtest(offset);
 	zz_perform_memtest_rand(offset, 1024);
-	zz_perform_memtest_delaywrites();
-	zz_perform_memtest_fpgareg();
+	//zz_perform_memtest_fpgareg();
 
 	return 0;
 }
@@ -402,8 +377,8 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
 	gads[MYGAD_LPF] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
 										GTSL_Min, 0,
-										GTSL_Max, 24000,
-										GTSL_Level, 24000,
+										GTSL_Max, 23900,
+										GTSL_Level, 23900,
 										GTSL_LevelFormat, "%ld Hz",
 										GTSL_MaxLevelLen, 10,
 										GTSL_LevelPlace, PLACETEXT_BELOW,
@@ -446,7 +421,7 @@ VOID process_window_events(struct Window *mywin)
 	SendIO((struct IORequest *) timerio);*/
 
 	while (!terminated) {
-		Wait ((1U << mywin->UserPort->mp_SigBit)) // | (1U << timerport->mp_SigBit) );
+		Wait ((1U << mywin->UserPort->mp_SigBit)); // | (1U << timerport->mp_SigBit) );
 
 		/*if ((!terminated) && (1U << timerport->mp_SigBit)) {
 			refresh_zz_info(mywin);
