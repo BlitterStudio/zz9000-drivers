@@ -17,6 +17,7 @@
 #include <dos/dosextens.h>
 #include <dos/dostags.h>
 #include <utility/hooks.h>
+#include <hardware/intbits.h>
 
 #include <clib/alib_protos.h>
 #include <proto/exec.h>
@@ -28,14 +29,14 @@
 #include <math.h>
 #include <limits.h>
 
-static const char version[] = "$VER: axmp3 1.0\n\r";
+#define DEVF_INT2MODE 1
+
+static const char version[] = "$VER: axmp3 1.11\n\r";
 static const char procname[] = "axmp3";
 
 #define ZZ_BYTES_PER_PERIOD 3840
 #define AUDIO_BUFSZ ZZ_BYTES_PER_PERIOD*8 // TODO: query from hardware
 #define WORKER_PRIORITY 127 // 19 would be nicer
-#define INTB_EXTER (13)     // External interrupt
-#define INTB_VERTB (5)
 
 #define REG_ZZ_CONFIG        0x04
 #define REG_ZZ_AUDIO_SWAB    0x70
@@ -52,7 +53,6 @@ struct z9ax {
   struct Process *worker_process;
   struct Interrupt irq;
   uint32_t hw_addr;
-  uint32_t audio_hw_buf_addr;
   int8_t mainproc_signal;
   int8_t enable_signal;
   int8_t worker_signal;
@@ -63,6 +63,8 @@ struct z9ax {
   uint32_t encoded_offset;
   uint32_t decode_offset;
   uint32_t decode_chunk_sz;
+
+  uint8_t flags;
 };
 
 void WorkerProcess()
@@ -150,13 +152,15 @@ void init_interrupt(struct z9ax* ax) {
   ax->irq.is_Code = (void*)dev_isr;
 
   Forbid();
-  AddIntServer(INTB_EXTER, &ax->irq);
+  if (ax->flags & DEVF_INT2MODE) {
+    AddIntServer(INTB_PORTS, &ax->irq);
+  } else {
+    AddIntServer(INTB_EXTER, &ax->irq);
+  }
   Permit();
 
   // enable HW interrupt
-  USHORT hw_config = *(USHORT*)(ax->hw_addr + REG_ZZ_AUDIO_CONFIG);
-  hw_config |= 1;
-  *(volatile USHORT*)(ax->hw_addr + REG_ZZ_AUDIO_CONFIG) = hw_config;
+  *(volatile USHORT*)(ax->hw_addr + REG_ZZ_AUDIO_CONFIG) = 1;
 }
 
 void destroy_interrupt(struct z9ax* ax) {
@@ -164,7 +168,11 @@ void destroy_interrupt(struct z9ax* ax) {
   *(volatile USHORT*)(ax->hw_addr + REG_ZZ_AUDIO_CONFIG) = 0;
 
   Forbid();
-  RemIntServer(INTB_EXTER, &ax->irq);
+  if (ax->flags & DEVF_INT2MODE) {
+    RemIntServer(INTB_PORTS, &ax->irq);
+  } else {
+    RemIntServer(INTB_EXTER, &ax->irq);
+  }
   Permit();
 }
 
@@ -217,13 +225,28 @@ int main(int argc, char* argv[]) {
 
   glob_ax.hw_addr = hw_addr;
   glob_ax.zorro_version = zorro;
-  glob_ax.encoded_offset = 0x100000;
-  glob_ax.decode_offset = 0x03f00000;
+  if (zorro == 3) {
+    glob_ax.encoded_offset = 0x06000000;
+  } else {
+    glob_ax.encoded_offset = 0x100000;
+  }
+  glob_ax.decode_offset  = 0x07000000;
   glob_ax.decode_chunk_sz = 1920; // 16 bit sample pairs
 
   if (argc != 2) {
     fprintf(stderr, "Usage: %s soundfile.mp3\n", argv[0]);
     return RETURN_ERROR;
+  }
+
+  glob_ax.flags = 0;
+
+  BPTR fh;
+  if ((fh=Open((CONST_STRPTR)"ENV:ZZ9K_INT2",MODE_OLDFILE))) {
+    printf("Using INT2 mode.\n");
+    Close(fh);
+    glob_ax.flags |= DEVF_INT2MODE;
+  } else {
+    printf("Using INT6 mode (default).\n");
   }
 
   mp3_file = fopen(argv[1], "rb");
@@ -248,13 +271,16 @@ int main(int argc, char* argv[]) {
 
   fprintf(stderr, "Playing...\n");
 
-  glob_ax.audio_hw_buf_addr = hw_addr + 0x10000 + 0x03f00000;
-
   // set tx buffer address to 127 MB offset
   *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 0;
   *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = glob_ax.decode_offset>>16;
   *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 1;
   *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = glob_ax.decode_offset&0xffff;
+
+  // set LPF to 20KHz
+  *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 9;
+  *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = 20000;
+  *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 0;
 
   // set decoder params
   *((volatile uint16_t*)(hw_addr+REG_ZZ_DECODER_PARAM)) = 0;
