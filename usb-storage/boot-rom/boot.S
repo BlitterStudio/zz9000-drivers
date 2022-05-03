@@ -49,26 +49,23 @@ a3: configdev (i.e. 00004858)
   lea configdev(pc), a3
   move.l a3, (a1)
 
-  lea saddrs(pc), a6
-  jsr puts
+  //lea saddrs(pc), a6
+  //jsr puts
 
-  move.l a0, d0
-  jsr puthex
-
-  move.l a3, d0
-  jsr puthex
-
-  move.l a2, d0
-  jsr puthex
-
-  move.l (a2), d0
-  jsr puthex
-  move.l 4(a2), d0
-  jsr puthex
-  move.l 8(a2), d0
-  jsr puthex
-  move.l 12(a2), d0
-  jsr puthex
+  //move.l a0, d0
+  //jsr puthex
+  //move.l a3, d0
+  //jsr puthex
+  //move.l a2, d0
+  //jsr puthex
+  //move.l (a2), d0
+  //jsr puthex
+  //move.l 4(a2), d0
+  //jsr puthex
+  //move.l 8(a2), d0
+  //jsr puthex
+  //move.l 12(a2), d0
+  //jsr puthex
 
   // zzusb.device is at loadaddr + 0x400
   lea RomTagCopy, a5
@@ -80,22 +77,22 @@ a3: configdev (i.e. 00004858)
 
   add.l #0x400, a2
   move.l a2, d0
-  jsr puthex
+  //jsr puthex
 
   move.l a2, a0
   jsr relocatehunk
 
-  jsr puthex // segment 0
+  //jsr puthex // segment 0
 
   move.l d0, d7
-  move.l (d7), d0 // 00000a10 (size)
-  jsr puthex
-  move.l 4(d7), d0 // 07800098 (next?)
-  jsr puthex
+  //move.l (d7), d0 // 00000a10 (size)
+  //jsr puthex
+  //move.l 4(d7), d0 // 07800098 (next?)
+  //jsr puthex
 
   // romtag here
-  lea debromtag, a6
-  jsr puts
+  //lea debromtag, a6
+  //jsr puts
 
   // create our romtag copy from the romtag
   // that is in the device itself
@@ -103,26 +100,27 @@ a3: configdev (i.e. 00004858)
   // won't find it for some reason
   lea RomTagCopy, a4
 
-  move.l 8(d7), d0
-  jsr puthex
-  move.l 10(d7), d0
-  jsr puthex
+  //move.l 8(d7), d0
+  //jsr puthex
+  //move.l 10(d7), d0
+  //jsr puthex
+
   move.l 14(d7), d0
   //
   move.l d0, 6(a4)
-  jsr puthex
+  //jsr puthex
   move.l 18(d7), d0
   move.l d0, 10(a4)
-  jsr puthex
+  //jsr puthex
   move.l 22(d7), d0
   move.l d0, 14(a4)
-  jsr puthex
+  //jsr puthex
   move.l 26(d7), d0
   move.l d0, 18(a4)
-  jsr puthex
+  //jsr puthex
   move.l 30(d7), d0
   move.l d0, 22(a4)
-  jsr puthex
+  //jsr puthex
 
   /*
 romtag
@@ -227,8 +225,8 @@ relocatehunk:
   move.l  d2,d4 // [d2] number of hunks
 
 .alloc:
-  lea deballoc, a6
-  jsr puts
+  //lea deballoc, a6
+  //jsr puts
 
   move.l  -4(a2,d4.l),d0  // d4 = index of current hunk, a2 = where we are in the file
   rol.l   #2,d0           // [d0] hunk size, bit(1) FAST, bit(0) CHIP
@@ -236,7 +234,7 @@ relocatehunk:
   and.l   d0,d1
   and.w   #-4,d0 // remove bits 1:0? isn't this too late?
   addq.l  #SEG_SIZE,d0 // plus header size
-  jsr puthex // trace
+  //jsr puthex // trace
 
   move.l  d0,d3
   add.l  #MEMF_CLEAR,d1
@@ -245,7 +243,7 @@ relocatehunk:
 
   // size is in d0
   // we get the pointer in d0
-  jsr puthex // trace
+  // jsr puthex // trace
 
   move.l  d0,-4(sp,d4.l)
   move.l  d0,a0
@@ -255,8 +253,8 @@ relocatehunk:
   move.l  (sp,d4.l),SEG_NEXT(a0)
 
 .first:
-  lea debfirst, a6
-  jsr puts
+  //lea debfirst, a6
+  //jsr puts
 
   subq.l  #4,d4
   bgt     .alloc
@@ -268,8 +266,8 @@ relocatehunk:
   move.l  d2,d4
 
 .parse:
-  lea debparse, a6
-  jsr puts
+  //lea debparse, a6
+  //jsr puts
 
   move.w  (a2)+,d0        // should always read zero
   add.w   (a2)+,d0        // hunk type
@@ -290,8 +288,8 @@ relocatehunk:
   bra     .error
 
 .hdata:
-  lea debhdata, a6
-  jsr puts
+  //lea debhdata, a6
+  //jsr puts
 
   move.l  (a3),a1
   add.w   #SEG_START,a1
@@ -304,15 +302,15 @@ relocatehunk:
   bra     .parse
 
 .hbss:
-  lea debhbss, a6
-  jsr puts
+  //lea debhbss, a6
+  //jsr puts
 
   addq.l  #4,a2           // skip bss length
   bra     .parse
 
 .hsyms:
-  lea debhsyms, a6
-  jsr puts
+  //lea debhsyms, a6
+  //jsr puts
 
   move.l  (a2)+,d0
   beq     .parse
@@ -322,8 +320,8 @@ relocatehunk:
   bra     .hsyms
 
 .hreloc:
-  lea debhreloc, a6
-  jsr puts
+  //lea debhreloc, a6
+  //jsr puts
 
   move.l  (a2)+,d3        // number of relocations
   beq     .parse          // done (zero)
@@ -333,34 +331,34 @@ relocatehunk:
   addq.l  #SEG_START,d0   // [d0] referenced hunk data address
   move.l  (a3),a1         // pointer to reloc table?!
 
-  move.l d0,d7
-  jsr puthex // print d0 = target segment
-  move.l a1,d0
-  jsr puthex // print a1 = relocation table in this segment
-  move.l d7,d0
+  //move.l d0,d7
+  //jsr puthex // print d0 = target segment
+  //move.l a1,d0
+  //jsr puthex // print a1 = relocation table in this segment
+  //move.l d7,d0
 
 .reloc:
   move.l  (a2)+,d1
   add.l   d0,SEG_START(a1,d1.l)
 
-  move.l d0,d7
-  move.l d1,d0
-  jsr puthex // print d1 = offset of relocation in patch table
-  move.l a1, d0
-  add.l d1, d0
-  add.l SEG_START, d0
-  jsr puthex // print modified address
-  move.l SEG_START(a1,d1.l), d0
-  jsr puthex // print modified data
-  move.l d7,d0
+  //move.l d0,d7
+  //move.l d1,d0
+  //jsr puthex // print d1 = offset of relocation in patch table
+  //move.l a1, d0
+  //add.l d1, d0
+  //add.l SEG_START, d0
+  //jsr puthex // print modified address
+  //move.l SEG_START(a1,d1.l), d0
+  //jsr puthex // print modified data
+  //move.l d7,d0
 
   subq.l  #1,d3 // number of relocations--
   bgt     .reloc
   bra     .hreloc
 
 .hend:
-  lea debhend, a6
-  jsr puts
+  //lea debhend, a6
+  //jsr puts
 
   addq.l  #4,a3           // go to next hunk
   subq.l  #4,d4
