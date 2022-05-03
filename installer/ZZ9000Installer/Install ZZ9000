@@ -1,5 +1,5 @@
 
-(if (askbool (prompt "Do you want to install the P96 graphics driver for ZZ9000?")
+(if (askbool (prompt "Do you want to install the P96 graphics driver 1.11 for ZZ9000?")
    (help "")) (
 
 (set #rtgver (getversion "Libs:Picasso96/rtg.library"))
@@ -10,17 +10,26 @@
 (set #zzmonexists (and (exists "Devs:Monitors/ZZ9000.info") (exists "Devs:Monitors/ZZ9000")))
 
 (if (or (not (or #monexists #zzmonexists)) (< #rtgmajor 40))
-        (abort "Please install P96 2.0+ first and select *Altais* as the graphics card.\n\nYou can either use the old shareware version of Picasso96 on Aminet or the updated P96 by Individual Computers. To purchase it, you first have to register at https://icomp.de/shop-icomp/en/register.html, and then login to their shop. P96 will then appear as a product.")
+        (abort "Please install P96 first and select *Altais* as the graphics card.\n\nYou can either use the old shareware version of Picasso96 on Aminet or the new P96 by Individual Computers (recommended!). To purchase it, you first have to register at https://icomp.de/shop-icomp/en/register.html, and then login to their shop. P96 will then appear as a product.")
 )
 
 (message "P96 rtg.library version " #rtgmajor "." #rtgminor " detected. This is fine.")
 
+(if (askbool (prompt "Is this an Amiga 3000/4000?")
+   (help ""))
 (copyfiles 
-   (prompt "Install P96 compatible Graphics Driver")
+   (prompt "Install P96 compatible Graphics Driver (Z3 version)")
    (help "This will install the ZZ9000 graphics card driver for the P96 RTG system, ZZ9000.card.")
    (source "Libs/Picasso96/ZZ9000.card")
    (dest "Libs:Picasso96")
    (confirm))
+(copyfiles 
+   (prompt "Install P96 compatible Graphics Driver (Z2 version)")
+   (help "This will install the ZZ9000 graphics card driver for the P96 RTG system, ZZ9000.card.")
+   (source "Libs/Picasso96/ZZ9000.card.nodma")
+   (dest "Libs:Picasso96")
+   (newname "ZZ9000.card")
+   (confirm)))
 
 (complete 10)
 
@@ -85,15 +94,9 @@
 
 (complete 50)
 
-(if (askbool (prompt "Do you want to install the USB Storage driver for ZZ9000? Warning: It is still in beta. Don't use it to store important data!") (help ""))
-(
-(copyfiles 
-   (prompt "Install ZZ9000USBStorage.device")
-   (help "This will install the disk driver for ZZ9000's USB mass storage functionality.")
-   (source "Devs/ZZ9000USBStorage.device")
-   (dest "Devs:")
-   (confirm))
-))
+(if (exists "Devs:ZZ9000USBStorage.device")
+    (delete "Devs:ZZ9000USBStorage.device" (prompt "Delete obsolete ZZ9000USBStorage.device. The new zzusb.device is now included in ZZ9000's autoboot ROM.")
+        (help "") (infos)))
 
 (complete 60)
 
@@ -102,9 +105,9 @@
 (
 
 (set #mac (askstring 
-   (prompt "Please enter your unique Ethernet MAC address that is printed in your user manual. You just have to adjust the last 2 digits.") 
+   (prompt "Please enter your unique Ethernet MAC address that is printed in your user manual. You just have to adjust the last 6 digits.") 
    (help "If you want to change your MAC address later, edit ENVARC:ZZ9K_MAC") 
-   (default "68:82:f2:00:01:00") ))
+   (default "68:82:f2:01:02:00") ))
 
 (textfile (prompt "Saving your MAC address in ENVARC:ZZ9K_MAC") 
    (help "") (append #mac) (dest "ENVARC:ZZ9K_MAC"))
@@ -129,7 +132,30 @@
    (confirm))
 )))
 
+(complete 80)
+
+(if (askbool (prompt "Do you want to install the AHI audio driver for ZZ9000AX? This requires an existing installation of AHI.") (help ""))
+
+(
+
+(copyfiles 
+   (prompt "Install AHI driver for ZZ9000AX")
+   (help "This will install the audio driver for ZZ9000AX.")
+   (source "Devs/AHI/ZZ9000AX.audio")
+   (infos)
+   (dest "Devs:AHI")
+   (confirm))
+
+(copyfiles 
+   (prompt "Install AHI Audiomode for ZZ9000AX")
+   (help "This will install the AHI Audiomode for ZZ9000AX.")
+   (source "Devs/AudioModes/ZZ9000AX")
+   (infos)
+   (dest "Devs:AudioModes")
+   (confirm))
+))
+
 (complete 100)
 
-(message "That's it! Please reboot and enjoy your MNT ZZ9000.\n\nMake sure to visit https://mntre.com/zz9000 for updates.\n\nIf you need support, please join our IRC channel #mnt-amiga on irc.freenode.net or contact us at zz9000@mntre.com. Thank you!")
+(message "That's it! Please reboot and enjoy your MNT ZZ9000.\n\nMake sure to visit https://mntre.com/zz9000 for updates.\n\nIf you need support, please join our IRC channel #mnt-amiga on irc.libera.chat, visit community.mnt.re or contact us at zz9000@mntre.com. Thank you!")
 
