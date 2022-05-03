@@ -249,8 +249,8 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 	if (zorro_version>=2) {
 
 		b->MemoryBase = (uint8_t*)(cd->cd_BoardAddr)+0x10000;
-		if (zorro_version==2) {
-			b->MemorySize = cd->cd_BoardSize-0x20000;
+		if (zorro_version == 2) {
+			b->MemorySize = cd->cd_BoardSize-0x30000;
 		} else {
 			// 13.8 MB for Z3 (safety, will be expanded later)
 			// one full HD screen @8bit ~ 2MB
