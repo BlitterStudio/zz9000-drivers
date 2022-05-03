@@ -1,3 +1,5 @@
+#define DEVF_INT2MODE 1
+
 // Driver data
 struct z9ax {
   struct Task *t_mainproc;
@@ -16,6 +18,7 @@ struct z9ax {
   uint8_t zorro_version;
   struct AHIAudioCtrlDrv *audioctrl;
   uint16_t play_start;
+  uint8_t flags;
 };
 
 // TW: Driver base includes hardware address and zorro version besides library base.
@@ -23,6 +26,7 @@ struct z9ax {
 struct z9ax_base {
   struct Library ahisub_base;
   uint32_t hw_addr;
+  uint32_t hw_size;
   uint8_t zorro_version;
+  uint8_t flags;
 };
-

@@ -25,6 +25,8 @@
 
 #include <dos/dos.h>
 #include <dos/dostags.h>
+#include <exec/interrupts.h>
+#include <hardware/intbits.h>
 
 #include <proto/exec.h>
 #include <proto/dos.h>
@@ -46,10 +48,10 @@
 #define XSTR(s) STR(s)
 
 #define DEVICE_NAME "zz9000ax.audio"
-#define DEVICE_DATE "(01 Apr 2022)"
-#define DEVICE_ID_STRING "ZZ9000AX " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
+#define DEVICE_DATE "(02 May 2022)"
 #define DEVICE_VERSION 4
-#define DEVICE_REVISION 14
+#define DEVICE_REVISION 18
+#define DEVICE_ID_STRING "ZZ9000AX " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
 #define DEVICE_PRIORITY 0
 
 #define REAL_HARDWARE 1
@@ -57,8 +59,6 @@
 #define ZZ_BYTES_PER_PERIOD 3840
 #define AUDIO_BUFSZ ZZ_BYTES_PER_PERIOD*8 // TODO: query from hardware
 #define WORKER_PRIORITY 127 // TW: High priority because this is time-critical for high-level access.
-#define INTB_EXTER (13)
-#define INTB_VERTB (5)
 
 #define REG_ZZ_CONFIG       0x04
 #define REG_ZZ_AUDIO_SWAB   0x70
@@ -92,49 +92,32 @@ asm("romtag:                                \n"
     "       dc.l    _auto_init_tables       \n"
     "endcode:                               \n");
 
-
-inline void WRITESHORT(uint32_t b) {
-  //kprintf((uint8_t*)"%lx\n",b);
-
-  *((volatile uint16_t*)(0x400000f2)) = b;
-  *((volatile uint16_t*)(0x400000f0)) = 0xa;
-}
-
-inline void WRITELONG(uint32_t b) {
-  //kprintf((uint8_t*)"%lx\n",b);
-
-  *((volatile uint16_t*)(0x400000f2)) = b>>16;
-  *((volatile uint16_t*)(0x400000f2)) = b;
-  *((volatile uint16_t*)(0x400000f0)) = 0xa;
-}
-
 // TW: register access routines for cleaner code.
-inline void writeReg(uint32_t Base, uint16_t Reg, uint16_t Val)
+inline void write_reg(uint32_t base, uint16_t reg, uint16_t val)
 {
-  *((volatile uint16_t*)(Base+Reg)) = Val;
+  *((volatile uint16_t*)(base+reg)) = val;
 }
 
-inline uint16_t readReg(uint32_t Base, uint16_t Reg)
+inline uint16_t read_reg(uint32_t base, uint16_t reg)
 {
-  uint16_t Val;
-  Val = *((volatile uint16_t*)(Base+Reg));
-  return Val;
+  uint16_t val;
+  val = *((volatile uint16_t*)(base+reg));
+  return val;
 }
 
-inline void writeAudioParam(uint32_t Base, uint16_t Param, uint16_t Val)
+inline void write_audio_param(uint32_t base, uint16_t param, uint16_t val)
 {
-  *((volatile uint16_t*)(Base+REG_ZZ_AUDIO_PARAM)) = Param;
-  *((volatile uint16_t*)(Base+REG_ZZ_AUDIO_VAL))   = Val;
-  *((volatile uint16_t*)(Base+REG_ZZ_AUDIO_PARAM)) = 0;
+  *((volatile uint16_t*)(base+REG_ZZ_AUDIO_PARAM)) = param;
+  *((volatile uint16_t*)(base+REG_ZZ_AUDIO_VAL))   = val;
+  *((volatile uint16_t*)(base+REG_ZZ_AUDIO_PARAM)) = 0;
 }
 
 const char device_name[] = DEVICE_NAME;
 const char device_id_string[] = DEVICE_ID_STRING;
 
-#define ZZ_NUM_FREQS_Z3 6
-#define ZZ_NUM_FREQS_Z2 4 // FIXME: Z2 too slow for > 24kHz
+#define ZZ_NUM_FREQS 6
 
-const uint16_t freqs[] = {
+const uint16_t freqs[ZZ_NUM_FREQS] = {
   8000,
   12000,
   24000,
@@ -146,40 +129,53 @@ const uint16_t freqs[] = {
 // REMEMBER: never use global variables (except const!)
 // they are not initialized properly and will corrupt AHI code/data
 
-//#define debugmsg(v) WRITESHORT(v)
 #define debugmsg(v) while(0) {};
 
-static uint32_t __attribute__((used)) init (BPTR seg_list asm("a0"), struct Library *dev asm("d0"))
+static uint32_t __attribute__((used)) init(BPTR seg_list asm("a0"), struct Library *dev asm("d0"))
 {
   struct ConfigDev* cd;
 
   SysBase = *(struct ExecBase **)4L;
   Z9AXBase = (struct z9ax_base*)dev;
 
-  if(!(DOSBase = (struct DosLibrary *)OpenLibrary((STRPTR)"dos.library",0)))
+  if (!(DOSBase = (struct DosLibrary *)OpenLibrary((STRPTR)"dos.library",0)))
     return 0;
 
-  if(!(UtilityBase = (struct UtilityBase *)OpenLibrary((STRPTR)"utility.library",0)))
+  if (!(UtilityBase = (struct UtilityBase *)OpenLibrary((STRPTR)"utility.library",0)))
     return 0;
 
-  if(!(ExpansionBase = (struct ExpansionBase *)OpenLibrary((STRPTR)"expansion.library",0)))
+  if (!(ExpansionBase = (struct ExpansionBase *)OpenLibrary((STRPTR)"expansion.library",0)))
     return 0;
 
   // TW: Zorro2/3 detection during early init phase.
   // Find Z2 or Z3 model of MNT ZZ9000
   if ((cd = (struct ConfigDev*)FindConfigDev(cd,0x6d6e,0x4))) {
-	// ZORRO 3
+    // ZORRO 3
     Z9AXBase->zorro_version = 3;
     Z9AXBase->hw_addr = (uint32_t)cd->cd_BoardAddr;
+    Z9AXBase->hw_size = (uint32_t)cd->cd_BoardSize;
   }
   else if ((cd = (struct ConfigDev*)FindConfigDev(cd,0x6d6e,0x3))) {
-	// ZORRO 2
+    // ZORRO 2
     Z9AXBase->zorro_version = 2;
     Z9AXBase->hw_addr = (uint32_t)cd->cd_BoardAddr;
+    Z9AXBase->hw_size = (uint32_t)cd->cd_BoardSize;
   } else {
     // Not detected
     Z9AXBase->zorro_version = 0;
     Z9AXBase->hw_addr = 0;
+    return 0;
+  }
+
+  Z9AXBase->flags = 0;
+
+  BPTR fh;
+  if ((fh=Open((CONST_STRPTR)"ENV:ZZ9K_INT2",MODE_OLDFILE))) {
+    kprintf((CONST_STRPTR)"ZZ9000AX: Using INT2 mode.\n");
+    Close(fh);
+    Z9AXBase->flags |= DEVF_INT2MODE;
+  } else {
+    kprintf((CONST_STRPTR)"ZZ9000AX: Using INT6 mode (default).\n");
   }
 
   return (uint32_t)dev;
@@ -263,7 +259,6 @@ void WorkerProcess() {
     if (!(*AudioCtrl->ahiac_PreTimer)()) {
 #ifdef REAL_HARDWARE
       CallHookPkt(AudioCtrl->ahiac_MixerFunc, AudioCtrl, (void*)ahi_data->audio_buf_addr);
-      //CallHookPkt(AudioCtrl->ahiac_MixerFunc, AudioCtrl, ahi_data->audio_hw_buf_addr + buf_offset);
 #else
       CallHookPkt(AudioCtrl->ahiac_MixerFunc, AudioCtrl, glob_buf);
       uint32_t* xbuf = (uint32_t*)glob_buf;
@@ -273,22 +268,13 @@ void WorkerProcess() {
 
       int overrun = 0;
 #ifdef REAL_HARDWARE
-      #if 0
-      *((volatile uint16_t*)(ahi_data->hw_addr+REG_ZZ_AUDIO_SCALE)) = AudioCtrl->ahiac_BuffSamples;
-      #else
-      writeReg(ahi_data->hw_addr, REG_ZZ_AUDIO_SCALE, AudioCtrl->ahiac_BuffSamples);
-      #endif
+      write_reg(ahi_data->hw_addr, REG_ZZ_AUDIO_SCALE, AudioCtrl->ahiac_BuffSamples);
 
       // def. the faster way
       CopyMem((void*)ahi_data->audio_buf_addr, (void*)ahi_data->audio_hw_buf_addr + buf_offset, bytes);
       // byteswap, resample and play buffer
-      #if 0
-      *((volatile uint16_t*)(ahi_data->hw_addr+REG_ZZ_AUDIO_SWAB)) = buf_offset>>8; // (/256)
-      overrun = *((volatile uint16_t*)(ahi_data->hw_addr+REG_ZZ_AUDIO_SWAB));
-      #else
-      writeReg(ahi_data->hw_addr, REG_ZZ_AUDIO_SWAB, buf_offset>>8);
-      overrun = readReg(ahi_data->hw_addr, REG_ZZ_AUDIO_SWAB);
-      #endif
+      write_reg(ahi_data->hw_addr, REG_ZZ_AUDIO_SWAB, buf_offset>>8);
+      overrun = read_reg(ahi_data->hw_addr, REG_ZZ_AUDIO_SWAB);
 #endif
 
       if (overrun == 1) {
@@ -352,7 +338,11 @@ void init_interrupt(struct z9ax* ahi_data) {
 
   Forbid();
 #ifdef REAL_HARDWARE
-  AddIntServer(INTB_EXTER, irq);
+  if (ahi_data->flags & DEVF_INT2MODE) {
+    AddIntServer(INTB_PORTS, irq);
+  } else {
+    AddIntServer(INTB_EXTER, irq);
+  }
 #else
   AddIntServer(INTB_VERTB, irq); // for debugging
 #endif
@@ -360,15 +350,9 @@ void init_interrupt(struct z9ax* ahi_data) {
 
 #ifdef REAL_HARDWARE
   // enable HW interrupt
-  #if 0
-  USHORT hw_config = *(USHORT*)(ahi_data->hw_addr+REG_ZZ_AUDIO_CONFIG);
+  USHORT hw_config = read_reg(ahi_data->hw_addr, REG_ZZ_AUDIO_CONFIG);
   hw_config |= 1;
-  *(volatile USHORT*)(ahi_data->hw_addr+REG_ZZ_AUDIO_CONFIG) = hw_config;
-  #else
-  USHORT hw_config = readReg(ahi_data->hw_addr, REG_ZZ_AUDIO_CONFIG);
-  hw_config |= 1;
-  writeReg(ahi_data->hw_addr, REG_ZZ_AUDIO_CONFIG, hw_config);
-  #endif
+  write_reg(ahi_data->hw_addr, REG_ZZ_AUDIO_CONFIG, hw_config);
 #endif
 }
 
@@ -377,16 +361,16 @@ void destroy_interrupt(struct z9ax* ahi_data) {
 
 #ifdef REAL_HARDWARE
   // disable HW interrupt
-  #if 0
-  *(volatile USHORT*)(ahi_data->hw_addr+REG_ZZ_AUDIO_CONFIG) = 0;
-  #else
-  writeReg(ahi_data->hw_addr, REG_ZZ_AUDIO_CONFIG, 0);
-  #endif
-#endif
+  write_reg(ahi_data->hw_addr, REG_ZZ_AUDIO_CONFIG, 0);
 
   Forbid();
-  RemIntServer(INTB_EXTER, irq);
+  if (ahi_data->flags & DEVF_INT2MODE) {
+    RemIntServer(INTB_PORTS, irq);
+  } else {
+    RemIntServer(INTB_EXTER, irq);
+  }
   Permit();
+#endif
 }
 
 static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagList asm("a1"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2"))
@@ -397,7 +381,7 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
   if(!hw_addr) return AHIE_UNKNOWN;
   if(!zorro) return AHIE_UNKNOWN;
 
-  int ax_present = readReg(hw_addr, REG_ZZ_AUDIO_CONFIG);
+  int ax_present = read_reg(hw_addr, REG_ZZ_AUDIO_CONFIG);
   if (!ax_present) {
     char *alert = "\x00\x14\x14ZZ9000AX not detected. AHI driver will exit.\x00\x00";
     if (!IntuitionBase) {
@@ -420,48 +404,45 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
   }
 
   AudioCtrl->ahiac_DriverData = ahi_data;
+
+  ahi_data->flags = Z9AXBase->flags;
   ahi_data->audio_buf_addr = (uint32_t)audio_buf;
 
   ahi_data->hw_addr = hw_addr;
-  if (zorro == 2) {
-    uint32_t offset_tx = 0x001c0000;
-    uint32_t offset_rx = 0x001e0000;
-    ahi_data->audio_hw_buf_addr = hw_addr + 0x10000 + offset_tx;
+  // FIXME: see also zz_template_addr in RTG driver
+  uint32_t offset_tx = Z9AXBase->hw_size - 0x20000;
+  //uint32_t offset_rx = Z9AXBase->hw_size - 0x30000;
 
-    Forbid();
-    // set tx buffer address to 1920 kB offset
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 0;
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = offset_tx>>16;
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 1;
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = offset_tx&0xffff;
-    // set rx buffer address to 1920 kB offset
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 2;
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = offset_rx>>16;
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 3;
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = offset_rx&0xffff;
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 0;
-    Permit();
-  } else if (zorro == 3) {
-    uint32_t offset_tx = 0x03f00000;
-    uint32_t offset_rx = 0x03f20000;
-    ahi_data->audio_hw_buf_addr = hw_addr + 0x10000 + offset_tx;
+  //kprintf((CONST_STRPTR)"hw_addr: %lx\n", hw_addr);
+  //kprintf((CONST_STRPTR)"hw_size: %lx\n", Z9AXBase->hw_size);
+  //kprintf((CONST_STRPTR)"offset_tx: %lx\n", offset_tx);
+  //kprintf((CONST_STRPTR)"offset_rx: %lx\n", offset_rx);
 
-    Forbid();
-    // set tx buffer address to 127 MB offset
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 0;
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = offset_tx>>16;
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 1;
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = offset_tx&0xffff;
-    // set rx buffer address to 127 MB offset
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 2;
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = offset_rx;
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 3;
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_VAL)) = offset_rx&0xffff;
-    *((volatile uint16_t*)(hw_addr+REG_ZZ_AUDIO_PARAM)) = 0;
-    Permit();
+  ahi_data->audio_hw_buf_addr = hw_addr + 0x10000 + offset_tx;
+  //memset((void*)ahi_data->audio_hw_buf_addr, 0, AUDIO_BUFSZ);
+
+  int lpf_freq = AudioCtrl->ahiac_MixFreq / 2;
+
+  // filter has issues near 24KHz
+  if (lpf_freq > 23900) lpf_freq = 23900;
+
+  BPTR f;
+  if ((f = Open((APTR)"ENV:ZZ9000AX-NOLPF", MODE_OLDFILE))) {
+    Close(f);
+    // turn off auto low pass filter
+    lpf_freq = 23900;
   }
 
-  memset((void*)ahi_data->audio_hw_buf_addr, 0, AUDIO_BUFSZ);
+  Forbid();
+  // set tx buffer address
+  write_audio_param(hw_addr, 0, offset_tx>>16);
+  write_audio_param(hw_addr, 1, offset_tx&0xffff);
+  //write_audio_param(hw_addr, 2, offset_rx>>16);
+  //write_audio_param(hw_addr, 3, offset_rx&0xffff);
+
+  // set LPF freq to half of sampling freq
+  write_audio_param(hw_addr, 9, lpf_freq);
+  Permit();
 
   ahi_data->audioctrl = AudioCtrl;
   ahi_data->ahi_base = AHIsubBase;
@@ -550,21 +531,15 @@ static int32_t __attribute__((used)) intAHIsub_GetAttr(uint32_t attr_ asm("d0"),
     case AHIDB_Bits:
       return 16;
     case AHIDB_Frequencies:
-      // TW: Take zorro version from z9ax_base because DriverData might still be uninitialized when this function is called.
-      if (Z9AXBase->zorro_version == 2) {
-        return ZZ_NUM_FREQS_Z2;
-      } else {
-        return ZZ_NUM_FREQS_Z3;
-      }
+      return ZZ_NUM_FREQS;
     case AHIDB_Frequency:
       return freqs[arg];
     case AHIDB_Index:
-      // FIXME!
-      for (int i = 0; i < ZZ_NUM_FREQS_Z3; i++) {
+      for (int i = 0; i < ZZ_NUM_FREQS; i++) {
         if (freqs[i] >= arg)
           return i;
       }
-      return ZZ_NUM_FREQS_Z3-1;
+      return ZZ_NUM_FREQS-1;
     case AHIDB_Author:
       return (int32_t) "ZZ9000AX";
     case AHIDB_Copyright:
