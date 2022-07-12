@@ -324,11 +324,8 @@ int __attribute__((used)) InitCard(__REGA0(struct BoardInfo* b)) {
 	b->PaletteChipType = PCT_S3ViRGE;
 	b->GraphicsControllerType = GCT_S3ViRGE;
 
-	b->Flags |= BIF_GRANTDIRECTACCESS | BIF_HARDWARESPRITE | BIF_FLICKERFIXER | BIF_VGASCREENSPLIT | BIF_PALETTESWITCH;
-
-	// BIF_BLITTER messes up menus and a bunch of other things!?
-	// | BIF_BLITTER;
-  // theory: it might mess with our template/scratch area
+	// BIF_BLITTER fixed in FW versions after 1.11 (not yet released, code in git)
+	b->Flags |= BIF_GRANTDIRECTACCESS | BIF_HARDWARESPRITE | BIF_FLICKERFIXER | BIF_VGASCREENSPLIT | BIF_PALETTESWITCH | BIF_BLITTER;
 
 	b->RGBFormats = 1 | 2 | 512 | 1024 | 2048;
 	b->SoftSpriteFlags = 0;
