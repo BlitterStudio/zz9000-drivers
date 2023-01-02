@@ -4,6 +4,7 @@
  * Copyright (C) 2022, Lukas F. Hartmann <lukas@mntre.com>
  *                     MNT Research GmbH, Berlin
  *                     https://mntre.com
+ * Additional work contributed by Thomas Wenzel
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * GNU General Public License v3.0 or later
@@ -31,8 +32,8 @@
 
 #define DEVF_INT2MODE 1
 
-static const char version[] = "$VER: axmp3 1.11\n\r";
-static const char procname[] = "axmp3";
+static const char version[]  __attribute__((used)) = "$VER: axmp3 1.12\n\r";
+static const char procname[] __attribute__((used)) = "axmp3";
 
 #define ZZ_BYTES_PER_PERIOD 3840
 #define AUDIO_BUFSZ ZZ_BYTES_PER_PERIOD*8 // TODO: query from hardware
@@ -40,6 +41,7 @@ static const char procname[] = "axmp3";
 
 #define REG_ZZ_CONFIG        0x04
 #define REG_ZZ_AUDIO_SWAB    0x70
+#define REG_ZZ_DECODER_FIFO  0x72
 #define REG_ZZ_AUDIO_SCALE   0x74
 #define REG_ZZ_AUDIO_PARAM   0x76
 #define REG_ZZ_AUDIO_VAL     0x78
@@ -47,6 +49,26 @@ static const char procname[] = "axmp3";
 #define REG_ZZ_DECODER_VAL   0x7C
 #define REG_ZZ_DECODE        0x7E
 #define REG_ZZ_AUDIO_CONFIG  0xF4
+
+#define ID3V2_HEADER_LENGTH 10
+
+//#define FIFOSIZE 1152*4
+#define FIFOSIZE (16*1024+1)
+
+typedef enum {
+	FIFO_PREFILL,
+	FIFO_OPERATIONAL
+} FIFO_MODE;
+
+typedef enum {
+	DECODE_CLEAR,
+	DECODE_INIT,
+	DECODE_RUN
+} DECODE_COMMAND;
+
+#define BSWAP_S(x) ((uint16_t) ((((x) >> 8) & 0xff) | (((x) & 0xff) << 8)))
+#define BSWAP_L(x) (((((uint32_t)x) & 0xff000000u) >> 24) | ((((uint32_t)x) & 0x00ff0000u) >> 8) | ((((uint32_t)x) & 0x0000ff00u) << 8) | ((((uint32_t)x) & 0x000000ffu) << 24))
+#define BSWAP_P(x) (void*)(((((uint32_t)x) & 0xff000000u) >> 24) | ((((uint32_t)x) & 0x00ff0000u) >> 8) | ((((uint32_t)x) & 0x0000ff00u) << 8) | ((((uint32_t)x) & 0x000000ffu) << 24))
 
 struct z9ax {
   struct Task *t_mainproc;
@@ -65,7 +87,70 @@ struct z9ax {
   uint32_t decode_chunk_sz;
 
   uint8_t flags;
+  FILE* mp3_file;
 };
+
+
+struct z9ax glob_ax;
+
+/* ************ */
+/*  BEGIN FIFO  */
+/* ************ */
+// We are the master of FifoWriteIdx.
+static unsigned short FifoWriteIdx = 0;
+
+// Clear FIFO on both sides.
+static void clearFifo(unsigned long aHWAddr) {
+	FifoWriteIdx = 0;
+	// ZZ_DECODE (clear)
+	*((volatile uint16_t*)(aHWAddr+REG_ZZ_DECODE)) = DECODE_CLEAR;
+}
+
+// Fill FIFO by reading from aFile.
+static void fillFifo(FILE *aFile, unsigned long aHWAddr, FIFO_MODE aMode) {
+	static unsigned char FileReadBuffer[FIFOSIZE]; // This can be huge. Better leave it on the heap.
+	unsigned char *Buffer = (unsigned char *)glob_ax.mp3_addr;
+	long Space = 0;
+	unsigned short FifoReadIdx;
+	unsigned long i;
+
+	// 1. Get FIFO Read Index from ZZ9k (we are the slave).
+	FifoReadIdx = *((volatile uint16_t*)(aHWAddr+REG_ZZ_DECODER_FIFO));
+	if(FifoWriteIdx >= FifoReadIdx) {
+		Space = FIFOSIZE-(FifoWriteIdx-FifoReadIdx);
+	}
+	else {
+		Space = FifoReadIdx-FifoWriteIdx;
+	}
+
+	// 2. Calculate space left in FIFO.
+	// In prefill mode fill the FIFO completely.
+	if(aMode == FIFO_PREFILL) {
+		Space -= 1; // Note: Fill level limited for technical rasons.
+	}
+	// In operational mode fill it only half way to leave data for seeking back.
+	else {
+		Space -= FIFOSIZE/2;
+	}
+	if(Space <= 0) return;
+
+	// 3. Fill the FIFO
+	size_t mp3_bytes_read = fread(FileReadBuffer, 1, Space, aFile);
+
+	for(i=0; i<mp3_bytes_read; i++) {
+		if(Space) {
+			Buffer[FifoWriteIdx++] = FileReadBuffer[i];
+			if(FifoWriteIdx >= FIFOSIZE) FifoWriteIdx = 0;
+			Space--;
+		}
+	}
+
+	// 4. Set FIFO Write Index in ZZ9k (we are the master).
+	*((volatile uint16_t*)(aHWAddr+REG_ZZ_DECODER_FIFO)) = FifoWriteIdx;
+}
+/* ********** */
+/*  END FIFO  */
+/* ********** */
 
 void WorkerProcess()
 {
@@ -84,7 +169,9 @@ void WorkerProcess()
   for(;;) {
     signals = Wait(SIGBREAKF_CTRL_C | (1L << ax->enable_signal));
     if (signals & SIGBREAKF_CTRL_C) break;
-
+    
+    fillFifo(ax->mp3_file, ax->hw_addr, FIFO_OPERATIONAL);
+    
     *((volatile uint16_t*)(ax->hw_addr+REG_ZZ_AUDIO_SCALE)) = buf_samples;
 
     *((volatile uint16_t*)(ax->hw_addr+REG_ZZ_DECODER_PARAM)) = 4;
@@ -93,7 +180,7 @@ void WorkerProcess()
     *((volatile uint16_t*)(ax->hw_addr+REG_ZZ_DECODER_VAL)) = (ax->decode_offset+buf_offset)&0xffff;
     *((volatile uint16_t*)(ax->hw_addr+REG_ZZ_DECODER_PARAM)) = 0;
     // ZZ_DECODE (task)
-    *((volatile uint16_t*)(ax->hw_addr+REG_ZZ_DECODE)) = 1;
+    *((volatile uint16_t*)(ax->hw_addr+REG_ZZ_DECODE)) = DECODE_RUN;
 
     // play buffer
     *((volatile uint16_t*)(ax->hw_addr+REG_ZZ_AUDIO_SWAB)) = (1<<15) | (buf_offset >> 8); // no byteswap, offset/256
@@ -176,17 +263,31 @@ void destroy_interrupt(struct z9ax* ax) {
   Permit();
 }
 
-struct z9ax glob_ax;
-
-void clean_up() {
-  fprintf(stderr, "Cleaning up.\n");
-  Signal((struct Task *)glob_ax.worker_process, SIGBREAKF_CTRL_C);
-  Wait(1L << glob_ax.mainproc_signal);
-  destroy_interrupt(&glob_ax);
-  FreeSignal(glob_ax.mainproc_signal);
+uint32_t GetID3v2Length(unsigned char *ID3v2test, unsigned char ID3v2version) {
+  uint32_t ID3v2length = 0;
+  if((ID3v2test[0] == 0x49)
+  && (ID3v2test[1] == 0x44)
+  && (ID3v2test[2] == 0x33)
+  && (ID3v2test[4] <  0xFF)
+  && (ID3v2test[6] <  0x80)
+  && (ID3v2test[7] <  0x80)
+  && (ID3v2test[8] <  0x80)
+  && (ID3v2test[9] <  0x80)) {
+    if((ID3v2version == 0)
+    || (ID3v2version == ID3v2test[3])) {
+      ID3v2length = ((uint32_t)ID3v2test[6] << 21)
+                  + ((uint32_t)ID3v2test[7] << 14)
+                  + ((uint32_t)ID3v2test[8] << 7 )
+                  + ((uint32_t)ID3v2test[9]      );
+    }
+  }
+  return ID3v2length;
 }
 
 int main(int argc, char* argv[]) {
+  uint8_t ID3v2test[ID3V2_HEADER_LENGTH];
+  uint32_t ID3v2length;
+  uint32_t DataOffset = 0;
   FILE* mp3_file;
   struct ConfigDev* cd;
   uint32_t hw_addr = 0;
@@ -259,16 +360,24 @@ int main(int argc, char* argv[]) {
   size_t sz = ftell(mp3_file);
   rewind(mp3_file);
 
-  fprintf(stderr, "File size: %u bytes.\n", sz);
+  if(fread(ID3v2test, 1, ID3V2_HEADER_LENGTH, mp3_file) == ID3V2_HEADER_LENGTH) {
+    if((ID3v2length = GetID3v2Length(ID3v2test, 0))) {
+      DataOffset = ID3V2_HEADER_LENGTH+ID3v2length;
+	  fseek(mp3_file, DataOffset, SEEK_SET);
+    }
+  }
+
+  fprintf(stderr, "File size: %u bytes, data offset: %zu bytes\n", sz, DataOffset);
 
   glob_ax.mp3_addr = hw_addr + 0x10000 + glob_ax.encoded_offset;
+  glob_ax.mp3_file = mp3_file;
   glob_ax.mp3_bytes = sz;
 
-  fprintf(stderr, "Loading the first 64k...\n");
 
-  size_t mp3_bytes_read = fread((void*)glob_ax.mp3_addr, 1, 64*1024, mp3_file);
-  size_t mp3_bytes_total = mp3_bytes_read;
-
+  fprintf(stderr, "Prefilling FIFO...\n");
+  clearFifo(hw_addr);
+  fillFifo(mp3_file, hw_addr, FIFO_PREFILL);
+  
   fprintf(stderr, "Playing...\n");
 
   // set tx buffer address to 127 MB offset
@@ -288,9 +397,9 @@ int main(int argc, char* argv[]) {
   *((volatile uint16_t*)(hw_addr+REG_ZZ_DECODER_PARAM)) = 1;
   *((volatile uint16_t*)(hw_addr+REG_ZZ_DECODER_VAL)) = glob_ax.encoded_offset&0xffff;
   *((volatile uint16_t*)(hw_addr+REG_ZZ_DECODER_PARAM)) = 2;
-  *((volatile uint16_t*)(hw_addr+REG_ZZ_DECODER_VAL)) = glob_ax.mp3_bytes>>16;
+  *((volatile uint16_t*)(hw_addr+REG_ZZ_DECODER_VAL)) = FIFOSIZE>>16;
   *((volatile uint16_t*)(hw_addr+REG_ZZ_DECODER_PARAM)) = 3;
-  *((volatile uint16_t*)(hw_addr+REG_ZZ_DECODER_VAL)) = glob_ax.mp3_bytes&0xffff;
+  *((volatile uint16_t*)(hw_addr+REG_ZZ_DECODER_VAL)) = FIFOSIZE&0xffff;
   *((volatile uint16_t*)(hw_addr+REG_ZZ_DECODER_PARAM)) = 4;
   *((volatile uint16_t*)(hw_addr+REG_ZZ_DECODER_VAL)) = glob_ax.decode_offset>>16;
   *((volatile uint16_t*)(hw_addr+REG_ZZ_DECODER_PARAM)) = 5;
@@ -302,7 +411,7 @@ int main(int argc, char* argv[]) {
   *((volatile uint16_t*)(hw_addr+REG_ZZ_DECODER_PARAM)) = 0;
 
   // ZZ_DECODE (init)
-  *((volatile uint16_t*)(hw_addr+REG_ZZ_DECODE)) = 0;
+  *((volatile uint16_t*)(hw_addr+REG_ZZ_DECODE)) = DECODE_INIT;
 
   glob_ax.t_mainproc = FindTask(NULL);
   glob_ax.mainproc_signal = AllocSignal(-1);
@@ -320,19 +429,14 @@ int main(int argc, char* argv[]) {
     if (glob_ax.worker_process) {
       Wait(1L << glob_ax.mainproc_signal);
       init_interrupt(&glob_ax);
-
-      atexit(clean_up);
-
-      // stream the rest of the file
-
-      while (mp3_bytes_read > 0) {
-        fprintf(stderr, "Streaming... [%d/%d]\n", mp3_bytes_total, glob_ax.mp3_bytes);
-        mp3_bytes_read = fread((void*)glob_ax.mp3_addr+mp3_bytes_total, 1, 128*1024, mp3_file);
-        mp3_bytes_total += mp3_bytes_read;
-      }
-      fprintf(stderr, "Done, waiting for Ctrl+C.\n");
+  
       Wait(SIGBREAKF_CTRL_C);
+  
+      Signal((struct Task *)glob_ax.worker_process, SIGBREAKF_CTRL_C);
+      Wait(1L << glob_ax.mainproc_signal);
+      destroy_interrupt(&glob_ax);
     }
+    FreeSignal(glob_ax.mainproc_signal);
   }
 
   fclose(mp3_file);
