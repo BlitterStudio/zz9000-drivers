@@ -29,6 +29,7 @@
 #include <exec/errors.h>
 #include <exec/interrupts.h>
 #include <exec/tasks.h>
+#include <exec/execbase.h>
 #include <hardware/intbits.h>
 #include <string.h>
 
@@ -75,6 +76,8 @@ __saveds ULONG dev_isr(__reg("a1") struct devbase* db) {
 
   // ethernet interrupt signal set?
   if (status & 1) {
+    // disable HW interrupt
+    *(volatile USHORT*)(ZZ9K_REGS+0x04) = status & 0xfffe;
     // ack/clear ethernet interrupt
     *(volatile USHORT*)(ZZ9K_REGS+0x04) = 8|16;
 
@@ -273,7 +276,7 @@ __saveds LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
             // Register Interrupt server
             if (db->db_interrupt = AllocMem(sizeof(struct Interrupt), MEMF_PUBLIC|MEMF_CLEAR)) {
               db->db_interrupt->is_Node.ln_Type = NT_INTERRUPT;
-              db->db_interrupt->is_Node.ln_Pri = -60;
+              db->db_interrupt->is_Node.ln_Pri = 125;
               db->db_interrupt->is_Node.ln_Name = "ZZ9000Net";
               db->db_interrupt->is_Data = (APTR)db;
               db->db_interrupt->is_Code = dev_isr;
@@ -740,6 +743,9 @@ __saveds void frame_proc() {
       // if there are no more new packets, idle until the next interrupt
       recv = Wait(wmask);
     }
+
+    // ready for next interrupt
+    *(volatile USHORT*)(ZZ9K_REGS+0x04) = 1;
   }
 
   Forbid();
