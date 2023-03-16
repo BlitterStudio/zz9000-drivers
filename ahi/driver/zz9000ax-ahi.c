@@ -44,13 +44,16 @@
 
 #include "zz9000ax-ahi.h"
 
+// Comment out to enable debug output:
+#define kprintf(...)
+
 #define STR(s) #s
 #define XSTR(s) STR(s)
 
 #define DEVICE_NAME "zz9000ax.audio"
-#define DEVICE_DATE "(02 May 2022)"
+#define DEVICE_DATE "(03.01.2023)"
 #define DEVICE_VERSION 4
-#define DEVICE_REVISION 18
+#define DEVICE_REVISION 19
 #define DEVICE_ID_STRING "ZZ9000AX " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
 #define DEVICE_PRIORITY 0
 
@@ -373,26 +376,40 @@ void destroy_interrupt(struct z9ax* ahi_data) {
 #endif
 }
 
-static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagList asm("a1"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2"))
-{
+static BOOL UsedByMHI(void) {
+  struct List *IrqList;
+  if(Z9AXBase->flags & DEVF_INT2MODE) {
+    IrqList = (struct List *)SysBase->IntVects[INTB_PORTS].iv_Data;
+  }
+  else {
+    IrqList = (struct List *)SysBase->IntVects[INTB_EXTER].iv_Data;
+  }
+  if(FindName(IrqList, (CONST_STRPTR)"mhizz9000")) return TRUE;
+  return FALSE;
+}
+
+static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagList asm("a1"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
   // TW: Just take the values from where init() has already stored them.
   uint32_t hw_addr = Z9AXBase->hw_addr;
   int zorro = Z9AXBase->zorro_version;
-  if(!hw_addr) return AHIE_UNKNOWN;
-  if(!zorro) return AHIE_UNKNOWN;
+  if(!hw_addr) return AHISF_ERROR; // TW: Only AHISF_xxx return codes are allowed here.
+  if(!zorro) return AHISF_ERROR; // TW: Only AHISF_xxx return codes are allowed here.
 
   int ax_present = read_reg(hw_addr, REG_ZZ_AUDIO_CONFIG);
   if (!ax_present) {
     char *alert = "\x00\x14\x14ZZ9000AX not detected. AHI driver will exit.\x00\x00";
     if (!IntuitionBase) {
       IntuitionBase = (struct IntuitionBase*)OpenLibrary((STRPTR)"intuition.library",37);
+      DisplayAlert(RECOVERY_ALERT, (APTR)alert, 52);
+      CloseLibrary((struct Library *)IntuitionBase);
+      IntuitionBase = NULL;
     }
-    DisplayAlert(RECOVERY_ALERT, (APTR)alert, 52);
-    CloseLibrary((struct Library *)IntuitionBase);
-    CloseLibrary((struct Library *)ExpansionBase);
-    CloseLibrary((struct Library *)UtilityBase);
-    CloseLibrary((struct Library *)DOSBase);
-    return AHIE_UNKNOWN;
+    return AHISF_ERROR; // TW: Only AHISF_xxx return codes are allowed here.
+  }
+
+  if(UsedByMHI()) {
+  	kprintf((CONST_STRPTR)"Can't allocate! Hardware already used by MHI.\n");
+    return AHISF_ERROR; // TW: Only AHISF_xxx return codes are allowed here.
   }
 
   struct z9ax *ahi_data = AllocVec(sizeof(struct z9ax), MEMF_PUBLIC | MEMF_FAST | MEMF_CLEAR);
@@ -400,7 +417,7 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
   void* audio_buf = AllocVec(AUDIO_BUFSZ, MEMF_PUBLIC | MEMF_FAST | MEMF_CLEAR);
 
   if (!ahi_data || !audio_buf) {
-    return AHIE_NOMEM;
+    return AHISF_ERROR; // TW: Only AHISF_xxx return codes are allowed here.
   }
 
   AudioCtrl->ahiac_DriverData = ahi_data;
@@ -502,13 +519,11 @@ static void __attribute__((used)) intAHIsub_FreeAudio(struct AHIAudioCtrlDrv *Au
 }
 
 // TW: Prepared Stop() and Start() to store status in a flag in z9ax.
-static uint32_t __attribute__((used)) intAHIsub_Stop(uint32_t Flags asm("d0"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
+static void __attribute__((used)) intAHIsub_Stop(uint32_t Flags asm("d0"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
   struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
   if (Flags & AHISF_PLAY) {
     ahi_data->play_start = 1;
   }
-
-  return AHIE_OK;
 }
 
 static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
@@ -516,7 +531,7 @@ static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), 
   if (flags & AHISF_PLAY) {
     ahi_data->play_start = 0;
   }
-
+  // Returns AHIE_OK if successful.
   return AHIE_OK;
 }
 
