@@ -1,6 +1,6 @@
 /*
  * MNT ZZ9000 Network Driver (ZZ9000Net.device)
- * Copyright (C) 2016-2019, Lukas F. Hartmann <lukas@mntre.com>
+ * Copyright (C) 2016-2023, Lukas F. Hartmann <lukas@mntre.com>
  *                          MNT Research GmbH, Berlin
  *                          https://mntre.com
  *
@@ -290,8 +290,6 @@ __saveds LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
               ok = 1;
 
               // enable HW interrupt
-              //USHORT hw_config = *(volatile USHORT*)(ZZ9K_REGS+0x04);
-              //hw_config |= 1;
               *(volatile USHORT*)(ZZ9K_REGS+0x04) = 1;
 
               D(("ZZ9000Net: ZZ interrupt enabled\n"));
@@ -349,19 +347,16 @@ __saveds BPTR DevClose(   ASMR(a1) struct IORequest *ioreq        ASMREG(a1),
 
 	D(("ZZ9000Net: DevClose open count %ld\n",db->db_Lib.lib_OpenCnt));
 
-	if( !ioreq )
+	if (!ioreq)
 		return ret;
+
+  // disable HW interrupt
+  *(volatile USHORT*)(ZZ9K_REGS+0x04) = 0;
+  D(("ZZ9000Net: ZZ interrupt disabled\n"));
 
 	db->db_Lib.lib_OpenCnt--;
 
   if (db->db_Lib.lib_OpenCnt == 0) {
-    // disable HW interrupt
-    USHORT hw_config = *(volatile USHORT*)(ZZ9K_REGS+0x04);
-    hw_config &= 0xfffe;
-    *(volatile USHORT*)(ZZ9K_REGS+0x04) = hw_config;
-
-    D(("ZZ9000Net: ZZ interrupt disabled\n"));
-
     if (db->db_interrupt) {
       D(("ZZ9000Net: Remove IntServer...\n"));
       Forbid();
@@ -459,7 +454,7 @@ __saveds VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
   }
 
   case S2_READORPHAN:
-    if( !ioreq->ios2_BufferManagement )
+    if (!ioreq->ios2_BufferManagement)
 			{
 				ioreq->ios2_Req.io_Error = S2ERR_BAD_ARGUMENT;
 				ioreq->ios2_WireError = S2WERR_BUFF_ERROR;
@@ -747,6 +742,8 @@ __saveds void frame_proc() {
     // ready for next interrupt
     *(volatile USHORT*)(ZZ9K_REGS+0x04) = 1;
   }
+  // disable interrupt
+  *(volatile USHORT*)(ZZ9K_REGS+0x04) = 0;
 
   Forbid();
   ReleaseSemaphore(&db->db_ProcExitSem);

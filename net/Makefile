@@ -22,8 +22,8 @@
 # 
 ###############################################################################
 DEVICEVERSION=1
-DEVICEREVISION=0
-DEVICEDATE=31.07.2019
+DEVICEREVISION=13
+DEVICEDATE=2023-03-15
 #ASMOBJECTS = $(SUBDIR)/enc624j6l.o $(SUBDIR)/intervaltimer.o kprintf.o
 
 ###############################################################################
@@ -34,7 +34,7 @@ DEVICEDATE=31.07.2019
 DEVICEID=ZZ9000Net.device
 DEFINES = #
 ASMDEFS = #
-CPU = 68000
+CPU = 68030
 
 DEVICEID2= #test.device_68000
 DEFINES2 = # -DPROTO_V2EXPNET
