@@ -201,6 +201,18 @@ static void fillFifo(struct MhiPlayer *mp) {
 /*  END FIFO  */
 /* ********** */
 
+static BOOL UsedByAHI(struct MHI_LibBase *MhiLibBase) {
+	struct List *IrqList;
+	if(MhiLibBase->flags & DEVF_INT2MODE) {
+		IrqList = (struct List *)SysBase->IntVects[INTB_PORTS].iv_Data;
+	}
+	else {
+		IrqList = (struct List *)SysBase->IntVects[INTB_EXTER].iv_Data;
+	}
+	if(FindName(IrqList, "ZZ9000AX")) return TRUE;
+	return FALSE;
+}
+
 BOOL UserLibInit(struct MHI_LibBase *MhiLibBase) {
 	struct ConfigDev* cd;
 	ULONG hw_addr = 0;
@@ -348,6 +360,13 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 
 	// We only support one exclusive decoder allocation.
 	if(MHI_LibBase->NumAllocatedDecoders) {
+		KPrintF("Can't allocate! Hardware already used by another MHI instance.\n");
+		return NULL;
+	}
+
+	// We can't alloc if the hardware is already used by AHI.
+	if(UsedByAHI(MHI_LibBase)) {
+		KPrintF("Can't allocate! Hardware already used by AHI.\n");
 		return NULL;
 	}
 
@@ -369,15 +388,14 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 		KPrintF("encoded_offset = 0x%08lX\n", mp->encoded_offset);
 		KPrintF("decode_offset  = 0x%08lX\n", mp->decode_offset);
 
-		mp->mp3_addr = MHI_LibBase->hw_addr + 0x10000 + mp->encoded_offset;
+		mp->mp3_addr     = MHI_LibBase->hw_addr + 0x10000 + mp->encoded_offset;
+		mp->flags        = MHI_LibBase->flags;
 		
 		mp->decode_chunk_sz = 1920; // 16 bit sample pairs
 
 		mp->MhiTask      = mhi_task;
 		mp->MhiMask      = mhi_sigmask;
 		mp->Status       = MHIF_STOPPED;
-
-		mp->flags        = MHI_LibBase->flags;
 
 		mp->FifoMode     = FIFO_PREFILL;
 		mp->FifoWriteIdx = 0;

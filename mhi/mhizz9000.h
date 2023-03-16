@@ -1,5 +1,5 @@
-#ifndef MHIMPEGIT_H
-#define MHIMPEGIT_H
+#ifndef MHIZZ9000_H
+#define MHIZZ9000_H
 
 #include <exec/exec.h>
 #include <libraries/mhi.h>

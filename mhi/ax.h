@@ -1,8 +1,6 @@
 #ifndef __AX_H__
 #define __AX_H__
 
-#include <stdint.h>
-
 enum {
 	AP_TX_BUF_OFFS_HI,
 	AP_TX_BUF_OFFS_LO,

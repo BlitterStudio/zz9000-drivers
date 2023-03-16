@@ -20,8 +20,9 @@ struct MHI_LibBase {
 	ULONG NumAllocatedDecoders;
 
 	ULONG hw_addr;
-	UBYTE zorro_version;
+	ULONG hw_size;
 
+	UBYTE zorro_version;
 	UBYTE flags;
 };
 
@@ -34,22 +35,20 @@ struct MhiPlayer {
 	FIFO_MODE FifoMode;
 	unsigned short FifoWriteIdx;
 
-	struct Task *t_mainproc;
-	struct Process *worker_process;
 	struct Interrupt irq;
-	BYTE mainproc_signal;
-	BYTE enable_signal;
-	BYTE worker_signal;
-	UBYTE zorro_version;
-	
+	struct Interrupt sirq;
+
 	ULONG hw_addr;
 	ULONG mp3_addr;
-	ULONG mp3_bytes;
 	ULONG encoded_offset;
 	ULONG decode_offset;
 	ULONG decode_chunk_sz;
+	ULONG buf_offset;
 	
 	UBYTE flags;
+	UBYTE zorro_version;
+	UBYTE volume;
+	UBYTE panning;
 
 };
 
