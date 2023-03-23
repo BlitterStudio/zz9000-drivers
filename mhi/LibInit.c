@@ -2,6 +2,13 @@
 ** Library init code
 **
 ** Based on CLib37x by Andreas R. Kleinert
+**
+** License agreement of the original project: http://aminet.net/dev/c/CLib37x.readme
+** [...]
+** Feel free to use this source for own projects.
+**
+** It is allowed to be spread and distributed anywhere, as far
+** as my consent is concerned.
 */
 
 #define __USE_SYSBASE
