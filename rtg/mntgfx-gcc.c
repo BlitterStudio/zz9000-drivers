@@ -553,6 +553,8 @@ void init_modeline(MNTZZ9KRegs* registers, uint16_t w, uint16_t h, uint8_t color
 		mode = 10;
 	} else if (w == 2560 && h == 1440) {
 		mode = 11;
+	} else if (w == 1920 && h == 800) {
+		mode = 17;
 	}
 
 	zzwrite16(&registers->mode, mode|(colormode<<8)|(scalemode<<12));
