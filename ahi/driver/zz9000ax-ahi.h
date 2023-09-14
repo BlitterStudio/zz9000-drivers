@@ -17,7 +17,7 @@ struct z9ax {
   uint16_t disable_cnt;
   uint8_t zorro_version;
   struct AHIAudioCtrlDrv *audioctrl;
-  uint16_t play_stop;
+  uint16_t play_start;
   uint8_t flags;
 };
 
