@@ -51,9 +51,9 @@
 #define XSTR(s) STR(s)
 
 #define DEVICE_NAME "zz9000ax.audio"
-#define DEVICE_DATE "(03.01.2023)"
+#define DEVICE_DATE "(13.09.2023)"
 #define DEVICE_VERSION 4
-#define DEVICE_REVISION 19
+#define DEVICE_REVISION 20
 #define DEVICE_ID_STRING "ZZ9000AX " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
 #define DEVICE_PRIORITY 0
 
@@ -321,7 +321,8 @@ void cdev_isr(struct z9ax* data asm("a1")) {
     *(USHORT*)(data->hw_addr+REG_ZZ_CONFIG) = 8|32;
 
     if(data->disable_cnt) return;
-    if(data->worker_process && !data->disable_cnt) {
+    if(data->play_stop) return;
+    if(data->worker_process) {
       Signal((struct Task*)data->worker_process, 1L<<data->enable_signal);
     }
   }
@@ -422,6 +423,7 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
 
   AudioCtrl->ahiac_DriverData = ahi_data;
 
+  ahi_data->play_stop = 1; // TW: Upon allocation playback is initially stopped.
   ahi_data->flags = Z9AXBase->flags;
   ahi_data->audio_buf_addr = (uint32_t)audio_buf;
 
@@ -522,14 +524,14 @@ static void __attribute__((used)) intAHIsub_FreeAudio(struct AHIAudioCtrlDrv *Au
 static void __attribute__((used)) intAHIsub_Stop(uint32_t Flags asm("d0"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
   struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
   if (Flags & AHISF_PLAY) {
-    ahi_data->play_start = 1;
+    ahi_data->play_stop = 1;
   }
 }
 
 static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
   struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
   if (flags & AHISF_PLAY) {
-    ahi_data->play_start = 0;
+    ahi_data->play_stop = 0;
   }
   // Returns AHIE_OK if successful.
   return AHIE_OK;
