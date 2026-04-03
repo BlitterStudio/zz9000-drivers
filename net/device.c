@@ -67,6 +67,9 @@ static ULONG ZZ9K_REGS = 0;
 #define ZZ9K_RX 0x2000
 #define ZZ9K_TX 0x8000
 
+struct Sana2DeviceStats global_stats;
+BOOL is_online;
+
 __saveds void frame_proc();
 char *frame_proc_name = "ZZ9000NetFramer";
 
@@ -248,6 +251,8 @@ __saveds LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
       ioreq->ios2_Req.io_Unit = (struct Unit *)unit; // not a real pointer, but id integer
       ioreq->ios2_Req.io_Device = (struct Device *)db;
 
+      memset(&global_stats, 0, sizeof(global_stats));
+
       NewList(&db->db_ReadList);
       InitSemaphore(&db->db_ReadListSem);
 
@@ -403,6 +408,22 @@ __saveds BPTR DevExpunge( ASMR(a6) DEVBASEP                        ASMREG(a6) )
 	return seglist;
 }
 
+struct Device *TimerBase;
+static void set_last_start()
+{
+  struct { void *db_SysBase; } *db = (void*)0x4;
+  struct IORequest req;
+  memset(&req, 0, sizeof(req));
+  req.io_Message.mn_Length = sizeof(req);
+
+  if (OpenDevice(TIMERNAME, UNIT_MICROHZ, &req, 0) == 0)
+  {
+    TimerBase = req.io_Device;
+    GetSysTime(&global_stats.LastStart);
+    CloseDevice(&req);
+  }
+}
+
 ULONG read_frame(struct IOSana2Req *req, volatile UBYTE *frame);
 ULONG write_frame(struct IOSana2Req *req, UBYTE *frame);
 
@@ -449,6 +470,7 @@ __saveds VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
       ioreq->ios2_WireError = S2WERR_GENERIC_ERROR;
     } else {
       ioreq->ios2_Req.io_Error = 0;
+      global_stats.PacketsSent++;
     }
     break;
   }
@@ -469,9 +491,15 @@ __saveds VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
         ioreq = NULL;
 			}
     break;
-  case S2_ONLINE:
-  case S2_OFFLINE:
+
   case S2_CONFIGINTERFACE:   /* forward request */
+    /* fall through */
+  case S2_ONLINE:
+    set_last_start();
+    is_online = TRUE;
+    break;
+  case S2_OFFLINE:
+    is_online = FALSE;
     break;
 
   case S2_GETSTATIONADDRESS:
@@ -494,6 +522,11 @@ __saveds VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
       devquery->SizeSupplied = (devquery->SizeAvailable<30?devquery->SizeAvailable:30);
     }
     break;
+  case S2_GETGLOBALSTATS:
+    {
+      if (ioreq->ios2_StatData)
+        memcpy(ioreq->ios2_StatData, &global_stats, sizeof(struct Sana2DeviceStats));
+    }
   case S2_GETSPECIALSTATS:
     {
       struct Sana2SpecialStatHeader *s2ssh = (struct Sana2SpecialStatHeader *)ioreq->ios2_StatData;
@@ -719,8 +752,10 @@ __saveds void frame_proc() {
             Remove((struct Node*)ior);
             ReplyMsg((struct Message *)ior);
             processed = 1;
+            global_stats.PacketsReceived++;
           } else {
             D(("RERR %ld\n",res));
+	    global_stats.UnknownTypesReceived++;
           }
           break;
         }
