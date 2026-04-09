@@ -42,6 +42,7 @@ struct Gadget *gads[10];
 #define MYGAD_BTN_REFRESH  (6)
 #define MYGAD_Z9AX         (7)
 #define MYGAD_LPF          (8)
+#define MYGAD_SCANLINES    (9)
 
 struct TextAttr Topaz80 = { (STRPTR)"topaz.font", 8, 0, 0, };
 
@@ -53,6 +54,7 @@ struct Library* ExpansionBase;
 struct ConfigDev* zz_cd;
 volatile UBYTE* zz_regs;
 int zorro_version = 0;
+uint16_t scanline_intensity = 0;
 
 char txt_buf[64];
 
@@ -118,6 +120,11 @@ void zz_set_lpf_freq(uint16_t freq)
 	zz_set_reg(REG_ZZ_AUDIO_PARAM, 9);
 	zz_set_reg(REG_ZZ_AUDIO_VAL, freq);
 	zz_set_reg(REG_ZZ_AUDIO_PARAM, 0);
+}
+
+void zz_set_scanline_intensity(uint16_t intensity)
+{
+	zz_set_reg(0x100A, intensity);
 }
 
 double t_old=0;
@@ -292,6 +299,11 @@ VOID handleGadgetEvent(struct Window *win, struct Gadget *gad, ULONG code)
 			zz_set_lpf_freq(code);
 			break;
 		}
+		case MYGAD_SCANLINES: {
+			scanline_intensity = code;
+			zz_set_scanline_intensity(code);
+			break;
+		}
 	}
 }
 
@@ -303,7 +315,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 	gad = CreateContext(glistptr);
 
 	ng.ng_LeftEdge	 = 20;
-	ng.ng_TopEdge		 = 170+topborder;
+	ng.ng_TopEdge		 = 210+topborder;
 	ng.ng_Width			 = 100;
 	ng.ng_Height		 = 14;
 	ng.ng_GadgetText = (STRPTR)"Bus Test";
@@ -380,6 +392,19 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 										GTSL_Max, 23900,
 										GTSL_Level, 23900,
 										GTSL_LevelFormat, "%ld Hz",
+										GTSL_MaxLevelLen, 10,
+										GTSL_LevelPlace, PLACETEXT_BELOW,
+										TAG_END);
+
+	ng.ng_TopEdge	= 175+topborder;
+	ng.ng_GadgetID	= MYGAD_SCANLINES;
+	ng.ng_GadgetText = (STRPTR)"Scanlines";
+
+	gads[MYGAD_SCANLINES] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
+										GTSL_Min, 0,
+										GTSL_Max, 255,
+										GTSL_Level, scanline_intensity,
+										GTSL_LevelFormat, "%ld",
 										GTSL_MaxLevelLen, 10,
 										GTSL_LevelPlace, PLACETEXT_BELOW,
 										TAG_END);
@@ -502,7 +527,7 @@ VOID gadtoolsWindow(VOID) {
 							WA_Title,			"MNT ZZTop 1.11",
 							WA_Gadgets,		glist,			WA_AutoAdjust,		TRUE,
 							WA_Width,				280,			WA_MinWidth,			 280,
-							WA_InnerHeight, 200,			WA_MinHeight,			 200,
+							WA_InnerHeight, 230,			WA_MinHeight,			 230,
 							WA_DragBar,		 TRUE,			WA_DepthGadget,		TRUE,
 							WA_Activate,	 TRUE,			WA_CloseGadget,		TRUE,
 							WA_SizeGadget, FALSE,			WA_SimpleRefresh, TRUE,
