@@ -24,5 +24,11 @@ https://mntre.com
 Network driver based on work by
 (C) 2018 Henryk Richter <henryk.richter@gmx.net>
 
+Scanline support tools (ZZScanlines, ZZTop slider) based on original
+scanline bitstream by Xanxi, adapted for firmware 1.13+.
+
+RTG driver optimizations (SetColorArray Z3 batch path, AllocBitMap)
+and scanline tooling by Dimitris Panokostas (midwan).
+
 SPDX-License-Identifier: GPL-3.0-or-later
 https://spdx.org/licenses/GPL-3.0-or-later.html

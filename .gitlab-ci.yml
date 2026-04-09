@@ -1,0 +1,35 @@
+stages:
+  - build
+
+rtg-driver-build:
+  stage: build
+  image: sacredbanana/amiga-compiler:m68k-amigaos
+  script:
+    - cd rtg
+    - m68k-amigaos-gcc mntgfx-gcc.c -m68020 -mtune=68020-60 -O2 -o ZZ9000.card -noixemul -Wall -Wextra -Wno-unused-parameter -fomit-frame-pointer -nostartfiles -lamiga
+  artifacts:
+    paths:
+      - rtg/ZZ9000.card
+    expire_in: 1 week
+
+zztop-build:
+  stage: build
+  image: sacredbanana/amiga-compiler:m68k-amigaos
+  script:
+    - cd ZZTop
+    - m68k-amigaos-gcc Sources/ZZTop.c -m68030 -O2 -o ZZTop -Wall -Wextra -Wno-unused-parameter -lamiga -noixemul -lm
+  artifacts:
+    paths:
+      - ZZTop/ZZTop
+    expire_in: 1 week
+
+zzscanlines-build:
+  stage: build
+  image: sacredbanana/amiga-compiler:m68k-amigaos
+  script:
+    - cd ZZScanlines
+    - m68k-amigaos-gcc -O2 -noixemul -o ZZScanlines ZZScanlines.c -lamiga
+  artifacts:
+    paths:
+      - ZZScanlines/ZZScanlines
+    expire_in: 1 week
