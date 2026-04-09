@@ -71,7 +71,7 @@
 #define REG_ZZ_AUDIO_CONFIG 0xF4
 
 struct ExecBase     *SysBase;
-struct UtilityBase  *UtilityBase;
+struct Library      *UtilityBase;
 struct Library      *AHIsubBase  = NULL;
 struct DosLibrary   *DOSBase     = NULL;
 struct z9ax_base    *Z9AXBase;
