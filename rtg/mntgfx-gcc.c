@@ -466,7 +466,6 @@ int __attribute__((used)) InitCard(__REGA0(struct BoardInfo* b)) {
 	b->SetReadPlane = (void *)SetReadPlane;
 
 	b->WaitVerticalSync = (void *)WaitVerticalSync;
-	//b->SetInterrupt = (void *)NULL;
 
 	b->WaitBlitter = (void *)WaitBlitter;
 
@@ -494,8 +493,8 @@ int __attribute__((used)) InitCard(__REGA0(struct BoardInfo* b)) {
 	//b->SetDPMSLevel = (void *)NULL;
 	//b->ResetChip = (void *)NULL;
 	//b->GetFeatureAttrs = (void *)NULL;
-	//b->AllocBitMap = (void *)NULL;
-	//b->FreeBitMap = (void *)NULL;
+	//b->AllocBitMap = (void *)ZZ_AllocBitMap;
+	//b->FreeBitMap = (void *)ZZ_FreeBitMap;
 	//b->GetBitMapAttr = (void *)NULL;
 
 	b->SetSprite = (void *)SetSprite;
@@ -652,25 +651,38 @@ void SetColorArray(__REGA0(struct BoardInfo *b), __REGD0(UWORD start), __REGD1(U
 
 	MNTZZ9KRegs* registers = (MNTZZ9KRegs *)b->RegisterBase;
 	int j = start + num;
-	int op = 3; // OP_PALETTE
 
 	if (start >= 256) {
-		// Select secondary palette if start index is above 255
 		if (!secondary_palette_enabled) {
 			zzwrite16(&registers->blitter_user1, CARD_FEATURE_SECONDARY_PALETTE);
 			zzwrite16(&registers->set_feature_status, 1);
 			secondary_palette_enabled = 1;
 		}
-		op = 19; // OP_PALETTE_HI
 	}
 
-	for (int i = start; i < j; i++) {
-		unsigned long xrgb = ((uint32_t)(i & 0xFF) << 24) | ((uint32_t)b->CLUT[(i & 0xFF)].Red << 16) | ((uint32_t)b->CLUT[(i & 0xFF)].Green << 8) | ((uint32_t)b->CLUT[(i & 0xFF)].Blue);
+	if ((b->CardFlags & CARDFLAG_ZORRO_3) && num >= 16) {
+		dmy_cache
+		if (num > 256) num = 256;
+		for (int i = 0; i < num; i++) {
+			int ci = (start + i) & 0xFF;
+			gfxdata->clut1[i * 3]     = b->CLUT[ci].Red;
+			gfxdata->clut1[i * 3 + 1] = b->CLUT[ci].Green;
+			gfxdata->clut1[i * 3 + 2] = b->CLUT[ci].Blue;
+		}
+		gfxdata->user[0] = start;
+		gfxdata->user[1] = num;
+		gfxdata->u8_user[0] = (start >= 256) ? 1 : 0;
+		zzwrite16(&registers->blitter_dma_op, OP_SET_PALETTE);
+	} else {
+		int op = (start >= 256) ? 19 : 3;
+		for (int i = start; i < j; i++) {
+			unsigned long xrgb = ((uint32_t)(i & 0xFF) << 24) | ((uint32_t)b->CLUT[(i & 0xFF)].Red << 16) | ((uint32_t)b->CLUT[(i & 0xFF)].Green << 8) | ((uint32_t)b->CLUT[(i & 0xFF)].Blue);
 
-		*(volatile uint16_t*)((uint32_t)registers + 0x1000) = xrgb >> 16;
-		*(volatile uint16_t*)((uint32_t)registers + 0x1002) = xrgb & 0xFFFF;
-		*(volatile uint16_t*)((uint32_t)registers + 0x1004) = op;
-		*(volatile uint16_t*)((uint32_t)registers + 0x1004) = 0; // NOP
+			*(volatile uint16_t*)((uint32_t)registers + 0x1000) = xrgb >> 16;
+			*(volatile uint16_t*)((uint32_t)registers + 0x1002) = xrgb & 0xFFFF;
+			*(volatile uint16_t*)((uint32_t)registers + 0x1004) = op;
+			*(volatile uint16_t*)((uint32_t)registers + 0x1004) = 0;
+		}
 	}
 }
 
@@ -743,6 +755,7 @@ BOOL GetVSyncState(__REGA0(struct BoardInfo *b), __REGD0(BOOL toggle)) {
 
 	return vblank_state;
 }
+
 
 void FillRect(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REGD0(WORD x), __REGD1(WORD y), __REGD2(WORD w), __REGD3(WORD h), __REGD4(ULONG color), __REGD5(UBYTE mask), __REGD7(RGBFTYPE format)) {
 	if (!r) return;
@@ -1108,6 +1121,71 @@ void DrawLine(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 
 		zzwrite16(&registers->blitter_op_draw_line, mask);
 	}
+}
+
+struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width), __REGD1(ULONG height), __REGA1(struct TagItem *tags)) {
+	if (!(b->CardFlags & CARDFLAG_ZORRO_3))
+		return NULL;
+
+	ULONG rgbformat = RGBFB_CLUT;
+	ULONG bytesperrow_override = 0;
+
+	struct TagItem *tag = tags;
+	while (tag && tag->ti_Tag != TAG_DONE) {
+		switch (tag->ti_Tag) {
+			case TAG_IGNORE: break;
+			case TAG_SKIP: tag += tag->ti_Data; break;
+			case TAG_MORE: tag = (struct TagItem *)tag->ti_Data; continue;
+			case ABMA_RGBFormat: rgbformat = tag->ti_Data; break;
+			case ABMA_NoMemory: return NULL;
+			case ABMA_ConstantBytesPerRow: bytesperrow_override = tag->ti_Data; break;
+			default: break;
+		}
+		tag++;
+	}
+
+	uint16_t bytesperrow = bytesperrow_override ? bytesperrow_override :
+		CalculateBytesPerRow(b, width, rgbformat);
+	uint32_t size = (uint32_t)bytesperrow * height;
+	if (!size) return NULL;
+
+	dmy_cache
+	gfxdata->u8_user[1] = 1;
+	gfxdata->offset[1] = size;
+	zzwrite16(&registers->blitter_acc_op, ACC_OP_ALLOC_SURFACE);
+
+	uint32_t card_offset = gfxdata->offset[0];
+	if (!card_offset) return NULL;
+
+	struct BitMap *bm = (struct BitMap *)AllocMem(sizeof(struct BitMap), MEMF_PUBLIC | MEMF_CLEAR);
+	if (!bm) {
+		gfxdata->offset[0] = card_offset;
+		gfxdata->u8_user[0] = 0;
+		zzwrite16(&registers->blitter_acc_op, ACC_OP_FREE_SURFACE);
+		return NULL;
+	}
+
+	bm->BytesPerRow = bytesperrow;
+	bm->Rows = height;
+	bm->Depth = 1;
+	bm->Planes[0] = (PLANEPTR)((uint32_t)b->MemoryBase + card_offset);
+
+	return bm;
+}
+
+BOOL ZZ_FreeBitMap(__REGA0(struct BoardInfo *b), __REGA1(struct BitMap *bm), __REGA2(struct TagItem *tags)) {
+	if (!bm) return FALSE;
+
+	if (b->CardFlags & CARDFLAG_ZORRO_3) {
+		uint32_t card_offset = (uint32_t)bm->Planes[0] - (uint32_t)b->MemoryBase;
+		dmy_cache
+		gfxdata->offset[0] = card_offset;
+		gfxdata->u8_user[0] = 0;
+		zzwrite16(&registers->blitter_acc_op, ACC_OP_FREE_SURFACE);
+	}
+
+	FreeMem(bm, sizeof(struct BitMap));
+	return TRUE;
 }
 
 // This function shall blit a planar bitmap anywhere in the 68K address space into a chunky bitmap in video RAM.
