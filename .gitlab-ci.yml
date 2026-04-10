@@ -1,0 +1,72 @@
+stages:
+  - build
+
+rtg-driver-build:
+  stage: build
+  image: sacredbanana/amiga-compiler:m68k-amigaos
+  script:
+    - cd rtg
+    - m68k-amigaos-gcc mntgfx-gcc.c -m68020 -mtune=68020-60 -O2 -o ZZ9000.card -noixemul -Wall -Wextra -Wno-unused-parameter -fomit-frame-pointer -nostartfiles -lamiga
+  artifacts:
+    paths:
+      - rtg/ZZ9000.card
+    expire_in: 1 week
+
+zztop-build:
+  stage: build
+  image: sacredbanana/amiga-compiler:m68k-amigaos
+  script:
+    - cd ZZTop
+    - m68k-amigaos-gcc Sources/ZZTop.c -m68030 -O2 -o ZZTop -Wall -Wextra -Wno-unused-parameter -lamiga -noixemul -lm
+  artifacts:
+    paths:
+      - ZZTop/ZZTop
+    expire_in: 1 week
+
+zzscanlines-build:
+  stage: build
+  image: sacredbanana/amiga-compiler:m68k-amigaos
+  script:
+    - cd ZZScanlines
+    - m68k-amigaos-gcc -O2 -noixemul -o ZZScanlines ZZScanlines.c -lamiga
+  artifacts:
+    paths:
+      - ZZScanlines/ZZScanlines
+    expire_in: 1 week
+
+usb-storage-build:
+  stage: build
+  image: sacredbanana/amiga-compiler:m68k-amigaos
+  script:
+    - cd usb-storage
+    - m68k-amigaos-gcc mntsd_device.c mntsd_cmd.c rdb_partitions.c -m68020 -mtune=68020-60 -s -Wall -Wextra -Wno-unused-parameter -fomit-frame-pointer -nostdlib -nostartfiles -O2 -o zzusb.device
+  artifacts:
+    paths:
+      - usb-storage/zzusb.device
+    expire_in: 1 week
+
+mhi-build:
+  stage: build
+  image: sacredbanana/amiga-compiler:m68k-amigaos
+  script:
+    - cd mhi
+    - m68k-amigaos-gcc StartUp.c LibInit.c mhizz9000.c asmfuncs.s -m68020 -O3 -o mhizz9000.library.debug -g -ggdb -Wall -Wextra -Wno-unused-parameter -Wno-pointer-to-int-cast -Wno-pointer-sign -nostartfiles -ldebug
+    - m68k-amigaos-strip -s -o mhizz9000.library mhizz9000.library.debug
+  artifacts:
+    paths:
+      - mhi/mhizz9000.library
+    expire_in: 1 week
+
+ahi-build:
+  stage: build
+  image: sacredbanana/amiga-compiler:m68k-amigaos
+  script:
+    - cd ahi/driver
+    - vasmm68k_mot -quiet -phxass -Fhunk -m68020 -o PREFSFILE.uncut prefsfile.a -I/opt/amiga/m68k-amigaos/ndk-include -I/opt/amiga/m68k-amigaos/include
+    - dd bs=1 skip=40 if=PREFSFILE.uncut of=ZZ9000AX
+    - m68k-amigaos-gcc zz9000ax-ahi.c asmfuncs.s -O3 -o zz9000ax.audio -Wall -Wextra -Wno-unused-parameter -nostartfiles -m68020 -ldebug
+  artifacts:
+    paths:
+      - ahi/driver/zz9000ax.audio
+      - ahi/driver/ZZ9000AX
+    expire_in: 1 week

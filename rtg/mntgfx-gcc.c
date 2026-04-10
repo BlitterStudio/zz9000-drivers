@@ -1412,19 +1412,24 @@ void SetSpriteImage(__REGA0(struct BoardInfo *b), __REGD7(RGBFTYPE format)) {
 		zz_template_addr = b->MemorySize;
 	}
 
-	uint16_t data_size = ((b->MouseWidth >> 3) * 2) * (b->MouseHeight);
-	if (b->MouseWidth > 16)
-		memcpy((uint8_t*)(((uint32_t)b->MemoryBase)+zz_template_addr), b->MouseImage+4, data_size);
-	else
-		memcpy((uint8_t*)(((uint32_t)b->MemoryBase)+zz_template_addr), b->MouseImage+2, data_size);
+	uint32_t flags = b->Flags;
+	int hiressprite = 1;
+	int doubledsprite = 0;
+	if (flags & BIF_HIRESSPRITE)
+		hiressprite = 2;
+	if (flags & BIF_BIGSPRITE)
+		doubledsprite = 1;
+
+	uint16_t data_size = ((b->MouseWidth >> 3) * 2 * hiressprite) * (b->MouseHeight);
+	memcpy((uint8_t*)(((uint32_t)b->MemoryBase)+zz_template_addr), b->MouseImage + 2 * hiressprite, data_size);
 
 	if(b->CardFlags & CARDFLAG_ZORRO_3) {
 		dmy_cache
 		gfxdata->offset[1] = zz_template_addr;
 		gfxdata->x[0] = b->XOffset;
-		gfxdata->x[1] = b->MouseWidth;
+		gfxdata->x[1] = b->MouseWidth | (doubledsprite << 8);
 		gfxdata->y[0] = b->YOffset;
-		gfxdata->y[1] = b->MouseHeight;
+		gfxdata->y[1] = b->MouseHeight | ((hiressprite - 1) << 8);
 
 		zzwrite16(&registers->blitter_dma_op, OP_SPRITE_BITMAP);
 	} else {
@@ -1432,9 +1437,9 @@ void SetSpriteImage(__REGA0(struct BoardInfo *b), __REGD7(RGBFTYPE format)) {
 		writeBlitterSrcOffset(registers, zz_template_addr);
 
 		writeBlitterX1(registers, b->XOffset);
-		writeBlitterX2(registers, b->MouseWidth);
+		writeBlitterX2(registers, b->MouseWidth | (doubledsprite << 8));
 		writeBlitterY1(registers, b->YOffset);
-		writeBlitterY2(registers, b->MouseHeight);
+		writeBlitterY2(registers, b->MouseHeight | ((hiressprite - 1) << 8));
 
 		zzwrite16(&registers->sprite_bitmap, 0);
 	}

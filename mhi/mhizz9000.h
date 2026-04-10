@@ -4,7 +4,7 @@
 #include <exec/exec.h>
 #include <libraries/mhi.h>
 #include "compiler.h"
-#include "version.h"
+#include "Version.h"
 #include "mhilib.h"
 
 #define MHILIB_NAME "mhizz9000.library"
