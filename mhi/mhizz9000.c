@@ -2,7 +2,7 @@
  * MNT ZZ9000AX Amiga MHI driver (Hardware Accelerated)
  *
  * Copyright (C) 2022, Thomas Wenzel
- * Copyright (C) 2022, Lukas F. Hartmann <lukas@mntre.com>
+ * Copyright (C) 2022, Lucie L. Hartmann <lucie@mntre.com>
  *                     MNT Research GmbH, Berlin
  *                     https://mntre.com
  *

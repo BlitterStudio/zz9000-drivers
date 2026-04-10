@@ -1,6 +1,6 @@
 /*
  * MNT ZZ9000 Amiga Graphics Card Diagnostics (ZZTop)
- * Copyright (C) 2016-2022, Lukas F. Hartmann <lukas@mntre.com>
+ * Copyright (C) 2016-2026, Lucie L. Hartmann <lucie@mntre.com>
  *													MNT Research GmbH, Berlin
  *													https://mntre.com
  *

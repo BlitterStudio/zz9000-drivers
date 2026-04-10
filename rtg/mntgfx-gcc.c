@@ -1,7 +1,7 @@
 /*
  * MNT ZZ9000 Amiga Graphics Card Driver (ZZ9000.card)
  *
- * Copyright (C) 2016-2023, Lukas F. Hartmann <lukas@mntre.com>
+ * Copyright (C) 2016-2026, Lucie L. Hartmann <lucie@mntre.com>
  *													MNT Research GmbH, Berlin
  *													https://mntre.com
  * Copyright (C) 2021,			Bjorn Astrom <beeanyew@gmail.com>

@@ -1,9 +1,8 @@
 /*
  * MNT ZZ9000AX Amiga AHI Driver
  *
- * Copyright (C) 2022, Lukas F. Hartmann <lukas@mntre.com>
- *                     MNT Research GmbH, Berlin
- *                     https://mntre.com
+ * Copyright (C) 2022-2026, MNT Research GmbH, Lucie L. Hartmann <lucie@mntre.com>
+ *                          https://mntre.com
  *
  * Based on code by _Bnu (thanks a ton!) and AHI example drivers.
  * Modified by Thomas Wenzel (TW)

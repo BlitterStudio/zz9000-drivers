@@ -46,7 +46,7 @@ The network drivers reside in the "net" folder. The driver is SANA-II compatible
 
 # License / Copyright
 
-Copyright (C) 2016-2019, Lukas F. Hartmann <lukas@mntre.com>
+Copyright (C) 2016-2026, Lucie L. Hartmann <lucie@mntre.com>
 MNT Research GmbH, Berlin
 https://mntre.com
 

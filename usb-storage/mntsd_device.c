@@ -1,6 +1,6 @@
 /*
  * Amiga ZZ9000 USB Storage Driver (ZZ9000USBStorage.device)
- * Copyright (C) 2016-2021, MNT Research GmbH, Lukas F. Hartmann <lukas@mntre.com>
+ * Copyright (C) 2016-2026, MNT Research GmbH, Lucie L. Hartmann <lucie@mntre.com>
  * Copyright (C) 2021,      Bjorn Astrom <beeanyew@gmail.com>
  * Originally based on code:
  * Copyright (C) 2016,      Jason S. McMullan <jason.mcmullan@gmail.com>

@@ -1,9 +1,9 @@
 /*
  * MNT ZZ9000AX Amiga Audio Test Driver
  *
- * Copyright (C) 2021, Lukas F. Hartmann <lukas@mntre.com>
- *                     MNT Research GmbH, Berlin
- *                     https://mntre.com
+ * Copyright (C) 2021-2026, Lucie L. Hartmann <lucie@mntre.com>
+ *                          MNT Research GmbH, Berlin
+ *                          https://mntre.com
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * GNU General Public License v3.0 or later

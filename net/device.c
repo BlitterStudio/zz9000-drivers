@@ -1,6 +1,6 @@
 /*
  * MNT ZZ9000 Network Driver (ZZ9000Net.device)
- * Copyright (C) 2016-2023, Lukas F. Hartmann <lukas@mntre.com>
+ * Copyright (C) 2016-2026, Lucie L. Hartmann <lucie@mntre.com>
  *                          MNT Research GmbH, Berlin
  *                          https://mntre.com
  *

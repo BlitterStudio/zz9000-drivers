@@ -1,7 +1,7 @@
 /*
  * MNT ZZ9000AX Amiga MP3 Player Example (Hardware Accelerated)
  *
- * Copyright (C) 2022, Lukas F. Hartmann <lukas@mntre.com>
+ * Copyright (C) 2022, Lucie L. Hartmann <lucie@mntre.com>
  *                     MNT Research GmbH, Berlin
  *                     https://mntre.com
  * Additional work contributed by Thomas Wenzel
