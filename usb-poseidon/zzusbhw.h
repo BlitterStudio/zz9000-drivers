@@ -1,0 +1,159 @@
+/*
+ * ZZ9000 Poseidon USB Hardware Driver
+ *
+ * Copyright (C) 2026, MNT Research GmbH
+ *
+ * Licensed under the MIT License.
+ *
+ * This driver implements the Poseidon usbhardware.device interface,
+ * allowing the Poseidon USB stack to use the ZZ9000's USB port for
+ * all USB device types (HID, storage, networking, etc.).
+ *
+ * Architecture:
+ *   The ZZ9000's USB controller (Xilinx Zynq PS7 EHCI) runs on the
+ *   ARM core. The m68k Amiga side communicates with it via a
+ *   register-based command protocol through Zorro address space.
+ *
+ *   m68k Poseidon driver <--registers--> ARM firmware <--> EHCI <--> USB devices
+ *
+ *   The ARM firmware already has a full EHCI/USB stack. This driver
+ *   sends USB operation requests through a command mailbox protocol,
+ *   and the ARM firmware executes them and returns results via
+ *   shared memory.
+ */
+
+#ifndef ZZUSBHW_H
+#define ZZUSBHW_H
+
+#include <exec/types.h>
+#include <exec/lists.h>
+#include <exec/semaphores.h>
+#include <devices/usbhardware.h>
+
+#define DEVICE_NAME      "zzusbhw.device"
+#define DEVICE_VERSION   1
+#define DEVICE_REVISION  36
+
+#define ZZ_NUM_PORTS     1
+
+/*
+ * USB Command Mailbox Protocol
+ *
+ * The m68k driver writes a command structure to the shared buffer
+ * at card_base + 0xa000, then triggers the ARM firmware via a
+ * register write. The ARM firmware processes the command and
+ * writes the response back to the same buffer.
+ *
+ * This protocol requires matching ARM firmware support in
+ * zz9000-firmware/ZZ9000_proto.sdk/ZZ9000OS/src/main.c
+ */
+
+/* Command types */
+#define ZZUSB_CMD_CONTROL_XFER  0x01
+#define ZZUSB_CMD_BULK_XFER     0x02
+#define ZZUSB_CMD_INT_XFER      0x03
+#define ZZUSB_CMD_ISO_XFER      0x04
+#define ZZUSB_CMD_RESET_PORT    0x05
+#define ZZUSB_CMD_RESUME_PORT   0x06
+#define ZZUSB_CMD_SUSPEND_PORT  0x07
+#define ZZUSB_CMD_ENUMERATE     0x08
+#define ZZUSB_CMD_QUERY_DEVICE  0x09
+#define ZZUSB_CMD_SET_ADDRESS   0x0A
+#define ZZUSB_CMD_CLEAR_STALL   0x0B
+#define ZZUSB_CMD_CHECK_PORT    0x0C
+
+/* Command status codes (returned by ARM firmware) */
+#define ZZUSB_STATUS_OK         0x00
+#define ZZUSB_STATUS_PENDING    0x01
+#define ZZUSB_STATUS_ERROR      0xFF
+#define ZZUSB_STATUS_TIMEOUT    0xFE
+#define ZZUSB_STATUS_STALL      0xFD
+#define ZZUSB_STATUS_NAK        0xFC
+#define ZZUSB_STATUS_CRC        0xFB
+#define ZZUSB_STATUS_BABBLE     0xFA
+#define ZZUSB_STATUS_OVERRUN    0xF9
+#define ZZUSB_STATUS_UNDERRUN   0xF8
+#define ZZUSB_STATUS_OFFLINE    0xF7
+#define ZZUSB_STATUS_BADPARAM   0xF6
+
+/* USB speed types */
+#define ZZUSB_SPEED_LOW        0
+#define ZZUSB_SPEED_FULL       1
+#define ZZUSB_SPEED_HIGH       2
+
+/*
+ * Command structure layout in shared buffer.
+ * Written at card_base + 0xa000 via Zorro II bus.
+ *
+ * Most fields are big-endian (m68k native), read by ARM with be16()/be32().
+ * Setup packet fields (wValue, wIndex, wLength) are in USB little-endian,
+ * read by ARM with le16().
+ * uint8_t fields need no conversion.
+ */
+struct ZZUSBCommand {
+    uint16_t cmd;           /* ZZUSB_CMD_* */
+    uint16_t status;        /* ZZUSB_STATUS_* (written by ARM on completion) */
+    uint32_t dev_addr;      /* USB device address (0-127) */
+    uint16_t endpoint;      /* endpoint number (0-15) */
+    uint16_t direction;     /* 0=OUT, 0x80=IN */
+    uint16_t xfer_type;     /* control/bulk/int/iso */
+    uint16_t max_pkt_size;  /* max packet size for endpoint */
+    uint32_t data_length;   /* total transfer length */
+    uint32_t actual_length; /* actual bytes transferred (written by ARM) */
+    uint32_t timeout_ms;    /* timeout in milliseconds */
+    uint16_t speed;         /* device speed */
+    uint16_t interval;      /* interrupt interval */
+    /* Setup data for control transfers (8 bytes) */
+    uint8_t  setup_bRequestType;
+    uint8_t  setup_bRequest;
+    uint16_t setup_wValue;
+    uint16_t setup_wIndex;
+    uint16_t setup_wLength;
+    /* Padding to align data to 32 bytes */
+    uint8_t  reserved[6];
+    /* Data follows at offset 32 */
+} __attribute__((packed));
+
+#define ZZUSB_CMD_SIZE    48   /* command header including setup data */
+#define ZZUSB_DATA_OFFSET 64   /* data starts at this offset (cache-line aligned) */
+
+/* Size of shared buffer minus command header = max data per transfer */
+#define ZZUSB_MAX_XFER    (24576 - ZZUSB_DATA_OFFSET)
+
+#define ZZ_REG_USB_PROXY_CMD    0xDE
+
+/*
+ * Device base structure (extends struct Device/library)
+ */
+struct ZZUSBBase {
+    struct Device      zz_Device;
+    struct SignalSemaphore zz_Lock;
+    struct Task       *zz_PollTask;
+    ULONG              zz_PollSignal;       /* signal-mask the poll task waits on */
+    struct Task        zz_PollTaskStorage;
+    ULONG              zz_PollStack[1024];  /* match v1.14 layout exactly */
+    struct ZZUSBUnit {
+        struct Unit    zz_Unit;
+        void*          zz_Registers;
+        BOOL           zz_Enabled;
+        BOOL           zz_PortPresent;
+        UWORD          zz_RootHubAddr;
+        UWORD          zz_PortChange;
+        UWORD          zz_PortStatus;
+        UWORD          zz_Speed;
+        struct IOUsbHWReq *zz_PendingIntXfer; /* deferred root hub INTXFER */
+        /*
+         * Async interrupt delivery — one pending IOR per endpoint
+         * (1..15). On UHCMD_INTXFER to a non-root-hub device, we
+         * stash the IOR here and return WITHOUT replying. A
+         * background task polls firmware; when real data arrives
+         * it fills the IOR and ReplyMsgs. This matches how Deneb
+         * delivers interrupt transfers and avoids the
+         * empty-return → Poseidon-slide problem of synchronous
+         * delivery.
+         */
+        struct IOUsbHWReq *zz_IntPending[16];
+    } zz_Units[ZZ_NUM_PORTS];
+};
+
+#endif /* ZZUSBHW_H */
