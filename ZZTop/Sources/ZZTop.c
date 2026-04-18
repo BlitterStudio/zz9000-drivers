@@ -54,7 +54,7 @@ struct Library* ExpansionBase;
 struct ConfigDev* zz_cd;
 volatile UBYTE* zz_regs;
 int zorro_version = 0;
-uint16_t scanline_intensity = 0;
+uint16_t scanline_mode = 0;
 
 char txt_buf[64];
 
@@ -122,9 +122,25 @@ void zz_set_lpf_freq(uint16_t freq)
 	zz_set_reg(REG_ZZ_AUDIO_PARAM, 0);
 }
 
-void zz_set_scanline_intensity(uint16_t intensity)
+/*
+ * Scanlines V2 register map (FPGA firmware >= 1.14 with scanlines-v2
+ * bitstream):
+ *   0x100C = scanline_width / mode (0=off, 1=classic, 2=soft, 3=gradient)
+ *   0x100E = scanline_parity (0=odd dark, 1=even dark) — set via ZZScanlines CLI
+ *
+ * The V1-era 0x1008 / 0x100A intensity registers still decode in the
+ * V2 bitstream (now as scanline_intensity / scanline_intensity2) but
+ * the V2 modes don't consult them, so they are effectively no-ops under
+ * this tool.
+ */
+void zz_set_scanline_mode(uint16_t mode)
 {
-	zz_set_reg(0x100A, intensity);
+	zz_set_reg(0x100C, mode);
+}
+
+uint16_t zz_get_scanline_mode(void)
+{
+	return zz_get_reg16(0x100C) & 0x3;
 }
 
 double t_old=0;
@@ -300,8 +316,8 @@ VOID handleGadgetEvent(struct Window *win, struct Gadget *gad, ULONG code)
 			break;
 		}
 		case MYGAD_SCANLINES: {
-			scanline_intensity = code;
-			zz_set_scanline_intensity(code);
+			scanline_mode = code;
+			zz_set_scanline_mode(code);
 			break;
 		}
 	}
@@ -353,7 +369,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
 	ng.ng_TopEdge	= 60+topborder;
 	ng.ng_GadgetID	= MYGAD_TEMP;
-	ng.ng_GadgetText = (STRPTR)"Core �C";
+	ng.ng_GadgetText = (STRPTR)"Core �C";
 
 	gads[MYGAD_TEMP] = gad = CreateGadget(STRING_KIND, gad, &ng,
 										GTST_String, "",
@@ -400,11 +416,13 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 	ng.ng_GadgetID	= MYGAD_SCANLINES;
 	ng.ng_GadgetText = (STRPTR)"Scanlines";
 
+	/* V2 modes: 0=off 1=classic 2=soft 3=gradient. Parity (odd/even
+	 * dark) is secondary and set via the ZZScanlines CLI tool. */
 	gads[MYGAD_SCANLINES] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
 										GTSL_Min, 0,
-										GTSL_Max, 255,
-										GTSL_Level, scanline_intensity,
-										GTSL_LevelFormat, "%ld",
+										GTSL_Max, 3,
+										GTSL_Level, scanline_mode,
+										GTSL_LevelFormat, "Mode %ld",
 										GTSL_MaxLevelLen, 10,
 										GTSL_LevelPlace, PLACETEXT_BELOW,
 										TAG_END);
@@ -576,6 +594,11 @@ int main(void) {
 
 	zz_regs = (UBYTE*)zz_cd->cd_BoardAddr;
 	CloseLibrary(ExpansionBase);
+
+	/* Sync the slider with whatever mode the FPGA currently holds — the
+	 * V2 bitstream keeps scanline state across soft resets, so a prior
+	 * CLI or ZZTop session may have left a non-zero mode configured. */
+	scanline_mode = zz_get_scanline_mode();
 
 	if (NULL == (IntuitionBase = OpenLibrary((CONST_STRPTR)"intuition.library", 37)))
 		errorMessage("Requires V37 intuition.library");

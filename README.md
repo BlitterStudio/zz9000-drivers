@@ -53,11 +53,22 @@ https://mntre.com
 Network driver based on work by
 (C) 2018 Henryk Richter <henryk.richter@gmx.net>
 
-Scanline support tools (ZZScanlines, ZZTop slider) based on original
-scanline bitstream by Xanxi, adapted for firmware 1.13+.
+Scanline control tools (ZZScanlines CLI, ZZTop slider) pair with
+scanline bitstream V1 and V2 by Xanxi. V2 adds
+multi-mode patterns (classic / soft / gradient) with odd/even parity,
+gated to AGA scandoubled modes and RTG resolutions below 350 lines.
+ZZScanlines.c V2 is essentially Xanxi's reference implementation,
+adapted for the drivers repo conventions.
 
 RTG driver optimizations (SetColorArray Z3 batch path, AllocBitMap)
-and scanline tooling by Dimitris Panokostas (midwan).
+and scanline tooling (ZZScanlines V2 port, ZZTop V2 slider retargeting
+with hardware readback) by Dimitris Panokostas (midwan).
+
+USB Poseidon hardware driver (zzusbhw.device) — chunked bulk transfers,
+root-hub emulation, async INT via poll task, Z3 autoconfig preference,
+CopyMemQuick fast path, mailbox protocol, throughput optimisation —
+by Dimitris Panokostas (midwan). Paired with the ZZ9000OS firmware
+USB stack in the companion repository.
 
 SPDX-License-Identifier: GPL-3.0-or-later
 https://spdx.org/licenses/GPL-3.0-or-later.html
