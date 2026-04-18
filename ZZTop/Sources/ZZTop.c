@@ -31,7 +31,7 @@
 
 #include "zz9000.h"
 
-struct Gadget *gads[10];
+struct Gadget *gads[11];
 
 #define MYGAD_ZORROVER     (0)
 #define MYGAD_FWVER        (1)
@@ -43,6 +43,13 @@ struct Gadget *gads[10];
 #define MYGAD_Z9AX         (7)
 #define MYGAD_LPF          (8)
 #define MYGAD_SCANLINES    (9)
+#define MYGAD_PARITY       (10)
+
+static STRPTR parity_labels[] = {
+	(STRPTR)"Odd dark",
+	(STRPTR)"Even dark",
+	NULL
+};
 
 struct TextAttr Topaz80 = { (STRPTR)"topaz.font", 8, 0, 0, };
 
@@ -55,6 +62,7 @@ struct ConfigDev* zz_cd;
 volatile UBYTE* zz_regs;
 int zorro_version = 0;
 uint16_t scanline_mode = 0;
+uint16_t scanline_parity = 0;
 
 char txt_buf[64];
 
@@ -126,7 +134,7 @@ void zz_set_lpf_freq(uint16_t freq)
  * Scanlines V2 register map (FPGA firmware >= 1.14 with scanlines-v2
  * bitstream):
  *   0x100C = scanline_width / mode (0=off, 1=classic, 2=soft, 3=gradient)
- *   0x100E = scanline_parity (0=odd dark, 1=even dark) — set via ZZScanlines CLI
+ *   0x100E = scanline_parity (0=odd dark, 1=even dark)
  *
  * The V1-era 0x1008 / 0x100A intensity registers still decode in the
  * V2 bitstream (now as scanline_intensity / scanline_intensity2) but
@@ -141,6 +149,16 @@ void zz_set_scanline_mode(uint16_t mode)
 uint16_t zz_get_scanline_mode(void)
 {
 	return zz_get_reg16(0x100C) & 0x3;
+}
+
+void zz_set_scanline_parity(uint16_t parity)
+{
+	zz_set_reg(0x100E, parity & 0x1);
+}
+
+uint16_t zz_get_scanline_parity(void)
+{
+	return zz_get_reg16(0x100E) & 0x1;
 }
 
 double t_old=0;
@@ -320,6 +338,11 @@ VOID handleGadgetEvent(struct Window *win, struct Gadget *gad, ULONG code)
 			zz_set_scanline_mode(code);
 			break;
 		}
+		case MYGAD_PARITY: {
+			scanline_parity = code;
+			zz_set_scanline_parity(code);
+			break;
+		}
 	}
 }
 
@@ -331,7 +354,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 	gad = CreateContext(glistptr);
 
 	ng.ng_LeftEdge	 = 20;
-	ng.ng_TopEdge		 = 210+topborder;
+	ng.ng_TopEdge		 = 240+topborder;
 	ng.ng_Width			 = 100;
 	ng.ng_Height		 = 14;
 	ng.ng_GadgetText = (STRPTR)"Bus Test";
@@ -416,8 +439,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 	ng.ng_GadgetID	= MYGAD_SCANLINES;
 	ng.ng_GadgetText = (STRPTR)"Scanlines";
 
-	/* V2 modes: 0=off 1=classic 2=soft 3=gradient. Parity (odd/even
-	 * dark) is secondary and set via the ZZScanlines CLI tool. */
+	/* V2 modes: 0=off 1=classic 2=soft 3=gradient. */
 	gads[MYGAD_SCANLINES] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
 										GTSL_Min, 0,
 										GTSL_Max, 3,
@@ -425,6 +447,15 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 										GTSL_LevelFormat, "Mode %ld",
 										GTSL_MaxLevelLen, 10,
 										GTSL_LevelPlace, PLACETEXT_BELOW,
+										TAG_END);
+
+	ng.ng_TopEdge	= 210+topborder;
+	ng.ng_GadgetID	= MYGAD_PARITY;
+	ng.ng_GadgetText = (STRPTR)"Parity";
+
+	gads[MYGAD_PARITY] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+										GTCY_Labels, parity_labels,
+										GTCY_Active, scanline_parity,
 										TAG_END);
 
 	return(gad);
@@ -545,7 +576,7 @@ VOID gadtoolsWindow(VOID) {
 							WA_Title,			"MNT ZZTop 1.11",
 							WA_Gadgets,		glist,			WA_AutoAdjust,		TRUE,
 							WA_Width,				280,			WA_MinWidth,			 280,
-							WA_InnerHeight, 230,			WA_MinHeight,			 230,
+							WA_InnerHeight, 260,			WA_MinHeight,			 260,
 							WA_DragBar,		 TRUE,			WA_DepthGadget,		TRUE,
 							WA_Activate,	 TRUE,			WA_CloseGadget,		TRUE,
 							WA_SizeGadget, FALSE,			WA_SimpleRefresh, TRUE,
@@ -599,6 +630,7 @@ int main(void) {
 	 * V2 bitstream keeps scanline state across soft resets, so a prior
 	 * CLI or ZZTop session may have left a non-zero mode configured. */
 	scanline_mode = zz_get_scanline_mode();
+	scanline_parity = zz_get_scanline_parity();
 
 	if (NULL == (IntuitionBase = OpenLibrary((CONST_STRPTR)"intuition.library", 37)))
 		errorMessage("Requires V37 intuition.library");
