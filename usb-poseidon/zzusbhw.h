@@ -1,9 +1,23 @@
 /*
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
  * ZZ9000 Poseidon USB Hardware Driver
  *
- * Copyright (C) 2026, MNT Research GmbH
+ * Copyright (C) 2026 MNT Research GmbH
+ * Copyright (C) 2026 Dimitris Panokostas <midwan@gmail.com>
  *
- * Licensed under the MIT License.
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  *
  * This driver implements the Poseidon usbhardware.device interface,
  * allowing the Poseidon USB stack to use the ZZ9000's USB port for
@@ -32,7 +46,7 @@
 
 #define DEVICE_NAME      "zzusbhw.device"
 #define DEVICE_VERSION   1
-#define DEVICE_REVISION  36
+#define DEVICE_REVISION  83
 
 #define ZZ_NUM_PORTS     1
 
@@ -137,6 +151,12 @@ struct ZZUSBBase {
         void*          zz_Registers;
         BOOL           zz_Enabled;
         BOOL           zz_PortPresent;
+        BOOL           zz_PortDead;    /* device marked unusable after
+                                        * unrecoverable error (babble,
+                                        * stuck qTD). Sticky until
+                                        * physical disconnect — prevents
+                                        * infinite re-enumerate loops on
+                                        * a device that keeps failing. */
         UWORD          zz_RootHubAddr;
         UWORD          zz_PortChange;
         UWORD          zz_PortStatus;
@@ -153,6 +173,17 @@ struct ZZUSBBase {
          * delivery.
          */
         struct IOUsbHWReq *zz_IntPending[16];
+        /*
+         * Consecutive bulk-failure counter. Incremented when a
+         * UHCMD_BULKXFER comes back non-OK from firmware; reset to
+         * 0 on any successful bulk. If it crosses the threshold we
+         * report UHIOERR_USBOFFLINE instead of TIMEOUT so Poseidon
+         * tears the device down instead of looping forever. A
+         * genuinely incompatible USB stick would otherwise keep
+         * Poseidon retrying indefinitely, accumulating state until
+         * something in the class driver shreds.
+         */
+        UWORD          zz_BulkErrCount;
     } zz_Units[ZZ_NUM_PORTS];
 };
 
