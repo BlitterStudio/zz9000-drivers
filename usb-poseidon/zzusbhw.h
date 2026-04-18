@@ -46,7 +46,7 @@
 
 #define DEVICE_NAME      "zzusbhw.device"
 #define DEVICE_VERSION   1
-#define DEVICE_REVISION  83
+#define DEVICE_REVISION  88
 
 #define ZZ_NUM_PORTS     1
 
