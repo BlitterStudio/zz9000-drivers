@@ -8,8 +8,6 @@
 *.nodma
 *.audio
 PREFSFILE*
-usb-storage/zzusb-device.h
-usb-storage/boot-rom/zzbootrom.h
 sd-boot/zzsd-device.h
 attic
 
