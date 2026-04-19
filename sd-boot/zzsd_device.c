@@ -1,3 +1,16 @@
+/*
+ * ZZ9000 SD-card-backed hardfile boot driver (zzsd.device)
+ * Copyright (C) 2026, MNT Research GmbH
+ * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
+ *
+ * Based in part on the ZZ9000 USB storage driver
+ * (Copyright (C) 2016-2026 MNT Research GmbH, Lucie L. Hartmann;
+ *  Copyright (C) 2021 Bjorn Astrom; Copyright (C) 2016 Jason S.
+ *  McMullan).
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 #include <exec/resident.h>
 #include <exec/errors.h>
 #include <exec/memory.h>
@@ -54,9 +67,6 @@ int __attribute__((no_reorder)) _start() {
 const char device_name[] = DEVICE_NAME;
 const char device_id_string[] = DEVICE_ID_STRING;
 
-#define debug(x,args...) while(0){}
-#define kprintf(x,args...) while(0){}
-
 static void zzsd_reset(void *boardaddr) {
     volatile uint16_t *status = (volatile uint16_t *)((uint8_t *)boardaddr + ZZSD_STATUS);
     *status = 0;
@@ -110,7 +120,9 @@ static struct Library __attribute__((used)) *init_device(uint8_t *seg_list asm("
     dev->lib_Revision = DEVICE_REVISION;
     dev->lib_IdString = (char *)device_id_string;
 
-    DevBase->sd_Device = (struct Device*)dev;
+    /* sd_Device is embedded at offset 0 and already IS `dev` (same
+     * address), so no separate assignment is needed — writing to it
+     * would overlap Exec-managed lib_* fields. */
     InitSemaphore(&DevBase->sd_Lock);
     cd->cd_Driver = (struct Device *)dev;
 
@@ -126,7 +138,7 @@ static uint8_t* __attribute__((used)) expunge(struct Library *dev asm("a6")) {
     return 0;
 }
 
-static void __attribute__((used)) open(struct Library *dev asm("a6"), struct IOExtTD *iotd asm("a1"), uint32_t unitnum asm("d0"), uint32_t flags asm("d1")) {
+static uint32_t __attribute__((used)) open(struct Library *dev asm("a6"), struct IOExtTD *iotd asm("a1"), uint32_t unitnum asm("d0"), uint32_t flags asm("d1")) {
     int io_err = IOERR_OPENFAIL;
     struct SDBase* DevBase = (struct SDBase*)dev;
 
@@ -144,7 +156,7 @@ static void __attribute__((used)) open(struct Library *dev asm("a6"), struct IOE
             iotd->iotd_Req.io_Unit = (struct Unit*)&DevBase->sd_Unit[unitnum];
             iotd->iotd_Req.io_Unit->unit_flags = UNITF_ACTIVE;
             iotd->iotd_Req.io_Unit->unit_OpenCnt = 1;
-            ((struct Library *)DevBase->sd_Device)->lib_OpenCnt++;
+            dev->lib_OpenCnt++;
         } else if (unitnum != 0) {
             /* HDToolBox scans multiple units/LUNs. Returning TDERR_BadUnitNum
                tells it "this unit doesn't exist" so it keeps scanning.
@@ -152,12 +164,19 @@ static void __attribute__((used)) open(struct Library *dev asm("a6"), struct IOE
             io_err = TDERR_BadUnitNum;
         }
         iotd->iotd_Req.io_Error = io_err;
+        iotd->iotd_Req.io_Device = (struct Device *)dev;
     }
+    /* Amiga Open() convention: D0 = device pointer on success, 0 on
+     * failure. A void return leaves D0 indeterminate, and some callers
+     * (including dos.library handler spawn paths) treat a non-zero D0
+     * as required for success. Returning dev or 0 explicitly fixes
+     * both interpretations. */
+    return (io_err == 0) ? (uint32_t)dev : 0;
 }
 
 static uint8_t* __attribute__((used)) close(struct Library *dev asm("a6"), struct IOExtTD *iotd asm("a1")) {
-    struct SDBase* DevBase = (struct SDBase*)dev;
-    ((struct Library *)DevBase->sd_Device)->lib_OpenCnt--;
+    (void)iotd;
+    dev->lib_OpenCnt--;
     return 0;
 }
 
@@ -312,8 +331,22 @@ LONG SD_PerformIO(struct SDBase *DevBase, struct SDUnit *sdu, struct IORequest *
     }
     case CMD_CLEAR:
     case CMD_UPDATE:
+    case CMD_START:
+    case CMD_STOP:
+    case CMD_RESET:
+    case CMD_FLUSH:
     case TD_REMOVE:
     case TD_CHANGESTATE:
+    case TD_SEEK:
+    case TD_SEEK64:
+    case NSCMD_TD_SEEK64:
+    case TD_ADDCHANGEINT:
+    case TD_REMCHANGEINT:
+    case TD_EJECT:
+        /* HDs don't have media-change semantics, don't need seeking,
+         * and treat cache start/stop/flush as advisory — answer all
+         * of these as success-no-op so handlers that issue them (e.g.
+         * dos.library shutdown, HDToolBox) don't see spurious errors. */
         iostd->io_Actual = 0;
         err = 0;
         break;
@@ -394,19 +427,56 @@ LONG SD_PerformSCSI(struct SDBase *DevBase, struct SDUnit *sdu, struct IORequest
     struct IOStdReq *iostd = (struct IOStdReq *)io;
     struct SCSICmd *scsi = iostd->io_Data;
     uint8_t* boardaddr = sdu->sdu_Registers;
-    uint8_t* data = (uint8_t*)scsi->scsi_Data;
+    uint8_t* data;
     uint32_t i, block, blocks, maxblocks;
     long err;
     uint8_t r1;
+
+    if (!scsi) return IOERR_BADADDRESS;
+    data = (uint8_t*)scsi->scsi_Data;
 
     maxblocks = DevBase->sd_PartBlocks;
     if (maxblocks == 0) maxblocks = zzsd_capacity_or_default(boardaddr);
     if (scsi->scsi_CmdLength < 6) return IOERR_BADLENGTH;
     if (scsi->scsi_Command == NULL) return IOERR_BADADDRESS;
+    /* Any command that writes into scsi_Data needs a non-null buffer
+     * with non-zero length. The per-case bodies below assume both are
+     * valid; reject upfront so a broken caller can't fault us here. */
+    if (scsi->scsi_Length > 0 && data == NULL) return IOERR_BADADDRESS;
+
+    /* Default SCSI return values. A handler that only writes
+     * scsi_Actual on success leaves scsi_Status / scsi_CmdActual /
+     * scsi_SenseActual at whatever the caller last observed, which
+     * PFS3 interprets as a stale error state and refuses to progress
+     * past the first block read. Zero them explicitly so every SCSI
+     * path reports GOOD status with no sense data. */
     scsi->scsi_Actual = 0;
+    scsi->scsi_CmdActual = scsi->scsi_CmdLength;
+    scsi->scsi_Status = 0;
+    scsi->scsi_SenseActual = 0;
+
+    debugstr(boardaddr, "SCSI op=");
+    debughex(boardaddr, scsi->scsi_Command[0]);
 
     switch (scsi->scsi_Command[0]) {
-    case 0x00:
+    case 0x00:      /* TEST UNIT READY — always ready while mounted */
+        err = 0;
+        break;
+    case 0x03:      /* REQUEST SENSE — we never set SENSE; return 'no sense' */
+        for (i = 0; i < scsi->scsi_Length && i < 18; i++) {
+            uint8_t val;
+            switch (i) {
+            case 0:  val = 0x70; break;  /* fixed-format, current error */
+            case 2:  val = 0x00; break;  /* sense key = NO SENSE */
+            case 7:  val = 10;   break;  /* additional sense length */
+            default: val = 0;    break;
+            }
+            data[i] = val;
+        }
+        scsi->scsi_Actual = i;
+        err = 0;
+        break;
+    case 0x1b:      /* START/STOP UNIT — no-op; we are always spinning */
         err = 0;
         break;
     case 0x12:
@@ -483,6 +553,36 @@ LONG SD_PerformSCSI(struct SDBase *DevBase, struct SDUnit *sdu, struct IORequest
         scsi->scsi_Actual = 8;
         err = 0;
         break;
+    case 0x28:      /* READ(10): 4-byte LBA at cmd[2..5], 2-byte len at cmd[7..8] */
+    case 0x2a: {    /* WRITE(10): same layout */
+        int is_write = (scsi->scsi_Command[0] == 0x2a);
+        if (scsi->scsi_CmdLength < 10) { err = HFERR_BadStatus; break; }
+        block = ((uint32_t)scsi->scsi_Command[2] << 24) |
+                ((uint32_t)scsi->scsi_Command[3] << 16) |
+                ((uint32_t)scsi->scsi_Command[4] << 8)  |
+                (uint32_t)scsi->scsi_Command[5];
+        blocks = ((uint32_t)scsi->scsi_Command[7] << 8) |
+                 (uint32_t)scsi->scsi_Command[8];
+        if (blocks == 0) { scsi->scsi_Actual = 0; err = 0; break; }
+        if (block + blocks > maxblocks) { err = IOERR_BADADDRESS; break; }
+        if (scsi->scsi_Length < (blocks << SD_SECTOR_SHIFT)) { err = IOERR_BADLENGTH; break; }
+        if (data == NULL) { err = IOERR_BADADDRESS; break; }
+        block += DevBase->sd_BaseOffset;
+        {
+            uint32_t retries = SD_RETRY;
+            do {
+                r1 = is_write
+                    ? zzsd_write_blocks(boardaddr, data, block, blocks)
+                    : zzsd_read_blocks(boardaddr, data, block, blocks);
+                if (r1) zzsd_reset(boardaddr);
+                retries--;
+            } while (r1 && retries > 0);
+        }
+        if (r1) { err = HFERR_BadStatus; break; }
+        scsi->scsi_Actual = blocks << SD_SECTOR_SHIFT;
+        err = 0;
+        break;
+    }
     case 0x1a:
         data[0] = 3 + 8 + 0x16;
         data[1] = 0;
@@ -548,8 +648,11 @@ LONG SD_PerformSCSI(struct SDBase *DevBase, struct SDUnit *sdu, struct IORequest
         break;
     }
 
-    if (err == 0) iostd->io_Actual = sizeof(*scsi);
-    else iostd->io_Actual = 0;
+    /* SCSI convention: io_Actual = 0 on success; the byte count goes
+     * in scsi_Actual (already set by each case). Some callers (seen
+     * under SysSpeed heavy random-access) misinterpret a non-zero
+     * io_Actual as a short transfer and retry indefinitely. */
+    iostd->io_Actual = 0;
     return err;
 }
 

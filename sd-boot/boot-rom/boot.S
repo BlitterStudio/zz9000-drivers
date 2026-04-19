@@ -1,3 +1,14 @@
+/*
+ * ZZ9000 autoboot DiagArea thunk — Kickstart entry points
+ * (DiagEntry / BootEntry), a runtime hunk relocator for the packed
+ * zzsd.device image, and the RomTagCopy template Kickstart's
+ * resident scan picks up.
+ *
+ * Copyright (C) 2026, MNT Research GmbH
+ * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 main:
 RomTagCopy:
   .short 0x4afc
@@ -31,64 +42,72 @@ DiagPt:
   lea configdev(pc), a3
   move.l a3, (a1)
 
-  // debug: print loadaddr
-  lea dbgladr(pc), a6
-  jsr puts
-  move.l a2, d0
-  jsr puthex
-
   lea RomTagCopy, a5
   move.l a2, a4
   add.l #0x20, a4
   move.l a4, 2(a5)
 
-  add.l #0x400, a2
-  move.l a2, a0
+  // Driver source: read from the ROM window via Zorro (boardaddr+0x6300).
+  // Kickstart's autoconfig DiagArea copy is capped at ~8 KB regardless of
+  // our da_Size, and the FPGA bitstream only maps 0x6000..0x8000 (8 KB)
+  // to BOOT_ROM — 0x8000+ goes to the ethernet TX frame, returning zeros
+  // for our purposes. Driver lives at ROM offset 0x300; Amiga reads at
+  // cardbase + 0x6000 + 0x300 = 0x6300. z3660 does the same idea (driver
+  // code stays in ROM, not in DiagArea).
+  add.l #0x300, a2                 // keep a2 advanced for any later users
+  move.l cardbase(pc), a0
+  add.l #0x6300, a0
 
-  // debug: print driver ptr
-  lea dbgdrv(pc), a6
-  jsr puts
-  move.l a0, d0
-  jsr puthex
+  // Copy the driver binary to a freshly-allocated buffer before touching
+  // anything else. The driver currently lives inside the Kickstart-allocated
+  // DiagArea, and the per-hunk AllocMem calls below tend to hand back memory
+  // that overlaps that region — once CopyMem writes into a hunk, it corrupts
+  // the source bytes we're still walking. Relocating from a private buffer
+  // eliminates the overlap entirely.
+  move.l a0, d2                  // d2 = driver src
+  // Ask for 32 KB so Amiga is forced to find a contiguous free block
+  // that's almost certainly outside the DiagArea (which is only 8 KB).
+  // A small request fragmented around the DiagArea yielded a buffer
+  // whose tail addresses were non-responsive.
+  move.l #0x8000, d0             // 32 KB
+  move.l #0x10000, d1            // MEMF_CLEAR
+  move.l 4, a6
+  jsr -198(a6)                   // AllocMem
+  tst.l d0
+  bne .have_buf
+  // Fallback: try 8 KB
+  move.l #0x4000, d0
+  move.l #0x10000, d1
+  move.l 4, a6
+  jsr -198(a6)
+  tst.l d0
+  beq .skip_copy
+.have_buf:
+  move.l d0, d3                  // d3 = buffer
+
+  // Use Exec's CopyMem (LVO -624). It handles cache coherency correctly
+  // on all CPUs and processes overlap via backwards copy when dst > src.
+  // CopyMem(A0=src, A1=dst, D0=size) — no return.
+  // Copy 0x1D00 bytes — max we can read before running into 0x8000 from
+  // driver src (0x6300). Reading past 0x8000 hits the ethernet TX frame
+  // (returns zeros) and would poison the buffer tail.
+  move.l d2, a0
+  move.l d3, a1
+  move.l #0x1D00, d0
+  move.l 4, a6
+  jsr -624(a6)                    // CopyMem
+  move.l 4, a6
+  jsr -636(a6)                    // CacheClearU
+
+  move.l d3, a0                  // relocate from the private copy
+.skip_copy:
 
   jsr relocatehunk
-
-  // debug: print hunk result
-  lea dbghunk(pc), a6
-  jsr puts
   move.l d0, d7
-  move.l d7, d0
-  jsr puthex
 
   // if relocatehunk returned 0, it failed
   tst.l d7
   beq diag_fail
-
-  // debug: print first 4 longs at hunk base
-  lea dbgdata(pc), a6
-  jsr puts
-  move.l (d7), d0
-  jsr puthex
-  move.l 4(d7), d0
-  jsr puthex
-  move.l 8(d7), d0
-  jsr puthex
-  move.l 12(d7), d0
-  jsr puthex
-
-  // debug: print RomTag fields we're copying (14-30)
-  lea dbgrtag(pc), a6
-  jsr puts
-  move.l 14(d7), d0
-  jsr puthex
-  move.l 18(d7), d0
-  jsr puthex
-  move.l 22(d7), d0
-  jsr puthex
-  move.l 26(d7), d0
-  jsr puthex
-  move.l 30(d7), d0
-  jsr puthex
 
   // copy RomTag fields
   lea RomTagCopy, a4
@@ -103,22 +122,6 @@ DiagPt:
   move.l 30(d7), d0
   move.l d0, 22(a4)
 
-  // debug: print RomTagCopy contents
-  lea dbgcopy(pc), a6
-  jsr puts
-  lea RomTagCopy, a5
-  move.l (a5), d0
-  jsr puthex
-  move.l 2(a5), d0
-  jsr puthex
-  move.l 6(a5), d0
-  jsr puthex
-  move.l 10(a5), d0
-  jsr puthex
-  move.l 14(a5), d0
-  jsr puthex
-  move.l 18(a5), d0
-  jsr puthex
   move.l 22(a5), d0
   jsr puthex
 
@@ -141,20 +144,15 @@ DosName:
   .string "dos.library"
 
 .align 4
-dbgladr:
-  .string "LADR=\r\n"
-dbgdrv:
-  .string "DRVP=\r\n"
-dbghunk:
-  .string "HUNK=\r\n"
-dbgdata:
-  .string "DATA:\r\n"
-dbgrtag:
-  .string "RTAG:\r\n"
-dbgcopy:
-  .string "COPY:\r\n"
 dbgok:
   .string "OK!\r\n"
+dbgalloc:
+  .string "ALLC:\r\n"
+dbgallocfail:
+  .string "ALLCFAIL\r\n"
+/* PARS/UNK/ABS/END debug removed — these printed inside the hunk
+ * parse loop and added ~40 bytes per site. Kept ALLC/ALLCFAIL because
+ * an allocation failure during diag is the most common bug class. */
 
 .align 4
 puts:
@@ -189,6 +187,11 @@ puthex:
   SEG_START = 8
   SEG_SIZE = 8
   MEMF_CLEAR = 0x10000
+  /* MEMF_REVERSE (bit 31) forces AllocMem to hand out memory from the
+     top of the free list. Without this, Kickstart's DiagArea buffer
+     stays in the general free pool and AllocMem happily returns blocks
+     that overlap the driver source we're still relocating from. */
+  MEMF_REVERSE = 0x80000000
   AllocMem = -198
 
 relocatehunk:
@@ -215,12 +218,20 @@ relocatehunk:
   addq.l  #SEG_SIZE,d0
 
   move.l  d0,d3
-  add.l  #MEMF_CLEAR,d1
+  or.l   #MEMF_CLEAR,d1
   move.l 4,a6
   jsr AllocMem(a6)
 
+  move.l  d0,-(sp)
+  lea     dbgalloc(pc),a6
+  jsr     puts
+  move.l  (sp)+,d0
+  jsr     puthex
+
   move.l  d0,-4(sp,d4.l)
   move.l  d0,a0
+  tst.l   d0
+  beq     .allocfail
   move.l  d3,SEG_LEN(a0)
   cmp.l   d2,d4
   beq     .first
@@ -229,6 +240,17 @@ relocatehunk:
 .first:
   subq.l  #4,d4
   bgt     .alloc
+  bra     .allocdone
+
+.allocfail:
+  lea     dbgallocfail(pc),a6
+  jsr     puts
+  add.l   d2,sp
+  movem.l (sp)+, d2-d4/a2-a3
+  moveq   #0,d0
+  rts
+
+.allocdone:
 
   add.l   d2,a2
 
@@ -251,6 +273,7 @@ relocatehunk:
   beq     .hsyms
   cmp.w   #HUNK_END,d0
   beq     .hend
+
   moveq   #0,d0
   bra     .error
 
@@ -296,6 +319,7 @@ relocatehunk:
 .hend:
   addq.l  #4,a3
   subq.l  #4,d4
+  tst.l   d4
   bne     .parse
 
 .quit:
