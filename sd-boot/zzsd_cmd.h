@@ -118,10 +118,15 @@ struct NSDeviceQueryResult {
 #define NSCMD_TD_WRITE64    0xC001
 #define NSCMD_TD_SEEK64     0xC002
 #define NSCMD_TD_FORMAT64   0xC003
+/* TD_READ64/WRITE64/SEEK64/FORMAT64 are also defined by recent
+ * trackdisk.h in the Amiga NDK. Guard so both toolchains (with and
+ * without updated NDK) build cleanly. */
+#ifndef TD_READ64
 #define TD_READ64     24
 #define TD_WRITE64    25
 #define TD_SEEK64     26
 #define TD_FORMAT64   27
+#endif
 
 /* struct Device must be embedded at offset 0 so AutoInit's library
  * header (lib_Node, lib_NegSize, lib_Version, lib_IdString, lib_OpenCnt)

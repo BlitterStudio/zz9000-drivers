@@ -34,15 +34,33 @@ zzscanlines-build:
       - ZZScanlines/ZZScanlines
     expire_in: 1 week
 
-usb-storage-build:
+usb-poseidon-build:
   stage: build
   image: sacredbanana/amiga-compiler:m68k-amigaos
   script:
-    - cd usb-storage
-    - m68k-amigaos-gcc mntsd_device.c mntsd_cmd.c rdb_partitions.c -m68020 -mtune=68020-60 -s -Wall -Wextra -Wno-unused-parameter -fomit-frame-pointer -nostdlib -nostartfiles -O2 -o zzusb.device
+    - cd usb-poseidon
+    - m68k-amigaos-gcc -m68020 -mtune=68020-60 -msoft-float -s -Wall -Wextra -Wno-unused-parameter -fomit-frame-pointer -nostdlib -nostartfiles -O2 -I. -o zzusbhw.device zzusbhw_device.c -lgcc -lc
   artifacts:
     paths:
-      - usb-storage/zzusb.device
+      - usb-poseidon/zzusbhw.device
+    expire_in: 1 week
+
+sd-boot-build:
+  stage: build
+  image: sacredbanana/amiga-compiler:m68k-amigaos
+  script:
+    - cd sd-boot
+    - m68k-amigaos-gcc -m68000 -s -Wall -Wextra -Wno-unused-parameter -fomit-frame-pointer -nostdlib -nostartfiles -Os -o zzsd.device zzsd_device.c zzsd_cmd.c zzsd_boot.c
+    # Must fit inside the FPGA-decoded 8 KB boot ROM window minus the
+    # diag-area header (0x20) and diag-code thunk at offset 0x300.
+    # Hard limit = 0x2000 - 0x300 = 7424 bytes; if this fails, either
+    # trim the driver or re-plan the ROM layout before flashing.
+    - SIZE=$(stat -c%s zzsd.device 2>/dev/null || stat -f%z zzsd.device)
+    - echo "zzsd.device size = $SIZE bytes (hard ceiling 7424)"
+    - test "$SIZE" -lt 7424
+  artifacts:
+    paths:
+      - sd-boot/zzsd.device
     expire_in: 1 week
 
 mhi-build:
