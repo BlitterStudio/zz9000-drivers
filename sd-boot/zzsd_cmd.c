@@ -2,7 +2,6 @@
  * ZZ9000 SD-boot driver — low-level block read/write via the Zorro
  * shared-buffer protocol.
  *
- * Copyright (C) 2026, MNT Research GmbH
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  * SPDX-License-Identifier: GPL-3.0-or-later
  */

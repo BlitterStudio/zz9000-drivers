@@ -3,7 +3,6 @@
  *
  * ZZ9000 Poseidon USB Hardware Driver
  *
- * Copyright (C) 2026 MNT Research GmbH
  * Copyright (C) 2026 Dimitris Panokostas <midwan@gmail.com>
  *
  * This program is free software: you can redistribute it and/or modify

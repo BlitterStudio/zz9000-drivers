@@ -3,7 +3,6 @@
  *
  * ZZ9000 Poseidon USB Hardware Driver (zzusbhw.device)
  *
- * Copyright (C) 2026 MNT Research GmbH
  * Copyright (C) 2026 Dimitris Panokostas <midwan@gmail.com>
  *
  * This program is free software: you can redistribute it and/or modify
@@ -1137,9 +1136,8 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
                         break;
                     case UHA_Copyright:
                         tags->ti_Data = (ULONG)(uintptr_t)
-                            "(C) Copyright 2026 Dimitris Panokostas "
-                            "and MNT Research GmbH. Licensed under "
-                            "GNU GPL v3 or later.";
+                            "(C) Copyright 2026 Dimitris Panokostas. "
+                            "Licensed under GNU GPL v3 or later.";
                         break;
                     default:
                         break;

@@ -2,7 +2,6 @@
  * ZZ9000 SD-boot driver — shared definitions (register map, wire
  * format, SDBase device-library layout).
  *
- * Copyright (C) 2026, MNT Research GmbH
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  * SPDX-License-Identifier: GPL-3.0-or-later
  */

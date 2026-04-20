@@ -1,11 +1,9 @@
 /*
  * ZZ9000 SD-card-backed hardfile boot driver (zzsd.device)
- * Copyright (C) 2026, MNT Research GmbH
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  *
- * Based in part on the ZZ9000 USB storage driver
- * (Copyright (C) 2016-2026 MNT Research GmbH, Lucie L. Hartmann;
- *  Copyright (C) 2021 Bjorn Astrom; Copyright (C) 2016 Jason S.
+ * Based in part on a prior ZZ9000 USB storage driver
+ * (Copyright (C) 2021 Bjorn Astrom; Copyright (C) 2016 Jason S.
  *  McMullan).
  *
  * SPDX-License-Identifier: GPL-3.0-or-later

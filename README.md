@@ -1,6 +1,14 @@
-# MNT ZZ9000 Drivers (AmigaOS)
+# ZZ9000 Drivers (AmigaOS) — BlitterStudio fork
 
-More Info: https://mntre.com/zz9000
+> **Fork notice.** This repository is an independent fork and continued
+> development of the original MNT ZZ9000 AmigaOS driver sources. It is
+> maintained by Dimitris Panokostas / **BlitterStudio** and is **not
+> affiliated with, endorsed by, or supported by MNT Research GmbH**.
+> The ZZ9000 hardware itself is designed and manufactured by MNT
+> Research GmbH — hardware questions belong with them; driver issues
+> and fork-specific discussion belong here.
+>
+> Upstream (pre-fork): https://source.mnt.re/amiga/zz9000-drivers
 
 ## Graphics
 
