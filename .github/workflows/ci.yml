@@ -1,0 +1,195 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write  # needed by the release job on tag pushes
+
+env:
+  AMIGA_IMAGE: sacredbanana/amiga-compiler:m68k-amigaos
+
+jobs:
+  rtg:
+    name: rtg — ZZ9000.card
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ZZ9000.card
+        run: |
+          docker run --rm -v "$PWD":/src -w /src/rtg "$AMIGA_IMAGE" \
+            m68k-amigaos-gcc mntgfx-gcc.c -m68020 -mtune=68020-60 -O2 \
+              -o ZZ9000.card -noixemul -Wall -Wextra \
+              -Wno-unused-parameter -fomit-frame-pointer \
+              -nostartfiles -lamiga
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ZZ9000.card
+          path: rtg/ZZ9000.card
+          if-no-files-found: error
+
+  zztop:
+    name: ZZTop
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ZZTop
+        run: |
+          docker run --rm -v "$PWD":/src -w /src/ZZTop "$AMIGA_IMAGE" \
+            m68k-amigaos-gcc Sources/ZZTop.c -m68030 -O2 -o ZZTop \
+              -Wall -Wextra -Wno-unused-parameter -lamiga -noixemul -lm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ZZTop
+          path: ZZTop/ZZTop
+          if-no-files-found: error
+
+  zzscanlines:
+    name: ZZScanlines
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ZZScanlines
+        run: |
+          docker run --rm -v "$PWD":/src -w /src/ZZScanlines "$AMIGA_IMAGE" \
+            m68k-amigaos-gcc -O2 -noixemul -o ZZScanlines ZZScanlines.c -lamiga
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ZZScanlines
+          path: ZZScanlines/ZZScanlines
+          if-no-files-found: error
+
+  usb-poseidon:
+    name: usb-poseidon — zzusbhw.device
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build zzusbhw.device
+        run: |
+          docker run --rm -v "$PWD":/src -w /src/usb-poseidon "$AMIGA_IMAGE" \
+            m68k-amigaos-gcc -m68020 -mtune=68020-60 -msoft-float -s \
+              -Wall -Wextra -Wno-unused-parameter -fomit-frame-pointer \
+              -nostdlib -nostartfiles -O2 -I. \
+              -o zzusbhw.device zzusbhw_device.c -lgcc -lc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zzusbhw.device
+          path: usb-poseidon/zzusbhw.device
+          if-no-files-found: error
+
+  sd-boot:
+    name: sd-boot — zzsd.device
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build zzsd.device
+        run: |
+          docker run --rm -v "$PWD":/src -w /src/sd-boot "$AMIGA_IMAGE" \
+            m68k-amigaos-gcc -m68000 -s -Wall -Wextra \
+              -Wno-unused-parameter -fomit-frame-pointer \
+              -nostdlib -nostartfiles -Os \
+              -o zzsd.device zzsd_device.c zzsd_cmd.c zzsd_boot.c
+      - name: Enforce ROM-window size ceiling (7424 bytes)
+        # Must fit inside the FPGA-decoded 8 KB boot ROM window minus
+        # the diag-area header (0x20) and diag-code thunk at offset
+        # 0x300 → hard ceiling 0x2000 - 0x300 = 7424 bytes.
+        run: |
+          SIZE=$(stat -c%s sd-boot/zzsd.device 2>/dev/null || stat -f%z sd-boot/zzsd.device)
+          echo "zzsd.device size = $SIZE bytes (hard ceiling 7424)"
+          test "$SIZE" -lt 7424
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zzsd.device
+          path: sd-boot/zzsd.device
+          if-no-files-found: error
+
+  mhi:
+    name: mhi — mhizz9000.library
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build mhizz9000.library
+        run: |
+          docker run --rm -v "$PWD":/src -w /src/mhi "$AMIGA_IMAGE" sh -c '
+            set -e
+            m68k-amigaos-gcc StartUp.c LibInit.c mhizz9000.c asmfuncs.s \
+              -m68020 -O3 -o mhizz9000.library.debug -g -ggdb \
+              -Wall -Wextra -Wno-unused-parameter \
+              -Wno-pointer-to-int-cast -Wno-pointer-sign \
+              -nostartfiles -ldebug
+            m68k-amigaos-strip -s -o mhizz9000.library mhizz9000.library.debug
+          '
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mhizz9000.library
+          path: mhi/mhizz9000.library
+          if-no-files-found: error
+
+  ahi:
+    name: ahi — zz9000ax.audio
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build zz9000ax.audio + ZZ9000AX
+        run: |
+          docker run --rm -v "$PWD":/src -w /src/ahi/driver "$AMIGA_IMAGE" sh -c '
+            set -e
+            vasmm68k_mot -quiet -phxass -Fhunk -m68020 \
+              -o PREFSFILE.uncut prefsfile.a \
+              -I/opt/amiga/m68k-amigaos/ndk-include \
+              -I/opt/amiga/m68k-amigaos/include
+            dd bs=1 skip=40 if=PREFSFILE.uncut of=ZZ9000AX
+            m68k-amigaos-gcc zz9000ax-ahi.c asmfuncs.s -O3 \
+              -o zz9000ax.audio -Wall -Wextra -Wno-unused-parameter \
+              -nostartfiles -m68020 -ldebug
+          '
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zz9000ax.audio
+          path: ahi/driver/zz9000ax.audio
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ZZ9000AX
+          path: ahi/driver/ZZ9000AX
+          if-no-files-found: error
+
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [rtg, zztop, zzscanlines, usb-poseidon, sd-boot, mhi, ahi]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Assemble release bundle
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          STAGING="zz9000-drivers-${TAG}"
+          mkdir -p "$STAGING"
+          cp artifacts/ZZ9000.card/ZZ9000.card            "$STAGING/"
+          cp artifacts/ZZTop/ZZTop                         "$STAGING/"
+          cp artifacts/ZZScanlines/ZZScanlines             "$STAGING/"
+          cp artifacts/zzusbhw.device/zzusbhw.device       "$STAGING/"
+          cp artifacts/zzsd.device/zzsd.device             "$STAGING/"
+          cp artifacts/mhizz9000.library/mhizz9000.library "$STAGING/"
+          cp artifacts/zz9000ax.audio/zz9000ax.audio       "$STAGING/"
+          cp artifacts/ZZ9000AX/ZZ9000AX                   "$STAGING/"
+          cp -r installer                                  "$STAGING/installer"
+          cp README.md                                     "$STAGING/"
+          zip -r "$STAGING.zip" "$STAGING"
+          ls -lh "$STAGING.zip"
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: zz9000-drivers-*.zip
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
