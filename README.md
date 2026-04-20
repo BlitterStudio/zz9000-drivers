@@ -8,7 +8,8 @@
 > affiliated with, endorsed by, or supported by MNT Research GmbH**.
 > The ZZ9000 hardware itself is designed and manufactured by MNT
 > Research GmbH — hardware questions belong with them; driver issues
-> and fork-specific discussion belong here.
+> and fork-specific discussion belong in this repo's
+> [Issues](https://github.com/BlitterStudio/zz9000-drivers/issues).
 >
 > Upstream (pre-fork): https://source.mnt.re/amiga/zz9000-drivers
 
@@ -16,7 +17,28 @@ AmigaOS driver set for the MNT ZZ9000 Zorro II/III card: RTG graphics,
 SANA-II networking, AHI/MHI audio for the ZZ9000AX daughterboard, USB
 (Poseidon), SD-card boot from a FAT32-hosted HDF, plus the ZZTop
 configuration GUI and a scanline CLI. Everything targets `m68k-amigaos`
-and builds headless via Docker.
+and builds headless via Docker. The matching FPGA logic and ARM
+firmware live in
+[zz9000-firmware](https://github.com/BlitterStudio/zz9000-firmware).
+
+## What this fork adds on top of upstream
+
+- **RTG driver optimizations** — SetColorArray Z3 batch palette path,
+  AllocBitMap improvements, general Picasso96 compatibility hardening.
+- **USB Poseidon driver** (`zzusbhw.device`) — chunked bulk transfers,
+  root-hub emulation, async INT via poll task, Z3 autoconfig preference,
+  CopyMemQuick fast path, mailbox protocol. Paired with the firmware's
+  new USB stack.
+- **SD-card boot driver** (`zzsd.device`) — boots AmigaOS from a
+  hardfile on a FAT32 SD card via the autoboot ROM. Size-constrained
+  (7424 bytes); CI enforces the ceiling.
+- **ZZScanlines V2** — CLI front-end for the multi-mode scanline
+  bitstream (classic / soft / gradient with parity control).
+- **ZZTop V2** — config GUI with scanline slider, hardware readback,
+  and the new toggles exposed by firmware 1.14.
+- **CI + releases** — GitHub Actions builds every component on push/PR
+  and publishes a tagged release zip on `v*` tags
+  ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
 
 ## Components
 
@@ -90,7 +112,11 @@ git push origin v1.0.0
 
 ## Installing on a real ZZ9000
 
-Copy the artifacts to the target Amiga:
+The easiest path is the Commodore Installer bundled in `installer/` (or
+inside the release zip) — it handles file placement, icons, and the
+Picasso96 entries for you. That's the recommended route for end users.
+
+For manual installs or component-by-component replacement:
 
 | Artifact                          | Destination             |
 |-----------------------------------|-------------------------|
@@ -99,10 +125,7 @@ Copy the artifacts to the target Amiga:
 | `ahi/driver/zz9000ax.audio`       | `Devs:AHI/`             |
 | `mhi/mhizz9000.library`           | `Libs:MHI/` (or `LIBS:`)|
 | `usb-poseidon/zzusbhw.device`     | Registered with Poseidon|
-| `sd-boot/zzsd.device`             | Packed into `BOOT.bin` — see `sd-boot/README.md` |
-
-The `installer/` folder has a ready-to-run Commodore Installer script
-for end users.
+| `sd-boot/zzsd.device`             | Packed into `BOOT.bin` — see [sd-boot/README.md](sd-boot/README.md) |
 
 ## Credits
 
