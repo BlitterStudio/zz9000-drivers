@@ -19,7 +19,7 @@ jobs:
     name: rtg — ZZ9000.card
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Build ZZ9000.card
         run: |
           docker run --rm -v "$PWD":/src -w /src/rtg "$AMIGA_IMAGE" \
@@ -27,7 +27,7 @@ jobs:
               -o ZZ9000.card -noixemul -Wall -Wextra \
               -Wno-unused-parameter -fomit-frame-pointer \
               -nostartfiles -lamiga
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ZZ9000.card
           path: rtg/ZZ9000.card
@@ -37,13 +37,13 @@ jobs:
     name: ZZTop
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Build ZZTop
         run: |
           docker run --rm -v "$PWD":/src -w /src/ZZTop "$AMIGA_IMAGE" \
             m68k-amigaos-gcc Sources/ZZTop.c -m68030 -O2 -o ZZTop \
               -Wall -Wextra -Wno-unused-parameter -lamiga -noixemul -lm
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ZZTop
           path: ZZTop/ZZTop
@@ -53,12 +53,12 @@ jobs:
     name: ZZScanlines
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Build ZZScanlines
         run: |
           docker run --rm -v "$PWD":/src -w /src/ZZScanlines "$AMIGA_IMAGE" \
             m68k-amigaos-gcc -O2 -noixemul -o ZZScanlines ZZScanlines.c -lamiga
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ZZScanlines
           path: ZZScanlines/ZZScanlines
@@ -68,7 +68,7 @@ jobs:
     name: usb-poseidon — zzusbhw.device
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Build zzusbhw.device
         run: |
           docker run --rm -v "$PWD":/src -w /src/usb-poseidon "$AMIGA_IMAGE" \
@@ -76,7 +76,7 @@ jobs:
               -Wall -Wextra -Wno-unused-parameter -fomit-frame-pointer \
               -nostdlib -nostartfiles -O2 -I. \
               -o zzusbhw.device zzusbhw_device.c -lgcc -lc
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: zzusbhw.device
           path: usb-poseidon/zzusbhw.device
@@ -86,7 +86,7 @@ jobs:
     name: sd-boot — zzsd.device
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Build zzsd.device
         run: |
           docker run --rm -v "$PWD":/src -w /src/sd-boot "$AMIGA_IMAGE" \
@@ -102,7 +102,7 @@ jobs:
           SIZE=$(stat -c%s sd-boot/zzsd.device 2>/dev/null || stat -f%z sd-boot/zzsd.device)
           echo "zzsd.device size = $SIZE bytes (hard ceiling 7424)"
           test "$SIZE" -lt 7424
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: zzsd.device
           path: sd-boot/zzsd.device
@@ -112,7 +112,7 @@ jobs:
     name: mhi — mhizz9000.library
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Build mhizz9000.library
         run: |
           docker run --rm -v "$PWD":/src -w /src/mhi "$AMIGA_IMAGE" sh -c '
@@ -124,7 +124,7 @@ jobs:
               -nostartfiles -ldebug
             m68k-amigaos-strip -s -o mhizz9000.library mhizz9000.library.debug
           '
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: mhizz9000.library
           path: mhi/mhizz9000.library
@@ -134,7 +134,7 @@ jobs:
     name: ahi — zz9000ax.audio
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Build zz9000ax.audio + ZZ9000AX
         run: |
           docker run --rm -v "$PWD":/src -w /src/ahi/driver "$AMIGA_IMAGE" sh -c '
@@ -148,12 +148,12 @@ jobs:
               -o zz9000ax.audio -Wall -Wextra -Wno-unused-parameter \
               -nostartfiles -m68020 -ldebug
           '
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: zz9000ax.audio
           path: ahi/driver/zz9000ax.audio
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ZZ9000AX
           path: ahi/driver/ZZ9000AX
@@ -165,8 +165,8 @@ jobs:
     needs: [rtg, zztop, zzscanlines, usb-poseidon, sd-boot, mhi, ahi]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
       - name: Assemble release bundle
@@ -188,7 +188,7 @@ jobs:
           zip -r "$STAGING.zip" "$STAGING"
           ls -lh "$STAGING.zip"
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: zz9000-drivers-*.zip
           generate_release_notes: true
