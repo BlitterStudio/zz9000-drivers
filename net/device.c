@@ -792,16 +792,28 @@ SAVEDS void frame_proc() {
       USHORT packet_type = *(volatile USHORT*)(frm + 16);
       struct IOSana2Req *match = NULL;
 
-      /* Gap detection: the FPGA advances 'serial' once per received
-       * frame in a single slot. If we didn't drain fast enough the
-       * previous frame was overwritten, and we'll see serial jump by
-       * more than 1. Unsigned 16-bit subtraction wraps correctly, so
-       * this works across the 65535→0 boundary too. Skip the count on
-       * the very first frame because old_serial's initial value isn't
-       * meaningful — we could be attaching mid-stream. */
+      /* Gap detection: the firmware increments 'serial' once per
+       * received frame; when the Amiga falls behind and the firmware
+       * backlog (FRAME_MAX_BACKLOG = 32) overflows, frames are dropped
+       * at the MAC layer and the next delivered frame's serial skips
+       * ahead. A "reasonable" gap is bounded by the backlog depth.
+       *
+       * Any much larger delta is almost certainly an artifact — a torn
+       * header read, an uninitialised-DRAM 0xFFFF on cold boot before
+       * the first real frame lands, or a firmware-side reset — not a
+       * genuine miss. Count those separately in BadData so Overruns
+       * stays trustworthy.
+       *
+       * Unsigned 16-bit subtraction wraps correctly, so delta also
+       * handles the 65535→0 serial rollover. */
       if (have_baseline) {
-        USHORT gap = (USHORT)(serial - old_serial - 1);
-        if (gap) global_stats.Overruns += gap;
+        USHORT delta = (USHORT)(serial - old_serial);
+        if (delta > 1 && delta <= 128) {
+          global_stats.Overruns += (ULONG)(delta - 1);
+        } else if (delta > 128) {
+          /* anomaly — don't pollute Overruns */
+          global_stats.BadData++;
+        }
       }
       have_baseline = TRUE;
       old_serial    = serial;
