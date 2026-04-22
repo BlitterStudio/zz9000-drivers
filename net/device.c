@@ -426,7 +426,7 @@ static void set_last_start()
   }
 }
 
-ULONG read_frame(struct IOSana2Req *req, volatile UBYTE *frame);
+ULONG read_frame(struct IOSana2Req *req, volatile UBYTE *frame, USHORT sz);
 ULONG write_frame(struct IOSana2Req *req, volatile UBYTE *frame);
 
 SAVEDS VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
@@ -606,18 +606,23 @@ static inline USHORT zznet_read_word(volatile UBYTE *frame, ULONG offset) {
 	return *(volatile USHORT*)(frame + offset);
 }
 
-static inline USHORT get_frame_serial(volatile UBYTE *frame) {
-	return zznet_read_word(frame, 2);
+/* Fetch [size:2][serial:2] in one bus cycle on Z3 (32-bit) — the two
+ * values always move together and live in adjacent words, so there is
+ * no reason to poke the card twice. Caller gets them back via the out
+ * params. */
+static inline void zznet_read_header(volatile UBYTE *frame, USHORT *size, USHORT *serial) {
+	ULONG hdr = *(volatile ULONG*)frame;
+	*size   = (USHORT)(hdr >> 16);
+	*serial = (USHORT)(hdr & 0xFFFF);
 }
 
-ULONG read_frame(struct IOSana2Req *req, volatile UBYTE *frame)
+ULONG read_frame(struct IOSana2Req *req, volatile UBYTE *frame, USHORT sz)
 {
 	struct BufferManagement *bm;
 	volatile UBYTE *frame_ptr;
 	ULONG datasize;
 	ULONG err = 0;
 
-	USHORT sz = zznet_read_word(frame, 0);
 	USHORT tp = zznet_read_word(frame, 16);
 
 	if (req->ios2_Req.io_Flags & SANA2IOF_RAW) {
@@ -752,7 +757,8 @@ SAVEDS void frame_proc() {
       break;
     }
 
-    USHORT serial = get_frame_serial(frm);
+    USHORT sz, serial;
+    zznet_read_header(frm, &sz, &serial);
 
     if (serial != old_serial) {
       USHORT packet_type = *(volatile USHORT*)(frm + 16);
@@ -776,7 +782,7 @@ SAVEDS void frame_proc() {
       ReleaseSemaphore(&db->db_ReadListSem);
 
       if (match) {
-        ULONG res = read_frame(match, frm);
+        ULONG res = read_frame(match, frm, sz);
         if (res == 0) {
           global_stats.PacketsReceived++;
         } else {
