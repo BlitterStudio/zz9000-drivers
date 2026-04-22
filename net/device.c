@@ -243,7 +243,16 @@ SAVEDS LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
 
 	db->db_Lib.lib_OpenCnt++; /* avoid Expunge, see below for separate "unit" open count */
 
-  if (unit==0 && db->db_Lib.lib_OpenCnt==1) {
+  /* Multi-open support: the original driver rejected any opener past the
+   * first. That blocks diagnostics like zznetstats from attaching while
+   * Roadshow has the device open. SANA-II allows multiple openers with
+   * independent BufferManagement — we do the heavy one-time init (RX
+   * list, worker process, interrupt server, stats reset) only on the
+   * very first open, and just hand the per-opener BM out on subsequent
+   * opens. */
+  if (unit==0 && db->db_Lib.lib_OpenCnt >= 1) {
+    BOOL first_open = (db->db_Lib.lib_OpenCnt == 1);
+
     if ((bm = (struct BufferManagement*)AllocVec(sizeof(struct BufferManagement), MEMF_CLEAR|MEMF_PUBLIC))) {
       bm->bm_CopyToBuffer = (BMFunc)GetTagData(S2_CopyToBuff, 0, (struct TagItem *)ioreq->ios2_BufferManagement);
       bm->bm_CopyFromBuffer = (BMFunc)GetTagData(S2_CopyFromBuff, 0, (struct TagItem *)ioreq->ios2_BufferManagement);
@@ -252,6 +261,12 @@ SAVEDS LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
       ioreq->ios2_Req.io_Error = 0;
       ioreq->ios2_Req.io_Unit = (struct Unit *)unit; // not a real pointer, but id integer
       ioreq->ios2_Req.io_Device = (struct Device *)db;
+
+      if (!first_open) {
+        /* Secondary opener — hardware and worker process are already up. */
+        ok  = 1;
+        ret = 0;
+      } else {
 
       memset(&global_stats, 0, sizeof(global_stats));
 
@@ -322,6 +337,7 @@ SAVEDS LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
         }
         DeleteMsgPort(port);
       }
+      } /* end first_open init */
     }
   } else {
     ret = IOERR_OPENFAIL;
@@ -357,13 +373,25 @@ SAVEDS BPTR DevClose(   ASMR(a1) struct IORequest *ioreq        ASMREG(a1),
 	if (!ioreq)
 		return ret;
 
-  // disable HW interrupt
-  *(volatile USHORT*)(ZZ9K_REGS+0x04) = 0;
-  D(("ZZ9000Net: ZZ interrupt disabled\n"));
+	/* Free this opener's BufferManagement. Each OpenDevice allocates one;
+	 * previously this was leaked on every close. */
+	{
+		struct IOSana2Req *s2 = (struct IOSana2Req *)ioreq;
+		if (s2->ios2_BufferManagement) {
+			FreeVec(s2->ios2_BufferManagement);
+			s2->ios2_BufferManagement = NULL;
+		}
+	}
 
 	db->db_Lib.lib_OpenCnt--;
 
   if (db->db_Lib.lib_OpenCnt == 0) {
+    /* Last opener gone — disable HW IRQ, tear down worker process.
+     * Previously the IRQ was disabled on every close, which killed
+     * Roadshow's RX if a diagnostic tool opened+closed the device. */
+    *(volatile USHORT*)(ZZ9K_REGS+0x04) = 0;
+    D(("ZZ9000Net: ZZ interrupt disabled\n"));
+
     if (db->db_interrupt) {
       D(("ZZ9000Net: Remove IntServer...\n"));
       Forbid();
