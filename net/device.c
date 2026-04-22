@@ -756,35 +756,53 @@ SAVEDS void frame_proc() {
 
     if (serial != old_serial) {
       USHORT packet_type = *(volatile USHORT*)(frm + 16);
+      struct IOSana2Req *match = NULL;
       old_serial = serial;
 
+      /* Walk the read list only long enough to find a matching listener
+       * and detach it. Doing the payload copy (read_frame) and ReplyMsg
+       * outside the semaphore keeps DevAbortIO / CMD_READ unblocked for
+       * the duration of the Zorro bus copy. */
       ObtainSemaphore(&db->db_ReadListSem);
       for (ior = (struct IOSana2Req *)db->db_ReadList.lh_Head;
            ior->ios2_Req.io_Message.mn_Node.ln_Succ;
            ior = (struct IOSana2Req *)ior->ios2_Req.io_Message.mn_Node.ln_Succ) {
         if (ior->ios2_PacketType == packet_type) {
-          ULONG res = read_frame(ior, frm);
-          if (res == 0) {
-            Remove((struct Node*)ior);
-            ReplyMsg((struct Message *)ior);
-            global_stats.PacketsReceived++;
-          } else {
-            D(("RERR %ld\n", res));
-            global_stats.UnknownTypesReceived++;
-          }
+          Remove((struct Node*)ior);
+          match = ior;
           break;
         }
       }
       ReleaseSemaphore(&db->db_ReadListSem);
 
-      /* Mark the current RX slot consumed so the FPGA can deliver the next
-       * frame, then re-enable the ethernet IRQ and loop — another packet
-       * may already be queued so we re-check serial before sleeping. */
+      if (match) {
+        ULONG res = read_frame(match, frm);
+        if (res == 0) {
+          global_stats.PacketsReceived++;
+        } else {
+          /* read_frame already set io_Error/ios2_WireError; reply so the
+           * caller learns the request failed instead of leaving it on
+           * a now-dangling list entry. */
+          D(("RERR %ld\n", res));
+          global_stats.UnknownTypesReceived++;
+        }
+        ReplyMsg((struct Message *)match);
+      } else {
+        /* No listener matched — frame dropped. A future change could
+         * route these to S2_READORPHAN requests. */
+        global_stats.UnknownTypesReceived++;
+      }
+
+      /* Release the FPGA RX slot so the next frame can land. We do NOT
+       * re-enable the ethernet IRQ here — staying masked lets us drain
+       * any already-queued frames via the serial recheck on the next
+       * loop iteration without paying for an IRQ we'd ignore anyway. */
       *rx_accept = 1;
-      *irq_ctrl  = 1;
     } else {
-      /* No new packet: re-enable IRQ then sleep. Enable-before-wait is
-       * important — the ISR may have fired during our last iteration. */
+      /* Nothing new. Re-enable the ethernet IRQ so the ISR can wake us,
+       * then sleep. Enable-before-wait is correct: if a frame raced in
+       * between our serial read and the enable, the ISR will signal
+       * and Wait returns immediately. */
       *irq_ctrl = 1;
       recv = Wait(wmask);
     }
