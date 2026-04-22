@@ -427,7 +427,7 @@ static void set_last_start()
 }
 
 ULONG read_frame(struct IOSana2Req *req, volatile UBYTE *frame, USHORT sz);
-ULONG write_frame(struct IOSana2Req *req, volatile UBYTE *frame);
+ULONG write_frame(struct IOSana2Req *req, UBYTE *frame);
 
 SAVEDS VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
                             ASMR(a6) DEVBASEP                       ASMREG(a6) )
@@ -466,7 +466,7 @@ SAVEDS VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
     }
     /* fall through */
   case CMD_WRITE: {
-    ULONG res = write_frame(ioreq, (volatile UBYTE*)(ZZ9K_REGS+ZZ9K_TX));
+    ULONG res = write_frame(ioreq, (UBYTE*)(ZZ9K_REGS+ZZ9K_TX));
     if (res!=0) {
       ioreq->ios2_Req.io_Error = S2ERR_NO_RESOURCES;
       ioreq->ios2_WireError = S2WERR_GENERIC_ERROR;
@@ -674,7 +674,7 @@ ULONG read_frame(struct IOSana2Req *req, volatile UBYTE *frame, USHORT sz)
 	return err;
 }
 
-ULONG write_frame(struct IOSana2Req *req, volatile UBYTE *frame)
+ULONG write_frame(struct IOSana2Req *req, UBYTE *frame)
 {
 	struct BufferManagement *bm;
 	USHORT sz = 0;
@@ -685,14 +685,14 @@ ULONG write_frame(struct IOSana2Req *req, volatile UBYTE *frame)
 	} else {
 		sz = req->ios2_DataLength + HW_ETH_HDR_SIZE;
 
-		/* Write the 14-byte Ethernet header as word stores into the TX
-		 * window: dst MAC (3 words), src MAC (3 words), ethertype (1 word). */
-		volatile USHORT *wd = (volatile USHORT*)frame;
-		USHORT *sd  = (USHORT*)req->ios2_DstAddr;
-		USHORT *ss  = (USHORT*)HW_MAC;
-		wd[0] = sd[0]; wd[1] = sd[1]; wd[2] = sd[2];
-		wd[3] = ss[0]; wd[4] = ss[1]; wd[5] = ss[2];
-		wd[6] = (USHORT)req->ios2_PacketType;
+		/* Build the 14-byte Ethernet header. Using memcpy (non-volatile
+		 * frame pointer) lets libc / the compiler emit move.l where the
+		 * alignment permits; forcing word stores here costs Zorro III
+		 * bandwidth versus the baseline. The reg write below is volatile
+		 * and serves as the commit barrier before we kick TX. */
+		*((USHORT*)(frame + 12)) = (USHORT)req->ios2_PacketType;
+		memcpy(frame,     req->ios2_DstAddr, HW_ADDRFIELDSIZE);
+		memcpy(frame + 6, HW_MAC,            HW_ADDRFIELDSIZE);
 		frame += HW_ETH_HDR_SIZE;
 	}
 
@@ -701,7 +701,7 @@ ULONG write_frame(struct IOSana2Req *req, volatile UBYTE *frame)
 	}
 
 	bm = (struct BufferManagement *)req->ios2_BufferManagement;
-	if (!(*bm->bm_CopyFromBuffer)((void*)frame, (void*)req->ios2_Data, req->ios2_DataLength)) {
+	if (!(*bm->bm_CopyFromBuffer)(frame, req->ios2_Data, req->ios2_DataLength)) {
 		return 1;
 	}
 
