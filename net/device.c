@@ -426,7 +426,7 @@ static void set_last_start()
   }
 }
 
-ULONG read_frame(struct IOSana2Req *req, volatile UBYTE *frame, USHORT sz);
+ULONG read_frame(struct IOSana2Req *req, volatile UBYTE *frame, USHORT sz, USHORT tp);
 ULONG write_frame(struct IOSana2Req *req, UBYTE *frame);
 
 SAVEDS VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
@@ -616,14 +616,12 @@ static inline void zznet_read_header(volatile UBYTE *frame, USHORT *size, USHORT
 	*serial = (USHORT)(hdr & 0xFFFF);
 }
 
-ULONG read_frame(struct IOSana2Req *req, volatile UBYTE *frame, USHORT sz)
+ULONG read_frame(struct IOSana2Req *req, volatile UBYTE *frame, USHORT sz, USHORT tp)
 {
 	struct BufferManagement *bm;
 	volatile UBYTE *frame_ptr;
 	ULONG datasize;
 	ULONG err = 0;
-
-	USHORT tp = zznet_read_word(frame, 16);
 
 	if (req->ios2_Req.io_Flags & SANA2IOF_RAW) {
 		frame_ptr = frame + 4;
@@ -646,25 +644,26 @@ ULONG read_frame(struct IOSana2Req *req, volatile UBYTE *frame, USHORT sz)
 		req->ios2_Req.io_Error = req->ios2_WireError = 0;
 	}
 
-	/* Copy dst/src MAC out as three word moves instead of six byte loads
-	 * through libc memcpy. The SANA-II spec aligns ios2_DstAddr/SrcAddr
-	 * to a word, so the destination writes are safe word stores too. */
+	/* Coalesce the 12-byte dst+src MAC header into three longword MMIO reads
+	 * instead of six word reads (and a second pass of three for the broadcast
+	 * check). On Z3 that's 3 bus cycles instead of 9. The destination
+	 * ios2_DstAddr / ios2_SrcAddr fields are word-aligned per SANA-II, so
+	 * splitting each long back into two word stores is safe. */
 	{
-		volatile USHORT *ws = (volatile USHORT*)(frame + 4);
+		ULONG m0 = *(volatile ULONG*)(frame + 4);    /* dst[0..3]           */
+		ULONG m1 = *(volatile ULONG*)(frame + 8);    /* dst[4..5] src[0..1] */
+		ULONG m2 = *(volatile ULONG*)(frame + 12);   /* src[2..5]           */
+
 		USHORT *wd = (USHORT*)req->ios2_DstAddr;
-		wd[0] = ws[0]; wd[1] = ws[1]; wd[2] = ws[2];
+		USHORT *ws = (USHORT*)req->ios2_SrcAddr;
+		wd[0] = (USHORT)(m0 >> 16);
+		wd[1] = (USHORT)(m0 & 0xFFFF);
+		wd[2] = (USHORT)(m1 >> 16);
+		ws[0] = (USHORT)(m1 & 0xFFFF);
+		ws[1] = (USHORT)(m2 >> 16);
+		ws[2] = (USHORT)(m2 & 0xFFFF);
 
-		ws = (volatile USHORT*)(frame + 4 + HW_ADDRFIELDSIZE);
-		wd = (USHORT*)req->ios2_SrcAddr;
-		wd[0] = ws[0]; wd[1] = ws[1]; wd[2] = ws[2];
-	}
-
-	/* Broadcast check: three word compares with short-circuit eval means
-	 * we bail after the first non-0xffff word for the common unicast case
-	 * (one MMIO read instead of six). */
-	{
-		volatile USHORT *wd = (volatile USHORT*)(frame + 4);
-		if (wd[0] == 0xFFFF && wd[1] == 0xFFFF && wd[2] == 0xFFFF) {
+		if (m0 == 0xFFFFFFFFUL && (m1 & 0xFFFF0000UL) == 0xFFFF0000UL) {
 			req->ios2_Req.io_Flags |= SANA2IOF_BCAST;
 		}
 	}
@@ -782,7 +781,7 @@ SAVEDS void frame_proc() {
       ReleaseSemaphore(&db->db_ReadListSem);
 
       if (match) {
-        ULONG res = read_frame(match, frm, sz);
+        ULONG res = read_frame(match, frm, sz, packet_type);
         if (res == 0) {
           global_stats.PacketsReceived++;
         } else {
