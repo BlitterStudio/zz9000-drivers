@@ -741,8 +741,9 @@ SAVEDS void frame_proc() {
 
   wmask = SIGBREAKF_CTRL_F | SIGBREAKF_CTRL_C;
 
-  USHORT old_serial = 0;
-  ULONG  recv       = Wait(wmask);   /* wait for first packet */
+  USHORT old_serial    = 0;
+  BOOL   have_baseline = FALSE;
+  ULONG  recv          = Wait(wmask);   /* wait for first packet */
 
   volatile UBYTE*  frm       = (volatile UBYTE*)(ZZ9K_REGS+ZZ9K_RX);
   volatile USHORT* rx_accept = (volatile USHORT*)(ZZ9K_REGS+0x82);
@@ -762,7 +763,20 @@ SAVEDS void frame_proc() {
     if (serial != old_serial) {
       USHORT packet_type = *(volatile USHORT*)(frm + 16);
       struct IOSana2Req *match = NULL;
-      old_serial = serial;
+
+      /* Gap detection: the FPGA advances 'serial' once per received
+       * frame in a single slot. If we didn't drain fast enough the
+       * previous frame was overwritten, and we'll see serial jump by
+       * more than 1. Unsigned 16-bit subtraction wraps correctly, so
+       * this works across the 65535→0 boundary too. Skip the count on
+       * the very first frame because old_serial's initial value isn't
+       * meaningful — we could be attaching mid-stream. */
+      if (have_baseline) {
+        USHORT gap = (USHORT)(serial - old_serial - 1);
+        if (gap) global_stats.Overruns += gap;
+      }
+      have_baseline = TRUE;
+      old_serial    = serial;
 
       /* Walk the read list only long enough to find a matching listener
        * and detach it. Doing the payload copy (read_frame) and ReplyMsg
