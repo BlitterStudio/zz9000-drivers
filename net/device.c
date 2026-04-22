@@ -263,8 +263,14 @@ SAVEDS LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
 
       if (port = CreateMsgPort()) {
         D(("ZZ9000Net: Starting Process\n"));
+        /* Run the frame drainer at an elevated priority. The FPGA has a
+         * single RX slot; if frame_proc gets preempted by ordinary user
+         * tasks under sustained receive, the slot stays occupied, the MAC
+         * buffer backs up and frames drop on the wire. Priority 5 keeps
+         * us ahead of normal userspace and Roadshow's reader tasks but
+         * well below Exec input.device and other system servers. */
         if ((db->db_Proc = CreateNewProcTags(NP_Entry, (ULONG)frame_proc, NP_Name,
-                                             (ULONG)frame_proc_name, NP_Priority, 0, TAG_DONE))) {
+                                             (ULONG)frame_proc_name, NP_Priority, 5, TAG_DONE))) {
           InitSemaphore(&db->db_ProcExitSem);
 
           init.error = 1;
