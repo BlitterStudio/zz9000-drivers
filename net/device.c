@@ -7,6 +7,9 @@
  * Based on code copyright (C) 2018 Henryk Richter <henryk.richter@gmx.net>
  * Released under GPLv3+ with permission.
  *
+ * 2026 GCC port, bug fixes and performance work:
+ *   Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
+ *
  * More Info: https://mntre.com/zz9000
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -21,6 +24,7 @@
 #include <proto/utility.h>
 #include <proto/dos.h>
 #include <proto/expansion.h>
+#include <proto/timer.h>
 #include <clib/exec_protos.h>
 #include <clib/alib_protos.h>
 #include <dos/dostags.h>
@@ -70,31 +74,30 @@ static ULONG ZZ9K_REGS = 0;
 struct Sana2DeviceStats global_stats;
 BOOL is_online;
 
-__saveds void frame_proc();
+SAVEDS void frame_proc();
 char *frame_proc_name = "ZZ9000NetFramer";
 
-// ZZ9000 Interrupt Handler (INT6)
-__saveds ULONG dev_isr(__reg("a1") struct devbase* db) {
-  USHORT status = *(volatile USHORT*)(ZZ9K_REGS+0x04);
+/* ZZ9000 interrupt server (INT6 default, optional INT2).
+ * Reads the status once, masks+acks the ethernet bit, signals frame_proc.
+ * Returns non-zero when this interrupt was ours so Exec short-circuits
+ * the server chain; chains through (returns 0) when it isn't.
+ */
+SAVEDS ULONG dev_isr(struct devbase* db __asm("a1")) {
+  volatile USHORT* status_reg = (volatile USHORT*)(ZZ9K_REGS+0x04);
+  USHORT status = *status_reg;
 
-  // ethernet interrupt signal set?
-  if (status & 1) {
-    // disable HW interrupt
-    *(volatile USHORT*)(ZZ9K_REGS+0x04) = status & 0xfffe;
-    // ack/clear ethernet interrupt
-    *(volatile USHORT*)(ZZ9K_REGS+0x04) = 8|16;
-
-    // signal main process that a packet is available
-    if (db->db_Proc) {
-      Signal((struct Task*)db->db_Proc, SIGBREAKF_CTRL_F);
-    }
-  }
-
-  if (status == 1) {
-    return 1;
-  } else {
+  if (!(status & 1)) {
     return 0;
   }
+
+  /* Disable the ethernet IRQ bit, then ack it. frame_proc re-enables bit 0. */
+  *status_reg = status & 0xfffe;
+  *status_reg = 8|16;
+
+  if (db->db_Proc) {
+    Signal((struct Task*)db->db_Proc, SIGBREAKF_CTRL_F);
+  }
+  return 1;
 }
 
 static UBYTE HW_MAC[] = {0x00,0x00,0x00,0x00,0x00,0x00};
@@ -130,7 +133,7 @@ struct ProcInit
    UBYTE pad[2];
 };
 
-__saveds struct Device *DevInit( ASMR(d0) DEVBASEP                  ASMREG(d0),
+SAVEDS struct Device *DevInit( ASMR(d0) DEVBASEP                  ASMREG(d0),
                                    ASMR(a0) BPTR seglist              ASMREG(a0),
 				   ASMR(a6) struct Library *_SysBase  ASMREG(a6) )
 {
@@ -153,7 +156,6 @@ __saveds struct Device *DevInit( ASMR(d0) DEVBASEP                  ASMREG(d0),
 			ok = 0;
 
       struct ConfigDev* cd = NULL;
-      USHORT fwrev = 0;
 
       if ((ExpansionBase = OpenLibrary("expansion.library", 0)) ) {
         // Find Z2 or Z3 model of MNT ZZ9000
@@ -229,7 +231,7 @@ __saveds struct Device *DevInit( ASMR(d0) DEVBASEP                  ASMREG(d0),
 	return (ok > 0) ? (struct Device*)db : (0);
 }
 
-__saveds LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
+SAVEDS LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
                          ASMR(d0) ULONG unit                         ASMREG(d0),
                          ASMR(d1) ULONG flags                        ASMREG(d1),
                          ASMR(a6) DEVBASEP                           ASMREG(a6) )
@@ -253,7 +255,7 @@ __saveds LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
 
       memset(&global_stats, 0, sizeof(global_stats));
 
-      NewList(&db->db_ReadList);
+      NEWLIST(&db->db_ReadList);
       InitSemaphore(&db->db_ReadListSem);
 
       struct ProcInit init;
@@ -261,8 +263,8 @@ __saveds LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
 
       if (port = CreateMsgPort()) {
         D(("ZZ9000Net: Starting Process\n"));
-        if (db->db_Proc = CreateNewProcTags(NP_Entry, frame_proc, NP_Name,
-                                            frame_proc_name, NP_Priority, 0, TAG_DONE)) {
+        if ((db->db_Proc = CreateNewProcTags(NP_Entry, (ULONG)frame_proc, NP_Name,
+                                             (ULONG)frame_proc_name, NP_Priority, 0, TAG_DONE))) {
           InitSemaphore(&db->db_ProcExitSem);
 
           init.error = 1;
@@ -279,12 +281,12 @@ __saveds LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
             ok = 1;
 
             // Register Interrupt server
-            if (db->db_interrupt = AllocMem(sizeof(struct Interrupt), MEMF_PUBLIC|MEMF_CLEAR)) {
+            if ((db->db_interrupt = AllocMem(sizeof(struct Interrupt), MEMF_PUBLIC|MEMF_CLEAR))) {
               db->db_interrupt->is_Node.ln_Type = NT_INTERRUPT;
               db->db_interrupt->is_Node.ln_Pri = 125;
               db->db_interrupt->is_Node.ln_Name = "ZZ9000Net";
               db->db_interrupt->is_Data = (APTR)db;
-              db->db_interrupt->is_Code = dev_isr;
+              db->db_interrupt->is_Code = (void(*)())dev_isr;
 
               Disable();
               AddIntServer((db->db_Flags & DEVF_INT2MODE) ? INTB_PORTS : INTB_EXTER, db->db_interrupt);
@@ -344,7 +346,7 @@ __saveds LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
 	return ret;
 }
 
-__saveds BPTR DevClose(   ASMR(a1) struct IORequest *ioreq        ASMREG(a1),
+SAVEDS BPTR DevClose(   ASMR(a1) struct IORequest *ioreq        ASMREG(a1),
                             ASMR(a6) DEVBASEP                       ASMREG(a6) )
 {
 	/* ULONG unit; */
@@ -388,7 +390,7 @@ __saveds BPTR DevClose(   ASMR(a1) struct IORequest *ioreq        ASMREG(a1),
 	return ret;
 }
 
-__saveds BPTR DevExpunge( ASMR(a6) DEVBASEP                        ASMREG(a6) )
+SAVEDS BPTR DevExpunge( ASMR(a6) DEVBASEP                        ASMREG(a6) )
 {
 	BPTR seglist = db->db_SegList;
 
@@ -425,13 +427,13 @@ static void set_last_start()
 }
 
 ULONG read_frame(struct IOSana2Req *req, volatile UBYTE *frame);
-ULONG write_frame(struct IOSana2Req *req, UBYTE *frame);
+ULONG write_frame(struct IOSana2Req *req, volatile UBYTE *frame);
 
-__saveds VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
+SAVEDS VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
                             ASMR(a6) DEVBASEP                       ASMREG(a6) )
 {
 	ULONG unit = (ULONG)ioreq->ios2_Req.io_Unit;
-  int mtu;
+	(void)unit;
 
 	ioreq->ios2_Req.io_Message.mn_Node.ln_Type = NT_MESSAGE;
   ioreq->ios2_Req.io_Error = S2ERR_NO_ERROR;
@@ -464,7 +466,7 @@ __saveds VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
     }
     /* fall through */
   case CMD_WRITE: {
-    ULONG res = write_frame(ioreq, (UBYTE*)(ZZ9K_REGS+ZZ9K_TX));
+    ULONG res = write_frame(ioreq, (volatile UBYTE*)(ZZ9K_REGS+ZZ9K_TX));
     if (res!=0) {
       ioreq->ios2_Req.io_Error = S2ERR_NO_RESOURCES;
       ioreq->ios2_WireError = S2WERR_GENERIC_ERROR;
@@ -523,14 +525,14 @@ __saveds VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
     }
     break;
   case S2_GETGLOBALSTATS:
-    {
-      if (ioreq->ios2_StatData)
-        memcpy(ioreq->ios2_StatData, &global_stats, sizeof(struct Sana2DeviceStats));
+    if (ioreq->ios2_StatData) {
+      memcpy(ioreq->ios2_StatData, &global_stats, sizeof(struct Sana2DeviceStats));
     }
+    break;
   case S2_GETSPECIALSTATS:
     {
       struct Sana2SpecialStatHeader *s2ssh = (struct Sana2SpecialStatHeader *)ioreq->ios2_StatData;
-      s2ssh->RecordCountSupplied = 0;
+      if (s2ssh) s2ssh->RecordCountSupplied = 0;
     }
     break;
   default:
@@ -546,20 +548,34 @@ __saveds VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
   }
 }
 
-__saveds LONG DevAbortIO( ASMR(a1) struct IORequest *ioreq        ASMREG(a1),
+SAVEDS LONG DevAbortIO( ASMR(a1) struct IORequest *ioreq        ASMREG(a1),
                             ASMR(a6) DEVBASEP                       ASMREG(a6) )
 {
-	LONG   ret = 0;
-  struct IOSana2Req* ios2 = (struct IOSana2Req*)ioreq;
+	struct IOSana2Req* ios2 = (struct IOSana2Req*)ioreq;
+	struct Node* n;
+	LONG ret = -1;
 
 	D(("ZZ9000Net: AbortIO on %lx\n",(ULONG)ioreq));
 
-  Remove((struct Node*)ioreq);
+	/* Walk the read list under the semaphore to make sure the IO is still
+	 * pending (and not already being serviced by frame_proc). Only then is
+	 * it safe to Remove()/Reply it; otherwise the caller gets -1 meaning
+	 * "IO was not abortable". */
+	ObtainSemaphore(&db->db_ReadListSem);
+	for (n = db->db_ReadList.lh_Head; n->ln_Succ; n = n->ln_Succ) {
+		if (n == (struct Node*)ioreq) {
+			Remove(n);
+			ret = 0;
+			break;
+		}
+	}
+	ReleaseSemaphore(&db->db_ReadListSem);
 
-	ioreq->io_Error = IOERR_ABORTED;
-  ios2->ios2_WireError = 0;
-
-	ReplyMsg((struct Message*)ioreq);
+	if (ret == 0) {
+		ioreq->io_Error = IOERR_ABORTED;
+		ios2->ios2_WireError = 0;
+		ReplyMsg((struct Message*)ioreq);
+	}
 	return ret;
 }
 
@@ -574,123 +590,129 @@ void DevTermIO( DEVBASEP, struct IORequest *ioreq )
   }
 }
 
-ULONG get_frame_serial(UBYTE* frame) {
-  UBYTE* frm = (UBYTE*)frame;
-  ULONG ser  = ((ULONG)frm[2]<<8)|((ULONG)frm[3]);
-  return ser;
+/* Frame header layout in the ZZ9000 RX window (MMIO-backed):
+ *   +0..+1   USHORT  total size
+ *   +2..+3   USHORT  serial (increments each new frame)
+ *   +4..+9   UBYTE[] destination MAC
+ *   +10..+15 UBYTE[] source MAC
+ *   +16..+17 USHORT  ethertype
+ *   +18..    payload
+ *
+ * Byte-wise shift-and-OR loads used to cost two MMIO cycles each. Word
+ * reads are a single bus cycle on a word-aligned address, which roughly
+ * halves the per-packet overhead on Zorro. */
+
+static inline USHORT zznet_read_word(volatile UBYTE *frame, ULONG offset) {
+	return *(volatile USHORT*)(frame + offset);
+}
+
+static inline USHORT get_frame_serial(volatile UBYTE *frame) {
+	return zznet_read_word(frame, 2);
 }
 
 ULONG read_frame(struct IOSana2Req *req, volatile UBYTE *frame)
 {
-  ULONG datasize;
-  BYTE *frame_ptr;
-  BOOL broadcast;
-  ULONG err = 0;
-  struct BufferManagement *bm;
+	struct BufferManagement *bm;
+	volatile UBYTE *frame_ptr;
+	ULONG datasize;
+	ULONG err = 0;
 
-  UBYTE* frm = (UBYTE*)frame;
-  ULONG sz   = ((ULONG)frm[0]<<8)|((ULONG)frm[1]);
-  ULONG ser  = ((ULONG)frm[2]<<8)|((ULONG)frm[3]);
-  USHORT tp  = ((USHORT)frm[16]<<8)|((USHORT)frm[17]);
+	USHORT sz = zznet_read_word(frame, 0);
+	USHORT tp = zznet_read_word(frame, 16);
 
-  if (req->ios2_Req.io_Flags & SANA2IOF_RAW) {
-    frame_ptr = frm+4;
-    datasize = sz;
-    req->ios2_Req.io_Flags = SANA2IOF_RAW;
-  }
-  else {
-    frame_ptr = frm+4+HW_ETH_HDR_SIZE;
-    datasize = sz-HW_ETH_HDR_SIZE;
-    req->ios2_Req.io_Flags = 0;
-  }
+	if (req->ios2_Req.io_Flags & SANA2IOF_RAW) {
+		frame_ptr = frame + 4;
+		datasize  = sz;
+		req->ios2_Req.io_Flags = SANA2IOF_RAW;
+	} else {
+		frame_ptr = frame + 4 + HW_ETH_HDR_SIZE;
+		datasize  = (ULONG)sz - HW_ETH_HDR_SIZE;
+		req->ios2_Req.io_Flags = 0;
+	}
 
-  req->ios2_DataLength = datasize;
+	req->ios2_DataLength = datasize;
 
-  //D(("datasize: %lx\n",datasize));
-  //D(("frame_ptr: %lx\n",frame_ptr));
-  //D(("ios2_Data: %lx\n",req->ios2_Data));
-  //D(("bufmgmt: %lx\n",req->ios2_BufferManagement));
+	bm = (struct BufferManagement *)req->ios2_BufferManagement;
+	if (!(*bm->bm_CopyToBuffer)((void*)req->ios2_Data, (void*)frame_ptr, datasize)) {
+		req->ios2_Req.io_Error = S2ERR_SOFTWARE;
+		req->ios2_WireError    = S2WERR_BUFF_ERROR;
+		err = 1;
+	} else {
+		req->ios2_Req.io_Error = req->ios2_WireError = 0;
+	}
 
-  // copy frame to device user (probably tcp/ip system)
-  bm = (struct BufferManagement *)req->ios2_BufferManagement;
-  if (!(*bm->bm_CopyToBuffer)(req->ios2_Data, frame_ptr, datasize)) {
-    //D(("rx copybuf error\n"));
-    req->ios2_Req.io_Error = S2ERR_SOFTWARE;
-    req->ios2_WireError = S2WERR_BUFF_ERROR;
-    err = 1;
-  }
-  else {
-    req->ios2_Req.io_Error = req->ios2_WireError = 0;
-    err = 0;
-  }
+	/* Copy dst/src MAC out as three word moves instead of six byte loads
+	 * through libc memcpy. The SANA-II spec aligns ios2_DstAddr/SrcAddr
+	 * to a word, so the destination writes are safe word stores too. */
+	{
+		volatile USHORT *ws = (volatile USHORT*)(frame + 4);
+		USHORT *wd = (USHORT*)req->ios2_DstAddr;
+		wd[0] = ws[0]; wd[1] = ws[1]; wd[2] = ws[2];
 
-  memcpy(req->ios2_SrcAddr, frame+4+6, HW_ADDRFIELDSIZE);
-  memcpy(req->ios2_DstAddr, frame+4, HW_ADDRFIELDSIZE);
+		ws = (volatile USHORT*)(frame + 4 + HW_ADDRFIELDSIZE);
+		wd = (USHORT*)req->ios2_SrcAddr;
+		wd[0] = ws[0]; wd[1] = ws[1]; wd[2] = ws[2];
+	}
 
-  //D(("RXSZ %ld\n",(LONG)sz));
-  //D(("RXPT %ld\n",(LONG)tp));
+	/* Broadcast check: three word compares with short-circuit eval means
+	 * we bail after the first non-0xffff word for the common unicast case
+	 * (one MMIO read instead of six). */
+	{
+		volatile USHORT *wd = (volatile USHORT*)(frame + 4);
+		if (wd[0] == 0xFFFF && wd[1] == 0xFFFF && wd[2] == 0xFFFF) {
+			req->ios2_Req.io_Flags |= SANA2IOF_BCAST;
+		}
+	}
 
-  //D(("RXSER %ld\n",(LONG)ser));
-  //D(("RXDST %lx...\n",*((ULONG*)(req->ios2_DstAddr))));
-  //D(("RXSRC %lx\n",*((ULONG*)(req->ios2_SrcAddr))));
-  //D(("RXSRC %lx\n",*((ULONG*)(frame_ptr))));
+	req->ios2_PacketType = tp;
 
-  broadcast = TRUE;
-  for (int i=0; i<HW_ADDRFIELDSIZE; i++) {
-    if (frame[i+4] != 0xff) {
-      broadcast = FALSE;
-      break;
-    }
-  }
-  if (broadcast) {
-    req->ios2_Req.io_Flags |= SANA2IOF_BCAST;
-  }
-
-  req->ios2_PacketType = tp;
-
-  return err;
+	return err;
 }
 
-ULONG write_frame(struct IOSana2Req *req, UBYTE *frame)
+ULONG write_frame(struct IOSana2Req *req, volatile UBYTE *frame)
 {
-   ULONG rc=0;
-   struct BufferManagement *bm;
-   USHORT sz=0;
+	struct BufferManagement *bm;
+	USHORT sz = 0;
+	ULONG  rc = 0;
 
-   if (req->ios2_Req.io_Flags & SANA2IOF_RAW) {
-      sz = req->ios2_DataLength;
-   } else {
-      sz = req->ios2_DataLength + HW_ETH_HDR_SIZE;
-      *((USHORT*)(frame+6+6)) = (USHORT)req->ios2_PacketType;
-      memcpy(frame, req->ios2_DstAddr, HW_ADDRFIELDSIZE);
-      memcpy(frame+6, HW_MAC, HW_ADDRFIELDSIZE);
-      frame+=HW_ETH_HDR_SIZE;
-   }
+	if (req->ios2_Req.io_Flags & SANA2IOF_RAW) {
+		sz = req->ios2_DataLength;
+	} else {
+		sz = req->ios2_DataLength + HW_ETH_HDR_SIZE;
 
-   if (sz>0) {
-     bm = (struct BufferManagement *)req->ios2_BufferManagement;
+		/* Write the 14-byte Ethernet header as word stores into the TX
+		 * window: dst MAC (3 words), src MAC (3 words), ethertype (1 word). */
+		volatile USHORT *wd = (volatile USHORT*)frame;
+		USHORT *sd  = (USHORT*)req->ios2_DstAddr;
+		USHORT *ss  = (USHORT*)HW_MAC;
+		wd[0] = sd[0]; wd[1] = sd[1]; wd[2] = sd[2];
+		wd[3] = ss[0]; wd[4] = ss[1]; wd[5] = ss[2];
+		wd[6] = (USHORT)req->ios2_PacketType;
+		frame += HW_ETH_HDR_SIZE;
+	}
 
-     if (!(*bm->bm_CopyFromBuffer)(frame, req->ios2_Data, req->ios2_DataLength)) {
-       rc = 1; // FIXME error code
-       //D(("tx copybuf err\n"));
-     }
-     else {
-       // buffer was copied to zz9000, send it
-       volatile USHORT* reg = (volatile USHORT*)(ZZ9K_REGS+0x80); // FIXME send_frame reg
-       *reg = sz;
+	if (sz == 0) {
+		return 0;
+	}
 
-       // get feedback
-       rc = *reg;
-       if (rc!=0) {
-         D(("tx err: %d\n",rc));
-       }
-     }
-   }
+	bm = (struct BufferManagement *)req->ios2_BufferManagement;
+	if (!(*bm->bm_CopyFromBuffer)((void*)frame, (void*)req->ios2_Data, req->ios2_DataLength)) {
+		return 1;
+	}
 
-   return rc;
+	{
+		volatile USHORT *reg = (volatile USHORT*)(ZZ9K_REGS+0x80);
+		*reg = sz;      /* kick the TX engine */
+		rc   = *reg;    /* read back hardware status */
+		if (rc) {
+			D(("tx err: %d\n",rc));
+		}
+	}
+
+	return rc;
 }
 
-__saveds void frame_proc() {
+SAVEDS void frame_proc() {
   ULONG wmask;
 
   D(("ZZ9000Net: frame_proc()\n"));
@@ -715,31 +737,25 @@ __saveds void frame_proc() {
 
   wmask = SIGBREAKF_CTRL_F | SIGBREAKF_CTRL_C;
 
-  ULONG old_serial = 0;
-  ULONG recv = 0;
+  USHORT old_serial = 0;
+  ULONG  recv       = Wait(wmask);   /* wait for first packet */
 
-  // wait for the first packet
-  recv = Wait(wmask);
+  volatile UBYTE*  frm       = (volatile UBYTE*)(ZZ9K_REGS+ZZ9K_RX);
+  volatile USHORT* rx_accept = (volatile USHORT*)(ZZ9K_REGS+0x82);
+  volatile USHORT* irq_ctrl  = (volatile USHORT*)(ZZ9K_REGS+0x04);
 
   while (1) {
     struct IOSana2Req *ior;
-    BOOL receiver_found = 0;
-
-    // wait for signal from our interrupt handler
-    // remove this to use polled-IO
 
     if (recv & SIGBREAKF_CTRL_C) {
       D(("ZZ9000Net: process end\n"));
       break;
     }
 
-    volatile UBYTE* frm = (volatile UBYTE*)(ZZ9K_REGS+ZZ9K_RX);
-    ULONG serial = get_frame_serial(frm);
+    USHORT serial = get_frame_serial(frm);
 
-    //D(("FTI %ld\n", serial));
     if (serial != old_serial) {
-      int processed = 0;
-      USHORT packet_type = ((USHORT)frm[16]<<8)|((USHORT)frm[17]);
+      USHORT packet_type = *(volatile USHORT*)(frm + 16);
       old_serial = serial;
 
       ObtainSemaphore(&db->db_ReadListSem);
@@ -748,34 +764,30 @@ __saveds void frame_proc() {
            ior = (struct IOSana2Req *)ior->ios2_Req.io_Message.mn_Node.ln_Succ) {
         if (ior->ios2_PacketType == packet_type) {
           ULONG res = read_frame(ior, frm);
-          if (res==0) {
+          if (res == 0) {
             Remove((struct Node*)ior);
             ReplyMsg((struct Message *)ior);
-            processed = 1;
             global_stats.PacketsReceived++;
           } else {
-            D(("RERR %ld\n",res));
-	    global_stats.UnknownTypesReceived++;
+            D(("RERR %ld\n", res));
+            global_stats.UnknownTypesReceived++;
           }
           break;
         }
       }
       ReleaseSemaphore(&db->db_ReadListSem);
 
-      if (!processed) {
-        //D(("UNPR %ld\n",(LONG)packet_type));
-      }
-
-      // mark this frame as accepted
-      volatile USHORT* reg = (volatile USHORT*)(ZZ9K_REGS+0x82); // FIXME receive_frame reg
-      *reg = 1;
+      /* Mark the current RX slot consumed so the FPGA can deliver the next
+       * frame, then re-enable the ethernet IRQ and loop — another packet
+       * may already be queued so we re-check serial before sleeping. */
+      *rx_accept = 1;
+      *irq_ctrl  = 1;
     } else {
-      // if there are no more new packets, idle until the next interrupt
+      /* No new packet: re-enable IRQ then sleep. Enable-before-wait is
+       * important — the ISR may have fired during our last iteration. */
+      *irq_ctrl = 1;
       recv = Wait(wmask);
     }
-
-    // ready for next interrupt
-    *(volatile USHORT*)(ZZ9K_REGS+0x04) = 1;
   }
   // disable interrupt
   *(volatile USHORT*)(ZZ9K_REGS+0x04) = 0;

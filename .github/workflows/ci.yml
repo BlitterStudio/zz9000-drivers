@@ -108,6 +108,21 @@ jobs:
           path: sd-boot/zzsd.device
           if-no-files-found: error
 
+  net:
+    name: net — ZZ9000Net.device
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build ZZ9000Net.device
+        run: |
+          docker run --rm -v "$PWD":/src -w /src/net "$AMIGA_IMAGE" \
+            sh -c 'make'
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ZZ9000Net.device
+          path: net/ZZ9000Net.device
+          if-no-files-found: error
+
   mhi:
     name: mhi — mhizz9000.library
     runs-on: ubuntu-latest
@@ -162,7 +177,7 @@ jobs:
   release:
     name: Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [rtg, zztop, zzscanlines, usb-poseidon, sd-boot, mhi, ahi]
+    needs: [rtg, zztop, zzscanlines, usb-poseidon, sd-boot, net, mhi, ahi]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -180,6 +195,7 @@ jobs:
           cp artifacts/ZZScanlines/ZZScanlines             "$STAGING/"
           cp artifacts/zzusbhw.device/zzusbhw.device       "$STAGING/"
           cp artifacts/zzsd.device/zzsd.device             "$STAGING/"
+          cp artifacts/ZZ9000Net.device/ZZ9000Net.device   "$STAGING/"
           cp artifacts/mhizz9000.library/mhizz9000.library "$STAGING/"
           cp artifacts/zz9000ax.audio/zz9000ax.audio       "$STAGING/"
           cp artifacts/ZZ9000AX/ZZ9000AX                   "$STAGING/"

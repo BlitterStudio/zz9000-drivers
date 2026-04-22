@@ -1,51 +1,41 @@
-###############################################################################
+# Makefile for ZZ9000Net.device (SANA-II)
 #
-# makefile for vbcc or gcc
+# (C) 2026 Dimitris Panokostas <midwan@gmail.com> — GCC-only build
 #
-# author: Henryk Richter <henryk.richter@gmx.net>
-# 
-# concept:
-#
-# tools required:
-#  - vbcc, defaulting to m68k-amigaos
-#  - vlink
-#  (- vasm)
-#
-# porting:
-#
-#  see Common.mk
-#
-###############################################################################
+# Builds with m68k-amigaos-gcc from https://github.com/bebbo/amiga-gcc.
+# CI uses the `sacredbanana/amiga-compiler:m68k-amigaos` image, which has
+# the Bebbo toolchain plus the Roadshow SDK pre-installed under
+# /opt/amiga/m68k-amigaos. For local builds, run ./build.sh which puts
+# /opt/amiga/bin on PATH before invoking make.
 
-###############################################################################
-# Date, version, extra objects to build
-# 
-###############################################################################
-DEVICEVERSION=1
-DEVICEREVISION=13
-DEVICEDATE=2023-03-15
-#ASMOBJECTS = $(SUBDIR)/enc624j6l.o $(SUBDIR)/intervaltimer.o kprintf.o
+DEVICEID = ZZ9000Net.device
 
-###############################################################################
-# Devices to build (1 or 2, keep DEVICEID2 empty if only one build is desired)
-#
-###############################################################################
+CC      = m68k-amigaos-gcc
+CPU     = 68020
 
-DEVICEID=ZZ9000Net.device
-DEFINES = #
-ASMDEFS = #
-CPU = 68030
+SOURCES = deviceheader.c deviceinit.c device.c
 
-DEVICEID2= #test.device_68000
-DEFINES2 = # -DPROTO_V2EXPNET
-ASMDEFS2 = # -DPROTO_V2EXPNET
-CPU2 = #68000
+# DEVICEVERSION/DEVICEREVISION/DEVICEDATE come from version.h (HAVE_VERSION_H).
+CFLAGS  = -m$(CPU) -mtune=68020-60 -msoft-float -O2 \
+          -Wall -Wextra -Wno-unused-parameter -Wno-pointer-sign \
+          -fomit-frame-pointer \
+          -DDEVICENAME=$(DEVICEID) \
+          -DHAVE_VERSION_H
 
-###############################################################################
-# import generic ruleset
-# 
-###############################################################################
-include Common.mk
+LDFLAGS = -nostdlib -nostartfiles -s
+LDLIBS  = -lgcc -lc
 
+ifeq ($(DEBUG),1)
+CFLAGS  += -DDEBUG -g
+LDLIBS  += -ldebug
+endif
 
+all: $(DEVICEID)
 
+$(DEVICEID): $(SOURCES) device.h compiler.h debug.h macros.h sana2.h version.h
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(SOURCES) $(LDLIBS)
+
+clean:
+	rm -f $(DEVICEID)
+
+.PHONY: all clean

@@ -1,5 +1,11 @@
-export VBCC=../../vbcc
-export PATH=$PATH:$VBCC/bin
-export SDK="-I$VBCC/targets/m68k-amigaos/include -I$VBCC/targets/m68k-amigaos/include2"
+#!/bin/sh
+# Local build wrapper for ZZ9000Net.device
+#
+# (C) 2026 Dimitris Panokostas <midwan@gmail.com> — GCC-only build
+#
+# Uses m68k-amigaos-gcc from https://github.com/bebbo/amiga-gcc.
+# CI uses the `sacredbanana/amiga-compiler:m68k-amigaos` image; for
+# local builds this script puts /opt/amiga/bin on PATH before make.
+export PATH=$PATH:/opt/amiga/bin
 
-make
+exec make "$@"
