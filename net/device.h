@@ -5,6 +5,8 @@
  *                          https://mntre.com
  * Copyright (C) 2018 Henryk Richter <henryk.richter@gmx.net>
  *
+ * 2026 GCC port: Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
+ *
  * More Info: https://mntre.com/zz9000
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -120,7 +122,7 @@ void DevTermIO( DEVBASETYPE*, struct IORequest * );
 #define HW_ETH_HDR_SIZE          14       /* ethernet header: dst, src, type */
 #define HW_ETH_MTU               1500
 
-typedef BOOL (*BMFunc)(__reg("a0") void* a, __reg("a1") void* b, __reg("d0") long c);
+typedef BOOL (*BMFunc)(void* a __asm("a0"), void* b __asm("a1"), long c __asm("d0"));
 
 typedef struct BufferManagement
 {
@@ -138,7 +140,7 @@ struct HWFrame {
    /*UBYTE    hwf_Data[MTU];*/
 };
 
-const struct InitTable
+struct InitTable
 {
   ULONG LibBaseSize;
   APTR  FunctionTable;

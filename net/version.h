@@ -2,6 +2,7 @@
   version.h
 
   (C) 2018 Henryk Richter <henryk.richter@gmx.net>
+  (C) 2026 Dimitris Panokostas <midwan@gmail.com> — revision bump for GCC port
 
   version and date handling
 */
@@ -9,9 +10,9 @@
 #define _INC_VERSION_H
 
 #define DEVICEVERSION  1
-#define DEVICEREVISION 13
+#define DEVICEREVISION 19
 #define DEVICEEXTRA
 /* #define DEVICEEXTRA Beta */
-#define DEVICEDATE     2024-06-15
+#define DEVICEDATE     2026-04-23
 
 #endif
