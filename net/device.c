@@ -74,6 +74,26 @@ static ULONG ZZ9K_REGS = 0;
 struct Sana2DeviceStats global_stats;
 BOOL is_online;
 
+/* Staging buffer for RX payload copies.
+ *
+ * Roadshow's BufferManagement bm_CopyToBuffer is a generic memcpy. When
+ * we hand it `frame + 18` (the non-RAW payload offset inside the FPGA
+ * RX window), the source is only word-aligned (18 mod 4 == 2), so its
+ * memcpy falls back to move.w at best. Every RX frame then burns
+ * ~750 word-sized Zorro bus cycles instead of ~375 longword cycles.
+ *
+ * Staging the payload through a driver-owned RAM buffer lets us issue
+ * the MMIO reads ourselves as longwords (one Z3 bus cycle per 4 bytes)
+ * and then hand Roadshow a RAM source, where its generic memcpy is
+ * essentially free relative to the MMIO read cost.
+ *
+ * 1536 covers any MTU up to 1514 plus a 2-byte alignment offset. The
+ * buffer is single-use per frame and only touched from frame_proc
+ * (single worker process per devbase, serialized by AmigaOS Forbid()
+ * semantics on OpenDevice/CloseDevice), so no locking is needed. The
+ * pointer lives on the devbase — see `struct devbase::db_RxStage`. */
+#define RX_STAGE_SIZE 1536
+
 SAVEDS void frame_proc();
 char *frame_proc_name = "ZZ9000NetFramer";
 
@@ -324,6 +344,28 @@ SAVEDS LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
               ret = 0;
               ok = 1;
 
+              /* Allocate the RX payload staging buffer in Fast RAM. This
+               * runs only after all fallible first-open init has
+               * succeeded, so a failure above cannot leak the buffer.
+               * Failure here is non-fatal: read_frame falls back to a
+               * direct bm_CopyToBuffer from MMIO when db_RxStage is
+               * NULL. AllocVec is expected to return 8-byte alignment
+               * per the Exec contract; the explicit runtime check keeps
+               * us honest about zznet_mmio_read_block's longword
+               * alignment precondition. */
+              if (!db->db_RxStage) {
+                db->db_RxStage = AllocVec(RX_STAGE_SIZE, MEMF_FAST);
+                if (db->db_RxStage && ((ULONG)db->db_RxStage & 3)) {
+                  D(("ZZ9000Net: AllocVec returned misaligned pointer %lx; refusing staging\n",
+                     (ULONG)db->db_RxStage));
+                  FreeVec(db->db_RxStage);
+                  db->db_RxStage = NULL;
+                }
+                if (!db->db_RxStage) {
+                  D(("ZZ9000Net: db_RxStage unavailable; falling back to direct MMIO copy\n"));
+                }
+              }
+
               // enable HW interrupt
               *(volatile USHORT*)(ZZ9K_REGS+0x04) = 1;
 
@@ -420,6 +462,15 @@ SAVEDS BPTR DevClose(   ASMR(a1) struct IORequest *ioreq        ASMREG(a1),
       ObtainSemaphore(&db->db_ProcExitSem);
       ReleaseSemaphore(&db->db_ProcExitSem);
     }
+
+    /* Staging buffer is freed only after the worker process has
+     * exited above (ObtainSemaphore/ReleaseSemaphore pair). That
+     * guarantees no read_frame can still be in flight referencing
+     * db_RxStage, because all RX paths run inside frame_proc. */
+    if (db->db_RxStage) {
+      FreeVec(db->db_RxStage);
+      db->db_RxStage = NULL;
+    }
   }
 
 	ioreq->io_Device = (0);
@@ -467,7 +518,7 @@ static void set_last_start()
   }
 }
 
-ULONG read_frame(struct IOSana2Req *req, volatile UBYTE *frame, USHORT sz, USHORT tp);
+ULONG read_frame(DEVBASETYPE *db, struct IOSana2Req *req, volatile UBYTE *frame, USHORT sz, USHORT tp);
 ULONG write_frame(struct IOSana2Req *req, UBYTE *frame);
 
 SAVEDS VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
@@ -657,32 +708,150 @@ static inline void zznet_read_header(volatile UBYTE *frame, USHORT *size, USHORT
 	*serial = (USHORT)(hdr & 0xFFFF);
 }
 
-ULONG read_frame(struct IOSana2Req *req, volatile UBYTE *frame, USHORT sz, USHORT tp)
+/* Bulk MMIO→RAM copy for an RX payload.
+ *
+ * Source is the FPGA RX window (word-aligned for non-RAW at frame+18,
+ * longword-aligned for RAW at frame+4). We place the destination
+ * inside `base` at the same 2-byte phase as the source so the body of
+ * the copy can be done in aligned longword reads on both sides — the
+ * expensive side (MMIO) drops to 1 bus cycle per 4 bytes instead of 2.
+ *
+ * Returns the start of the valid bytes inside `base`, which the caller
+ * then passes to Roadshow's CopyToBuffer as a RAM source.
+ */
+static inline UBYTE* zznet_mmio_read_block(volatile UBYTE *src, UBYTE *base, ULONG n) {
+	/* Caller contract: `base` is longword-aligned (enforced at AllocVec
+	 * time in DevOpen). `src` is word-aligned and its 2-byte phase
+	 * picks whether the body of the copy starts at `base` (RAW, src
+	 * 4-aligned) or `base + 2` (non-RAW, src at frame+18). After the
+	 * leading-word branch fires (if any), both src and dst are
+	 * longword-aligned, and they stay that way through the longword
+	 * loop — so every typed wide access in this function lands on an
+	 * aligned address. */
+	UBYTE *dst = base + ((ULONG)src & 2);   /* match source 2-byte phase */
+	UBYTE *dst_start = dst;
+
+	if (n == 0) return dst_start;
+
+	/* Consume a leading 2-byte misalignment once — but only when at
+	 * least 2 bytes remain. A stray 1-byte payload (runt frame) would
+	 * otherwise underflow the unsigned `n` and walk the longword loop
+	 * across the whole FPGA window. For n == 1 we fall straight through
+	 * to the final single-byte copy below. */
+	if (((ULONG)src & 2) && n >= 2) {
+		*(USHORT*)dst = *(volatile USHORT*)src;
+		src += 2; dst += 2; n -= 2;
+	}
+
+	/* Bulk longword stream runs only when src is actually 4-aligned. If
+	 * the leading-word branch was skipped because n < 2, src is still
+	 * 2-aligned and we drop straight to the byte tail. */
+	if (((ULONG)src & 3) == 0) {
+		volatile ULONG *ls = (volatile ULONG*)src;
+		ULONG          *ld = (ULONG*)dst;
+		ULONG longs = n >> 2;
+		while (longs--) *ld++ = *ls++;
+		src = (volatile UBYTE*)ls;
+		dst = (UBYTE*)ld;
+		n &= 3;
+	}
+
+	if (n >= 2) {
+		*(USHORT*)dst = *(volatile USHORT*)src;
+		src += 2; dst += 2; n -= 2;
+	}
+	if (n) {
+		*dst = *src;
+	}
+
+	return dst_start;
+}
+
+ULONG read_frame(DEVBASETYPE *db, struct IOSana2Req *req, volatile UBYTE *frame, USHORT sz, USHORT tp)
 {
 	struct BufferManagement *bm;
 	volatile UBYTE *frame_ptr;
 	ULONG datasize;
 	ULONG err = 0;
 
+	/* Size policy split by listener type:
+	 *   - RAW   : accept up to HW_ETH_MAX_RAW  (1518, VLAN-tagged).
+	 *   - non-RAW : accept up to HW_ETH_MAX_STD (1514, untagged), since
+	 *               we advertise MTU = 1500 to the SANA-II client.
+	 *
+	 * frame_proc already drops wire-level garbage (sz < 18 or sz >
+	 * HW_ETH_MAX_RAW) before matching a listener, so these checks only
+	 * fire for frames that are protocol-shaped but don't fit the
+	 * listener's contract — e.g. a VLAN-tagged frame delivered to a
+	 * non-RAW listener. In that case returning an error is correct:
+	 * the oversized frame genuinely cannot be delivered through the
+	 * non-RAW path without overrunning the client's MTU-sized buffer. */
 	if (req->ios2_Req.io_Flags & SANA2IOF_RAW) {
+		if (sz > HW_ETH_MAX_RAW) {
+			req->ios2_Req.io_Error = S2ERR_SOFTWARE;
+			req->ios2_WireError    = S2WERR_BUFF_ERROR;
+			return 1;
+		}
 		frame_ptr = frame + 4;
 		datasize  = sz;
 		req->ios2_Req.io_Flags = SANA2IOF_RAW;
 	} else {
+		if (sz < HW_ETH_HDR_SIZE || sz > HW_ETH_MAX_STD) {
+			req->ios2_Req.io_Error = S2ERR_SOFTWARE;
+			req->ios2_WireError    = S2WERR_BUFF_ERROR;
+			return 1;
+		}
 		frame_ptr = frame + 4 + HW_ETH_HDR_SIZE;
-		datasize  = (ULONG)sz - HW_ETH_HDR_SIZE;
+		datasize  = (ULONG)sz - HW_ETH_HDR_SIZE;   /* ≤ HW_ETH_MTU by the check above */
 		req->ios2_Req.io_Flags = 0;
+	}
+
+	/* Internal assertion: staging buffer must fit datasize + 2-byte
+	 * phase offset. With the protocol caps above, datasize ≤ 1518
+	 * (RAW, VLAN-tagged) and RX_STAGE_SIZE is 1536, so this is always
+	 * true — the check exists only as a backstop for future MTU /
+	 * staging-size changes. */
+	if (datasize + 2 > RX_STAGE_SIZE) {
+		req->ios2_Req.io_Error = S2ERR_SOFTWARE;
+		req->ios2_WireError    = S2WERR_BUFF_ERROR;
+		return 1;
 	}
 
 	req->ios2_DataLength = datasize;
 
 	bm = (struct BufferManagement *)req->ios2_BufferManagement;
-	if (!(*bm->bm_CopyToBuffer)((void*)req->ios2_Data, (void*)frame_ptr, datasize)) {
-		req->ios2_Req.io_Error = S2ERR_SOFTWARE;
-		req->ios2_WireError    = S2WERR_BUFF_ERROR;
-		err = 1;
-	} else {
-		req->ios2_Req.io_Error = req->ios2_WireError = 0;
+	{
+		/* SANA-II contract: bm_CopyToBuffer is a synchronous copy — it
+		 * reads `datasize` bytes from `source` into the client-owned
+		 * destination and returns success/failure of a completed copy.
+		 * It is not a descriptor submission. This routine (and the
+		 * pre-rev-20 direct-MMIO path before it) already depended on
+		 * that contract: on return we write `rx_accept`, which hands
+		 * the backlog slot back to the firmware for reuse by the next
+		 * inbound frame. If the callback deferred consumption, the
+		 * hardware slot would be overwritten by incoming traffic long
+		 * before the client finished copying — so reusing db_RxStage
+		 * across successive frames adds no new lifetime assumption
+		 * beyond what the SANA-II spec already requires.
+		 *
+		 * Fast path: stage the payload through Fast RAM so Roadshow's
+		 * generic memcpy sees a longword-aligned RAM source and can copy
+		 * at memory speed instead of stalling the Zorro bus word by
+		 * word. Fallback: if no staging buffer is available (Fast RAM
+		 * allocation failed at open time), hand Roadshow the MMIO
+		 * source directly — slower, but functionally identical to the
+		 * pre-rev-20 behavior. */
+		void *copy_src = db->db_RxStage
+			? (void *)zznet_mmio_read_block(frame_ptr, db->db_RxStage, datasize)
+			: (void *)frame_ptr;
+
+		if (!(*bm->bm_CopyToBuffer)((void*)req->ios2_Data, copy_src, datasize)) {
+			req->ios2_Req.io_Error = S2ERR_SOFTWARE;
+			req->ios2_WireError    = S2WERR_BUFF_ERROR;
+			err = 1;
+		} else {
+			req->ios2_Req.io_Error = req->ios2_WireError = 0;
+		}
 	}
 
 	/* Coalesce the 12-byte dst+src MAC header into three longword MMIO reads
@@ -802,6 +971,33 @@ SAVEDS void frame_proc() {
     zznet_read_header(frm, &sz, &serial);
 
     if (serial != old_serial) {
+      /* Wire-level sanity check on the HW frame size. Reject frames
+       * whose size field is shorter than the full ethernet header (14
+       * bytes — dst/src MAC + ethertype) or longer than the widest
+       * accepted frame (HW_ETH_MAX_RAW, 1518 incl. 802.1Q tag). These
+       * are HW- or firmware-level artifacts (torn reads, cold-boot
+       * 0xFFFF, corrupt backlog slots) — completing a client read
+       * with an error for them would turn line noise into user-visible
+       * RX failures.
+       *
+       * The lower bound is 14, not 18: a frame with sz == 14 has a
+       * full ethernet header (ethertype included at bytes 12-13, i.e.
+       * frame+16..17 after the 4-byte HW size/serial prefix) and a
+       * zero-byte payload. Such frames are legitimate on the wire
+       * once the EMAC strips FCS and padding — rejecting them would
+       * silently drop valid short control frames from RAW listeners.
+       *
+       * On the happy path we drop the bad HW frame only: bump
+       * BadData, release the backlog slot via rx_accept, leave every
+       * pending listener untouched on the read list. */
+      if (sz < HW_ETH_HDR_SIZE || sz > HW_ETH_MAX_RAW) {
+        global_stats.BadData++;
+        have_baseline = TRUE;
+        old_serial    = serial;
+        *rx_accept = 1;
+        continue;
+      }
+
       USHORT packet_type = *(volatile USHORT*)(frm + 16);
       struct IOSana2Req *match = NULL;
 
@@ -848,7 +1044,7 @@ SAVEDS void frame_proc() {
       ReleaseSemaphore(&db->db_ReadListSem);
 
       if (match) {
-        ULONG res = read_frame(match, frm, sz, packet_type);
+        ULONG res = read_frame(db, match, frm, sz, packet_type);
         if (res == 0) {
           global_stats.PacketsReceived++;
         } else {

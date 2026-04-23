@@ -74,6 +74,13 @@ struct devbase {
 	struct Process* db_Proc;
 	struct SignalSemaphore db_ProcExitSem;
 
+	/* RX payload staging buffer (see RX_STAGE_SIZE in device.c). Lifetime
+	 * is tied to this device base: allocated on first open before the HW
+	 * IRQ is enabled, freed on last close after the worker process has
+	 * exited. Kept here (instead of file-static) so ownership and
+	 * lifetime are bound to the devbase the RX path dereferences. */
+	UBYTE *db_RxStage;
+
 	struct DevUnit db_Units[MAX_UNITS]; /* unused in construct */
 };
 
@@ -121,6 +128,14 @@ void DevTermIO( DEVBASETYPE*, struct IORequest * );
 #define HW_ADDRFIELDSIZE 6
 #define HW_ETH_HDR_SIZE          14       /* ethernet header: dst, src, type */
 #define HW_ETH_MTU               1500
+#define HW_ETH_VLAN_TAG          4        /* 802.1Q tag adds 4 bytes */
+/* Untagged Ethernet frame without FCS, used as the non-RAW size ceiling
+ * because the driver advertises MTU = 1500 to SANA-II clients. */
+#define HW_ETH_MAX_STD           (HW_ETH_HDR_SIZE + HW_ETH_MTU)              /* 1514 */
+/* VLAN-tagged Ethernet frame without FCS, used as the RAW / wire-level
+ * size ceiling. Frames up to 802.1Q size are legitimate on tagged links
+ * and must be accepted by RAW consumers (packet capture, bridging). */
+#define HW_ETH_MAX_RAW           (HW_ETH_MAX_STD + HW_ETH_VLAN_TAG)          /* 1518 */
 
 typedef BOOL (*BMFunc)(void* a __asm("a0"), void* b __asm("a1"), long c __asm("d0"));
 
