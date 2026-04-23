@@ -263,9 +263,22 @@ SAVEDS LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
       ioreq->ios2_Req.io_Device = (struct Device *)db;
 
       if (!first_open) {
-        /* Secondary opener — hardware and worker process are already up. */
-        ok  = 1;
-        ret = 0;
+        /* Secondary opener — hardware and worker process are already up.
+         * Defensive: explicitly verify first-open init actually completed
+         * (db_Proc and db_interrupt set) instead of trusting lib_OpenCnt
+         * as a proxy. Under AmigaOS Forbid()-serialized OpenDevice this
+         * race isn't reachable, but the explicit check is cheap and
+         * protects against a future caller that opens without Forbid(). */
+        if (db->db_Proc && db->db_interrupt) {
+          ok  = 1;
+          ret = 0;
+        } else {
+          D(("ZZ9000Net: secondary open rejected, first-open init incomplete\n"));
+          FreeVec(bm);
+          ioreq->ios2_BufferManagement = NULL;
+          ret = IOERR_OPENFAIL;
+          ok  = 0;
+        }
       } else {
 
       memset(&global_stats, 0, sizeof(global_stats));
