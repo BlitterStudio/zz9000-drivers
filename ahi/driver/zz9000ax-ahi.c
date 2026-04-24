@@ -6,6 +6,7 @@
  *
  * Based on code by _Bnu (thanks a ton!) and AHI example drivers.
  * Modified by Thomas Wenzel (TW)
+ * Hardened by Dimitris Panokostas <midwan@gmail.com> (2026)
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * GNU General Public License v3.0 or later
@@ -59,8 +60,15 @@
 #define REAL_HARDWARE 1
 
 #define ZZ_BYTES_PER_PERIOD 3840
-#define AUDIO_BUFSZ ZZ_BYTES_PER_PERIOD*8 // TODO: query from hardware
-#define WORKER_PRIORITY 127 // TW: High priority because this is time-critical for high-level access.
+// AUDIO_BUFSZ is the hardware-side ring size (8 periods). The CPU-side
+// bounce buffer is only ever filled one period at a time — see BOUNCE_BUFSZ.
+#define AUDIO_BUFSZ (ZZ_BYTES_PER_PERIOD*8) // TODO: query from hardware
+#define BOUNCE_BUFSZ ZZ_BYTES_PER_PERIOD
+// AmigaOS scheduling is strictly preemptive priority with no aging; any
+// task at or above this priority stuck in a CPU loop will starve the mixer
+// and produce audible stutter. Keep the mixer well above user-level tasks
+// and slightly below critical system servers (timer.device = 127).
+#define WORKER_PRIORITY 110
 
 #define REG_ZZ_CONFIG       0x04
 #define REG_ZZ_AUDIO_SWAB   0x70
@@ -95,19 +103,17 @@ asm("romtag:                                \n"
     "endcode:                               \n");
 
 // TW: register access routines for cleaner code.
-inline void write_reg(uint32_t base, uint16_t reg, uint16_t val)
+static inline void write_reg(uint32_t base, uint16_t reg, uint16_t val)
 {
   *((volatile uint16_t*)(base+reg)) = val;
 }
 
-inline uint16_t read_reg(uint32_t base, uint16_t reg)
+static inline uint16_t read_reg(uint32_t base, uint16_t reg)
 {
-  uint16_t val;
-  val = *((volatile uint16_t*)(base+reg));
-  return val;
+  return *((volatile uint16_t*)(base+reg));
 }
 
-inline void write_audio_param(uint32_t base, uint16_t param, uint16_t val)
+static inline void write_audio_param(uint32_t base, uint16_t param, uint16_t val)
 {
   *((volatile uint16_t*)(base+REG_ZZ_AUDIO_PARAM)) = param;
   *((volatile uint16_t*)(base+REG_ZZ_AUDIO_VAL))   = val;
@@ -128,48 +134,54 @@ const uint16_t freqs[ZZ_NUM_FREQS] = {
   48000,
 };
 
-// REMEMBER: never use global variables (except const!)
-// they are not initialized properly and will corrupt AHI code/data
+// NOTE: Non-const globals above are written exactly once during init() and
+// treated as read-only thereafter. Do not introduce other mutable globals:
+// a Resident/AutoInit device's BSS is not reliably zeroed by all loaders,
+// and stale state will corrupt AHI code/data across OpenDevice cycles.
 
 #define debugmsg(v) while(0) {};
 
 static uint32_t __attribute__((used)) init(BPTR seg_list asm("a0"), struct Library *dev asm("d0"))
 {
-  struct ConfigDev* cd;
+  struct ConfigDev* cd = NULL;
 
   SysBase = *(struct ExecBase **)4L;
   Z9AXBase = (struct z9ax_base*)dev;
 
-  if (!(DOSBase = (struct DosLibrary *)OpenLibrary((STRPTR)"dos.library",0)))
-    return 0;
+  // BSS/driver-base may be reused across AutoInit reloads; start clean
+  // so AllocAudio's hw_addr/zorro_version gates can't be fooled by stale
+  // state left over from a previous failed init.
+  Z9AXBase->zorro_version = 0;
+  Z9AXBase->hw_addr = 0;
+  Z9AXBase->hw_size = 0;
+  Z9AXBase->flags = 0;
 
-  if (!(UtilityBase = (struct UtilityBase *)OpenLibrary((STRPTR)"utility.library",0)))
-    return 0;
+  if (!(DOSBase = (struct DosLibrary *)OpenLibrary((STRPTR)"dos.library",0)))
+    goto fail;
+
+  if (!(UtilityBase = (struct Library *)OpenLibrary((STRPTR)"utility.library",0)))
+    goto fail;
 
   if (!(ExpansionBase = (struct ExpansionBase *)OpenLibrary((STRPTR)"expansion.library",0)))
-    return 0;
+    goto fail;
 
   // TW: Zorro2/3 detection during early init phase.
   // Find Z2 or Z3 model of MNT ZZ9000
-  if ((cd = (struct ConfigDev*)FindConfigDev(cd,0x6d6e,0x4))) {
+  if ((cd = (struct ConfigDev*)FindConfigDev(NULL,0x6d6e,0x4))) {
     // ZORRO 3
     Z9AXBase->zorro_version = 3;
     Z9AXBase->hw_addr = (uint32_t)cd->cd_BoardAddr;
     Z9AXBase->hw_size = (uint32_t)cd->cd_BoardSize;
   }
-  else if ((cd = (struct ConfigDev*)FindConfigDev(cd,0x6d6e,0x3))) {
+  else if ((cd = (struct ConfigDev*)FindConfigDev(NULL,0x6d6e,0x3))) {
     // ZORRO 2
     Z9AXBase->zorro_version = 2;
     Z9AXBase->hw_addr = (uint32_t)cd->cd_BoardAddr;
     Z9AXBase->hw_size = (uint32_t)cd->cd_BoardSize;
   } else {
-    // Not detected
-    Z9AXBase->zorro_version = 0;
-    Z9AXBase->hw_addr = 0;
-    return 0;
+    // Not detected — Z9AXBase already zeroed above.
+    goto fail;
   }
-
-  Z9AXBase->flags = 0;
 
   BPTR fh;
   if ((fh=Open((CONST_STRPTR)"ENV:ZZ9K_INT2",MODE_OLDFILE))) {
@@ -181,6 +193,12 @@ static uint32_t __attribute__((used)) init(BPTR seg_list asm("a0"), struct Libra
   }
 
   return (uint32_t)dev;
+
+fail:
+  if (ExpansionBase) { CloseLibrary((struct Library *)ExpansionBase); ExpansionBase = NULL; }
+  if (UtilityBase)   { CloseLibrary((struct Library *)UtilityBase);   UtilityBase   = NULL; }
+  if (DOSBase)       { CloseLibrary((struct Library *)DOSBase);       DOSBase       = NULL; }
+  return 0;
 }
 
 static uint8_t* __attribute__((used)) expunge(struct Library *libbase asm("a6"))
@@ -204,11 +222,21 @@ static void __attribute__((used)) open(struct Library *dev asm("a6"), struct IOR
   }
 
   iotd->io_Error = 0;
+
+  // OpenLibrary/OpenDevice callers are not required to Forbid; guard the
+  // increment explicitly so concurrent opens can't race the counter.
+  Forbid();
   dev->lib_OpenCnt++;
+  Permit();
 }
 
 static uint8_t* __attribute__((used)) close(struct Library *dev asm("a6"), struct IORequest *iotd asm("a1"))
 {
+  // Mirror the Forbid() guard used in open() so the open-count stays consistent
+  // if two tasks close the device concurrently.
+  Forbid();
+  if (dev->lib_OpenCnt > 0) dev->lib_OpenCnt--;
+  Permit();
   return 0;
 }
 
@@ -247,6 +275,19 @@ void WorkerProcess() {
   ahi_data->worker_signal = AllocSignal(-1);
   ahi_data->enable_signal = AllocSignal(-1);
 
+  // If either signal failed, bail out without entering the mix loop.
+  if (ahi_data->worker_signal == -1 || ahi_data->enable_signal == -1) {
+    if (ahi_data->worker_signal != -1) { FreeSignal(ahi_data->worker_signal); ahi_data->worker_signal = -1; }
+    if (ahi_data->enable_signal != -1) { FreeSignal(ahi_data->enable_signal); ahi_data->enable_signal = -1; }
+#ifndef REAL_HARDWARE
+    if (glob_buf) FreeVec(glob_buf);
+#endif
+    // Clear worker_process so AllocAudio can detect the failure after the handshake.
+    ahi_data->worker_process = NULL;
+    Signal((struct Task *)ahi_data->t_mainproc, 1L << ahi_data->mainproc_signal);
+    return;
+  }
+
   uint32_t signals = 0;
   uint32_t buf_offset = 0;
 
@@ -255,6 +296,12 @@ void WorkerProcess() {
   for(;;) {
     signals = Wait(SIGBREAKF_CTRL_C | (1L<<ahi_data->enable_signal));
     if (signals & SIGBREAKF_CTRL_C) break;
+
+    // A pending enable_signal may have been latched by the ISR between
+    // Stop()/teardown setting play_stop and this wake-up. Drop those
+    // cycles on the floor — the hardware is already (or about to be)
+    // disabled and the AHI layer may be mid-teardown.
+    if (ahi_data->play_stop) continue;
 
     CallHookPkt(AudioCtrl->ahiac_PlayerFunc, AudioCtrl, NULL);
 
@@ -295,13 +342,11 @@ void WorkerProcess() {
   }
 
   Forbid();
-  FreeSignal(ahi_data->enable_signal);
-  ahi_data->enable_signal = -1;
-  FreeSignal(ahi_data->worker_signal);
-  ahi_data->worker_signal = -1;
+  if (ahi_data->enable_signal != -1) { FreeSignal(ahi_data->enable_signal); ahi_data->enable_signal = -1; }
+  if (ahi_data->worker_signal != -1) { FreeSignal(ahi_data->worker_signal); ahi_data->worker_signal = -1; }
 
 #ifndef REAL_HARDWARE
-  FreeVec(glob_buf);
+  if (glob_buf) FreeVec(glob_buf);
 #endif
 
   ahi_data->worker_process = NULL;
@@ -350,6 +395,7 @@ void init_interrupt(struct z9ax* ahi_data) {
   AddIntServer(INTB_VERTB, irq); // for debugging
 #endif
   Permit();
+  ahi_data->irq_installed = 1;
 
 #ifdef REAL_HARDWARE
   // enable HW interrupt
@@ -362,6 +408,8 @@ void init_interrupt(struct z9ax* ahi_data) {
 void destroy_interrupt(struct z9ax* ahi_data) {
   struct Interrupt* irq = &ahi_data->irq;
 
+  if (!ahi_data->irq_installed) return;
+
 #ifdef REAL_HARDWARE
   // disable HW interrupt
   write_reg(ahi_data->hw_addr, REG_ZZ_AUDIO_CONFIG, 0);
@@ -373,19 +421,30 @@ void destroy_interrupt(struct z9ax* ahi_data) {
     RemIntServer(INTB_EXTER, irq);
   }
   Permit();
+#else
+  Forbid();
+  RemIntServer(INTB_VERTB, irq);
+  Permit();
 #endif
+  ahi_data->irq_installed = 0;
 }
 
 static BOOL UsedByMHI(void) {
   struct List *IrqList;
+  BOOL found;
+  // IntVects[].iv_Data points at an interrupt-server list that can be mutated
+  // by AddIntServer/RemIntServer from any task; Forbid() keeps the traversal
+  // consistent and prevents FindName from walking freed nodes.
+  Forbid();
   if(Z9AXBase->flags & DEVF_INT2MODE) {
     IrqList = (struct List *)SysBase->IntVects[INTB_PORTS].iv_Data;
   }
   else {
     IrqList = (struct List *)SysBase->IntVects[INTB_EXTER].iv_Data;
   }
-  if(FindName(IrqList, (CONST_STRPTR)"mhizz9000")) return TRUE;
-  return FALSE;
+  found = FindName(IrqList, (CONST_STRPTR)"mhizz9000") ? TRUE : FALSE;
+  Permit();
+  return found;
 }
 
 static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagList asm("a1"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
@@ -395,14 +454,18 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
   if(!hw_addr) return AHISF_ERROR; // TW: Only AHISF_xxx return codes are allowed here.
   if(!zorro) return AHISF_ERROR; // TW: Only AHISF_xxx return codes are allowed here.
 
-  int ax_present = read_reg(hw_addr, REG_ZZ_AUDIO_CONFIG);
+  // REG_ZZ_AUDIO_CONFIG bit 0 is the "AX present" strap; mask explicitly so
+  // other status bits can't ever make this look like detection succeeded.
+  int ax_present = read_reg(hw_addr, REG_ZZ_AUDIO_CONFIG) & 1;
   if (!ax_present) {
-    char *alert = "\x00\x14\x14ZZ9000AX not detected. AHI driver will exit.\x00\x00";
+    const char *alert = "\x00\x14\x14ZZ9000AX not detected. AHI driver will exit.\x00\x00";
     if (!IntuitionBase) {
       IntuitionBase = (struct IntuitionBase*)OpenLibrary((STRPTR)"intuition.library",37);
-      DisplayAlert(RECOVERY_ALERT, (APTR)alert, 52);
-      CloseLibrary((struct Library *)IntuitionBase);
-      IntuitionBase = NULL;
+      if (IntuitionBase) {
+        DisplayAlert(RECOVERY_ALERT, (APTR)alert, 52);
+        CloseLibrary((struct Library *)IntuitionBase);
+        IntuitionBase = NULL;
+      }
     }
     return AHISF_ERROR; // TW: Only AHISF_xxx return codes are allowed here.
   }
@@ -414,30 +477,31 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
 
   struct z9ax *ahi_data = AllocVec(sizeof(struct z9ax), MEMF_PUBLIC | MEMF_FAST | MEMF_CLEAR);
   // allocate bounce buffer, as letting AHI write directly to hardware is slower than CopyMem
-  void* audio_buf = AllocVec(AUDIO_BUFSZ, MEMF_PUBLIC | MEMF_FAST | MEMF_CLEAR);
+  void* audio_buf = AllocVec(BOUNCE_BUFSZ, MEMF_PUBLIC | MEMF_FAST | MEMF_CLEAR);
 
   if (!ahi_data || !audio_buf) {
+    if (audio_buf) FreeVec(audio_buf);
+    if (ahi_data)  FreeVec(ahi_data);
     return AHISF_ERROR; // TW: Only AHISF_xxx return codes are allowed here.
   }
 
-  AudioCtrl->ahiac_DriverData = ahi_data;
-
-  ahi_data->play_stop = 1; // TW: Upon allocation playback is initially stopped.
+  // TW: Upon allocation playback is initially stopped.
+  ahi_data->play_stop = 1;
   ahi_data->flags = Z9AXBase->flags;
   ahi_data->audio_buf_addr = (uint32_t)audio_buf;
-
   ahi_data->hw_addr = hw_addr;
+  ahi_data->audioctrl = AudioCtrl;
+  ahi_data->ahi_base = AHIsubBase;
+  ahi_data->worker_signal = -1;
+  ahi_data->enable_signal = -1;
+  ahi_data->mainproc_signal = -1;
+  ahi_data->zorro_version = zorro;
+  ahi_data->t_mainproc = FindTask(NULL);
   // FIXME: see also zz_template_addr in RTG driver
   uint32_t offset_tx = Z9AXBase->hw_size - 0x20000;
-  //uint32_t offset_rx = Z9AXBase->hw_size - 0x30000;
-
-  //kprintf((CONST_STRPTR)"hw_addr: %lx\n", hw_addr);
-  //kprintf((CONST_STRPTR)"hw_size: %lx\n", Z9AXBase->hw_size);
-  //kprintf((CONST_STRPTR)"offset_tx: %lx\n", offset_tx);
-  //kprintf((CONST_STRPTR)"offset_rx: %lx\n", offset_rx);
-
   ahi_data->audio_hw_buf_addr = hw_addr + 0x10000 + offset_tx;
-  //memset((void*)ahi_data->audio_hw_buf_addr, 0, AUDIO_BUFSZ);
+
+  AudioCtrl->ahiac_DriverData = ahi_data;
 
   int lpf_freq = AudioCtrl->ahiac_MixFreq / 2;
 
@@ -455,73 +519,106 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
   // set tx buffer address
   write_audio_param(hw_addr, 0, offset_tx>>16);
   write_audio_param(hw_addr, 1, offset_tx&0xffff);
-  //write_audio_param(hw_addr, 2, offset_rx>>16);
-  //write_audio_param(hw_addr, 3, offset_rx&0xffff);
 
   // set LPF freq to half of sampling freq
   write_audio_param(hw_addr, 9, lpf_freq);
   Permit();
 
-  ahi_data->audioctrl = AudioCtrl;
-  ahi_data->ahi_base = AHIsubBase;
-  ahi_data->worker_signal = -1;
-  ahi_data->enable_signal = -1;
-  ahi_data->zorro_version = zorro;
-  ahi_data->t_mainproc = FindTask(NULL);
   ahi_data->mainproc_signal = AllocSignal(-1);
-
-  if (ahi_data->mainproc_signal != -1) {
-    Forbid();
-    if (ahi_data->worker_process = CreateNewProcTags(NP_Entry, (uint32_t)&WorkerProcess,
-                                                     NP_Name, (uint32_t)device_name,
-                                                     NP_Priority, WORKER_PRIORITY,
-                                                     TAG_DONE)) {
-      ahi_data->worker_process->pr_Task.tc_UserData = ahi_data;
-    }
-    Permit();
-
-    if (ahi_data->worker_process) {
-      Wait(1L << ahi_data->mainproc_signal);
-      if (ahi_data->worker_process != NULL) {
-      }
-    }
-
-    init_interrupt(ahi_data);
+  if (ahi_data->mainproc_signal == -1) {
+    kprintf((CONST_STRPTR)"ZZ9000AX: AllocSignal failed\n");
+    goto fail;
   }
+
+  Forbid();
+  ahi_data->worker_process = CreateNewProcTags(NP_Entry,    (uint32_t)&WorkerProcess,
+                                               NP_Name,     (uint32_t)device_name,
+                                               NP_Priority, WORKER_PRIORITY,
+                                               TAG_DONE);
+  if (ahi_data->worker_process) {
+    ahi_data->worker_process->pr_Task.tc_UserData = ahi_data;
+  }
+  Permit();
+
+  if (!ahi_data->worker_process) {
+    kprintf((CONST_STRPTR)"ZZ9000AX: CreateNewProcTags failed\n");
+    goto fail;
+  }
+
+  // Wait for worker to finish its early init (signal allocation, etc.)
+  Wait(1L << ahi_data->mainproc_signal);
+
+  // Worker may have failed to allocate its signals; it clears itself in that case.
+  if (!ahi_data->worker_process) {
+    kprintf((CONST_STRPTR)"ZZ9000AX: worker failed to init\n");
+    goto fail;
+  }
+
+  init_interrupt(ahi_data);
 
   // yields 960 samples (3840 bytes) for 48000Hz
   AudioCtrl->ahiac_BuffSamples = AudioCtrl->ahiac_MixFreq/50;
 
   // none of that weird timing
   return AHISF_KNOWSTEREO | AHISF_MIXING; // | AHISF_TIMING;
+
+fail:
+  // Invariant at this label: the worker has NOT been fully brought up.
+  // Either mainproc_signal allocation failed, CreateNewProcTags failed,
+  // or the worker signalled back with worker_process cleared (signal alloc
+  // failed). We must never reach fail: with a live worker, otherwise it
+  // would be orphaned.
+  if (ahi_data->mainproc_signal != -1) {
+    FreeSignal(ahi_data->mainproc_signal);
+    ahi_data->mainproc_signal = -1;
+  }
+  if (ahi_data->audio_buf_addr) {
+    FreeVec((void*)ahi_data->audio_buf_addr);
+    ahi_data->audio_buf_addr = 0;
+  }
+  FreeVec(ahi_data);
+  AudioCtrl->ahiac_DriverData = NULL;
+  return AHISF_ERROR;
 }
 
 static void __attribute__((used)) intAHIsub_FreeAudio(struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
-  if (AudioCtrl->ahiac_DriverData) {
-    struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
+  if (!AudioCtrl->ahiac_DriverData) return;
 
-    destroy_interrupt(ahi_data);
+  struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
 
-    if (ahi_data->worker_process) {
-      Signal((struct Task *)ahi_data->worker_process, SIGBREAKF_CTRL_C);
+  // Make sure the worker's mix loop won't try to touch hardware after we tear down.
+  ahi_data->play_stop = 1;
+
+  // Remove ISR first so we know nothing will signal the worker concurrently.
+  destroy_interrupt(ahi_data);
+
+  if (ahi_data->worker_process) {
+    Signal((struct Task *)ahi_data->worker_process, SIGBREAKF_CTRL_C);
+    // Worker clears worker_process and signals mainproc_signal on exit.
+    if (ahi_data->mainproc_signal != -1) {
       Wait(1L << ahi_data->mainproc_signal);
-      ahi_data->worker_process = NULL;
     }
-
-    FreeSignal(ahi_data->mainproc_signal);
-
-    if (ahi_data->audio_buf_addr) {
-      FreeVec((void*)ahi_data->audio_buf_addr);
-    }
-
-    FreeVec(AudioCtrl->ahiac_DriverData);
-    AudioCtrl->ahiac_DriverData = NULL;
+    ahi_data->worker_process = NULL;
   }
+
+  if (ahi_data->mainproc_signal != -1) {
+    FreeSignal(ahi_data->mainproc_signal);
+    ahi_data->mainproc_signal = -1;
+  }
+
+  if (ahi_data->audio_buf_addr) {
+    FreeVec((void*)ahi_data->audio_buf_addr);
+    ahi_data->audio_buf_addr = 0;
+  }
+
+  FreeVec(AudioCtrl->ahiac_DriverData);
+  AudioCtrl->ahiac_DriverData = NULL;
 }
 
 // TW: Prepared Stop() and Start() to store status in a flag in z9ax.
 static void __attribute__((used)) intAHIsub_Stop(uint32_t Flags asm("d0"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
   struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
+  if (!ahi_data) return;
   if (Flags & AHISF_PLAY) {
     ahi_data->play_stop = 1;
   }
@@ -529,6 +626,7 @@ static void __attribute__((used)) intAHIsub_Stop(uint32_t Flags asm("d0"), struc
 
 static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
   struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
+  if (!ahi_data) return AHIE_OK;
   if (flags & AHISF_PLAY) {
     ahi_data->play_stop = 0;
   }
@@ -625,6 +723,7 @@ static uint32_t __attribute__((used)) intAHIsub_UnloadSound(uint16_t sound asm("
 void __attribute__((used)) cintAHIsub_Enable(struct AHIAudioCtrlDrv *AudioCtrl asm("a2"))
 {
   struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
+  if (!ahi_data) return;
   if (ahi_data->disable_cnt > 0) {
     ahi_data->disable_cnt--;
   }
@@ -633,6 +732,7 @@ void __attribute__((used)) cintAHIsub_Enable(struct AHIAudioCtrlDrv *AudioCtrl a
 void __attribute__((used)) cintAHIsub_Disable(struct AHIAudioCtrlDrv *AudioCtrl asm("a2"))
 {
   struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
+  if (!ahi_data) return;
   ahi_data->disable_cnt++;
 }
 
