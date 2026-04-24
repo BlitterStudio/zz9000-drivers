@@ -6,6 +6,8 @@
  *                     MNT Research GmbH, Berlin
  *                     https://mntre.com
  *
+ * Hardened by Dimitris Panokostas <midwan@gmail.com> (2026)
+ *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * GNU General Public License v3.0 or later
  *
@@ -91,6 +93,51 @@ static void setAudioParam(struct MhiPlayer *mp, ULONG Param, UWORD Value) {
 static void setDecoderParam(struct MhiPlayer *mp, ULONG Param, UWORD Value) {
 	*((volatile UWORD*)(mp->hw_addr+REG_ZZ_DECODER_PARAM)) = Param;
 	*((volatile UWORD*)(mp->hw_addr+REG_ZZ_DECODER_VAL))   = Value;
+}
+
+// Read an optional user override for AP_DSP_SET_VOLUMES from
+// ENV:ZZ9K_MIX_LEVELS. The file (created e.g. with
+// `setenv ZZ9K_MIX_LEVELS C040`) contains a 1-4 digit hex string packing
+// ZZ9000AX/MHI output level in the high byte and Paula pass-through in
+// the low byte. "0x" prefix, leading whitespace and trailing newlines
+// are tolerated. Returns `default_value` on any failure so a stale or
+// mangled file can never brick audio.
+static UWORD read_mix_levels_env(UWORD default_value) {
+	BPTR fh;
+	UBYTE buf[16];
+	LONG len;
+	UWORD out = 0;
+	int digits = 0;
+	int i;
+
+	if (!DOSBase) return default_value;
+	fh = Open((CONST_STRPTR)"ENV:ZZ9K_MIX_LEVELS", MODE_OLDFILE);
+	if (!fh) return default_value;
+	len = Read(fh, buf, sizeof(buf) - 1);
+	Close(fh);
+	if (len <= 0) return default_value;
+	buf[len] = 0;
+
+	for (i = 0; i < len && digits < 4; i++) {
+		UBYTE c = buf[i];
+		int d;
+		if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+			if (digits > 0) break;
+			continue;
+		}
+		if (digits == 0 && c == '0' && (i + 1 < len) &&
+		    (buf[i + 1] == 'x' || buf[i + 1] == 'X')) {
+			i++;
+			continue;
+		}
+		if (c >= '0' && c <= '9') d = c - '0';
+		else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+		else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+		else break;
+		out = (UWORD)((out << 4) | d);
+		digits++;
+	}
+	return (digits > 0) ? out : default_value;
 }
 /* ****************************** */
 /*  END ZZ9000AX parameter access */
@@ -201,7 +248,13 @@ static void fillFifo(struct MhiPlayer *mp) {
 /*  END FIFO  */
 /* ********** */
 
-static BOOL UsedByAHI(struct MHI_LibBase *MhiLibBase) {
+// Check whether AHI has its ISR installed on our shared interrupt level.
+// MUST be called with Forbid() already active so the caller can combine
+// this check with AddIntServer() into a single atomic claim step --
+// otherwise AHI and MHI can both win the check and then both attach.
+// The IntVects[] server list can be mutated by any task, so walking it
+// unprotected would be unsafe in its own right.
+static BOOL ahi_present_locked(struct MHI_LibBase *MhiLibBase) {
 	struct List *IrqList;
 	if(MhiLibBase->flags & DEVF_INT2MODE) {
 		IrqList = (struct List *)SysBase->IntVects[INTB_PORTS].iv_Data;
@@ -209,44 +262,58 @@ static BOOL UsedByAHI(struct MHI_LibBase *MhiLibBase) {
 	else {
 		IrqList = (struct List *)SysBase->IntVects[INTB_EXTER].iv_Data;
 	}
-	if(FindName(IrqList, "ZZ9000AX")) return TRUE;
-	return FALSE;
+	return FindName(IrqList, "ZZ9000AX") ? TRUE : FALSE;
 }
 
 BOOL UserLibInit(struct MHI_LibBase *MhiLibBase) {
-	struct ConfigDev* cd;
+	// Must start at NULL: FindConfigDev(NULL, ...) means "search from head".
+	// Leaving cd uninitialized here is UB and, if BSS happens to hold a
+	// non-NULL value across AutoInit reloads, FindConfigDev will skip past
+	// or walk into invalid entries.
+	struct ConfigDev* cd = NULL;
 	ULONG hw_addr = 0;
 	ULONG hw_size = 0;
 	int ax_present;
 
 	MhiLibBase->zorro_version = 0;
-	if((ExpansionBase = (struct ExpansionBase*) OpenLibrary((STRPTR)"expansion.library", 0))) {
-		// Find Z2 or Z3 model of MNT ZZ9000
-		if((cd = (struct ConfigDev*)FindConfigDev(cd, 0x6D6E, 0x4))) {
-			// ZORRO 3
-			MhiLibBase->zorro_version = 3;
-			KPrintF("ZZ9000 Zorro 3 Version detected.\n");
-		}
-		else if((cd = (struct ConfigDev*)FindConfigDev(cd, 0x6D6E, 0x3))) {
-			// ZORRO 2
-			MhiLibBase->zorro_version = 2;
-			KPrintF("ZZ9000 Zorro 2 Version detected.\n");
-		}
-	} else {
+	MhiLibBase->hw_addr = 0;
+	MhiLibBase->hw_size = 0;
+	MhiLibBase->flags = 0;
+	MhiLibBase->NumAllocatedDecoders = 0;
+
+	ExpansionBase = (struct ExpansionBase*) OpenLibrary((STRPTR)"expansion.library", 0);
+	if(!ExpansionBase) {
 		KPrintF("Error: Can't open expansion.library.\n");
-		return FALSE;		
+		return FALSE;
 	}
-	CloseLibrary((struct Library*)ExpansionBase);
 
-	if(MhiLibBase->zorro_version == 0) {
+	// Find Z2 or Z3 model of MNT ZZ9000.
+	if((cd = (struct ConfigDev*)FindConfigDev(NULL, 0x6D6E, 0x4))) {
+		MhiLibBase->zorro_version = 3;
+		KPrintF("ZZ9000 Zorro 3 Version detected.\n");
+	}
+	else if((cd = (struct ConfigDev*)FindConfigDev(NULL, 0x6D6E, 0x3))) {
+		MhiLibBase->zorro_version = 2;
+		KPrintF("ZZ9000 Zorro 2 Version detected.\n");
+	}
+
+	if(!cd || MhiLibBase->zorro_version == 0) {
 		KPrintF("Error: ZZ9000 not detected.\n");
-		return FALSE;		
+		CloseLibrary((struct Library*)ExpansionBase);
+		return FALSE;
 	}
 
+	// Read BoardAddr/Size while expansion.library is still open -- the
+	// ConfigDev node is owned by that library and must not be dereferenced
+	// after CloseLibrary, even if in practice expansion.library never
+	// expunges.
 	hw_addr = (ULONG)cd->cd_BoardAddr;
 	hw_size = (ULONG)cd->cd_BoardSize;
+	CloseLibrary((struct Library*)ExpansionBase);
 
-	ax_present = *((volatile UWORD*)(hw_addr+REG_ZZ_AUDIO_CONFIG));
+	// REG_ZZ_AUDIO_CONFIG bit 0 is the "AX present" strap; mask explicitly
+	// so other status bits can't ever make detection look successful.
+	ax_present = (*((volatile UWORD*)(hw_addr+REG_ZZ_AUDIO_CONFIG))) & 1;
 	if(!ax_present) {
 		KPrintF("Error: ZZ9000AX not detected.\n");
 		return FALSE;
@@ -256,14 +323,12 @@ BOOL UserLibInit(struct MHI_LibBase *MhiLibBase) {
 	MhiLibBase->hw_addr = hw_addr;
 	MhiLibBase->hw_size = hw_size;
 
-	MhiLibBase->flags = 0;
 	BPTR fh;
 	if((fh=Open((CONST_STRPTR)"ENV:ZZ9K_INT2",MODE_OLDFILE))) {
 		Close(fh);
 		MhiLibBase->flags |= DEVF_INT2MODE;
 	}
 
-	MhiLibBase->NumAllocatedDecoders = 0;
 	return TRUE;
 }
 
@@ -274,6 +339,13 @@ void UserLibCleanup(struct MHI_LibBase *MhiLibBase) {
 extern ULONG dev_sisr(struct MhiPlayer *mp asm("a1"));
 ULONG cdev_sisr(struct MhiPlayer *mp asm("a1")) {
 	ULONG buf_samples = ZZ_BYTES_PER_PERIOD/4;
+	// Bail if the decoder is no longer playing. A hard ISR that fired
+	// between disable_hw_audio() and RemIntServer() can leave a soft IRQ
+	// queued on Exec's SoftInts list; when Stop/Free subsequently set
+	// Status != PLAYING under Forbid, the dispatched soft IRQ must be a
+	// no-op so it cannot clobber buf_offset/FifoWriteIdx/FifoMode or
+	// walk a freed BufferList.
+	if(mp->Status != MHIF_PLAYING) return 0;
 	fillFifo(mp);
 
 	setRegister(mp, REG_ZZ_AUDIO_SCALE, buf_samples);
@@ -302,7 +374,7 @@ extern ULONG dev_isr(struct MhiPlayer *mp asm("a1"));
 ULONG cdev_isr(struct MhiPlayer *mp asm("a1")) {
 	UWORD status = *(UWORD*)(mp->hw_addr+REG_ZZ_CONFIG);
 
-	// audio interrupt signal set?
+	// audio interrupt signal set? (REG_ZZ_CONFIG bit 1, mask 0x02)
 	if(status & 2) {
 		// Ack/clear audio interrupt.
 		*(USHORT*)(mp->hw_addr+REG_ZZ_CONFIG) = 8|32;
@@ -312,7 +384,11 @@ ULONG cdev_isr(struct MhiPlayer *mp asm("a1")) {
 	return 0;
 }
 
-void init_interrupt(struct MhiPlayer *mp) {
+// Initialise the Interrupt server nodes in mp so they are ready to be
+// added or Cause()d. Split out from the install step so AllocDecoder can
+// perform an atomic "check AHI is absent AND install our ISR" under a
+// single Forbid() window.
+static void prepare_irq_structs(struct MhiPlayer *mp) {
 	// Software interrupts have only five allowable priority levels:
 	// -32, -16, 0, +16, and +32
 	mp->sirq.is_Node.ln_Pri  = 0;
@@ -322,34 +398,31 @@ void init_interrupt(struct MhiPlayer *mp) {
 	mp->sirq.is_Code = (void*)dev_sisr;
 
 	mp->irq.is_Node.ln_Type = NT_INTERRUPT;
-	mp->irq.is_Node.ln_Pri  = 126; // High priority hard-interrupt server because it needs to react quickly.
+	mp->irq.is_Node.ln_Pri  = 126; // High priority: this ISR must react quickly.
 	mp->irq.is_Node.ln_Name = "mhizz9000";
 	mp->irq.is_Data = mp;
 	mp->irq.is_Code = (void*)dev_isr;
+}
 
-	Forbid();
+// Install the hard interrupt server. MUST be called under Forbid() so the
+// caller can combine it with ahi_present_locked() atomically.
+static void install_irq_server_locked(struct MhiPlayer *mp) {
 	if (mp->flags & DEVF_INT2MODE) {
 		AddIntServer(INTB_PORTS, &mp->irq);
 	} else {
 		AddIntServer(INTB_EXTER, &mp->irq);
 	}
-	Permit();
+}
 
-	// enable HW interrupt
+// Flip the HW-side audio interrupt bit. Called only when the decoder is
+// actually playing; the ISR is otherwise a no-op because dev_isr gates on
+// REG_ZZ_CONFIG bit 1 (mask 0x02) which the hardware only sets while running.
+static void enable_hw_audio(struct MhiPlayer *mp) {
 	setRegister(mp, REG_ZZ_AUDIO_CONFIG, 1);
 }
 
-void destroy_interrupt(struct MhiPlayer *mp) {
-	// disable HW interrupt
+static void disable_hw_audio(struct MhiPlayer *mp) {
 	setRegister(mp, REG_ZZ_AUDIO_CONFIG, 0);
-
-	Forbid();
-	if (mp->flags & DEVF_INT2MODE) {
-		RemIntServer(INTB_PORTS, &mp->irq);
-	} else {
-		RemIntServer(INTB_EXTER, &mp->irq);
-	}
-	Permit();
 }
 
 /*
@@ -358,92 +431,183 @@ void destroy_interrupt(struct MhiPlayer *mp) {
 APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 	struct MhiPlayer *mp = NULL;
 
-	// We only support one exclusive decoder allocation.
-	if(MHI_LibBase->NumAllocatedDecoders) {
-		KPrintF("Can't allocate! Hardware already used by another MHI instance.\n");
-		return NULL;
-	}
-
-	// We can't alloc if the hardware is already used by AHI.
-	if(UsedByAHI(MHI_LibBase)) {
-		KPrintF("Can't allocate! Hardware already used by AHI.\n");
-		return NULL;
-	}
-
 	mp = AllocVec(sizeof(struct MhiPlayer), MEMF_CLEAR);
-	if(mp) {
-		mp->hw_addr = MHI_LibBase->hw_addr;
-
-		if (MHI_LibBase->zorro_version == 3) {
-			// FIFO offset as in axmp3 (this is still within Zorro3 address range).
-			mp->encoded_offset =  0x06000000;
-			// Decoded audio offset right after FIFO with a little padding to be cache line aligned.
-			mp->decode_offset  = (0x06000000 + FIFOSIZE + 32) & 0xFFFFFFE0;
-		} else {
-			// FIFO offset like offset_tx in AHI driver (this is still within Zorro2 address range).
-			mp->encoded_offset = MHI_LibBase->hw_size - 0x20000;
-			// Decoded audio offset at 96MB.
-			mp->decode_offset  = 0x06000000;
-		}
-		KPrintF("encoded_offset = 0x%08lX\n", mp->encoded_offset);
-		KPrintF("decode_offset  = 0x%08lX\n", mp->decode_offset);
-
-		mp->mp3_addr     = MHI_LibBase->hw_addr + 0x10000 + mp->encoded_offset;
-		mp->flags        = MHI_LibBase->flags;
-		
-		mp->decode_chunk_sz = 1920; // 16 bit sample pairs
-
-		mp->MhiTask      = mhi_task;
-		mp->MhiMask      = mhi_sigmask;
-		mp->Status       = MHIF_STOPPED;
-
-		mp->FifoMode     = FIFO_PREFILL;
-		mp->FifoWriteIdx = 0;
-		mp->buf_offset   = 0;
-		mp->volume	     = 100;
-		mp->panning      = 50;
-
-		mp->BufferList = AllocVec(sizeof(struct MinList), MEMF_PUBLIC|MEMF_CLEAR);
-		if(mp->BufferList) {
-			NewList((struct List *)mp->BufferList);
-			MHI_LibBase->NumAllocatedDecoders++;
-			return mp;
-		}
-		FreeVec(mp);
+	if(!mp) {
+		KPrintF("Can't allocate MhiPlayer.\n");
+		return NULL;
 	}
-	return NULL;
+
+	mp->hw_addr = MHI_LibBase->hw_addr;
+
+	if (MHI_LibBase->zorro_version == 3) {
+		// FIFO offset as in axmp3 (this is still within Zorro3 address range).
+		mp->encoded_offset =  0x06000000;
+		// Decoded audio offset right after FIFO with a little padding to be cache line aligned.
+		mp->decode_offset  = (0x06000000 + FIFOSIZE + 32) & 0xFFFFFFE0;
+	} else {
+		// FIFO offset like offset_tx in AHI driver (this is still within Zorro2 address range).
+		mp->encoded_offset = MHI_LibBase->hw_size - 0x20000;
+		// Decoded audio offset at 96MB.
+		mp->decode_offset  = 0x06000000;
+	}
+	KPrintF("encoded_offset = 0x%08lX\n", mp->encoded_offset);
+	KPrintF("decode_offset  = 0x%08lX\n", mp->decode_offset);
+
+	mp->mp3_addr     = MHI_LibBase->hw_addr + 0x10000 + mp->encoded_offset;
+	mp->flags        = MHI_LibBase->flags;
+
+	mp->decode_chunk_sz = 1920; // 16 bit sample pairs
+
+	mp->MhiTask      = mhi_task;
+	mp->MhiMask      = mhi_sigmask;
+	mp->Status       = MHIF_STOPPED;
+
+	mp->FifoMode     = FIFO_PREFILL;
+	mp->FifoWriteIdx = 0;
+	mp->buf_offset   = 0;
+	mp->volume       = 100;
+	mp->panning      = 50;
+
+	mp->BufferList = AllocVec(sizeof(struct MinList), MEMF_PUBLIC|MEMF_CLEAR);
+	if(!mp->BufferList) {
+		FreeVec(mp);
+		return NULL;
+	}
+	NewList((struct List *)mp->BufferList);
+
+	// Populate the Interrupt nodes so the atomic-claim step below can
+	// AddIntServer our hard ISR directly.
+	prepare_irq_structs(mp);
+
+	// Atomic ownership claim: in one Forbid() window, verify (a) no other
+	// MHI decoder is already allocated and (b) AHI hasn't installed its
+	// ISR, then install our own hard-IRQ server. Doing all three under one
+	// Forbid closes the TOCTOU that would otherwise let AHI and MHI both
+	// decide the card is free and then both attach. The HW audio bit stays
+	// off until i_MHIPlay() fires, so the newly-installed ISR is a no-op
+	// in the meantime.
+	Forbid();
+	if(MHI_LibBase->NumAllocatedDecoders) {
+		Permit();
+		KPrintF("Can't allocate! Hardware already used by another MHI instance.\n");
+		FreeVec(mp->BufferList);
+		FreeVec(mp);
+		return NULL;
+	}
+	if(ahi_present_locked(MHI_LibBase)) {
+		Permit();
+		KPrintF("Can't allocate! Hardware already used by AHI.\n");
+		FreeVec(mp->BufferList);
+		FreeVec(mp);
+		return NULL;
+	}
+	install_irq_server_locked(mp);
+	MHI_LibBase->NumAllocatedDecoders++;
+	Permit();
+
+	// Set a balanced Paula-vs-ZZ9000AX output mixer default. AP_DSP_SET_VOLUMES
+	// (param 10) encodes AHI/MHI output level in the high byte and Paula pass-
+	// through level in the low byte (each 0x00-0xFF). Summing both above
+	// ~0x100 starts saturating the DAC (per MNT community forum thread 1011).
+	//
+	// Default 0x8080 is the symmetric baseline that matches the fixed-
+	// hardware revision every new customer receives (MNT removed the U4
+	// opamp that over-amplified Paula pass-through on early R1 units).
+	// Owners of an unfixed early R1 where raw Paula dominates over MP3
+	// output can compensate via `setenv ZZ9K_MIX_LEVELS C040` (boost MHI,
+	// cut Paula) — or any other 4-digit hex value — without rebuilding.
+	// (Ref: community.mnt.re/t/zz9000ax-mixing-levels-register/1011)
+	setAudioParam(mp, AP_DSP_SET_VOLUMES, read_mix_levels_env(0x8080));
+
+	return mp;
 }
 
 
 /*
  *
  */
+// Drain and free every ListNode in the BufferList. Must be called under
+// Forbid() because fillFifo() runs from a software interrupt and walks the
+// same list -- Forbid prevents the soft IRQ from preempting mid-unlink.
+static void drain_buffer_list_locked(struct MhiPlayer *mp) {
+	APTR node;
+	if(!mp->BufferList) return;
+	while((node = RemHead((struct List *)mp->BufferList)) != NULL) {
+		FreeVec(node);
+	}
+}
+
 void i_MHIFreeDecoder(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 	struct MhiPlayer *mp = (struct MhiPlayer *)mhi_handle;
-	if(mp) {
-		setAudioParam(mp, AP_DSP_SET_STEREO_VOLUME, 100 | (50<<8));
-		setAudioParam(mp, AP_DSP_SET_PREFACTOR,     50);
-		setAudioParam(mp, AP_DSP_SET_EQ_BAND1,      50);
-		setAudioParam(mp, AP_DSP_SET_EQ_BAND2,      50);
-		setAudioParam(mp, AP_DSP_SET_EQ_BAND3,      50);
-		setAudioParam(mp, AP_DSP_SET_EQ_BAND4,      50);
-		setAudioParam(mp, AP_DSP_SET_EQ_BAND5,      50);
-		setAudioParam(mp, AP_DSP_SET_EQ_BAND6,      50);
-		setAudioParam(mp, AP_DSP_SET_EQ_BAND7,      50);
-		setAudioParam(mp, AP_DSP_SET_EQ_BAND8,      50);
-		setAudioParam(mp, AP_DSP_SET_EQ_BAND9,      50);
-		setAudioParam(mp, AP_DSP_SET_EQ_BAND10,     50);
+	if(!mp) return;
 
-		if(mp->BufferList) {
-			APTR killednode;
-			while(killednode = RemHead((struct List *)mp->BufferList)) {
-				FreeVec(killednode);
-			}
-			FreeVec(mp->BufferList);
-		}
-		FreeVec(mp);
+	// --- Phase 1: quiesce the hardware and the driver state machine. ---
+	// Set Status first so any soft IRQ Cause()d by an in-flight hard ISR
+	// (or already queued on Exec's SoftInts list) becomes a no-op when it
+	// eventually dispatches -- cdev_sisr early-returns on Status!=PLAYING.
+	// Keep the hard ISR INSTALLED here: it is the MHI ownership token on
+	// the shared interrupt list, and releasing it before the DSP reset
+	// writes finish would let AHI allocate the card and race our own
+	// in-flight MMIO (Codex HIGH finding).
+	Forbid();
+	mp->Status = MHIF_STOPPED;
+	disable_hw_audio(mp);
+	drain_buffer_list_locked(mp);
+	Permit();
+	// Permit-to-0 dispatches any soft IRQ still queued on the SoftInts
+	// list; it runs cdev_sisr on still-valid mp, sees Status==STOPPED, and
+	// returns without touching the list or mp fields. No new soft IRQs can
+	// be Cause()d because the hard ISR is disarmed by disable_hw_audio --
+	// even though the ISR node is still installed, the HW won't fire it.
+
+	// --- Phase 2: DSP reset while MHI still owns the card. ---
+	// The ISR node is still on the interrupt-server list, so ahi_present/
+	// FindName(..., "mhizz9000") in a concurrent AHI AllocAudio will still
+	// see MHI as the owner and refuse to claim the card during these
+	// writes.
+	//
+	// Quiesce the MP3 decoder before AHI (or a second MHI session) takes
+	// the card. i_MHIPlay leaves REG_ZZ_DECODE in DECODE_RUN so the FPGA
+	// decoder keeps trying to consume the FIFO and write PCM into our
+	// decode_offset region. If we don't flip it back to DECODE_CLEAR
+	// here, a subsequent AHI AllocAudio inherits a "running" decoder and
+	// can crash on warm boot with ahi.device trap 0x80000006 (mixer
+	// reads garbage / overflow trap) -- the user reproduced this on PR
+	// #3 after an MP3 -> MOD session.
+	setRegister(mp, REG_ZZ_DECODE, DECODE_CLEAR);
+
+	setAudioParam(mp, AP_DSP_SET_STEREO_VOLUME, 100 | (50<<8));
+	setAudioParam(mp, AP_DSP_SET_PREFACTOR,     50);
+	setAudioParam(mp, AP_DSP_SET_EQ_BAND1,      50);
+	setAudioParam(mp, AP_DSP_SET_EQ_BAND2,      50);
+	setAudioParam(mp, AP_DSP_SET_EQ_BAND3,      50);
+	setAudioParam(mp, AP_DSP_SET_EQ_BAND4,      50);
+	setAudioParam(mp, AP_DSP_SET_EQ_BAND5,      50);
+	setAudioParam(mp, AP_DSP_SET_EQ_BAND6,      50);
+	setAudioParam(mp, AP_DSP_SET_EQ_BAND7,      50);
+	setAudioParam(mp, AP_DSP_SET_EQ_BAND8,      50);
+	setAudioParam(mp, AP_DSP_SET_EQ_BAND9,      50);
+	setAudioParam(mp, AP_DSP_SET_EQ_BAND10,     50);
+
+	// --- Phase 3: atomically release ownership. ---
+	// Only now do we give up the card: remove the IRQ node AND decrement
+	// NumAllocatedDecoders inside a single Forbid window so any racing
+	// AllocDecoder / AHI AllocAudio sees both state changes together.
+	Forbid();
+	if (mp->flags & DEVF_INT2MODE) {
+		RemIntServer(INTB_PORTS, &mp->irq);
+	} else {
+		RemIntServer(INTB_EXTER, &mp->irq);
 	}
 	if(MHI_LibBase->NumAllocatedDecoders) MHI_LibBase->NumAllocatedDecoders--;
+	Permit();
+
+	// --- Phase 4: free memory after ownership is released. ---
+	if(mp->BufferList) {
+		FreeVec(mp->BufferList);
+		mp->BufferList = NULL;
+	}
+	FreeVec(mp);
 }
 
 
@@ -453,21 +617,30 @@ void i_MHIFreeDecoder(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibB
 BOOL i_MHIQueueBuffer(REGA3(APTR mhi_handle), REGA0(APTR mhi_buffer), REGD0(ULONG mhi_size), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 	struct MhiPlayer *mp = (struct MhiPlayer *)mhi_handle;
 	struct ListNode *BufferNode;
-	if(mp != NULL) {
-		
-		BufferNode = AllocVec(sizeof(struct ListNode), MEMF_PUBLIC|MEMF_CLEAR);
-		BufferNode->Buffer = mhi_buffer;
-		BufferNode->Size   = mhi_size;
-		BufferNode->Index  = 0;
-		BufferNode->Played = FALSE;
-		AddTail((struct List *)mp->BufferList, (struct Node *)BufferNode);
 
-		KPrintF("MHIQueueBuffer: Adr=0x%08lX\n", mhi_buffer);
+	if(mp == NULL || mp->BufferList == NULL) return FALSE;
 
-		return TRUE;
+	BufferNode = AllocVec(sizeof(struct ListNode), MEMF_PUBLIC|MEMF_CLEAR);
+	if(!BufferNode) {
+		// OOM: return FALSE so the caller knows the buffer wasn't queued,
+		// instead of dereferencing NULL below.
+		KPrintF("MHIQueueBuffer: AllocVec failed\n");
+		return FALSE;
 	}
+	BufferNode->Buffer = mhi_buffer;
+	BufferNode->Size   = mhi_size;
+	BufferNode->Index  = 0;
+	BufferNode->Played = FALSE;
 
-	return FALSE;
+	// Forbid() while linking: fillFifo() walks this list from a software
+	// interrupt and must not observe a half-linked tail.
+	Forbid();
+	AddTail((struct List *)mp->BufferList, (struct Node *)BufferNode);
+	Permit();
+
+	KPrintF("MHIQueueBuffer: Adr=0x%08lX\n", mhi_buffer);
+
+	return TRUE;
 }
 
 
@@ -479,19 +652,22 @@ APTR i_MHIGetEmpty(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase
 	struct ListNode *BufferNode;
 	APTR mhi_buffer = NULL;
 
-	/* Fetch first free buffer and return its memory pointer to the caller */
-	if(mp) {
-		for(;;) {
-			BufferNode = (struct ListNode *)mp->BufferList->mlh_Head;
-			if(BufferNode == NULL) break;
-			if(BufferNode->Header.mln_Succ == NULL) break;
-			if(BufferNode->Played == FALSE) break;
+	if(!mp || !mp->BufferList) return NULL;
 
-			mhi_buffer = BufferNode->Buffer;
-			RemHead((struct List *)mp->BufferList);
-			FreeVec(BufferNode);
-		}
+	// Walk + RemHead must be protected against the soft-IRQ fillFifo()
+	// that reads from the same list head.
+	Forbid();
+	for(;;) {
+		BufferNode = (struct ListNode *)mp->BufferList->mlh_Head;
+		if(BufferNode == NULL) break;
+		if(BufferNode->Header.mln_Succ == NULL) break;
+		if(BufferNode->Played == FALSE) break;
+
+		mhi_buffer = BufferNode->Buffer;
+		RemHead((struct List *)mp->BufferList);
+		FreeVec(BufferNode);
 	}
+	Permit();
 	return mhi_buffer;
 }
 
@@ -517,46 +693,59 @@ void i_MHIPlay(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 
 	KPrintF("MHIPlay called\n");
 
-	if(mp) {
-		switch(mp->Status) {
-			case MHIF_STOPPED:
-				KPrintF("MHIPlay: Clearing FIFO.\n");
-				clearFifo(mp);
-				KPrintF("MHIPlay: Fillng FIFO.\n");
-				fillFifo(mp);
-				
-				// set tx buffer address to 127 MB offset
-				setAudioParam(mp, AP_TX_BUF_OFFS_HI, mp->decode_offset>>16);
-				setAudioParam(mp, AP_TX_BUF_OFFS_LO, mp->decode_offset&0xffff);
-				
-				// set LPF to 20KHz
-				setAudioParam(mp, AP_DSP_SET_LOWPASS, 20000);
-				
-				// set decoder params
-				setDecoderParam(mp, 0, mp->encoded_offset>>16);
-				setDecoderParam(mp, 1, mp->encoded_offset&0xffff);
-				setDecoderParam(mp, 2, FIFOSIZE>>16);
-				setDecoderParam(mp, 3, FIFOSIZE&0xffff);
-				setDecoderParam(mp, 4, mp->decode_offset>>16);
-				setDecoderParam(mp, 5, mp->decode_offset&0xffff);
-				setDecoderParam(mp, 6, mp->decode_chunk_sz>>16);
-				setDecoderParam(mp, 7, mp->decode_chunk_sz&0xffff);
-				
-				// ZZ_DECODE (init)
-				setRegister(mp, REG_ZZ_DECODE, DECODE_INIT);
-	
-				init_interrupt(mp);
-				KPrintF("MHIPlay: interrupt inited.\n");
-			
-				mp->Status = MHIF_PLAYING;
-			break;
-			case MHIF_PAUSED:			
-				// enable HW interrupt
-				setRegister(mp, REG_ZZ_AUDIO_CONFIG, 1);
-				mp->Status = MHIF_PLAYING;
-			break;
-		}
+	if(!mp) return;
+
+	// Hold Forbid across the entire state transition so Play / Stop / Pause
+	// can't interleave. Without this, the "mp->Status = PLAYING; then
+	// enable_hw_audio()" ordering (required so cdev_sisr's Status gate is
+	// already open for the first soft IRQ) opens a window where a racing
+	// Stop could set Status=STOPPED + disable_hw_audio BETWEEN those two
+	// statements -- Play would then re-enable the HW with Status=STOPPED,
+	// leaving the card interrupting while cdev_sisr silently drops every
+	// soft IRQ. All ops inside this Forbid are MMIO writes or static helper
+	// logic (no Wait / no blocking I/O), so task preemption blocking is
+	// bounded and short.
+	Forbid();
+	switch(mp->Status) {
+		case MHIF_STOPPED:
+			KPrintF("MHIPlay: Clearing FIFO.\n");
+			clearFifo(mp);
+			KPrintF("MHIPlay: Filling FIFO.\n");
+			fillFifo(mp);
+
+			// set tx buffer address to 127 MB offset
+			setAudioParam(mp, AP_TX_BUF_OFFS_HI, mp->decode_offset>>16);
+			setAudioParam(mp, AP_TX_BUF_OFFS_LO, mp->decode_offset&0xffff);
+
+			// set LPF to 20KHz
+			setAudioParam(mp, AP_DSP_SET_LOWPASS, 20000);
+
+			// set decoder params
+			setDecoderParam(mp, 0, mp->encoded_offset>>16);
+			setDecoderParam(mp, 1, mp->encoded_offset&0xffff);
+			setDecoderParam(mp, 2, FIFOSIZE>>16);
+			setDecoderParam(mp, 3, FIFOSIZE&0xffff);
+			setDecoderParam(mp, 4, mp->decode_offset>>16);
+			setDecoderParam(mp, 5, mp->decode_offset&0xffff);
+			setDecoderParam(mp, 6, mp->decode_chunk_sz>>16);
+			setDecoderParam(mp, 7, mp->decode_chunk_sz&0xffff);
+
+			// ZZ_DECODE (init)
+			setRegister(mp, REG_ZZ_DECODE, DECODE_INIT);
+
+			// Status must be PLAYING BEFORE enable_hw_audio so cdev_sisr's
+			// Status gate is open when the first hard ISR fires.
+			mp->Status = MHIF_PLAYING;
+			enable_hw_audio(mp);
+			KPrintF("MHIPlay: HW audio enabled.\n");
+		break;
+		case MHIF_PAUSED:
+			// Same ordering requirement as the STOPPED case above.
+			mp->Status = MHIF_PLAYING;
+			enable_hw_audio(mp);
+		break;
 	}
+	Permit();
 }
 
 
@@ -565,23 +754,38 @@ void i_MHIPlay(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
  */
 void i_MHIStop(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 	struct MhiPlayer *mp = (struct MhiPlayer *)mhi_handle;
-	APTR killednode;
 
 	KPrintF("MHIStop called\n");
 
-	if(mp) {
-		switch(mp->Status) {
-			case MHIF_PLAYING:
-			case MHIF_PAUSED:
-			case MHIF_OUT_OF_DATA:
-				destroy_interrupt(mp);
-				while(killednode = RemHead((struct List *)mp->BufferList)) {
-					FreeVec(killednode);
-				}
-				mp->Status = MHIF_STOPPED;
-			break;
-		}
+	if(!mp) return;
+
+	// Hold Forbid across the whole dispatch so Stop serializes against a
+	// concurrent Play / Pause; the Status check and the disable_hw_audio
+	// must be atomic relative to Play's Status=PLAYING + enable_hw_audio.
+	Forbid();
+	switch(mp->Status) {
+		case MHIF_PLAYING:
+		case MHIF_PAUSED:
+		case MHIF_OUT_OF_DATA:
+			// Stop the hardware first so it can't fire a new audio IRQ
+			// while we drain. The hard-IRQ server stays installed --
+			// it is the ownership claim and is only torn down at
+			// FreeDecoder time.
+			disable_hw_audio(mp);
+			// Flip Status under Forbid so a latent soft IRQ (Cause()d
+			// before disable_hw_audio took effect) dispatches into
+			// cdev_sisr and early-returns on Status!=PLAYING, leaving
+			// buf_offset/FifoWriteIdx/FifoMode alone. Resets live in
+			// the same Forbid window so the whole transition is atomic
+			// relative to any late soft-IRQ dispatch at Permit-to-0.
+			mp->Status = MHIF_STOPPED;
+			drain_buffer_list_locked(mp);
+			mp->buf_offset = 0;
+			mp->FifoWriteIdx = 0;
+			mp->FifoMode = FIFO_PREFILL;
+		break;
 	}
+	Permit();
 }
 
 
@@ -593,15 +797,16 @@ void i_MHIPause(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) 
 
 	KPrintF("MHIPause called\n");
 
-	if(mp) {
-		switch(mp->Status) {
-			case MHIF_PLAYING:
-				// disable HW interrupt
-				setRegister(mp, REG_ZZ_AUDIO_CONFIG, 0);
-				mp->Status = MHIF_PAUSED;
-			break;
-		}
+	if(!mp) return;
+
+	// Same serialization requirement as Play / Stop: check + disable +
+	// status flip must be atomic relative to a racing Play.
+	Forbid();
+	if(mp->Status == MHIF_PLAYING) {
+		disable_hw_audio(mp);
+		mp->Status = MHIF_PAUSED;
 	}
+	Permit();
 }
 
 

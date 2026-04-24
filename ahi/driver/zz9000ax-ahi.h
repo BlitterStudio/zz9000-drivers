@@ -19,6 +19,7 @@ struct z9ax {
   struct AHIAudioCtrlDrv *audioctrl;
   uint16_t play_stop;
   uint8_t flags;
+  uint8_t irq_installed;
 };
 
 // TW: Driver base includes hardware address and zorro version besides library base.

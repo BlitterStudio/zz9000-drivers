@@ -46,9 +46,9 @@ firmware live in
 |------------------|--------------------------|--------------|
 | `rtg/`           | `ZZ9000.card`            | Picasso96-compatible RTG graphics driver (not P96-derived). Installs under `Libs:Picasso96`. |
 | `net/`           | `ZZ9000Net.device`       | SANA-II network driver. Installs under `Devs:Networks`. |
-| `ahi/`           | `zz9000ax.audio`         | AHI audio driver for the ZZ9000AX daughterboard. `ahi/axtest/` has standalone tests. |
+| `ahi/`           | `zz9000ax.audio`         | AHI audio driver for the ZZ9000AX daughterboard. `ahi/axtest/` has standalone tests. Runtime tunables (mixer balance, LPF, INT2) are documented in [ahi/README.md](ahi/README.md). |
 | `ax-direct/`     | `axtest`, `axmp3`        | Direct-register reference tools for the AX audio subsystem — bringup and hardware MP3 playback. |
-| `mhi/`           | `mhizz9000.library`      | MHI library exposing the AX hardware MP3 decoder to MHI-aware players. |
+| `mhi/`           | `mhizz9000.library`      | MHI library exposing the AX hardware MP3 decoder to MHI-aware players. Shares the AX card (and its ENV tunables) with the AHI driver — see [ahi/README.md](ahi/README.md). |
 | `usb-poseidon/`  | `zzusbhw.device`         | USB hardware driver for Poseidon — chunked bulk transfers, root-hub emulation, async INT via poll task, mailbox protocol. Paired with the ZZ9000OS firmware USB stack. |
 | `sd-boot/`       | `zzsd.device`            | Boots AmigaOS from a hardfile (`/zz9000.hdf`) on a FAT32 SD card, via the ZZ9000's autoboot ROM. See [sd-boot/README.md](sd-boot/README.md). |
 | `ZZTop/`         | `ZZTop`                  | Configuration GUI (resolution, scanlines, toggles, hardware readback). |
