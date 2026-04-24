@@ -155,6 +155,19 @@ static inline UBYTE direct_color_mask(uint16_t colormode, UBYTE mask) {
 	return (colormode == MNTVA_COLOR_32BIT) ? 0xFF : mask;
 }
 
+static inline UWORD abs_word(WORD value) {
+	return (value < 0) ? (UWORD)(-((LONG)value)) : (UWORD)value;
+}
+
+static inline UWORD line_length(const struct Line *line) {
+	if (line->Length)
+		return line->Length;
+
+	UWORD dx = abs_word(line->dX);
+	UWORD dy = abs_word(line->dY);
+	return (dx >= dy) ? dx : dy;
+}
+
 static inline uint16_t planar_line_bytes(SHORT x, SHORT w) {
 	return ((((UWORD)x) & 0x07) + (UWORD)w + 7) >> 3;
 }
@@ -799,13 +812,10 @@ BOOL GetVSyncState(__REGA0(struct BoardInfo *b), __REGD0(BOOL toggle)) {
 }
 
 
-void FillRect(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REGD0(WORD x), __REGD1(WORD y), __REGD2(WORD w), __REGD3(WORD h), __REGD4(ULONG color), __REGD5(UBYTE mask), __REGD7(RGBFTYPE format)) {
-	if (!r) return;
-	if (w<1 || h<1) return;
-
-	uint16_t colormode = mnt_colormode(r->RGBFormat);
-	mask = direct_color_mask(colormode, mask);
-
+static inline void fill_rect_accel(struct BoardInfo *b, struct RenderInfo *r,
+	WORD x, WORD y, WORD w, WORD h, ULONG color, UBYTE mask,
+	RGBFTYPE format, uint16_t colormode)
+{
 	if (b->CardFlags & CARDFLAG_ZORRO_3) {
 		dmy_cache
 		gfxdata->offset[GFXDATA_DST] = ((uint32_t)r->Memory - (uint32_t)b->MemoryBase);
@@ -840,6 +850,16 @@ void FillRect(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 		writeBlitterY2(registers, h);
 		zzwrite16(&registers->blitter_op_fillrect, mask);
 	}
+}
+
+void FillRect(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REGD0(WORD x), __REGD1(WORD y), __REGD2(WORD w), __REGD3(WORD h), __REGD4(ULONG color), __REGD5(UBYTE mask), __REGD7(RGBFTYPE format)) {
+	if (!r) return;
+	if (w<1 || h<1) return;
+
+	uint16_t colormode = mnt_colormode(r->RGBFormat);
+	mask = direct_color_mask(colormode, mask);
+
+	fill_rect_accel(b, r, x, y, w, h, color, mask, format, colormode);
 }
 
 void InvertRect(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REGD0(WORD x), __REGD1(WORD y), __REGD2(WORD w), __REGD3(WORD h), __REGD4(UBYTE mask), __REGD7(RGBFTYPE format)) {
@@ -1132,6 +1152,19 @@ void DrawLine(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 
 	uint16_t colormode = mnt_colormode(r->RGBFormat);
 	mask = direct_color_mask(colormode, mask);
+
+	if (l->DrawMode == 0 && l->LinePtrn == 0xFFFF && mask == 0xFF && l->dY == 0) {
+		UWORD len = line_length(l);
+		WORD x = l->X;
+		WORD y = l->Y;
+		WORD w = (WORD)(len + 1);
+
+		if (l->dX < 0)
+			x -= len;
+
+		fill_rect_accel(b, r, x, y, w, 1, l->FgPen, mask, format, colormode);
+		return;
+	}
 
 	if (b->CardFlags & CARDFLAG_ZORRO_3) {
 		dmy_cache
