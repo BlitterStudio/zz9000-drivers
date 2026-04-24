@@ -156,6 +156,14 @@ static uint32_t __attribute__((used)) init(BPTR seg_list asm("a0"), struct Libra
   Z9AXBase->hw_size = 0;
   Z9AXBase->flags = 0;
 
+  // Same reasoning for the library-base globals: the fail: label below
+  // calls CloseLibrary on any non-NULL base, so leftover pointers from a
+  // previous failed init must not leak in.
+  DOSBase = NULL;
+  UtilityBase = NULL;
+  ExpansionBase = NULL;
+  IntuitionBase = NULL;
+
   if (!(DOSBase = (struct DosLibrary *)OpenLibrary((STRPTR)"dos.library",0)))
     goto fail;
 
