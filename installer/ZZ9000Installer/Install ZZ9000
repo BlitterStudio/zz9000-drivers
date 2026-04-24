@@ -1,161 +1,243 @@
+; ZZ9000 AmigaOS Installer
+;
+; Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
+; SPDX-License-Identifier: GPL-3.0-or-later
+;
+; All binary payloads under this drawer are populated at release time
+; by the CI release job (see .github/workflows/ci.yml). A locally-
+; cloned repo will not have the binaries in place until either CI runs
+; or they are copied in manually after building each component.
 
-(if (askbool (prompt "Do you want to install the P96 graphics driver 1.11 for ZZ9000?")
-   (help "")) (
 
-(set #rtgver (getversion "Libs:Picasso96/rtg.library"))
-(set #rtgmajor (/ #rtgver 65536))
-(set #rtgminor (- #rtgver (* #rtgmajor 65536)))
+; --------------------------------------------------------------------
+; Picasso96 RTG driver (ZZ9000.card)
+; --------------------------------------------------------------------
 
-(set #monexists (and (exists "Devs:Monitors/Altais.info") (exists "Devs:Monitors/Altais")))
-(set #zzmonexists (and (exists "Devs:Monitors/ZZ9000.info") (exists "Devs:Monitors/ZZ9000")))
+(if (askbool (prompt "Install the Picasso96 RTG driver (ZZ9000.card) for the ZZ9000?")
+             (help "Installs the unified ZZ9000.card into Libs:Picasso96/. The same driver works on both Zorro II and Zorro III hosts."))
+   (
+      (set #rtgver   (getversion "Libs:Picasso96/rtg.library"))
+      (set #rtgmajor (/ #rtgver 65536))
+      (set #rtgminor (- #rtgver (* #rtgmajor 65536)))
 
-(if (or (not (or #monexists #zzmonexists)) (< #rtgmajor 40))
-        (abort "Please install P96 first and select *Altais* as the graphics card.\n\nYou can either use the old shareware version of Picasso96 on Aminet or the new P96 by Individual Computers (recommended!). To purchase it, you first have to register at https://icomp.de/shop-icomp/en/register.html, and then login to their shop. P96 will then appear as a product.")
+      (set #monexists   (and (exists "Devs:Monitors/Altais.info")  (exists "Devs:Monitors/Altais")))
+      (set #zzmonexists (and (exists "Devs:Monitors/ZZ9000.info")  (exists "Devs:Monitors/ZZ9000")))
+
+      (if (or (not (or #monexists #zzmonexists)) (< #rtgmajor 40))
+          (abort "Please install Picasso96 first and select *Altais* as the graphics card.\n\nYou can use either the old shareware Picasso96 on Aminet, or the new P96 by Individual Computers (recommended). To purchase it, register at https://icomp.de/shop-icomp/en/register.html and log in to their shop. P96 then appears as a product.")
+      )
+
+      (message "P96 rtg.library version " #rtgmajor "." #rtgminor " detected — OK.")
+
+      (copyfiles
+         (prompt "Install ZZ9000.card (P96 RTG driver)")
+         (help "Installs the ZZ9000 graphics card driver for the Picasso96 RTG system.")
+         (source "Libs/Picasso96/ZZ9000.card")
+         (dest "Libs:Picasso96")
+         (confirm))
+
+      (complete 10)
+
+      (if (not #zzmonexists)
+          (copyfiles
+             (prompt "Create Monitor file for ZZ9000")
+             (help "Creates Devs:Monitors/ZZ9000 from the Altais monitor file — needed to expose the ZZ9000 screenmodes.")
+             (source "Devs:Monitors/Altais")
+             (infos)
+             (dest "Devs:Monitors")
+             (newname "ZZ9000")
+             (confirm)))
+
+      (if #monexists
+          (delete "Devs:Monitors/Altais"
+             (prompt "Delete the Altais monitor file (it has been renamed to ZZ9000).")
+             (help "The installer renamed Altais to ZZ9000; the original file is no longer needed.")
+             (confirm)
+             (infos)))
+
+      (complete 20)
+
+      (tooltype
+         (prompt "Configure the ZZ9000 Monitor file for ZZ9000.card")
+         (help "Registers ZZ9000.card as the P96 card driver in the monitor file.")
+         (dest "Devs:Monitors/ZZ9000")
+         (confirm)
+         (settooltype "BOARDTYPE"       "ZZ9000")
+         (settooltype "FAKENATIVEMODES" "No")
+         (settooltype "DISPLAYCHAIN"    "Yes"))
+
+      (complete 30)
+
+      (if (and (exists "Devs:Picasso96Settings") (not (exists "Devs:Picasso96Settings.bak")))
+          (copyfiles
+             (prompt "Back up your existing Picasso96Settings to Picasso96Settings.bak")
+             (help "Saves Devs:Picasso96Settings as Picasso96Settings.bak before we overwrite it.")
+             (source "Devs:Picasso96Settings")
+             (dest "Devs:")
+             (newname "Picasso96Settings.bak")
+             (confirm)))
+
+      (complete 40)
+
+      (copyfiles
+         (prompt "Install ZZ9000 Picasso96Settings")
+         (help "Installs the Picasso96 configuration containing ZZ9000-specific screenmodes.")
+         (source "Devs/Picasso96Settings")
+         (dest "Devs:")
+         (confirm))
+   )
 )
 
-(message "P96 rtg.library version " #rtgmajor "." #rtgminor " detected. This is fine.")
 
-(if (askbool (prompt "Is this an Amiga 3000/4000?")
-   (help ""))
-(copyfiles 
-   (prompt "Install P96 compatible Graphics Driver (Z3 version)")
-   (help "This will install the ZZ9000 graphics card driver for the P96 RTG system, ZZ9000.card.")
-   (source "Libs/Picasso96/ZZ9000.card")
-   (dest "Libs:Picasso96")
-   (confirm))
-(copyfiles 
-   (prompt "Install P96 compatible Graphics Driver (Z2 version)")
-   (help "This will install the ZZ9000 graphics card driver for the P96 RTG system, ZZ9000.card.")
-   (source "Libs/Picasso96/ZZ9000.card.nodma")
-   (dest "Libs:Picasso96")
-   (newname "ZZ9000.card")
-   (confirm)))
+; --------------------------------------------------------------------
+; Scandoubler cap (ZZ9000-VCAP)
+; --------------------------------------------------------------------
 
-(complete 10)
-
-(if (not #zzmonexists)
-(copyfiles 
-   (prompt "Copy Monitor File (Enables Graphics Driver)")
-   (help "This will create the ZZ9000 Monitor file from the Altais Monitor file. It enables the ZZ9000 screen modes.")
-   (source "Devs:Monitors/Altais")
-   (infos)
-   (dest "Devs:Monitors")
-   (newname "ZZ9000")
-   (confirm)))
-
-(if #monexists
-   (delete "Devs:Monitors/Altais" 
-        (prompt "Delete Altais Monitor.") 
-        (help "Delete the Altais Monitor file that was used to create the ZZ9000 Monitor file.")
-        (confirm)
-        (infos)))
-
-(complete 20)
-
-(tooltype
-   (prompt "Adjust Tooltypes of Monitor File to enable ZZ9000.card")
-   (help "This will register ZZ9000.card as the P96 card driver in the Monitor file.")
-   (dest "Devs:Monitors/ZZ9000")
-   (confirm)
-   (settooltype "BOARDTYPE" "ZZ9000")
-   (settooltype "FAKENATIVEMODES" "No")
-   (settooltype "DISPLAYCHAIN" "Yes"))
-
-(complete 30)
-
-(if (and (exists "Devs:Picasso96Settings") (not (exists "Devs:Picasso96Settings.bak")))
-(copyfiles
-   (prompt "Create a backup up your old P96 Configuration (Devs:Picasso96Settings.bak)")
-   (help "It will be copied to Devs:Picasso96Settings.bak")
-   (source "Devs:Picasso96Settings")
-   (dest "Devs:")
-   (newname "Picasso96Settings.bak")
-   (confirm)))
-
-(complete 40)
-
-(copyfiles 
-   (prompt "Install P96 Configuration (Picasso96Settings)")
-   (help "This will install the P96 configuration file for ZZ9000 that contains the available screen modes.")
-   (source "Devs/Picasso96Settings")
-   (dest "Devs:")
-   (confirm))
-))
-
-(if (askbool (prompt "Does your monitor support 50Hz modes? If not, we'll create ENVARC:ZZ9000-VCAP-800x600 to switch the scandoubler to 60Hz.")
-    (help "The default scandoubler mode is 720x576 50Hz."))
-
-    (delete "ENVARC:ZZ9000-VCAP-800x600" (prompt "Delete any existing 800x600/60Hz flag.")
-        (help ""))
-
-    (textfile (prompt "Creating ENVARC:ZZ9000-VCAP-800x600") (help "")
-        (append "1")
-        (dest "ENVARC:ZZ9000-VCAP-800x600")))
+(if (askbool (prompt "Does your monitor support 50 Hz modes? Say No to create ENVARC:ZZ9000-VCAP-800x600, which switches the scandoubler to 60 Hz.")
+             (help "The default scandoubler output is 720x576 @ 50 Hz. Saying No creates the 60 Hz flag."))
+    (delete "ENVARC:ZZ9000-VCAP-800x600"
+       (prompt "Remove any existing 800x600 / 60 Hz flag.")
+       (help ""))
+    (textfile
+       (prompt "Creating ENVARC:ZZ9000-VCAP-800x600")
+       (help "")
+       (append "1")
+       (dest "ENVARC:ZZ9000-VCAP-800x600")))
 
 (complete 50)
 
+
+; --------------------------------------------------------------------
+; Obsolete driver cleanup
+; --------------------------------------------------------------------
+
 (if (exists "Devs:ZZ9000USBStorage.device")
-    (delete "Devs:ZZ9000USBStorage.device" (prompt "Delete obsolete ZZ9000USBStorage.device. The new zzusb.device is now included in ZZ9000's autoboot ROM.")
-        (help "") (infos)))
+    (delete "Devs:ZZ9000USBStorage.device"
+       (prompt "Remove Devs:ZZ9000USBStorage.device? It has been superseded by zzusbhw.device, which is provided by the ZZ9000's autoboot ROM firmware.")
+       (help "This old USB storage driver is no longer needed; current firmware bundles a Poseidon-compatible replacement.")
+       (infos)))
 
-(complete 60)
-
-(if (askbool (prompt "Do you want to install the SANA-II Ethernet driver for ZZ9000? This requires an existing Installation of RoadShow, MiamiDX or similar.") (help ""))
-
-(
-
-(set #mac (askstring 
-   (prompt "Please enter your unique Ethernet MAC address that is printed in your user manual. You just have to adjust the last 6 digits.") 
-   (help "If you want to change your MAC address later, edit ENVARC:ZZ9K_MAC") 
-   (default "68:82:f2:01:02:00") ))
-
-(textfile (prompt "Saving your MAC address in ENVARC:ZZ9K_MAC") 
-   (help "") (append #mac) (dest "ENVARC:ZZ9K_MAC"))
+(complete 55)
 
 
-(copyfiles 
-   (prompt "Install SANA-II compatible Ethernet Driver")
-   (help "This will install the Network driver for ZZ9000's ethernet functionality.")
-   (source "Devs/Networks/ZZ9000Net.device")
-   (infos)
-   (dest "Devs:Networks")
-   (confirm))
+; --------------------------------------------------------------------
+; SANA-II network driver (ZZ9000Net.device)
+; --------------------------------------------------------------------
 
-(if (askbool (prompt "Do you want to install an example ZZ9000 NetInterface for use with RoadShow?") (help ""))
+(if (askbool (prompt "Install the SANA-II Ethernet driver (ZZ9000Net.device)? Requires an existing Roadshow, Miami DX, or AmiTCP setup.")
+             (help ""))
+   (
+      (set #mac (askstring
+         (prompt "Enter your unique Ethernet MAC address (printed in your ZZ9000 manual). Only the last six hex digits need to change.")
+         (help "To change the MAC later, edit ENVARC:ZZ9K_MAC.")
+         (default "68:82:f2:01:02:00")))
 
-(copyfiles 
-   (prompt "Install example NetInterface for use with RoadShow. It uses DHCP for dynamic IP. Edit Devs:NetInterfaces/ZZ9000Net to customize your settings.")
-   (help "This will install the NetInterface configuration file for ZZ9000 for use with RoadShow.")
-   (source "Devs/NetInterfaces/ZZ9000Net")
-   (infos)
-   (dest "Devs:NetInterfaces")
-   (confirm))
-)))
+      (textfile
+         (prompt "Saving your MAC address to ENVARC:ZZ9K_MAC")
+         (help "")
+         (append #mac)
+         (dest "ENVARC:ZZ9K_MAC"))
+
+      (copyfiles
+         (prompt "Install ZZ9000Net.device into Devs:Networks/")
+         (help "The SANA-II driver that Roadshow / Miami DX talks to.")
+         (source "Devs/Networks/ZZ9000Net.device")
+         (infos)
+         (dest "Devs:Networks")
+         (confirm))
+
+      (if (askbool (prompt "Install an example NetInterface for Roadshow? It defaults to DHCP; edit Devs:NetInterfaces/ZZ9000Net to customise.")
+                   (help ""))
+          (copyfiles
+             (prompt "Install example NetInterface into Devs:NetInterfaces/")
+             (help "")
+             (source "Devs/NetInterfaces/ZZ9000Net")
+             (infos)
+             (dest "Devs:NetInterfaces")
+             (confirm)))
+   )
+)
+
+(complete 65)
+
+
+; --------------------------------------------------------------------
+; ZZ9000AX audio (AHI subdriver + AHI AudioMode + MHI library)
+; --------------------------------------------------------------------
+
+(if (askbool (prompt "Install the ZZ9000AX audio drivers (AHI + MHI)? Requires an existing AHI installation.")
+             (help "Installs zz9000ax.audio (AHI subdriver), the ZZ9000AX AHI AudioMode descriptor, and mhizz9000.library (MHI hardware MP3 decoder)."))
+   (
+      (copyfiles
+         (prompt "Install zz9000ax.audio into Devs:AHI/")
+         (help "The AHI subdriver that exposes the ZZ9000AX DAC to AHI-aware applications.")
+         (source "Devs/AHI/zz9000ax.audio")
+         (infos)
+         (dest "Devs:AHI")
+         (confirm))
+
+      (copyfiles
+         (prompt "Install the ZZ9000AX AHI AudioMode")
+         (help "The AudioMode descriptor telling AHI which mode selects the ZZ9000AX DAC.")
+         (source "Devs/AudioModes/ZZ9000AX")
+         (infos)
+         (dest "Devs:AudioModes")
+         (confirm))
+
+      (copyfiles
+         (prompt "Install mhizz9000.library into LIBS: (MHI hardware MP3 decoder)")
+         (help "Lets MHI-aware players (AmigaAmp and friends) use the ZZ9000AX hardware MP3 decoder.")
+         (source "Libs/mhizz9000.library")
+         (dest "LIBS:")
+         (confirm))
+
+      (message "ZZ9000AX audio installed.\n\nOptional runtime tunables (full details in ahi-README.md at the root of the release zip you unpacked):\n\n  ENV:ZZ9K_MIX_LEVELS  — Paula / AHI mixer balance (for early Rev.1 boards with the U4 opamp still in place)\n  ENV:ZZ9000AX-NOLPF   — disable the AHI auto low-pass filter\n  ENV:ZZ9K_INT2        — move both audio drivers to INT2\n\nSetting these is optional — defaults are correct for current-revision hardware.")
+   )
+)
 
 (complete 80)
 
-(if (askbool (prompt "Do you want to install the AHI audio driver for ZZ9000AX? This requires an existing installation of AHI.") (help ""))
 
-(
+; --------------------------------------------------------------------
+; CLI tools and ZZTop
+; --------------------------------------------------------------------
 
-(copyfiles 
-   (prompt "Install AHI driver for ZZ9000AX")
-   (help "This will install the audio driver for ZZ9000AX.")
-   (source "Devs/AHI/ZZ9000AX.audio")
-   (infos)
-   (dest "Devs:AHI")
-   (confirm))
+(if (askbool (prompt "Install the ZZ9000 command-line utilities and ZZTop configuration GUI?")
+             (help "Installs ZZTop (configuration GUI) to SYS:Tools/, and the ZZScanlines, zznetstats and axmp3 CLI tools to C:."))
+   (
+      (copyfiles
+         (prompt "Install ZZTop into SYS:Tools/")
+         (help "Configuration GUI — resolution, scanlines, hardware toggles, and firmware status readback.")
+         (source "Tools/ZZTop")
+         (infos)
+         (dest "SYS:Tools")
+         (confirm))
 
-(copyfiles 
-   (prompt "Install AHI Audiomode for ZZ9000AX")
-   (help "This will install the AHI Audiomode for ZZ9000AX.")
-   (source "Devs/AudioModes/ZZ9000AX")
-   (infos)
-   (dest "Devs:AudioModes")
-   (confirm))
-))
+      (copyfiles
+         (prompt "Install ZZScanlines into C:")
+         (help "CLI front-end for the ZZ9000's scanline bitstream (classic / soft / gradient patterns with parity control). Requires firmware 1.14 or later.")
+         (source "Tools/ZZScanlines")
+         (dest "C:")
+         (confirm))
+
+      (copyfiles
+         (prompt "Install zznetstats into C:")
+         (help "Dumps SANA-II global statistics for ZZ9000Net.device — useful for debugging link / throughput issues.")
+         (source "Tools/zznetstats")
+         (dest "C:")
+         (confirm))
+
+      (copyfiles
+         (prompt "Install axmp3 into C:")
+         (help "Direct-register command-line MP3 player for the ZZ9000AX hardware decoder. Bypasses MHI — mostly useful for testing and diagnostics.")
+         (source "Tools/axmp3")
+         (infos)
+         (dest "C:")
+         (confirm))
+   )
+)
 
 (complete 100)
 
-(message "That's it! Please reboot and enjoy your MNT ZZ9000.\n\nMake sure to visit https://mntre.com/zz9000 for updates.\n\nIf you need support, please join our IRC channel #mnt-amiga on irc.libera.chat, visit community.mnt.re or contact us at zz9000@mntre.com. Thank you!")
 
+(message "Installation complete. Please reboot to pick up the changes.\n\n  Repo & docs:       https://github.com/BlitterStudio/zz9000-drivers\n  Firmware updates:  https://github.com/BlitterStudio/zz9000-firmware\n  Hardware:          https://mntre.com/zz9000\n  Community:         https://community.mnt.re — #mnt-amiga on irc.libera.chat — zz9000@mntre.com\n\nEnjoy your MNT ZZ9000!")
