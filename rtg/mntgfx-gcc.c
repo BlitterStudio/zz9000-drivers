@@ -159,6 +159,12 @@ static inline uint16_t planar_line_bytes(SHORT x, SHORT w) {
 	return ((((UWORD)x) & 0x07) + (UWORD)w + 7) >> 3;
 }
 
+static inline uint16_t planar_line_bytes_padded(SHORT w) {
+	// P2C keeps the historical two-byte padding; the firmware's
+	// source byte wrap check otherwise fires at the end of most scanlines.
+	return (((UWORD)w) >> 3) + 2;
+}
+
 static inline void zzwrite16(volatile uint16_t* reg, uint16_t value) {
 	*reg = value;
 }
@@ -1261,7 +1267,7 @@ void BlitPlanar2Chunky(__REGA0(struct BoardInfo *b), __REGA1(struct BitMap *bm),
 	uint16_t zz_mask = mask;
 	uint8_t cur_plane = 0x01;
 
-	uint16_t line_size = planar_line_bytes(x, w);
+	uint16_t line_size = planar_line_bytes_padded(w);
 	uint32_t output_plane_size = line_size * h;
 
 	if (output_plane_size * bm->Depth > 0xFFFF && (!(b->CardFlags & CARDFLAG_ZORRO_3))) {
