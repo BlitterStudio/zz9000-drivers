@@ -482,6 +482,52 @@ static BOOL mhi_present_locked(void) {
   return FindName(IrqList, (CONST_STRPTR)"mhizz9000") ? TRUE : FALSE;
 }
 
+// Read an optional user override for AP_DSP_SET_VOLUMES from
+// ENV:ZZ9K_MIX_LEVELS. The file (created e.g. with
+// `setenv ZZ9K_MIX_LEVELS C040`) contains a 1-4 digit hex string packing
+// ZZ9000AX/AHI output level in the high byte and Paula pass-through in
+// the low byte. "0x" prefix, leading whitespace and trailing newlines
+// are tolerated. Returns `default_value` on any failure so a stale or
+// mangled file can never brick audio.
+static uint16_t read_mix_levels_env(uint16_t default_value)
+{
+  BPTR fh;
+  UBYTE buf[16];
+  LONG len;
+  uint16_t out = 0;
+  int digits = 0;
+  int i;
+
+  if (!DOSBase) return default_value;
+  fh = Open((CONST_STRPTR)"ENV:ZZ9K_MIX_LEVELS", MODE_OLDFILE);
+  if (!fh) return default_value;
+  len = Read(fh, buf, sizeof(buf) - 1);
+  Close(fh);
+  if (len <= 0) return default_value;
+  buf[len] = 0;
+
+  for (i = 0; i < len && digits < 4; i++) {
+    UBYTE c = buf[i];
+    int d;
+    if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+      if (digits > 0) break;
+      continue;
+    }
+    if (digits == 0 && c == '0' && (i + 1 < len) &&
+        (buf[i + 1] == 'x' || buf[i + 1] == 'X')) {
+      i++;
+      continue;
+    }
+    if (c >= '0' && c <= '9') d = c - '0';
+    else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+    else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+    else break;
+    out = (uint16_t)((out << 4) | d);
+    digits++;
+  }
+  return (digits > 0) ? out : default_value;
+}
+
 static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagList asm("a1"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
   // TW: Just take the values from where init() has already stored them.
   uint32_t hw_addr = Z9AXBase->hw_addr;
@@ -574,12 +620,17 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
 
   // Balanced Paula-vs-ZZ9000AX output mixer default (param 10,
   // AP_DSP_SET_VOLUMES). High byte = ZZ9000AX/AHI level, low byte = Paula
-  // pass-through level, each 0x00-0xFF. 0x8080 is the safe maximum for
-  // both summed — higher values saturate the DAC and distort (per MNT
-  // forum thread 1011). Factory default is noticeably quiet on the AHI
-  // side and makes MOD/MP3 playback feel weak next to raw Paula, so we
-  // set a sane balanced default whenever we take the card.
-  write_audio_param(hw_addr, 10, 0x8080);
+  // pass-through level, each 0x00-0xFF. Summing both above ~0x100 starts
+  // saturating the DAC (per MNT forum thread 1011).
+  //
+  // Default 0xC040 compensates for early ZZ9000AX revisions that carry
+  // an opamp on U4 which over-amplifies the Paula pass-through and makes
+  // raw Paula dominate over AHI playback: we boost AHI to 0xC0 (~1.5x)
+  // and cut Paula to 0x40 (~0.5x) to pull them toward parity. Users with
+  // the fixed-hardware revision (U4 opamp desoldered by MNT) can override
+  // via `setenv ZZ9K_MIX_LEVELS 8080` (or any 4-digit hex value) to get a
+  // symmetric mix back.
+  write_audio_param(hw_addr, 10, read_mix_levels_env(0xC040));
   Permit();
 
   // Zero the hardware audio ring buffer before we enable playback. The

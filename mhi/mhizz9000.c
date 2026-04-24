@@ -94,6 +94,51 @@ static void setDecoderParam(struct MhiPlayer *mp, ULONG Param, UWORD Value) {
 	*((volatile UWORD*)(mp->hw_addr+REG_ZZ_DECODER_PARAM)) = Param;
 	*((volatile UWORD*)(mp->hw_addr+REG_ZZ_DECODER_VAL))   = Value;
 }
+
+// Read an optional user override for AP_DSP_SET_VOLUMES from
+// ENV:ZZ9K_MIX_LEVELS. The file (created e.g. with
+// `setenv ZZ9K_MIX_LEVELS C040`) contains a 1-4 digit hex string packing
+// ZZ9000AX/MHI output level in the high byte and Paula pass-through in
+// the low byte. "0x" prefix, leading whitespace and trailing newlines
+// are tolerated. Returns `default_value` on any failure so a stale or
+// mangled file can never brick audio.
+static UWORD read_mix_levels_env(UWORD default_value) {
+	BPTR fh;
+	UBYTE buf[16];
+	LONG len;
+	UWORD out = 0;
+	int digits = 0;
+	int i;
+
+	if (!DOSBase) return default_value;
+	fh = Open((CONST_STRPTR)"ENV:ZZ9K_MIX_LEVELS", MODE_OLDFILE);
+	if (!fh) return default_value;
+	len = Read(fh, buf, sizeof(buf) - 1);
+	Close(fh);
+	if (len <= 0) return default_value;
+	buf[len] = 0;
+
+	for (i = 0; i < len && digits < 4; i++) {
+		UBYTE c = buf[i];
+		int d;
+		if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+			if (digits > 0) break;
+			continue;
+		}
+		if (digits == 0 && c == '0' && (i + 1 < len) &&
+		    (buf[i + 1] == 'x' || buf[i + 1] == 'X')) {
+			i++;
+			continue;
+		}
+		if (c >= '0' && c <= '9') d = c - '0';
+		else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+		else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+		else break;
+		out = (UWORD)((out << 4) | d);
+		digits++;
+	}
+	return (digits > 0) ? out : default_value;
+}
 /* ****************************** */
 /*  END ZZ9000AX parameter access */
 /* ****************************** */
@@ -462,14 +507,18 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 
 	// Set a balanced Paula-vs-ZZ9000AX output mixer default. AP_DSP_SET_VOLUMES
 	// (param 10) encodes AHI/MHI output level in the high byte and Paula pass-
-	// through level in the low byte (each 0x00-0xFF). Per the MNT community
-	// forum, summing both channels above ~0x80 saturates the DAC and distorts,
-	// so 0x8080 is the safe maximum for a balanced mix. The factory default is
-	// noticeably quieter on the ZZ9000AX output which makes MP3/MHI playback
-	// feel weak next to raw Paula; bumping to 0x80/0x80 brings them to parity
-	// without risking clipping. (Ref: community.mnt.re/t/zz9000ax-mixing-
-	// levels-register/1011)
-	setAudioParam(mp, AP_DSP_SET_VOLUMES, 0x8080);
+	// through level in the low byte (each 0x00-0xFF). Summing both above
+	// ~0x100 starts saturating the DAC (per MNT community forum thread 1011).
+	//
+	// Default 0xC040 compensates for early ZZ9000AX revisions that carry an
+	// opamp on U4 which over-amplifies the Paula pass-through and makes raw
+	// Paula dominate over MP3 playback: we boost MHI to 0xC0 (~1.5x) and cut
+	// Paula to 0x40 (~0.5x) to pull them toward parity. Users with the
+	// fixed-hardware revision (U4 opamp desoldered by MNT) can override via
+	// `setenv ZZ9K_MIX_LEVELS 8080` (or any 4-digit hex value) to get a
+	// symmetric mix back. (Ref: community.mnt.re/t/zz9000ax-mixing-levels-
+	// register/1011)
+	setAudioParam(mp, AP_DSP_SET_VOLUMES, read_mix_levels_env(0xC040));
 
 	return mp;
 }
