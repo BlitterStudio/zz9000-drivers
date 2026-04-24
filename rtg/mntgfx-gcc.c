@@ -293,6 +293,10 @@ __saveds struct GFXBase* __attribute__((used)) InitLib(__REGA6(struct ExecBase *
 														 __REGD0(struct GFXBase *exb))
 {
 	_gfxbase = exb;
+	_gfxbase->libNode.lib_Node.ln_Name = device_name;
+	_gfxbase->libNode.lib_Version = DEVICE_VERSION;
+	_gfxbase->libNode.lib_Revision = DEVICE_REVISION;
+	_gfxbase->libNode.lib_IdString = device_id_string;
 	_gfxbase->Name = gfxname;
 	SysBase = *(struct ExecBase **)4L;
 	return _gfxbase;
