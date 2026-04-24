@@ -53,7 +53,7 @@
 #define DEVICE_NAME "zz9000ax.audio"
 #define DEVICE_DATE "(24.04.2026)"
 #define DEVICE_VERSION 4
-#define DEVICE_REVISION 21
+#define DEVICE_REVISION 22
 #define DEVICE_ID_STRING "ZZ9000AX " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
 #define DEVICE_PRIORITY 0
 
@@ -64,6 +64,11 @@
 // bounce buffer is only ever filled one period at a time — see BOUNCE_BUFSZ.
 #define AUDIO_BUFSZ (ZZ_BYTES_PER_PERIOD*8) // TODO: query from hardware
 #define BOUNCE_BUFSZ ZZ_BYTES_PER_PERIOD
+// AHI sample frames = 16-bit stereo => 4 bytes per frame. This is what
+// ahiac_BuffSamples counts and what AHIDB_MaxPlaySamples must advertise;
+// keep this in sync with the mixer byte math (bytes = BuffSamples << 2)
+// and with the bounce-buffer capacity check in WorkerProcess().
+#define BOUNCE_MAX_FRAMES (BOUNCE_BUFSZ / 4)
 // AmigaOS scheduling is strictly preemptive priority with no aging; any
 // task at or above this priority stuck in a CPU loop will starve the mixer
 // and produce audible stutter. Keep the mixer well above user-level tasks
@@ -314,6 +319,18 @@ void WorkerProcess() {
     CallHookPkt(AudioCtrl->ahiac_PlayerFunc, AudioCtrl, NULL);
 
     if (!(*AudioCtrl->ahiac_PreTimer)()) {
+      // Defence in depth: the mixer writes ahiac_BuffSamples*4 bytes into
+      // our bounce buffer. We set BuffSamples to MixFreq/50 in AllocAudio,
+      // which is bounded by our advertised max mix rate (48 kHz => 960
+      // frames => 3840 bytes = BOUNCE_BUFSZ). If anything ever drifts —
+      // AHI layer override, higher mix rate added to freqs[], buffer
+      // shrunk — catch it here instead of smashing memory.
+      if (AudioCtrl->ahiac_BuffSamples > BOUNCE_MAX_FRAMES) {
+        kprintf((CONST_STRPTR)"ZZ9000AX: BuffSamples %ld exceeds bounce cap %ld; skipping\n",
+                (long)AudioCtrl->ahiac_BuffSamples, (long)BOUNCE_MAX_FRAMES);
+        (*AudioCtrl->ahiac_PostTimer)();
+        continue;
+      }
 #ifdef REAL_HARDWARE
       CallHookPkt(AudioCtrl->ahiac_MixerFunc, AudioCtrl, (void*)ahi_data->audio_buf_addr);
 #else
@@ -383,16 +400,24 @@ void cdev_isr(struct z9ax* data asm("a1")) {
 // TW: dev_isr is now an external asm wrapper.
 extern uint32_t dev_isr(struct z9ax* data asm("a1"));
 
-void init_interrupt(struct z9ax* ahi_data) {
+// Fill in the Interrupt server node so it's ready to be added to the
+// int-server list. Kept separate from the actual AddIntServer call so the
+// install can be performed atomically under the AllocAudio ownership Forbid().
+static void prepare_irq_struct(struct z9ax* ahi_data) {
   struct Interrupt* irq = &ahi_data->irq;
 
   irq->is_Node.ln_Type = NT_INTERRUPT;
-  irq->is_Node.ln_Pri = 126; // TW: High priority interrupt server because it needs to react quickly.
+  irq->is_Node.ln_Pri = 126; // High priority: this ISR must react quickly.
   irq->is_Node.ln_Name = "ZZ9000AX";
   irq->is_Data = ahi_data;
   irq->is_Code = (void*)dev_isr;
+}
 
-  Forbid();
+// Install the interrupt server. MUST be called with Forbid() already active
+// so the caller can combine the MHI-presence check and the AddIntServer into
+// one atomic "claim" step (otherwise MHI could slip in between).
+static void install_irq_server_locked(struct z9ax* ahi_data) {
+  struct Interrupt* irq = &ahi_data->irq;
 #ifdef REAL_HARDWARE
   if (ahi_data->flags & DEVF_INT2MODE) {
     AddIntServer(INTB_PORTS, irq);
@@ -402,14 +427,18 @@ void init_interrupt(struct z9ax* ahi_data) {
 #else
   AddIntServer(INTB_VERTB, irq); // for debugging
 #endif
-  Permit();
   ahi_data->irq_installed = 1;
+}
 
+// Flip the hardware-side audio interrupt on. Called only once the worker is
+// up and ready to handle the resulting signals.
+static void enable_hw_interrupt(struct z9ax* ahi_data) {
 #ifdef REAL_HARDWARE
-  // enable HW interrupt
   USHORT hw_config = read_reg(ahi_data->hw_addr, REG_ZZ_AUDIO_CONFIG);
   hw_config |= 1;
   write_reg(ahi_data->hw_addr, REG_ZZ_AUDIO_CONFIG, hw_config);
+#else
+  (void)ahi_data;
 #endif
 }
 
@@ -437,22 +466,20 @@ void destroy_interrupt(struct z9ax* ahi_data) {
   ahi_data->irq_installed = 0;
 }
 
-static BOOL UsedByMHI(void) {
+// Check whether MHI has its ISR installed on our shared interrupt level.
+// MUST be called with Forbid() already active so that the caller can combine
+// the check with AddIntServer() into a single atomic claim step. The
+// intuition IntVects[] server list can be mutated by AddIntServer/
+// RemIntServer from any task, so walking it unprotected would be unsafe.
+static BOOL mhi_present_locked(void) {
   struct List *IrqList;
-  BOOL found;
-  // IntVects[].iv_Data points at an interrupt-server list that can be mutated
-  // by AddIntServer/RemIntServer from any task; Forbid() keeps the traversal
-  // consistent and prevents FindName from walking freed nodes.
-  Forbid();
   if(Z9AXBase->flags & DEVF_INT2MODE) {
     IrqList = (struct List *)SysBase->IntVects[INTB_PORTS].iv_Data;
   }
   else {
     IrqList = (struct List *)SysBase->IntVects[INTB_EXTER].iv_Data;
   }
-  found = FindName(IrqList, (CONST_STRPTR)"mhizz9000") ? TRUE : FALSE;
-  Permit();
-  return found;
+  return FindName(IrqList, (CONST_STRPTR)"mhizz9000") ? TRUE : FALSE;
 }
 
 static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagList asm("a1"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
@@ -475,11 +502,6 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
         IntuitionBase = NULL;
       }
     }
-    return AHISF_ERROR; // TW: Only AHISF_xxx return codes are allowed here.
-  }
-
-  if(UsedByMHI()) {
-  	kprintf((CONST_STRPTR)"Can't allocate! Hardware already used by MHI.\n");
     return AHISF_ERROR; // TW: Only AHISF_xxx return codes are allowed here.
   }
 
@@ -510,6 +532,25 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
   ahi_data->audio_hw_buf_addr = hw_addr + 0x10000 + offset_tx;
 
   AudioCtrl->ahiac_DriverData = ahi_data;
+
+  // Atomic ownership claim: check MHI isn't already on the shared interrupt
+  // level AND install our own ISR node in a single Forbid() window. Doing
+  // the two steps under one Forbid closes the TOCTOU that would otherwise
+  // let AHI and MHI both "win" the claim (we saw it; we took it; nobody
+  // could slip in between). The HW-side interrupt stays OFF until the
+  // worker is up — see enable_hw_interrupt() near the end.
+  prepare_irq_struct(ahi_data);
+  Forbid();
+  if (mhi_present_locked()) {
+    Permit();
+    kprintf((CONST_STRPTR)"Can't allocate! Hardware already used by MHI.\n");
+    FreeVec(audio_buf);
+    FreeVec(ahi_data);
+    AudioCtrl->ahiac_DriverData = NULL;
+    return AHISF_ERROR;
+  }
+  install_irq_server_locked(ahi_data);
+  Permit();
 
   int lpf_freq = AudioCtrl->ahiac_MixFreq / 2;
 
@@ -562,7 +603,8 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
     goto fail;
   }
 
-  init_interrupt(ahi_data);
+  // Worker is up; safe to let the hardware start firing audio interrupts.
+  enable_hw_interrupt(ahi_data);
 
   // yields 960 samples (3840 bytes) for 48000Hz
   AudioCtrl->ahiac_BuffSamples = AudioCtrl->ahiac_MixFreq/50;
@@ -576,6 +618,10 @@ fail:
   // or the worker signalled back with worker_process cleared (signal alloc
   // failed). We must never reach fail: with a live worker, otherwise it
   // would be orphaned.
+  // The interrupt server was already installed as part of the atomic claim
+  // earlier, so we must release it here before freeing ahi_data; otherwise
+  // RemIntServer would walk a freed node next time something probes.
+  destroy_interrupt(ahi_data);
   if (ahi_data->mainproc_signal != -1) {
     FreeSignal(ahi_data->mainproc_signal);
     ahi_data->mainproc_signal = -1;
@@ -679,7 +725,10 @@ static int32_t __attribute__((used)) intAHIsub_GetAttr(uint32_t attr_ asm("d0"),
     case AHIDB_MaxChannels:
       return 1;
     case AHIDB_MaxPlaySamples:
-      return ZZ_BYTES_PER_PERIOD;
+      // AHI contract: this is sample frames, NOT bytes. At the highest mix
+      // rate we advertise (48 kHz) the driver sets ahiac_BuffSamples to
+      // MixFreq/50 = 960 frames, which is exactly BOUNCE_MAX_FRAMES.
+      return BOUNCE_MAX_FRAMES;
     case AHIDB_MaxRecordSamples:
       return 0;
     case AHIDB_MinMonitorVolume:
