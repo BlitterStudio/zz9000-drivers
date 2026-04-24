@@ -191,10 +191,26 @@ jobs:
           path: ahi/driver/ZZ9000AX
           if-no-files-found: error
 
+  axmp3:
+    name: ax-direct — axmp3
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build axmp3
+        run: |
+          docker run --rm -v "$PWD":/src -w /src/ax-direct "$AMIGA_IMAGE" \
+            m68k-amigaos-gcc axmp3.c -m68030 -O2 -o axmp3 \
+              -Wall -Wextra -Wno-unused-parameter -lamiga -noixemul
+      - uses: actions/upload-artifact@v7
+        with:
+          name: axmp3
+          path: ax-direct/axmp3
+          if-no-files-found: error
+
   release:
     name: Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [rtg, zztop, zzscanlines, usb-poseidon, sd-boot, net, zznetstats, mhi, ahi]
+    needs: [rtg, zztop, zzscanlines, usb-poseidon, sd-boot, net, zznetstats, mhi, ahi, axmp3]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -202,23 +218,50 @@ jobs:
         with:
           path: artifacts
       - name: Assemble release bundle
+        # Two-layer bundle:
+        #   1. Flat copies of every artifact at the staging root — for
+        #      users who want to cherry-pick files manually.
+        #   2. The Commodore Installer drawer, populated in-place from
+        #      the same artifacts so a user can just double-click
+        #      "Install ZZ9000" without fishing files out of the root.
+        # The installer drawer's binary slots are .gitignored / unpopulated
+        # in the repo; CI fills them during release assembly so nothing
+        # stale ever ships.
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
           STAGING="zz9000-drivers-${TAG}"
           mkdir -p "$STAGING"
-          cp artifacts/ZZ9000.card/ZZ9000.card            "$STAGING/"
-          cp artifacts/ZZTop/ZZTop                         "$STAGING/"
-          cp artifacts/ZZScanlines/ZZScanlines             "$STAGING/"
-          cp artifacts/zzusbhw.device/zzusbhw.device       "$STAGING/"
-          cp artifacts/zzsd.device/zzsd.device             "$STAGING/"
-          cp artifacts/ZZ9000Net.device/ZZ9000Net.device   "$STAGING/"
-          cp artifacts/zznetstats/zznetstats               "$STAGING/"
-          cp artifacts/mhizz9000.library/mhizz9000.library "$STAGING/"
-          cp artifacts/zz9000ax.audio/zz9000ax.audio       "$STAGING/"
-          cp artifacts/ZZ9000AX/ZZ9000AX                   "$STAGING/"
-          cp -r installer                                  "$STAGING/installer"
-          cp README.md                                     "$STAGING/"
+
+          # Flat copies for manual installation.
+          cp artifacts/ZZ9000.card/ZZ9000.card              "$STAGING/"
+          cp artifacts/ZZTop/ZZTop                          "$STAGING/"
+          cp artifacts/ZZScanlines/ZZScanlines              "$STAGING/"
+          cp artifacts/zzusbhw.device/zzusbhw.device        "$STAGING/"
+          cp artifacts/zzsd.device/zzsd.device              "$STAGING/"
+          cp artifacts/ZZ9000Net.device/ZZ9000Net.device    "$STAGING/"
+          cp artifacts/zznetstats/zznetstats                "$STAGING/"
+          cp artifacts/mhizz9000.library/mhizz9000.library  "$STAGING/"
+          cp artifacts/zz9000ax.audio/zz9000ax.audio        "$STAGING/"
+          cp artifacts/ZZ9000AX/ZZ9000AX                    "$STAGING/"
+          cp artifacts/axmp3/axmp3                          "$STAGING/"
+
+          # Populate the installer drawer with fresh artifacts in the
+          # exact layout the Install ZZ9000 script reads from. Mirrors
+          # the (source ...) paths in installer/ZZ9000Installer/Install ZZ9000.
+          INST="installer/ZZ9000Installer"
+          install -Dm644 artifacts/ZZ9000.card/ZZ9000.card            "$INST/Libs/Picasso96/ZZ9000.card"
+          install -Dm644 artifacts/mhizz9000.library/mhizz9000.library "$INST/Libs/mhizz9000.library"
+          install -Dm644 artifacts/ZZ9000Net.device/ZZ9000Net.device   "$INST/Devs/Networks/ZZ9000Net.device"
+          install -Dm644 artifacts/zz9000ax.audio/zz9000ax.audio       "$INST/Devs/AHI/zz9000ax.audio"
+          install -Dm644 artifacts/ZZ9000AX/ZZ9000AX                   "$INST/Devs/AudioModes/ZZ9000AX"
+          install -Dm755 artifacts/ZZTop/ZZTop                         "$INST/Tools/ZZTop"
+          install -Dm755 artifacts/ZZScanlines/ZZScanlines             "$INST/Tools/ZZScanlines"
+          install -Dm755 artifacts/zznetstats/zznetstats               "$INST/Tools/zznetstats"
+          install -Dm755 artifacts/axmp3/axmp3                         "$INST/Tools/axmp3"
+
+          cp -r installer  "$STAGING/installer"
+          cp README.md     "$STAGING/"
           zip -r "$STAGING.zip" "$STAGING"
           ls -lh "$STAGING.zip"
       - name: Create GitHub Release
