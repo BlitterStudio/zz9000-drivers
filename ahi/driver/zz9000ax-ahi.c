@@ -596,6 +596,20 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
     return AHISF_ERROR;
   }
   install_irq_server_locked(ahi_data);
+  // Explicitly silence the FPGA DAC before we touch any audio state.
+  // Rationale: destroy_interrupt() writes this same 0 on FreeAudio, so
+  // every AllocAudio after the first one starts with the DAC already off
+  // and setup runs cleanly. The very first AllocAudio after a cold boot,
+  // however, sees whatever power-on default the FPGA left in this
+  // register (observed: DAC enabled at power-on on some revisions),
+  // which means the DAC has been consuming random contents from
+  // audio_hw_buf_addr since boot and keeps doing so throughout setup.
+  // Mirroring FreeAudio's disable here makes first-open and reopen take
+  // identical paths through setup, eliminating the "garbage burst on
+  // first app launch" symptom. We must only do this once we own the
+  // card (post install_irq_server_locked) so we can't stomp an
+  // in-progress MHI session.
+  write_reg(hw_addr, REG_ZZ_AUDIO_CONFIG, 0);
   Permit();
 
   int lpf_freq = AudioCtrl->ahiac_MixFreq / 2;
