@@ -648,14 +648,23 @@ void i_MHIPlay(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 			// The hard ISR was installed at AllocDecoder time as the
 			// ownership claim token; all that's left is to let the
 			// hardware start signalling audio completions.
+			//
+			// Flip Status to PLAYING BEFORE enable_hw_audio so the
+			// very first soft IRQ dispatched by the first hard ISR
+			// isn't discarded by the cdev_sisr() Status gate. Without
+			// this ordering, the startup FIFO refill / DECODE_RUN /
+			// REG_ZZ_AUDIO_SWAB sequence that the soft IRQ drives
+			// would be dropped and playback would stall.
+			mp->Status = MHIF_PLAYING;
 			enable_hw_audio(mp);
 			KPrintF("MHIPlay: HW audio enabled.\n");
-
-			mp->Status = MHIF_PLAYING;
 		break;
 		case MHIF_PAUSED:
-			enable_hw_audio(mp);
+			// Same ordering requirement as the STOPPED case above:
+			// mark PLAYING before unmasking so the resumed soft IRQ
+			// isn't gated out.
 			mp->Status = MHIF_PLAYING;
+			enable_hw_audio(mp);
 		break;
 	}
 }
