@@ -637,14 +637,13 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
   // pass-through level, each 0x00-0xFF. Summing both above ~0x100 starts
   // saturating the DAC (per MNT forum thread 1011).
   //
-  // Default 0xC040 compensates for early ZZ9000AX revisions that carry
-  // an opamp on U4 which over-amplifies the Paula pass-through and makes
-  // raw Paula dominate over AHI playback: we boost AHI to 0xC0 (~1.5x)
-  // and cut Paula to 0x40 (~0.5x) to pull them toward parity. Users with
-  // the fixed-hardware revision (U4 opamp desoldered by MNT) can override
-  // via `setenv ZZ9K_MIX_LEVELS 8080` (or any 4-digit hex value) to get a
-  // symmetric mix back.
-  write_audio_param(hw_addr, 10, read_mix_levels_env(0xC040));
+  // Default 0x8080 is the symmetric baseline that matches the fixed-
+  // hardware revision every new customer receives (MNT removed the U4
+  // opamp that over-amplified Paula pass-through on early R1 units).
+  // Owners of an unfixed early R1 where raw Paula dominates over AHI
+  // output can compensate via `setenv ZZ9K_MIX_LEVELS C040` (boost AHI,
+  // cut Paula) — or any other 4-digit hex value — without rebuilding.
+  write_audio_param(hw_addr, 10, read_mix_levels_env(0x8080));
   Permit();
 
   // Zero the hardware audio ring buffer before we enable playback. The
