@@ -482,31 +482,30 @@ void i_MHIFreeDecoder(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibB
 	struct MhiPlayer *mp = (struct MhiPlayer *)mhi_handle;
 	if(!mp) return;
 
-	// Make sure the hardware can't fire another audio IRQ while we tear
-	// down -- and release our ownership claim by removing the hard ISR.
-	// Safe even if the caller never called Stop first, which the old
-	// code silently leaked.
-	//
+	// --- Phase 1: quiesce the hardware and the driver state machine. ---
 	// Set Status first so any soft IRQ Cause()d by an in-flight hard ISR
 	// (or already queued on Exec's SoftInts list) becomes a no-op when it
 	// eventually dispatches -- cdev_sisr early-returns on Status!=PLAYING.
-	// Do it under Forbid so the ISR observes the store atomically with
-	// the ISR removal that follows.
+	// Keep the hard ISR INSTALLED here: it is the MHI ownership token on
+	// the shared interrupt list, and releasing it before the DSP reset
+	// writes finish would let AHI allocate the card and race our own
+	// in-flight MMIO (Codex HIGH finding).
 	Forbid();
 	mp->Status = MHIF_STOPPED;
 	disable_hw_audio(mp);
-	if (mp->flags & DEVF_INT2MODE) {
-		RemIntServer(INTB_PORTS, &mp->irq);
-	} else {
-		RemIntServer(INTB_EXTER, &mp->irq);
-	}
 	drain_buffer_list_locked(mp);
 	Permit();
-	// At Permit-to-0 Exec dispatches any soft IRQ still queued on the
-	// SoftInts list. That dispatch runs cdev_sisr on still-valid mp, sees
-	// Status==STOPPED, and returns without touching the list or mp fields.
-	// No new soft IRQs can be queued after RemIntServer.
+	// Permit-to-0 dispatches any soft IRQ still queued on the SoftInts
+	// list; it runs cdev_sisr on still-valid mp, sees Status==STOPPED, and
+	// returns without touching the list or mp fields. No new soft IRQs can
+	// be Cause()d because the hard ISR is disarmed by disable_hw_audio --
+	// even though the ISR node is still installed, the HW won't fire it.
 
+	// --- Phase 2: DSP reset while MHI still owns the card. ---
+	// The ISR node is still on the interrupt-server list, so ahi_present/
+	// FindName(..., "mhizz9000") in a concurrent AHI AllocAudio will still
+	// see MHI as the owner and refuse to claim the card during these
+	// writes.
 	setAudioParam(mp, AP_DSP_SET_STEREO_VOLUME, 100 | (50<<8));
 	setAudioParam(mp, AP_DSP_SET_PREFACTOR,     50);
 	setAudioParam(mp, AP_DSP_SET_EQ_BAND1,      50);
@@ -520,13 +519,25 @@ void i_MHIFreeDecoder(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibB
 	setAudioParam(mp, AP_DSP_SET_EQ_BAND9,      50);
 	setAudioParam(mp, AP_DSP_SET_EQ_BAND10,     50);
 
+	// --- Phase 3: atomically release ownership. ---
+	// Only now do we give up the card: remove the IRQ node AND decrement
+	// NumAllocatedDecoders inside a single Forbid window so any racing
+	// AllocDecoder / AHI AllocAudio sees both state changes together.
+	Forbid();
+	if (mp->flags & DEVF_INT2MODE) {
+		RemIntServer(INTB_PORTS, &mp->irq);
+	} else {
+		RemIntServer(INTB_EXTER, &mp->irq);
+	}
+	if(MHI_LibBase->NumAllocatedDecoders) MHI_LibBase->NumAllocatedDecoders--;
+	Permit();
+
+	// --- Phase 4: free memory after ownership is released. ---
 	if(mp->BufferList) {
 		FreeVec(mp->BufferList);
 		mp->BufferList = NULL;
 	}
 	FreeVec(mp);
-
-	if(MHI_LibBase->NumAllocatedDecoders) MHI_LibBase->NumAllocatedDecoders--;
 }
 
 
@@ -614,16 +625,23 @@ void i_MHIPlay(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 
 	if(!mp) return;
 
+	// Hold Forbid across the entire state transition so Play / Stop / Pause
+	// can't interleave. Without this, the "mp->Status = PLAYING; then
+	// enable_hw_audio()" ordering (required so cdev_sisr's Status gate is
+	// already open for the first soft IRQ) opens a window where a racing
+	// Stop could set Status=STOPPED + disable_hw_audio BETWEEN those two
+	// statements -- Play would then re-enable the HW with Status=STOPPED,
+	// leaving the card interrupting while cdev_sisr silently drops every
+	// soft IRQ. All ops inside this Forbid are MMIO writes or static helper
+	// logic (no Wait / no blocking I/O), so task preemption blocking is
+	// bounded and short.
+	Forbid();
 	switch(mp->Status) {
 		case MHIF_STOPPED:
 			KPrintF("MHIPlay: Clearing FIFO.\n");
 			clearFifo(mp);
 			KPrintF("MHIPlay: Filling FIFO.\n");
-			// Forbid while fillFifo walks BufferList: tasks could be
-			// QueueBuffer'ing concurrently right up to this point.
-			Forbid();
 			fillFifo(mp);
-			Permit();
 
 			// set tx buffer address to 127 MB offset
 			setAudioParam(mp, AP_TX_BUF_OFFS_HI, mp->decode_offset>>16);
@@ -645,28 +663,19 @@ void i_MHIPlay(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 			// ZZ_DECODE (init)
 			setRegister(mp, REG_ZZ_DECODE, DECODE_INIT);
 
-			// The hard ISR was installed at AllocDecoder time as the
-			// ownership claim token; all that's left is to let the
-			// hardware start signalling audio completions.
-			//
-			// Flip Status to PLAYING BEFORE enable_hw_audio so the
-			// very first soft IRQ dispatched by the first hard ISR
-			// isn't discarded by the cdev_sisr() Status gate. Without
-			// this ordering, the startup FIFO refill / DECODE_RUN /
-			// REG_ZZ_AUDIO_SWAB sequence that the soft IRQ drives
-			// would be dropped and playback would stall.
+			// Status must be PLAYING BEFORE enable_hw_audio so cdev_sisr's
+			// Status gate is open when the first hard ISR fires.
 			mp->Status = MHIF_PLAYING;
 			enable_hw_audio(mp);
 			KPrintF("MHIPlay: HW audio enabled.\n");
 		break;
 		case MHIF_PAUSED:
-			// Same ordering requirement as the STOPPED case above:
-			// mark PLAYING before unmasking so the resumed soft IRQ
-			// isn't gated out.
+			// Same ordering requirement as the STOPPED case above.
 			mp->Status = MHIF_PLAYING;
 			enable_hw_audio(mp);
 		break;
 	}
+	Permit();
 }
 
 
@@ -680,6 +689,10 @@ void i_MHIStop(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 
 	if(!mp) return;
 
+	// Hold Forbid across the whole dispatch so Stop serializes against a
+	// concurrent Play / Pause; the Status check and the disable_hw_audio
+	// must be atomic relative to Play's Status=PLAYING + enable_hw_audio.
+	Forbid();
 	switch(mp->Status) {
 		case MHIF_PLAYING:
 		case MHIF_PAUSED:
@@ -689,22 +702,20 @@ void i_MHIStop(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 			// it is the ownership claim and is only torn down at
 			// FreeDecoder time.
 			disable_hw_audio(mp);
-			// Flip Status BEFORE Permit so a latent soft IRQ (Cause()d
-			// between disable_hw_audio and the Forbid below) dispatches
-			// into cdev_sisr which early-returns on Status!=PLAYING and
-			// leaves buf_offset/FifoWriteIdx/FifoMode alone. Resetting
-			// those fields must happen inside the Forbid so the reset
-			// sequence is atomic relative to any late soft-IRQ dispatch
-			// at Permit-to-0.
-			Forbid();
+			// Flip Status under Forbid so a latent soft IRQ (Cause()d
+			// before disable_hw_audio took effect) dispatches into
+			// cdev_sisr and early-returns on Status!=PLAYING, leaving
+			// buf_offset/FifoWriteIdx/FifoMode alone. Resets live in
+			// the same Forbid window so the whole transition is atomic
+			// relative to any late soft-IRQ dispatch at Permit-to-0.
 			mp->Status = MHIF_STOPPED;
 			drain_buffer_list_locked(mp);
 			mp->buf_offset = 0;
 			mp->FifoWriteIdx = 0;
 			mp->FifoMode = FIFO_PREFILL;
-			Permit();
 		break;
 	}
+	Permit();
 }
 
 
@@ -718,10 +729,14 @@ void i_MHIPause(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) 
 
 	if(!mp) return;
 
+	// Same serialization requirement as Play / Stop: check + disable +
+	// status flip must be atomic relative to a racing Play.
+	Forbid();
 	if(mp->Status == MHIF_PLAYING) {
 		disable_hw_audio(mp);
 		mp->Status = MHIF_PAUSED;
 	}
+	Permit();
 }
 
 
