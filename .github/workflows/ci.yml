@@ -260,8 +260,12 @@ jobs:
           install -Dm755 artifacts/zznetstats/zznetstats               "$INST/Tools/zznetstats"
           install -Dm755 artifacts/axmp3/axmp3                         "$INST/Tools/axmp3"
 
-          cp -r installer  "$STAGING/installer"
-          cp README.md     "$STAGING/"
+          cp -r installer   "$STAGING/installer"
+          cp README.md      "$STAGING/"
+          # Bundle the audio-stack ENV-tunables doc that the installer's
+          # final audio message points users at. Renamed so it doesn't
+          # collide with the top-level README.md at the staging root.
+          cp ahi/README.md  "$STAGING/ahi-README.md"
           zip -r "$STAGING.zip" "$STAGING"
           ls -lh "$STAGING.zip"
       - name: Create GitHub Release

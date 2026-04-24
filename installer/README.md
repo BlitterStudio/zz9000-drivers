@@ -74,6 +74,11 @@ a **flat layout** (every artifact at the root — useful for manual
 cherry-picking) and a **populated installer drawer** (for the
 double-click install path). The two layers coexist in the same zip.
 
+Alongside those, the zip also includes `ahi-README.md` at its root —
+a copy of `ahi/README.md` from this repo, covering the three audio
+ENV tunables (`ZZ9K_MIX_LEVELS`, `ZZ9000AX-NOLPF`, `ZZ9K_INT2`). The
+installer's final audio message points users there.
+
 ## What doesn't go through this Installer
 
 A few artifacts from the release zip are **not** handled by this
