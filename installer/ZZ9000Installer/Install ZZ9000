@@ -215,7 +215,7 @@
 
       (copyfiles
          (prompt "Install ZZScanlines into C:")
-         (help "CLI front-end for the ZZ9000's scanline bitstream (classic / soft / gradient patterns with parity control). Requires firmware 1.14 or later.")
+         (help "CLI front-end for the ZZ9000's scanline bitstream (classic / soft / gradient patterns with parity control). Requires firmware 2.0.0 or later.")
          (source "Tools/ZZScanlines")
          (dest "C:")
          (confirm))

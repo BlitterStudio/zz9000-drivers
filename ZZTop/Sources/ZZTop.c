@@ -131,7 +131,7 @@ void zz_set_lpf_freq(uint16_t freq)
 }
 
 /*
- * Scanlines V2 register map (FPGA firmware >= 1.14 with scanlines-v2
+ * Scanlines V2 register map (FPGA firmware >= 2.0.0 with scanlines-v2
  * bitstream):
  *   0x100C = scanline_width / mode (0=off, 1=classic, 2=soft, 3=gradient)
  *   0x100E = scanline_parity (0=odd dark, 1=even dark)

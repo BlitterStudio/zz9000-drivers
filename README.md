@@ -35,7 +35,7 @@ firmware live in
 - **ZZScanlines V2** — CLI front-end for the multi-mode scanline
   bitstream (classic / soft / gradient with parity control).
 - **ZZTop V2** — config GUI with scanline slider, hardware readback,
-  and the new toggles exposed by firmware 1.14.
+  and the new toggles exposed by firmware 2.0.0.
 - **CI + releases** — GitHub Actions builds every component on push/PR
   and publishes a tagged release zip on `v*` tags
   ([.github/workflows/ci.yml](.github/workflows/ci.yml)).

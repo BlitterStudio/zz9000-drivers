@@ -52,8 +52,10 @@ struct GFXBase {
 #endif
 #define __saveds__
 
-#define DEVICE_VERSION 1
-#define DEVICE_REVISION 14
+#define DEVICE_VERSION 2
+#define DEVICE_REVISION 0
+#define REQUIRED_FW_VERSION_MAJOR 2
+#define REQUIRED_FW_VERSION_MINOR 0
 #define DEVICE_PRIORITY 0
 #define DEVICE_ID_STRING "$VER ZZ9000.card+blitter " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
 #define DEVICE_NAME "ZZ9000.card"
@@ -430,8 +432,9 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 		KPrintF("ZZ9000.card: FW Revision Major: %ld.\n", fwrev_major);
 		KPrintF("ZZ9000.card: FW Revision Minor: %ld.\n", fwrev_minor);
 
-		if (fwrev_major < 1 || (fwrev_major == 1 && fwrev_minor < 14)) {
-			char *alert = "\x00\x14\x14ZZ9000.card 1.14 needs at least firmware (BOOT.bin) 1.14.\x00\x00";
+		if (fwrev_major < REQUIRED_FW_VERSION_MAJOR ||
+			(fwrev_major == REQUIRED_FW_VERSION_MAJOR && fwrev_minor < REQUIRED_FW_VERSION_MINOR)) {
+			char *alert = "\x00\x14\x14ZZ9000.card 2.0 needs at least firmware (BOOT.bin) 2.0.\x00\x00";
 			DisplayAlert(RECOVERY_ALERT, (APTR)alert, 52);
 			return 0;
 		}

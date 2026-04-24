@@ -144,7 +144,7 @@ struct ZZUSBBase {
     struct Task       *zz_PollTask;
     ULONG              zz_PollSignal;       /* signal-mask the poll task waits on */
     struct Task        zz_PollTaskStorage;
-    ULONG              zz_PollStack[1024];  /* match v1.14 layout exactly */
+    ULONG              zz_PollStack[1024];  /* match v2.0.0 layout exactly */
     struct ZZUSBUnit {
         struct Unit    zz_Unit;
         void*          zz_Registers;
