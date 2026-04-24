@@ -152,9 +152,7 @@ static inline uint16_t panning_colormode(uint16_t colormode) {
 }
 
 static inline UBYTE direct_color_mask(uint16_t colormode, UBYTE mask) {
-	return (colormode == MNTVA_COLOR_16BIT565 ||
-			colormode == MNTVA_COLOR_15BIT ||
-			colormode == MNTVA_COLOR_32BIT) ? 0xFF : mask;
+	return (colormode == MNTVA_COLOR_32BIT) ? 0xFF : mask;
 }
 
 static inline uint16_t planar_line_bytes(SHORT x, SHORT w) {
