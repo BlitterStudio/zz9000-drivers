@@ -460,6 +460,17 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 	MHI_LibBase->NumAllocatedDecoders++;
 	Permit();
 
+	// Set a balanced Paula-vs-ZZ9000AX output mixer default. AP_DSP_SET_VOLUMES
+	// (param 10) encodes AHI/MHI output level in the high byte and Paula pass-
+	// through level in the low byte (each 0x00-0xFF). Per the MNT community
+	// forum, summing both channels above ~0x80 saturates the DAC and distorts,
+	// so 0x8080 is the safe maximum for a balanced mix. The factory default is
+	// noticeably quieter on the ZZ9000AX output which makes MP3/MHI playback
+	// feel weak next to raw Paula; bumping to 0x80/0x80 brings them to parity
+	// without risking clipping. (Ref: community.mnt.re/t/zz9000ax-mixing-
+	// levels-register/1011)
+	setAudioParam(mp, AP_DSP_SET_VOLUMES, 0x8080);
+
 	return mp;
 }
 
@@ -506,6 +517,17 @@ void i_MHIFreeDecoder(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibB
 	// FindName(..., "mhizz9000") in a concurrent AHI AllocAudio will still
 	// see MHI as the owner and refuse to claim the card during these
 	// writes.
+	//
+	// Quiesce the MP3 decoder before AHI (or a second MHI session) takes
+	// the card. i_MHIPlay leaves REG_ZZ_DECODE in DECODE_RUN so the FPGA
+	// decoder keeps trying to consume the FIFO and write PCM into our
+	// decode_offset region. If we don't flip it back to DECODE_CLEAR
+	// here, a subsequent AHI AllocAudio inherits a "running" decoder and
+	// can crash on warm boot with ahi.device trap 0x80000006 (mixer
+	// reads garbage / overflow trap) -- the user reproduced this on PR
+	// #3 after an MP3 -> MOD session.
+	setRegister(mp, REG_ZZ_DECODE, DECODE_CLEAR);
+
 	setAudioParam(mp, AP_DSP_SET_STEREO_VOLUME, 100 | (50<<8));
 	setAudioParam(mp, AP_DSP_SET_PREFACTOR,     50);
 	setAudioParam(mp, AP_DSP_SET_EQ_BAND1,      50);

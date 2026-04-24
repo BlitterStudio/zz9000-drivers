@@ -571,7 +571,29 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
 
   // set LPF freq to half of sampling freq
   write_audio_param(hw_addr, 9, lpf_freq);
+
+  // Balanced Paula-vs-ZZ9000AX output mixer default (param 10,
+  // AP_DSP_SET_VOLUMES). High byte = ZZ9000AX/AHI level, low byte = Paula
+  // pass-through level, each 0x00-0xFF. 0x8080 is the safe maximum for
+  // both summed — higher values saturate the DAC and distort (per MNT
+  // forum thread 1011). Factory default is noticeably quiet on the AHI
+  // side and makes MOD/MP3 playback feel weak next to raw Paula, so we
+  // set a sane balanced default whenever we take the card.
+  write_audio_param(hw_addr, 10, 0x8080);
   Permit();
+
+  // Zero the hardware audio ring buffer before we enable playback. The
+  // FPGA DAC starts consuming from audio_hw_buf_addr as soon as the HW
+  // audio interrupt is armed, and whatever garbage was left there by a
+  // previous MHI session, a previous AHI session, or power-on junk will
+  // be played as a short burst before the worker writes the first mixed
+  // period. AUDIO_BUFSZ is the full ring size (8 periods); zeroing all
+  // of it means the DAC plays silence until real data lands.
+  {
+    volatile uint8_t *hw_buf = (volatile uint8_t *)ahi_data->audio_hw_buf_addr;
+    uint32_t i;
+    for (i = 0; i < AUDIO_BUFSZ; i++) hw_buf[i] = 0;
+  }
 
   ahi_data->mainproc_signal = AllocSignal(-1);
   if (ahi_data->mainproc_signal == -1) {
