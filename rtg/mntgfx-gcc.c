@@ -1153,7 +1153,7 @@ void DrawLine(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 	uint16_t colormode = mnt_colormode(r->RGBFormat);
 	mask = direct_color_mask(colormode, mask);
 
-	if (l->LinePtrn == 0xFFFF && mask == 0xFF && l->dY == 0) {
+	if (l->DrawMode == 0 && l->LinePtrn == 0xFFFF && mask == 0xFF && l->dY == 0) {
 		UWORD len = line_length(l);
 		WORD x = l->X;
 		WORD y = l->Y;
