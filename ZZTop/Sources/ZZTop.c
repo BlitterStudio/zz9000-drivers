@@ -27,7 +27,6 @@
 #include <clib/timer_protos.h>
 
 #include <stdio.h>
-#include <stdlib.h>
 #include <stdint.h>
 
 #include "zz9000.h"
@@ -64,12 +63,7 @@ struct Gadget *gads[16];
 
 #define SCANLINE_MODE_COUNT 4
 #define REFRESH_MODE_COUNT  3
-#define ZZTOP_BUS_TEST_BYTES       (64UL * 1024UL)
-#define ZZTOP_BUS_TEST_MEM_BASE    (0x00010000UL)
-#define ZZTOP_BUS_TEST_Z2_RESERVED (0x00020000UL)
-#define ZZTOP_BUS_TEST_Z3_TOP      (0x03000000UL)
-#define ZZTOP_BUS_TEST_NO_RANGE    (0xffffffffUL)
-#define ZZTOP_BUS_TEST_NO_BACKUP   (0xfffffffeUL)
+#define ZZTOP_PROBE_READS 8
 
 static STRPTR parity_labels[] = {
 	(STRPTR)"Odd dark",
@@ -115,14 +109,24 @@ struct MsgPort *timerport;
 struct Library *TimerBase;
 BOOL timer_pending = FALSE;
 
-void errorMessage(char* error)
+void errorMessage(const char* error)
 {
-	if (error) printf("Error: %s\n", error);
-}
+	struct EasyStruct requester = {
+		sizeof(struct EasyStruct),
+		0,
+		(UBYTE *)"ZZTop",
+		NULL,
+		(UBYTE *)"OK"
+	};
 
-uint32_t zz_get_reg(uint32_t offset)
-{
-	return *((volatile uint32_t*)(zz_regs+offset));
+	if (!error) return;
+
+	if (IntuitionBase) {
+		requester.es_TextFormat = (UBYTE *)error;
+		EasyRequestArgs(NULL, &requester, NULL, NULL);
+	} else {
+		printf("Error: %s\n", error);
+	}
 }
 
 uint16_t zz_get_reg16(uint32_t offset)
@@ -155,17 +159,7 @@ double zz_get_voltage_int(void)
 
 uint32_t zz_get_ax_present(void)
 {
-	return zz_get_reg(REG_ZZ_AUDIO_CONFIG);
-}
-
-uint32_t zz_get_usb_status(void)
-{
-	return zz_get_reg(REG_ZZ_USB_STATUS);
-}
-
-uint32_t zz_get_usb_capacity(void)
-{
-	return zz_get_reg(REG_ZZ_USB_CAPACITY);
+	return zz_get_reg16(REG_ZZ_AUDIO_CONFIG) & 1;
 }
 
 void zz_set_lpf_freq(uint16_t freq)
@@ -280,10 +274,20 @@ void zztop_schedule_timer(void)
 	timer_pending = TRUE;
 }
 
-void zztop_restart_timer(void)
+BOOL zztop_restart_timer(void)
 {
+	if (zztop_refresh_seconds() == 0) {
+		zztop_close_timer();
+		return TRUE;
+	}
+
+	if (!TimerBase) {
+		if (!zztop_open_timer()) return FALSE;
+	}
+
 	zztop_cancel_timer();
 	zztop_schedule_timer();
+	return TRUE;
 }
 
 double t_old=0;
@@ -347,133 +351,26 @@ void refresh_zz_info(struct Window* win)
 	GT_SetGadgetAttrs(gads[MYGAD_RAWREGS], win, NULL, GTST_String, txt_buf, TAG_END);
 }
 
-ULONG zz_perform_memtest(uint32_t offset)
+ULONG zz_perform_register_probe(void)
 {
-	volatile uint32_t* bufferl = (volatile uint32_t*)(zz_cd->cd_BoardAddr+offset);
-	volatile uint16_t* bufferw = (volatile uint16_t*)bufferl;
-	uint32_t i = 0;
-	uint32_t errors = 0;
-	uint32_t long_count = ZZTOP_BUS_TEST_BYTES / 4;
-	uint32_t word_count = ZZTOP_BUS_TEST_BYTES / 2;
-
-	for (i=0; i<long_count; i++) {
-		uint32_t v2 = 0;
-		uint32_t v = (i%2)?0xaaaa5555:0x33337777;
-
-		bufferl[i] = v;
-		v2 = bufferl[i];
-
-		if (v!=v2) {
-			errors++;
-		}
-	}
-
-	for (i=0; i<word_count; i++) {
-		uint16_t v4 = 0;
-		uint16_t v3 = (i%2)?0xffff:0x0000;
-
-		bufferw[i] = v3;
-		v4 = bufferw[i];
-
-		if (v3!=v4) {
-			errors++;
-		}
-	}
-
-	return errors;
-}
-
-ULONG zz_perform_memtest_rand(uint32_t offset, int rep)
-{
-	uint32_t errors = 0;
-	const int sz = 16;
-	uint32_t word_count = ZZTOP_BUS_TEST_BYTES / 2;
-	volatile uint16_t* buffer = (volatile uint16_t*)(zz_cd->cd_BoardAddr+offset);
-	uint16_t tbuf[16];
-
-	for (int k = 0; k < rep; k++) {
-		uint32_t pos = (k * sz) % (word_count - sz);
-		volatile uint16_t* slot = buffer + pos;
-
-		for (int i=0; i<sz; i++) {
-			tbuf[i] = rand();
-		}
-
-		for (int i=0; i<sz; i++) {
-			slot[i] = tbuf[i];
-		}
-
-		for (int i=0; i<sz; i++) {
-			uint16_t v = slot[i];
-			if (v != tbuf[i]) {
-				errors++;
-			}
-		}
-	}
-
-	return errors;
-}
-
-ULONG zz_perform_memtest_fpgareg() {
-	volatile uint16_t* d1 = (volatile uint16_t*)(zz_cd->cd_BoardAddr+0x1030);
-	volatile uint16_t* d2 = (volatile uint16_t*)(zz_cd->cd_BoardAddr+0x1034);
-
-	*d2 = 1;
-	for (int i = 0; i < 0x100000*2; i++) {
-		*d1 = i;
-	}
-
-	return 0;
-}
-
-uint32_t zztop_bus_test_offset(void)
-{
-	uint32_t top;
-
-	if (zorro_version == 3) {
-		top = ZZTOP_BUS_TEST_Z3_TOP;
-	} else {
-		uint32_t board_size = (uint32_t)zz_cd->cd_BoardSize;
-
-		if (board_size <= ZZTOP_BUS_TEST_Z2_RESERVED) return 0;
-		top = board_size - ZZTOP_BUS_TEST_Z2_RESERVED;
-	}
-
-	if (top <= ZZTOP_BUS_TEST_MEM_BASE + ZZTOP_BUS_TEST_BYTES) return 0;
-	return top - ZZTOP_BUS_TEST_BYTES;
-}
-
-ULONG zz_perform_memtest_multi() {
-	uint32_t offset = zztop_bus_test_offset();
-	volatile uint8_t* test_base;
-	uint8_t* backup;
+	uint16_t fw = zz_get_reg16(REG_ZZ_FW_VERSION);
+	uint16_t hw = zz_get_reg16(REG_ZZ_HW_VERSION);
 	ULONG errors = 0;
 
-	if (offset == 0) return ZZTOP_BUS_TEST_NO_RANGE;
-
-	backup = malloc(ZZTOP_BUS_TEST_BYTES);
-	if (!backup) return ZZTOP_BUS_TEST_NO_BACKUP;
-
-	test_base = (volatile uint8_t*)(zz_cd->cd_BoardAddr+offset);
-	for (uint32_t i=0; i<ZZTOP_BUS_TEST_BYTES; i++) {
-		backup[i] = test_base[i];
+	for (int i = 0; i < ZZTOP_PROBE_READS; i++) {
+		if (zz_get_reg16(REG_ZZ_FW_VERSION) != fw) errors++;
+		if (zz_get_reg16(REG_ZZ_HW_VERSION) != hw) errors++;
 	}
 
-	errors += zz_perform_memtest(offset);
-	errors += zz_perform_memtest_rand(offset, 1024);
-	//zz_perform_memtest_fpgareg();
-
-	for (uint32_t i=0; i<ZZTOP_BUS_TEST_BYTES; i++) {
-		test_base[i] = backup[i];
-	}
-
-	free(backup);
+	if (fw == 0 || fw == 0xffff || hw == 0xffff) errors++;
 
 	return errors;
 }
 
 VOID handleGadgetEvent(struct Window *win, struct Gadget *gad, ULONG code)
 {
+	if (!gad) return;
+
 	switch (gad->GadgetID)
 	{
 		case MYGAD_BTN_REFRESH: {
@@ -484,21 +381,13 @@ VOID handleGadgetEvent(struct Window *win, struct Gadget *gad, ULONG code)
 			ULONG errors;
 
 			GT_SetGadgetAttrs(gads[MYGAD_TEST_RESULT], win, NULL,
-				GTST_String, (STRPTR)"Running...", TAG_END);
-			errors = zz_perform_memtest_multi();
-			if (errors == ZZTOP_BUS_TEST_NO_RANGE) {
+				GTST_String, (STRPTR)"Reading...", TAG_END);
+			errors = zz_perform_register_probe();
+			if (errors == 0) {
 				GT_SetGadgetAttrs(gads[MYGAD_TEST_RESULT], win, NULL,
-					GTST_String, (STRPTR)"No safe range", TAG_END);
-			} else if (errors == ZZTOP_BUS_TEST_NO_BACKUP) {
-				GT_SetGadgetAttrs(gads[MYGAD_TEST_RESULT], win, NULL,
-					GTST_String, (STRPTR)"No backup RAM", TAG_END);
-			} else if (errors == 0) {
-				snprintf(txt_buf, 20, "OK %luK",
-					(unsigned long)(ZZTOP_BUS_TEST_BYTES / 1024));
-				GT_SetGadgetAttrs(gads[MYGAD_TEST_RESULT], win, NULL,
-					GTST_String, txt_buf, TAG_END);
+					GTST_String, (STRPTR)"OK read-only", TAG_END);
 			} else {
-				snprintf(txt_buf, 20, "%lu errors", (unsigned long)errors);
+				snprintf(txt_buf, 20, "%lu read errs", (unsigned long)errors);
 				GT_SetGadgetAttrs(gads[MYGAD_TEST_RESULT], win, NULL,
 					GTST_String, txt_buf, TAG_END);
 			}
@@ -527,9 +416,13 @@ VOID handleGadgetEvent(struct Window *win, struct Gadget *gad, ULONG code)
 		}
 		case MYGAD_REFRESHMODE: {
 			refresh_mode = (refresh_mode + 1) % REFRESH_MODE_COUNT;
+			if (!zztop_restart_timer()) {
+				refresh_mode = 0;
+				GT_SetGadgetAttrs(gads[MYGAD_TEST_RESULT], win, NULL,
+					GTST_String, (STRPTR)"No timer.device", TAG_END);
+			}
 			GT_SetGadgetAttrs(gads[MYGAD_REFRESHMODE], win, NULL,
 				GTCY_Active, refresh_mode, TAG_END);
-			zztop_restart_timer();
 			break;
 		}
 	}
@@ -662,7 +555,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
 	ng.ng_TopEdge	= 320+topborder;
 	ng.ng_GadgetID	= MYGAD_TEST_RESULT;
-	ng.ng_GadgetText = (STRPTR)"Bus Result";
+	ng.ng_GadgetText = (STRPTR)"Result";
 
 	gads[MYGAD_TEST_RESULT] = gad = CreateGadget(STRING_KIND, gad, &ng,
 											GTST_String, (STRPTR)"Not run",
@@ -671,7 +564,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 	ng.ng_LeftEdge	 = 20;
 	ng.ng_TopEdge		 = 345+topborder;
 	ng.ng_Width			 = 110;
-	ng.ng_GadgetText = (STRPTR)"Bus Test";
+	ng.ng_GadgetText = (STRPTR)"Reg Probe";
 	ng.ng_GadgetID	 = MYGAD_BTN_TEST;
 	ng.ng_Flags			 = PLACETEXT_IN;
 
@@ -684,6 +577,10 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
 	gads[MYGAD_BTN_REFRESH] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
 											TAG_END);
+
+	for (int i=0; i<16; i++) {
+		if (!gads[i]) return NULL;
+	}
 
 	return(gad);
 }
@@ -698,15 +595,11 @@ VOID process_window_events(struct Window *mywin)
 	ULONG user_sig = 1U << mywin->UserPort->mp_SigBit;
 	ULONG timer_sig = 0;
 
-	if (zztop_open_timer()) {
-		timer_sig = 1U << timerport->mp_SigBit;
-		zztop_schedule_timer();
-	} else {
-		errorMessage("Auto refresh disabled: can't open timer.device");
-	}
-
 	while (!terminated) {
-		ULONG signals = Wait(user_sig | timer_sig);
+		ULONG signals;
+
+		timer_sig = TimerBase ? (1U << timerport->mp_SigBit) : 0;
+		signals = Wait(user_sig | timer_sig);
 
 		if (timer_sig && (signals & timer_sig) && timer_pending &&
 			CheckIO((struct IORequest *)timerio)) {
@@ -763,7 +656,7 @@ VOID gadtoolsWindow(VOID) {
 	struct TextFont *font;
 	struct Screen		*mysc;
 	struct Window		*mywin;
-	struct Gadget		*glist;
+	struct Gadget		*glist = NULL;
 	void						*vi;
 	UWORD						topborder;
 
@@ -803,7 +696,7 @@ VOID gadtoolsWindow(VOID) {
 					}
 				}
 
-				FreeGadgets(glist);
+				if (glist) FreeGadgets(glist);
 				FreeVisualInfo(vi);
 			}
 			UnlockPubScreen(NULL, mysc);
@@ -813,8 +706,14 @@ VOID gadtoolsWindow(VOID) {
 }
 
 int main(void) {
+	if (NULL == (IntuitionBase = OpenLibrary((CONST_STRPTR)"intuition.library", 37))) {
+		errorMessage("Requires V37 intuition.library");
+		return 0;
+	}
+
 	if (!(ExpansionBase = (struct Library*)OpenLibrary((CONST_STRPTR)"expansion.library",0L))) {
 		errorMessage("Requires expansion.library");
+		CloseLibrary(IntuitionBase);
 		return 0;
 	}
 
@@ -823,11 +722,12 @@ int main(void) {
 		zorro_version = 2;
 	} else {
 		zz_cd = (struct ConfigDev*)FindConfigDev(zz_cd,0x6d6e,0x4);
-		CloseLibrary(ExpansionBase);
 		if (zz_cd) {
 			zorro_version = 3;
 		} else {
-			errorMessage("MNT ZZ9000 not found.\n");
+			errorMessage("MNT ZZ9000 not found");
+			CloseLibrary(ExpansionBase);
+			CloseLibrary(IntuitionBase);
 			return 0;
 		}
 	}
@@ -835,28 +735,24 @@ int main(void) {
 	zz_regs = (UBYTE*)zz_cd->cd_BoardAddr;
 	CloseLibrary(ExpansionBase);
 
-	/* Sync the slider with whatever mode the FPGA currently holds — the
+	/* Sync the controls with whatever mode the FPGA currently holds - the
 	 * V2 bitstream keeps scanline state across soft resets, so a prior
 	 * CLI or ZZTop session may have left a non-zero mode configured. */
 	scanline_mode = zz_get_scanline_mode();
 	scanline_parity = zz_get_scanline_parity();
 
-	if (NULL == (IntuitionBase = OpenLibrary((CONST_STRPTR)"intuition.library", 37)))
-		errorMessage("Requires V37 intuition.library");
+	if (NULL == (GfxBase = OpenLibrary((CONST_STRPTR)"graphics.library", 37)))
+		errorMessage("Requires V37 graphics.library");
 	else {
-		if (NULL == (GfxBase = OpenLibrary((CONST_STRPTR)"graphics.library", 37)))
-			errorMessage("Requires V37 graphics.library");
+		if (NULL == (GadToolsBase = OpenLibrary((CONST_STRPTR)"gadtools.library", 37)))
+			errorMessage("Requires V37 gadtools.library");
 		else {
-			if (NULL == (GadToolsBase = OpenLibrary((CONST_STRPTR)"gadtools.library", 37)))
-				errorMessage("Requires V37 gadtools.library");
-			else {
-				gadtoolsWindow();
-				CloseLibrary(GadToolsBase);
-			}
-			CloseLibrary(GfxBase);
+			gadtoolsWindow();
+			CloseLibrary(GadToolsBase);
 		}
-		CloseLibrary(IntuitionBase);
+		CloseLibrary(GfxBase);
 	}
+	CloseLibrary(IntuitionBase);
 
 	return 0;
 }
