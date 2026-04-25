@@ -160,16 +160,14 @@ struct ZZUSBBase {
         UWORD          zz_PortChange;
         UWORD          zz_PortStatus;
         UWORD          zz_Speed;
-        struct IOUsbHWReq *zz_PendingIntXfer; /* deferred root hub INTXFER */
         /*
          * Async interrupt delivery — one pending IOR per endpoint
          * (1..15). On UHCMD_INTXFER to a non-root-hub device, we
          * stash the IOR here and return WITHOUT replying. A
-         * background task polls firmware; when real data arrives
-         * it fills the IOR and ReplyMsgs. This matches how Deneb
-         * delivers interrupt transfers and avoids the
-         * empty-return → Poseidon-slide problem of synchronous
-         * delivery.
+         * background task polls firmware; report data and idle
+         * zero-byte completions are both replied asynchronously.
+         * Clearing the data buffer on idle avoids replaying stale
+         * HID deltas while still keeping Poseidon's poll cadence alive.
          */
         struct IOUsbHWReq *zz_IntPending[16];
         /*

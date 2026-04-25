@@ -340,7 +340,6 @@ static struct Library* __attribute__((used)) init_device(uint8_t *seg_list asm("
     unit->zz_PortChange = 0;
     unit->zz_PortStatus = UPSF_PORT_POWER;
     unit->zz_Speed = 0;
-    unit->zz_PendingIntXfer = NULL;
     unit->zz_BulkErrCount = 0;
     for (int ep = 0; ep < 16; ep++)
         unit->zz_IntPending[ep] = NULL;
@@ -400,9 +399,6 @@ static uint8_t* __attribute__((used)) close(struct Library *dev asm("a6"), struc
     dev->lib_OpenCnt--;
     return 0;
 }
-
-static void complete_pending_intxfer(struct ZZUSBUnit *unit,
-                                      volatile uint8_t *base);
 
 /*
  * Abort every queued downstream interrupt IOR for this unit with
@@ -467,7 +463,6 @@ static void update_port_state(struct ZZUSBUnit *unit,
             unit->zz_Speed = r->speed;
             unit->zz_PortStatus = port_status;
             unit->zz_PortChange = UPSF_C_PORT_CONNECTION;
-            complete_pending_intxfer(unit, base);
         } else {
             unit->zz_PortStatus = port_status;
         }
@@ -486,7 +481,6 @@ static void update_port_state(struct ZZUSBUnit *unit,
             unit->zz_PortChange = UPSF_C_PORT_CONNECTION;
             unit->zz_BulkErrCount = 0;
             abort_int_iors_offline(unit, aborted, aborted_count, aborted_max);
-            complete_pending_intxfer(unit, base);
         }
     }
 }
@@ -611,8 +605,8 @@ static void hotplug_poll_task(void)
      *  - begin_io UHCMD_INTXFER stashes IORs in zz_IntPending[ep]
      *    and defers the reply.
      *  - Signal() from begin_io wakes us up.
-     *  - We scan pending IORs, issue firmware polls, reply only
-     *    when real data arrives (actual > 0) or a hard error hits.
+     *  - We scan pending IORs and reply on report data, idle
+     *    zero-byte completions, or hard errors.
      *  - Idle loop Wait()s on our signal; zero CPU when no pending.
      */
     BYTE sig = AllocSignal(-1);
@@ -644,8 +638,7 @@ static void hotplug_poll_task(void)
 }
 
 static void handle_roothub_control(struct ZZUSBUnit *unit,
-                                   struct IOUsbHWReq *ior,
-                                   volatile uint8_t *base)
+                                   struct IOUsbHWReq *ior)
 {
     uint8_t reqtype = ior->iouh_SetupData.bmRequestType;
     uint8_t request = ior->iouh_SetupData.bRequest;
@@ -911,9 +904,6 @@ static void handle_roothub_control(struct ZZUSBUnit *unit,
                                                      UPSF_PORT_HIGH_SPEED);
                         }
                         unit->zz_PortChange |= UPSF_C_PORT_RESET;
-
-                        complete_pending_intxfer(unit, base);
-
                         ior->iouh_Actual = 0;
                         ior->iouh_Req.io_Error = 0;
                         return;
@@ -980,36 +970,13 @@ static void handle_roothub_control(struct ZZUSBUnit *unit,
     ior->iouh_Actual = 0;
 }
 
-static void complete_pending_intxfer(struct ZZUSBUnit *unit,
-                                      volatile uint8_t *base)
-{
-    if (unit->zz_PendingIntXfer && unit->zz_PortChange != 0) {
-        struct IOUsbHWReq *pending = unit->zz_PendingIntXfer;
-        unit->zz_PendingIntXfer = NULL;
-
-        uint8_t change_bitmap[2] = { 0x02, 0x00 };
-        uint16_t len = (pending->iouh_Length < 2) ? pending->iouh_Length : 2;
-        if (pending->iouh_Data) {
-            safe_copy(change_bitmap, pending->iouh_Data, len);
-        }
-        pending->iouh_Actual = len;
-        pending->iouh_Req.io_Error = 0;
-
-        if (!(pending->iouh_Req.io_Flags & IOF_QUICK)) {
-            ReplyMsg(&pending->iouh_Req.io_Message);
-        }
-    }
-}
-
 static void handle_roothub_int(struct ZZUSBUnit *unit,
                                 struct IOUsbHWReq *ior,
                                 volatile uint8_t *base,
-                                int *deferred,
                                 struct IOUsbHWReq **aborted,
                                 int *aborted_count,
                                 int aborted_max)
 {
-    (void)deferred;
     if (ior->iouh_Endpoint == 1 && ior->iouh_Data) {
         /*
          * Re-check port state on every hub-INT poll unless
@@ -1114,9 +1081,10 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
      * the lock is held and replied once the lock is released.
      */
     struct IOUsbHWReq *deferred_old_ior = NULL;
-    struct IOUsbHWReq *aborted_replies[18];  /* 16 int slots + 1 root hub + 1 slack */
+    enum { ABORTED_REPLY_MAX = 16 };
+    struct IOUsbHWReq *aborted_replies[ABORTED_REPLY_MAX];
     int aborted_count = 0;
-    for (int _i = 0; _i < 18; _i++) aborted_replies[_i] = NULL;
+    for (int _i = 0; _i < ABORTED_REPLY_MAX; _i++) aborted_replies[_i] = NULL;
 
     if (!ZZBase || !ior) return;
 
@@ -1128,31 +1096,6 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
         }
         return;
     }
-
-
-
-    /*
-     * Lazy poll-task creation.
-     *
-     * AddTask cannot safely be called from init_device: that runs
-     * during library AutoInit, before MakeLibrary has sealed
-     * lib_Sum via SumLibrary, and touching the scheduler's ready
-     * list in that window corrupts exec state enough to guru with
-     * 80000004. By the time begin_io is first called, Poseidon has
-     * already OpenDevice'd us, MakeLibrary has returned, and
-     * lib_Sum is stable — AddTask is safe here.
-     *
-     * Forbid/Permit protects the one-shot init against re-entrant
-     * begin_io calls that race to create the task. AddTask inside
-     * a Forbid section is legal; the new task is installed on the
-     * ready list but doesn't start running until Permit returns.
-     */
-    /*
-     * Poll-task creation moved OUT of the generic begin_io path.
-     * We now only create it on the first downstream INTXFER (the
-     * actual path that needs it). In the empty-port bring-online
-     * scenario we never reach that path — no poll task, no crash.
-     */
 
     volatile uint8_t* base = (volatile uint8_t*)unit->zz_Registers;
 
@@ -1219,10 +1162,6 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
              */
             ior->iouh_Req.io_Error = 0;
             ior->iouh_State = UHSF_OPERATIONAL;
-
-            if (status == ZZUSB_STATUS_OK) {
-                complete_pending_intxfer(unit, base);
-            }
         }
         break;
 
@@ -1231,7 +1170,7 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
             uint16_t rh_addr = unit->zz_RootHubAddr;
 
             if ((rh_addr == 0 && ior->iouh_DevAddr == 0) || ior->iouh_DevAddr == rh_addr) {
-                handle_roothub_control(unit, ior, (void*)base);
+                handle_roothub_control(unit, ior);
             } else {
                 struct ZZUSBCommand cmd;
                 uint16_t status;
@@ -1348,17 +1287,14 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
 
             if (((rh_addr == 0 && ior->iouh_DevAddr == 0) || ior->iouh_DevAddr == rh_addr)
                 && ior->iouh_Endpoint == 1) {
-                handle_roothub_int(unit, ior, base, &deferred,
-                                   aborted_replies, &aborted_count,
-                                   (int)(sizeof(aborted_replies) /
-                                         sizeof(aborted_replies[0])));
+                handle_roothub_int(unit, ior, base, aborted_replies,
+                                   &aborted_count, ABORTED_REPLY_MAX);
             } else {
                 /*
                  * Async delivery for downstream interrupt endpoints.
                  * Stash the IOR, Signal the poll task, defer the
-                 * reply. Task replies when real data arrives —
-                 * same design as Deneb, proven to work for HID in
-                 * v1.52 and earlier.
+                 * reply. The task replies when firmware returns
+                 * data, an idle zero-length completion, or an error.
                  */
                 if (ior->iouh_Length > ZZUSB_MAX_XFER) {
                     ior->iouh_Req.io_Error = UHIOERR_PKTTOOLARGE;
@@ -1635,26 +1571,18 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
     case CMD_RESET:
     case CMD_FLUSH:
         /*
-         * Abort every queued IOR. Collect them here; actual
-         * ReplyMsg happens AFTER zz_Lock is released to avoid
-         * scheduling issues if a replied task immediately
+         * Abort every queued downstream interrupt IOR. Collect them
+         * here; actual ReplyMsg happens AFTER zz_Lock is released
+         * to avoid scheduling issues if a replied task immediately
          * re-enters our driver.
          */
-        if (unit->zz_PendingIntXfer) {
-            struct IOUsbHWReq *pending = unit->zz_PendingIntXfer;
-            unit->zz_PendingIntXfer = NULL;
-            pending->iouh_Actual = 0;
-            pending->iouh_Req.io_Error = IOERR_ABORTED;
-            if (aborted_count < 18)
-                aborted_replies[aborted_count++] = pending;
-        }
         for (int ep = 0; ep < 16; ep++) {
             struct IOUsbHWReq *pending = unit->zz_IntPending[ep];
             if (!pending) continue;
             unit->zz_IntPending[ep] = NULL;
             pending->iouh_Actual = 0;
             pending->iouh_Req.io_Error = IOERR_ABORTED;
-            if (aborted_count < 18)
+            if (aborted_count < ABORTED_REPLY_MAX)
                 aborted_replies[aborted_count++] = pending;
         }
         ior->iouh_Req.io_Error = 0;
@@ -1690,10 +1618,8 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
 static uint32_t __attribute__((used)) abort_io(struct Library *dev asm("a6"), struct IOUsbHWReq *ior asm("a1"))
 {
     /*
-     * Abort a queued IOR. The two pending slots we track are:
-     *  - unit->zz_PendingIntXfer: root-hub hub-status IOR
-     *  - unit->zz_IntPending[ep]: async interrupt IOR per endpoint
-     * All access is serialised by zz_Lock.
+     * Abort a queued downstream interrupt IOR. All access is
+     * serialised by zz_Lock.
      */
     struct ZZUSBBase *ZZBase = (struct ZZUSBBase*)dev;
     if (!ior || !ZZBase) return IOERR_NOCMD;
@@ -1705,16 +1631,11 @@ static uint32_t __attribute__((used)) abort_io(struct Library *dev asm("a6"), st
 
     ObtainSemaphore(&ZZBase->zz_Lock);
     int found = 0;
-    if (unit->zz_PendingIntXfer == ior) {
-        unit->zz_PendingIntXfer = NULL;
-        found = 1;
-    } else {
-        for (int ep = 0; ep < 16; ep++) {
-            if (unit->zz_IntPending[ep] == ior) {
-                unit->zz_IntPending[ep] = NULL;
-                found = 1;
-                break;
-            }
+    for (int ep = 0; ep < 16; ep++) {
+        if (unit->zz_IntPending[ep] == ior) {
+            unit->zz_IntPending[ep] = NULL;
+            found = 1;
+            break;
         }
     }
     ReleaseSemaphore(&ZZBase->zz_Lock);
