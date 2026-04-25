@@ -532,10 +532,15 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
         cmd.speed = unit->zz_Speed;
         cmd.data_length = ior->iouh_Length;
         cmd.interval = ior->iouh_Interval;
-        /* Short NAK timeout so we don't hold zz_Lock long on idle
-         * endpoints. Firmware returns quickly either with data or
-         * with NAK. */
-        cmd.timeout_ms = 10;
+        /*
+         * Firmware's current interrupt helper polls the EHCI queue for
+         * up to 16 ms before reporting an idle IN endpoint as a clean
+         * zero-byte completion. Keep the Amiga-side mailbox wait above
+         * that window; timing out locally first would make Poseidon see
+         * a spurious UHIOERR_TIMEOUT while firmware may still be using
+         * the shared command buffer.
+         */
+        cmd.timeout_ms = 50;
 
         uint16_t status = send_usb_cmd(base, &cmd,
                                        (ior->iouh_Dir == UHDIR_OUT) ? ior->iouh_Data : NULL,
