@@ -71,15 +71,23 @@ Then copy the `installer/` tree onto your Amiga and double-click
 
 ## Release bundle layout
 
-The CI release job (tag push `v*`) produces a zip containing only the
-populated `installer/` drawer. Driver and tool binaries are not
-duplicated as loose files at the zip root; they live in the exact
-drawer paths consumed by `Install ZZ9000`.
+The CI release job (tag push `v*`) produces a zip with the installer
+contents at the package root:
+
+```
+zz9000-drivers-<tag>/
+├── README.md
+├── ZZ9000Installer.info
+└── ZZ9000Installer/
+```
+
+Driver and tool binaries are not duplicated as loose files at the zip
+root; they live in the exact drawer paths consumed by `Install ZZ9000`.
 
 The release job also copies `ahi/README.md` to
-`installer/ZZ9000Installer/Docs/ahi-README.md`, covering the three
-audio ENV tunables (`ZZ9K_MIX_LEVELS`, `ZZ9000AX-NOLPF`,
-`ZZ9K_INT2`). The installer's final audio message points users there.
+`ZZ9000Installer/Docs/ahi-README.md`, covering the three audio ENV
+tunables (`ZZ9K_MIX_LEVELS`, `ZZ9000AX-NOLPF`, `ZZ9K_INT2`). The
+installer's final audio message points users there.
 
 ## What doesn't go through this Installer
 

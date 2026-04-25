@@ -100,11 +100,12 @@ this.
 
 Pushing a tag matching `v*` (e.g. `v1.0.0`, `v2026.04`) triggers the
 full CI build and then publishes `zz9000-drivers-<tag>.zip` containing
-the populated `installer/` folder. Built binaries are placed inside the
-installer drawer and are not duplicated as loose files at the zip root.
-Tags containing a `-` (e.g. `v1.0.0-rc1`) are marked as pre-releases.
-Release notes are generated automatically from commits and merged PRs
-since the previous tag.
+`README.md`, `ZZ9000Installer.info`, and the populated
+`ZZ9000Installer/` drawer at the package root. Built binaries are
+placed inside the installer drawer and are not duplicated as loose
+files at the zip root. Tags containing a `-` (e.g. `v1.0.0-rc1`) are
+marked as pre-releases. Release notes are generated automatically from
+commits and merged PRs since the previous tag.
 
 ```bash
 git tag -a v1.0.0 -m "ZZ9000 drivers 1.0.0"

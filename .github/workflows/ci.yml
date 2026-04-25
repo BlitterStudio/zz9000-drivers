@@ -242,7 +242,9 @@ jobs:
           install -Dm755 artifacts/axmp3/axmp3                         "$INST/Tools/axmp3"
           install -Dm644 ahi/README.md                                 "$INST/Docs/ahi-README.md"
 
-          cp -r installer   "$STAGING/installer"
+          cp installer/README.md "$STAGING/README.md"
+          cp installer/ZZ9000Installer.info "$STAGING/ZZ9000Installer.info"
+          cp -r installer/ZZ9000Installer "$STAGING/ZZ9000Installer"
           zip -r "$STAGING.zip" "$STAGING"
           ls -lh "$STAGING.zip"
       - name: Create GitHub Release
