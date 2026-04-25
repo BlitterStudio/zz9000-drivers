@@ -37,8 +37,8 @@ and other boot sources (DF0:, ROM) take over normally.
    packed in after a fixed offset so everything fits inside the FPGA-
    decoded 8 KB ROM window.
 2. Kickstart calls the DiagEntry thunk, which:
-   - reads `zzsd.device` byte-by-byte from the Zorro ROM window into a
-     private buffer (sidestepping Kickstart's 8 KB DiagArea copy),
+   - copies `zzsd.device` from Kickstart's RAM copy of the DiagArea into
+     a private buffer,
    - relocates the HUNK_HEADER/CODE/RELOC32/END stream into freshly
      allocated Amiga RAM,
    - patches a RomTagCopy in the DiagArea so Kickstart's resident
