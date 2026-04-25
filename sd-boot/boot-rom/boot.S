@@ -25,9 +25,14 @@ RomTagCopy:
 BootPt:
   lea     DosName(pc),a1
   jsr     LVOFindResident(a6)
+  tst.l   d0
+  beq.s   .boot_done
   move.l  d0,a0
-  move.l  RT_INIT(A0),a0
+  move.l  RT_INIT(a0),d0
+  beq.s   .boot_done
+  move.l  d0,a0
   jsr     (a0)
+.boot_done:
   rts
 
 DiagPt:
@@ -46,16 +51,12 @@ DiagPt:
   add.l #0x20, a4
   move.l a4, 2(a5)
 
-  // Driver source: read from the ROM window via Zorro (boardaddr+0x6300).
-  // Kickstart's autoconfig DiagArea copy is capped at ~8 KB regardless of
-  // our da_Size, and the FPGA bitstream only maps 0x6000..0x8000 (8 KB)
-  // to BOOT_ROM — 0x8000+ goes to the ethernet TX frame, returning zeros
-  // for our purposes. Driver lives at ROM offset 0x300; Amiga reads at
-  // cardbase + 0x6000 + 0x300 = 0x6300. z3660 does the same idea (driver
-  // code stays in ROM, not in DiagArea).
-  add.l #0x300, a2                 // keep a2 advanced for any later users
-  move.l cardbase(pc), a0
-  add.l #0x6300, a0
+  // Driver source: use Kickstart's already-copied DiagArea image instead
+  // of reading the embedded driver back through the Zorro ROM window. Cold
+  // multi-card systems can still be settling when DiagPt runs; staying in
+  // Amiga RAM avoids an early burst read from the board ROM aperture.
+  add.l #0x300, a2                 // a2 = driver source in DiagArea copy
+  move.l a2, a0
 
   // Copy the driver binary to a freshly-allocated buffer before touching
   // anything else. The driver currently lives inside the Kickstart-allocated
@@ -120,12 +121,6 @@ DiagPt:
   move.l d0, 18(a4)
   move.l 30(d7), d0
   move.l d0, 22(a4)
-
-  move.l 22(a5), d0
-  jsr puthex
-
-  lea dbgok(pc), a6
-  jsr puts
 
 diag_fail:
   movem.l (sp)+, d0-d7/a0-a6
@@ -221,12 +216,6 @@ relocatehunk:
   move.l 4,a6
   jsr AllocMem(a6)
 
-  move.l  d0,-(sp)
-  lea     dbgalloc(pc),a6
-  jsr     puts
-  move.l  (sp)+,d0
-  jsr     puthex
-
   move.l  d0,-4(sp,d4.l)
   move.l  d0,a0
   tst.l   d0
@@ -242,8 +231,6 @@ relocatehunk:
   bra     .allocdone
 
 .allocfail:
-  lea     dbgallocfail(pc),a6
-  jsr     puts
   add.l   d2,sp
   movem.l (sp)+, d2-d4/a2-a3
   moveq   #0,d0
