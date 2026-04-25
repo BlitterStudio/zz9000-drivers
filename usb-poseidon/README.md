@@ -8,8 +8,8 @@
 `zzusbhw.device` is the USB hardware driver that lets the MNT ZZ9000's
 on-board EHCI (USB 2.0 High-Speed) host controller plug into the
 [Poseidon USB stack](https://www.platon42.de/en/poseidon/) running on
-AmigaOS. Once bound, Poseidon's class drivers (HID, massstorage,
-ethernet, audio, …) see ZZ9000 USB ports as regular USB hardware.
+AmigaOS. Once bound, Poseidon's class drivers for control, bulk, and
+interrupt devices see ZZ9000 USB ports as regular USB hardware.
 
 ## What it supports
 
@@ -17,7 +17,7 @@ ethernet, audio, …) see ZZ9000 USB ports as regular USB hardware.
 |----------------------------------|----------------|
 | HID — mice, keyboards            | Works          |
 | USB mass storage (FAT/FFS/RDB)   | Works          |
-| USB audio class                  | Works          |
+| USB audio class                  | Not yet (firmware ISO proxy missing) |
 | USB Ethernet (ASIX AX88772, …)   | Works          |
 | Hot-plug / re-enumeration        | Works          |
 | Low-speed + full-speed + high-speed | Works (dynamic ULPI XCVR) |

@@ -51,7 +51,7 @@ struct ExecBase* SysBase;
  * routines parse it consistently.
  */
 #define DEVICE_ID_STRING DEVICE_NAME " " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) \
-    " (18.4.2026) Poseidon USB driver for ZZ9000 " \
+    " (25.4.2026) Poseidon USB driver for ZZ9000 " \
     "(C) Copyright 2026 Dimitris Panokostas"
 
 /* USB request constants (from usb.h) */
@@ -60,6 +60,7 @@ struct ExecBase* SysBase;
 #define USR_SET_FEATURE       0x03
 #define USR_GET_DESCRIPTOR    0x06
 #define USR_SET_ADDRESS       0x05
+#define USR_GET_CONFIGURATION 0x08
 #define USR_SET_CONFIGURATION 0x09
 
 #define URTF_IN               0x80
@@ -136,8 +137,18 @@ const char device_id_string[] = DEVICE_ID_STRING;
  */
 static const char __attribute__((used)) version_tag[] =
     "$VER: " DEVICE_NAME " " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION)
-    " (18.4.2026) Poseidon USB driver for ZZ9000 "
+    " (25.4.2026) Poseidon USB driver for ZZ9000 "
     "(C) Copyright 2026 Dimitris Panokostas";
+
+typedef char ZZUSBCommand_size_must_match_protocol[
+    (sizeof(struct ZZUSBCommand) == ZZUSB_CMD_SIZE) ? 1 : -1];
+
+static struct ExecBase *get_sysbase(void)
+{
+    struct ExecBase *sysbase;
+    __asm volatile ("move.l 4.w,%0" : "=r"(sysbase));
+    return sysbase;
+}
 
 /* Push a NUL-terminated string to the ZZ9000 serial debug channel. */
 static void dstr(void* regs, char* str)
@@ -158,7 +169,7 @@ static void dhex8(void* regs, uint32_t v)
     dhex4(regs, v >> 4);
     dhex4(regs, v);
 }
-static void dhex32(void* regs, uint32_t v)
+static void __attribute__((unused)) dhex32(void* regs, uint32_t v)
 {
     dhex8(regs, v >> 24);
     dhex8(regs, v >> 16);
@@ -208,6 +219,12 @@ static void safe_copy(const void *src, void *dst, uint32_t n)
 
     /* Byte tail, or unaligned-all-the-way. */
     while (n--) *d++ = *s++;
+}
+
+static void safe_zero(void *dst, uint32_t n)
+{
+    uint8_t *d = (uint8_t *)dst;
+    while (n--) *d++ = 0;
 }
 
 static int send_usb_cmd(volatile uint8_t *base, struct ZZUSBCommand *cmd,
@@ -279,7 +296,7 @@ static struct Library* __attribute__((used)) init_device(uint8_t *seg_list asm("
     struct ConfigDev* cd = NULL;
     uint8_t* registers = NULL;
 
-    SysBase = *(struct ExecBase **)4L;
+    SysBase = get_sysbase();
 
     if (!(ExpansionBase = (struct Library*)OpenLibrary((uint8_t*)"expansion.library", 0L))) {
         return 0;
@@ -360,7 +377,11 @@ static void __attribute__((used)) open(struct Library *dev asm("a6"), struct IOU
     struct ZZUSBBase* ZZBase = (struct ZZUSBBase*)dev;
     int io_err = IOERR_OPENFAIL;
 
-    if (ior && unitnum < ZZ_NUM_PORTS) {
+    if (!ior) {
+        return;
+    }
+
+    if (unitnum < ZZ_NUM_PORTS) {
         struct ZZUSBUnit* unit = &ZZBase->zz_Units[unitnum];
         if (unit->zz_Enabled) {
             io_err = 0;
@@ -472,17 +493,16 @@ static void update_port_state(struct ZZUSBUnit *unit,
 
 /*
  * Poll pending interrupt IORs on one unit. For each endpoint slot
- * with a pending IOR, issue an INT_XFER command to the firmware and,
- * only when firmware returns real data (actual > 0), fill the IOR
- * and ReplyMsg it. Empty polls (firmware returns actual=0) leave
- * the IOR queued. That's the async delivery pattern that lets
- * Poseidon's HID class see only genuine report-arrivals, which is
- * what Deneb does and what makes every device Just Work.
+ * with a pending IOR, issue an INT_XFER command to the firmware and
+ * complete the request when firmware either returns report data or
+ * explicitly reports an idle endpoint with actual=0. The zero-byte
+ * completion is important: holding a HID IOR forever while the mouse
+ * is idle makes Poseidon decide the endpoint is gone.
  *
- * IMPORTANT: send_usb_cmd issues a command to the ARM firmware and
- * blocks until the firmware responds. We release zz_Lock across the
- * send_usb_cmd call so begin_io calls from Poseidon aren't blocked
- * behind us (we only hold the lock for list manipulations).
+ * IMPORTANT: send_usb_cmd uses the single firmware mailbox, so the
+ * poll task holds zz_Lock while the command is in flight. Keep the
+ * firmware timeout short here so foreground Poseidon I/O is not held
+ * behind idle interrupt endpoints for long.
  */
 static void poll_int_pending(struct ZZUSBBase *base_dev,
                              struct ZZUSBUnit *unit)
@@ -527,34 +547,42 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
                                        (ior->iouh_Dir == UHDIR_OUT) ? ior->iouh_Data : NULL,
                                        (ior->iouh_Dir == UHDIR_OUT) ? ior->iouh_Length : 0);
 
-        if (status == ZZUSB_STATUS_OK) {
+        if (status == ZZUSB_STATUS_OK ||
+            (ior->iouh_Dir == UHDIR_IN &&
+             (status == ZZUSB_STATUS_NAK ||
+              status == ZZUSB_STATUS_TIMEOUT))) {
             volatile struct ZZUSBCommand *result =
                 (volatile struct ZZUSBCommand*)(base + 0xa000);
-            uint32_t actual = result->actual_length;
+            uint32_t actual = (status == ZZUSB_STATUS_OK)
+                              ? result->actual_length : 0;
 
             /* Clamp against the caller's buffer length in case the
              * firmware returns a bogus actual_length after a data
              * buffer error — prevents heap corruption in Poseidon. */
             if (actual > ior->iouh_Length) actual = ior->iouh_Length;
 
-            if (actual > 0) {
+            if (actual > 0 || ior->iouh_Dir == UHDIR_OUT) {
                 if (ior->iouh_Dir == UHDIR_IN && ior->iouh_Data) {
                     safe_copy((void*)(base + 0xa000 + ZZUSB_DATA_OFFSET),
                               ior->iouh_Data, actual);
                 }
-                ior->iouh_Actual = actual;
-                ior->iouh_Req.io_Error = 0;
-                unit->zz_IntPending[ep] = NULL;
-                reply_now = ior;
+            } else if (ior->iouh_Dir == UHDIR_IN && ior->iouh_Data &&
+                       ior->iouh_Length > 0) {
+                /*
+                 * Idle HID poll. Poseidon should key off Actual=0,
+                 * but some class-driver paths have historically read
+                 * stale bytes from iouh_Data anyway. Clear the buffer
+                 * so a zero-byte idle completion cannot replay the
+                 * previous mouse delta.
+                 */
+                safe_zero(ior->iouh_Data, ior->iouh_Length);
             }
-            /* actual == 0: leave IOR queued. Firmware NAK'd; try
-             * again on next poll cycle. This is the key difference
-             * from synchronous delivery — HID class driver never
-             * sees a spurious 0-byte success that would trigger
-             * the cursor-slide bug. */
-        } else if (status != ZZUSB_STATUS_TIMEOUT &&
-                   status != ZZUSB_STATUS_NAK) {
-            /* Hard error — fail the IOR with a retryable code.
+            ior->iouh_Actual = actual;
+            ior->iouh_Req.io_Error = 0;
+            unit->zz_IntPending[ep] = NULL;
+            reply_now = ior;
+        } else {
+            /* Non-idle error — fail the IOR with a retryable code.
              * Matches the v1.53 crash-safety policy: specific
              * error codes (STALL/OVERFLOW/CRC) have triggered
              * crashes in Poseidon's class-driver recovery paths,
@@ -874,9 +902,13 @@ static void handle_roothub_control(struct ZZUSBUnit *unit,
                                 (volatile struct ZZUSBCommand*)(rbase + 0xa000);
                             unit->zz_Speed = rresult->speed;
                             unit->zz_PortStatus |= UPSF_PORT_ENABLE;
+                            unit->zz_PortStatus &= ~UPSF_PORT_HIGH_SPEED;
                             if (unit->zz_Speed == ZZUSB_SPEED_HIGH) {
                                 unit->zz_PortStatus |= UPSF_PORT_HIGH_SPEED;
                             }
+                        } else {
+                            unit->zz_PortStatus &= ~(UPSF_PORT_ENABLE |
+                                                     UPSF_PORT_HIGH_SPEED);
                         }
                         unit->zz_PortChange |= UPSF_C_PORT_RESET;
 
@@ -900,7 +932,7 @@ static void handle_roothub_control(struct ZZUSBUnit *unit,
             }
             break;
 
-case USR_CLEAR_FEATURE:
+        case USR_CLEAR_FEATURE:
             if ((reqtype & 0x1f) == URTF_DEVICE) {
                 ior->iouh_Actual = 0;
                 ior->iouh_Req.io_Error = 0;
@@ -929,7 +961,7 @@ case USR_CLEAR_FEATURE:
                     ior->iouh_Req.io_Error = 0;
                     return;
                 case UFS_C_PORT_SUSPEND:
-                    unit->zz_PortChange &= ~UPSF_PORT_SUSPEND;
+                    unit->zz_PortChange &= ~UPSF_C_PORT_SUSPEND;
                     ior->iouh_Actual = 0;
                     ior->iouh_Req.io_Error = 0;
                     return;
@@ -1010,6 +1042,65 @@ static void handle_roothub_int(struct ZZUSBUnit *unit,
     }
 }
 
+static void fill_querydevice_tags(struct TagItem *tags)
+{
+    /*
+     * Poseidon normally sends a flat taglist, but TagItem control
+     * tags are legal API input. Handle them here so a TAG_MORE or
+     * TAG_SKIP list cannot make the driver walk unrelated memory.
+     * ti_Data is the direct value slot for UHCMD_QUERYDEVICE; leave
+     * unknown newer Poseidon tags untouched.
+     */
+    int guard = 64;
+
+    while (tags && guard-- > 0) {
+        switch (tags->ti_Tag) {
+        case TAG_DONE:
+            return;
+        case TAG_IGNORE:
+            tags++;
+            continue;
+        case TAG_MORE:
+            tags = (struct TagItem *)tags->ti_Data;
+            continue;
+        case TAG_SKIP:
+            tags += tags->ti_Data + 1;
+            continue;
+        case UHA_DriverVersion:
+            tags->ti_Data = 0x0200;
+            break;
+        case UHA_Version:
+            tags->ti_Data = DEVICE_VERSION;
+            break;
+        case UHA_Revision:
+            tags->ti_Data = DEVICE_REVISION;
+            break;
+        case UHA_State:
+            tags->ti_Data = UHSF_OPERATIONAL;
+            break;
+        case UHA_Manufacturer:
+            tags->ti_Data = (ULONG)(uintptr_t)"MNT Research GmbH";
+            break;
+        case UHA_ProductName:
+            tags->ti_Data = (ULONG)(uintptr_t)"ZZ9000 USB Host Controller";
+            break;
+        case UHA_Description:
+            tags->ti_Data = (ULONG)(uintptr_t)
+                "Poseidon USB hardware driver for the ZZ9000 "
+                "Zorro card (Zynq ChipIdea EHCI)";
+            break;
+        case UHA_Copyright:
+            tags->ti_Data = (ULONG)(uintptr_t)
+                "(C) Copyright 2026 Dimitris Panokostas. "
+                "Licensed under GNU GPL v3 or later.";
+            break;
+        default:
+            break;
+        }
+        tags++;
+    }
+}
+
 static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct IOUsbHWReq *ior asm("a1"))
 {
     struct ZZUSBBase* ZZBase = (struct ZZUSBBase*)dev;
@@ -1070,82 +1161,7 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
     switch (ior->iouh_Req.io_Command) {
     case UHCMD_QUERYDEVICE:
         {
-            /*
-             * QUERYDEVICE returns driver info. iouh_Data is a caller-
-             * provided TagItem array terminated by TAG_DONE. Per
-             * the standard Amiga TagItem convention used by every
-             * usbhardware.device Poseidon talks to (Deneb, Subway,
-             * RapidRoad, Highway), ti_Data is a *direct value slot*:
-             * write the ULONG value (or STRPTR for string tags)
-             * straight into ti_Data. The autodoc's "pointer to a
-             * longword (ULONG *)" phrasing is about the field type,
-             * not the semantics.
-             *
-             * v1.54 temporarily treated ti_Data as a pointer-to-
-             * longword (like psdGetAttrs), dereferenced it, and wrote
-             * values into whatever addresses Poseidon had pre-filled.
-             * That corrupted Poseidon's internal state and crashed
-             * Trident with guru 80000004. Revert to direct-slot
-             * writes — matches all working drivers.
-             *
-             * Control-tag handling (TAG_IGNORE / TAG_MORE / TAG_SKIP)
-             * is preserved so a valid TagItem taglist of any shape
-             * is walked safely.
-             *
-             * Poseidon also queries an extra tag (UHA_Dummy + 0x21
-             * = 0x80004732) not declared in our NDK usbhardware.h.
-             * Empirically it sits next to UHA_DriverVersion and is
-             * likely a feature-flag tag added in newer Poseidon
-             * releases. Leave it alone — we don't know its meaning,
-             * and zeroing it could confuse Poseidon.
-             */
-            /*
-             * Simplest possible QUERYDEVICE walker — matches the
-             * shape v1.52 had when everything worked. No control-
-             * tag (TAG_IGNORE / TAG_MORE / TAG_SKIP) handling; plain
-             * linear walk until TAG_DONE. The "full-featured" walker
-             * added in v1.53 appears to have tightened timing enough
-             * to expose a race in the poll-task first-dispatch path.
-             */
-            struct TagItem* tags = (struct TagItem*)ior->iouh_Data;
-            if (tags) {
-                while (tags->ti_Tag != TAG_DONE) {
-                    switch (tags->ti_Tag) {
-                    case UHA_DriverVersion:
-                        tags->ti_Data = 0x0200;
-                        break;
-                    case UHA_Version:
-                        tags->ti_Data = DEVICE_VERSION;
-                        break;
-                    case UHA_Revision:
-                        tags->ti_Data = DEVICE_REVISION;
-                        break;
-                    case UHA_State:
-                        tags->ti_Data = UHSF_OPERATIONAL;
-                        break;
-                    case UHA_Manufacturer:
-                        tags->ti_Data = (ULONG)(uintptr_t)"MNT Research GmbH";
-                        break;
-                    case UHA_ProductName:
-                        tags->ti_Data = (ULONG)(uintptr_t)
-                            "ZZ9000 USB Host Controller";
-                        break;
-                    case UHA_Description:
-                        tags->ti_Data = (ULONG)(uintptr_t)
-                            "Poseidon USB hardware driver for the ZZ9000 "
-                            "Zorro card (Zynq ChipIdea EHCI)";
-                        break;
-                    case UHA_Copyright:
-                        tags->ti_Data = (ULONG)(uintptr_t)
-                            "(C) Copyright 2026 Dimitris Panokostas. "
-                            "Licensed under GNU GPL v3 or later.";
-                        break;
-                    default:
-                        break;
-                    }
-                    tags++;
-                }
-            }
+            fill_querydevice_tags((struct TagItem *)ior->iouh_Data);
             ior->iouh_Actual = 0;
             ior->iouh_Req.io_Error = 0;
         }
@@ -1219,17 +1235,20 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
             } else {
                 struct ZZUSBCommand cmd;
                 uint16_t status;
+                int setup_in;
 
                 if (ior->iouh_Length > ZZUSB_MAX_XFER) {
                     ior->iouh_Req.io_Error = UHIOERR_PKTTOOLARGE;
                     break;
                 }
 
+                setup_in = (ior->iouh_SetupData.bmRequestType & 0x80) != 0;
+
                 memset(&cmd, 0, sizeof(cmd));
                 cmd.cmd = ZZUSB_CMD_CONTROL_XFER;
                 cmd.dev_addr = ior->iouh_DevAddr;
                 cmd.endpoint = ior->iouh_Endpoint;
-                cmd.direction = (ior->iouh_SetupData.bmRequestType & 0x80) ? 0x80 : 0x00;
+                cmd.direction = setup_in ? 0x80 : 0x00;
                 cmd.max_pkt_size = ior->iouh_MaxPktSize;
                 cmd.speed = unit->zz_Speed;
                 cmd.data_length = ior->iouh_Length;
@@ -1244,8 +1263,8 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
                 cmd.setup_wLength = ior->iouh_SetupData.wLength;
 
                 status = send_usb_cmd(base, &cmd,
-                                      (ior->iouh_Dir == UHDIR_OUT) ? ior->iouh_Data : NULL,
-                                      (ior->iouh_Dir == UHDIR_OUT) ? ior->iouh_Length : 0);
+                                      (!setup_in) ? ior->iouh_Data : NULL,
+                                      (!setup_in) ? ior->iouh_Length : 0);
 
                 if (status == ZZUSB_STATUS_OK) {
                     volatile struct ZZUSBCommand *result =
@@ -1261,8 +1280,7 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
                      */
                     if (actual > ior->iouh_Length) actual = ior->iouh_Length;
 
-                    int is_in = (ior->iouh_SetupData.bmRequestType & 0x80) != 0;
-                    if (is_in && ior->iouh_Data && actual > 0) {
+                    if (setup_in && ior->iouh_Data && actual > 0) {
                         /*
                          * safe_copy not CopyMem — Poseidon's iouh_Data
                          * can be odd-aligned on small descriptor reads,
@@ -1312,6 +1330,18 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
         ior->iouh_State = UHSF_OPERATIONAL;
         break;
 
+    case UHCMD_ISOXFER:
+        /*
+         * The mailbox protocol reserves ZZUSB_CMD_ISO_XFER, but the
+         * current firmware dispatcher has no isochronous handler.
+         * Fail explicitly instead of falling through to IOERR_NOCMD,
+         * which makes this look like a broken hardware-driver command
+         * rather than an unsupported transfer type.
+         */
+        ior->iouh_Actual = 0;
+        ior->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+        break;
+
     case UHCMD_INTXFER:
         {
             uint16_t rh_addr = unit->zz_RootHubAddr;
@@ -1353,6 +1383,12 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
                     unit->zz_IntPending[ep] = NULL;
                 }
 
+                /*
+                 * Once we queue an IOR for the poll task it is no
+                 * longer a quick completion. Clear IOF_QUICK so the
+                 * eventual ReplyMsg is delivered.
+                 */
+                ior->iouh_Req.io_Flags &= ~IOF_QUICK;
                 unit->zz_IntPending[ep] = ior;
                 deferred = 1;      /* do NOT ReplyMsg at bottom */
 

@@ -45,7 +45,7 @@
 
 #define DEVICE_NAME      "zzusbhw.device"
 #define DEVICE_VERSION   1
-#define DEVICE_REVISION  88
+#define DEVICE_REVISION  90
 
 #define ZZ_NUM_PORTS     1
 
@@ -122,9 +122,9 @@ struct ZZUSBCommand {
     uint16_t setup_wValue;
     uint16_t setup_wIndex;
     uint16_t setup_wLength;
-    /* Padding to align data to 32 bytes */
-    uint8_t  reserved[6];
-    /* Data follows at offset 32 */
+    /* Padding to the firmware-visible 48-byte command header. */
+    uint8_t  reserved[8];
+    /* Data follows at ZZUSB_DATA_OFFSET. */
 } __attribute__((packed));
 
 #define ZZUSB_CMD_SIZE    48   /* command header including setup data */
