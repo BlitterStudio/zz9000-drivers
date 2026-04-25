@@ -28,8 +28,8 @@ installer/
     │   ├── AudioModes/               ← ZZ9000AX populated by CI
     │   └── Networks/                 ← ZZ9000Net.device populated by CI
     ├── Libs/
+    │   ├── MHI/                      ← mhizz9000.library populated by CI
     │   └── Picasso96/                ← ZZ9000.card populated by CI
-    │                                 ← mhizz9000.library populated by CI (in Libs/ root)
     └── Tools/
         ├── ZZTop.info                Icon  (committed)
         ├── axmp3.info                Icon  (committed)
@@ -56,7 +56,7 @@ using the same layout CI uses:
 ```sh
 INST=installer/ZZ9000Installer
 install -Dm644 rtg/ZZ9000.card                 "$INST/Libs/Picasso96/ZZ9000.card"
-install -Dm644 mhi/mhizz9000.library           "$INST/Libs/mhizz9000.library"
+install -Dm644 mhi/mhizz9000.library           "$INST/Libs/MHI/mhizz9000.library"
 install -Dm644 net/ZZ9000Net.device            "$INST/Devs/Networks/ZZ9000Net.device"
 install -Dm644 ahi/driver/zz9000ax.audio       "$INST/Devs/AHI/zz9000ax.audio"
 install -Dm644 ahi/driver/ZZ9000AX             "$INST/Devs/AudioModes/ZZ9000AX"

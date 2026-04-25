@@ -232,7 +232,7 @@ jobs:
           # the (source ...) paths in installer/ZZ9000Installer/Install ZZ9000.
           INST="installer/ZZ9000Installer"
           install -Dm644 artifacts/ZZ9000.card/ZZ9000.card            "$INST/Libs/Picasso96/ZZ9000.card"
-          install -Dm644 artifacts/mhizz9000.library/mhizz9000.library "$INST/Libs/mhizz9000.library"
+          install -Dm644 artifacts/mhizz9000.library/mhizz9000.library "$INST/Libs/MHI/mhizz9000.library"
           install -Dm644 artifacts/ZZ9000Net.device/ZZ9000Net.device   "$INST/Devs/Networks/ZZ9000Net.device"
           install -Dm644 artifacts/zz9000ax.audio/zz9000ax.audio       "$INST/Devs/AHI/zz9000ax.audio"
           install -Dm644 artifacts/ZZ9000AX/ZZ9000AX                   "$INST/Devs/AudioModes/ZZ9000AX"
