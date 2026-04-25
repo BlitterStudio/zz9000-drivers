@@ -16,6 +16,7 @@
 #include <intuition/intuition.h>
 #include <intuition/gadgetclass.h>
 #include <libraries/gadtools.h>
+#include <devices/timer.h>
 
 #include <clib/exec_protos.h>
 #include <clib/graphics_protos.h>
@@ -31,23 +32,63 @@
 
 #include "zz9000.h"
 
-struct Gadget *gads[11];
+#define ZZTOP_RELEASE "2.0.1"
+#define ZZTOP_DATE    "25.04.2026"
+
+static const char version[] __attribute__((used)) =
+	"$VER: ZZTop " ZZTOP_RELEASE " (" ZZTOP_DATE ")\r\n";
+
+struct Gadget *gads[16];
 
 #define MYGAD_ZORROVER     (0)
 #define MYGAD_FWVER        (1)
 #define MYGAD_TEMP         (2)
-#define MYGAD_VAUX         (3)
-#define MYGAD_VINT         (4)
-#define MYGAD_BTN_TEST     (5)
-#define MYGAD_BTN_REFRESH  (6)
-#define MYGAD_Z9AX         (7)
-#define MYGAD_LPF          (8)
-#define MYGAD_SCANLINES    (9)
-#define MYGAD_PARITY       (10)
+#define MYGAD_TEMP_MINMAX  (3)
+#define MYGAD_VAUX         (4)
+#define MYGAD_VINT         (5)
+#define MYGAD_Z9AX         (6)
+#define MYGAD_STATUS       (7)
+#define MYGAD_RAWREGS      (8)
+#define MYGAD_LPF          (9)
+#define MYGAD_SCANLINES    (10)
+#define MYGAD_PARITY       (11)
+#define MYGAD_REFRESHMODE  (12)
+#define MYGAD_BTN_TEST     (13)
+#define MYGAD_BTN_REFRESH  (14)
+#define MYGAD_TEST_RESULT  (15)
+
+#define ZZTOP_REG_SD_STATUS       (0xBC)
+#define ZZTOP_REG_SD_BOOT_STATUS  (0xC4)
+#define ZZTOP_REG_SCANLINE_MODE   (0x100C)
+#define ZZTOP_REG_SCANLINE_PARITY (0x100E)
+
+#define SCANLINE_MODE_COUNT 4
+#define REFRESH_MODE_COUNT  3
+#define ZZTOP_BUS_TEST_BYTES       (64UL * 1024UL)
+#define ZZTOP_BUS_TEST_MEM_BASE    (0x00010000UL)
+#define ZZTOP_BUS_TEST_Z2_RESERVED (0x00020000UL)
+#define ZZTOP_BUS_TEST_Z3_TOP      (0x03000000UL)
+#define ZZTOP_BUS_TEST_NO_RANGE    (0xffffffffUL)
+#define ZZTOP_BUS_TEST_NO_BACKUP   (0xfffffffeUL)
 
 static STRPTR parity_labels[] = {
 	(STRPTR)"Odd dark",
 	(STRPTR)"Even dark",
+	NULL
+};
+
+static STRPTR scanline_labels[] = {
+	(STRPTR)"Off",
+	(STRPTR)"Classic",
+	(STRPTR)"Soft",
+	(STRPTR)"Gradient",
+	NULL
+};
+
+static STRPTR refresh_labels[] = {
+	(STRPTR)"Manual",
+	(STRPTR)"1 sec",
+	(STRPTR)"5 sec",
 	NULL
 };
 
@@ -63,12 +104,16 @@ volatile UBYTE* zz_regs;
 int zorro_version = 0;
 uint16_t scanline_mode = 0;
 uint16_t scanline_parity = 0;
+uint16_t refresh_mode = 0;
+double t_min = 0;
+double t_max = 0;
 
 char txt_buf[64];
 
 struct timerequest * timerio;
 struct MsgPort *timerport;
 struct Library *TimerBase;
+BOOL timer_pending = FALSE;
 
 void errorMessage(char* error)
 {
@@ -143,28 +188,115 @@ void zz_set_lpf_freq(uint16_t freq)
  */
 void zz_set_scanline_mode(uint16_t mode)
 {
-	zz_set_reg(0x100C, mode);
+	zz_set_reg(ZZTOP_REG_SCANLINE_MODE, mode);
 }
 
 uint16_t zz_get_scanline_mode(void)
 {
-	return zz_get_reg16(0x100C) & 0x3;
+	return zz_get_reg16(ZZTOP_REG_SCANLINE_MODE) & 0x3;
 }
 
 void zz_set_scanline_parity(uint16_t parity)
 {
-	zz_set_reg(0x100E, parity & 0x1);
+	zz_set_reg(ZZTOP_REG_SCANLINE_PARITY, parity & 0x1);
 }
 
 uint16_t zz_get_scanline_parity(void)
 {
-	return zz_get_reg16(0x100E) & 0x1;
+	return zz_get_reg16(ZZTOP_REG_SCANLINE_PARITY) & 0x1;
+}
+
+uint16_t zztop_refresh_seconds(void)
+{
+	if (refresh_mode == 1) return 1;
+	if (refresh_mode == 2) return 5;
+	return 0;
+}
+
+BOOL zztop_open_timer(void)
+{
+	if (TimerBase) return TRUE;
+
+	if (!(timerport = CreateMsgPort())) return FALSE;
+
+	timerio = (struct timerequest *)CreateIORequest(timerport, sizeof(struct timerequest));
+	if (!timerio) {
+		DeleteMsgPort(timerport);
+		timerport = NULL;
+		return FALSE;
+	}
+
+	if (OpenDevice((STRPTR)TIMERNAME, UNIT_MICROHZ, (struct IORequest *)timerio, 0) != 0) {
+		DeleteIORequest((struct IORequest *)timerio);
+		DeleteMsgPort(timerport);
+		timerio = NULL;
+		timerport = NULL;
+		return FALSE;
+	}
+
+	TimerBase = (struct Library *)timerio->tr_node.io_Device;
+	return TRUE;
+}
+
+void zztop_cancel_timer(void)
+{
+	if (!TimerBase || !timer_pending) return;
+
+	if (!CheckIO((struct IORequest *)timerio)) {
+		AbortIO((struct IORequest *)timerio);
+	}
+	WaitIO((struct IORequest *)timerio);
+	timer_pending = FALSE;
+}
+
+void zztop_close_timer(void)
+{
+	zztop_cancel_timer();
+
+	if (TimerBase) {
+		CloseDevice((struct IORequest *)timerio);
+		TimerBase = NULL;
+	}
+	if (timerio) {
+		DeleteIORequest((struct IORequest *)timerio);
+		timerio = NULL;
+	}
+	if (timerport) {
+		DeleteMsgPort(timerport);
+		timerport = NULL;
+	}
+}
+
+void zztop_schedule_timer(void)
+{
+	uint16_t secs = zztop_refresh_seconds();
+
+	if (!TimerBase || timer_pending || secs == 0) return;
+
+	timerio->tr_node.io_Command = TR_ADDREQUEST;
+	timerio->tr_time.tv_secs = secs;
+	timerio->tr_time.tv_micro = 0;
+	SendIO((struct IORequest *)timerio);
+	timer_pending = TRUE;
+}
+
+void zztop_restart_timer(void)
+{
+	zztop_cancel_timer();
+	zztop_schedule_timer();
 }
 
 double t_old=0;
 void refresh_zz_info(struct Window* win)
 {
 	uint16_t fwrev = zz_get_reg16(REG_ZZ_FW_VERSION);
+	uint16_t raw_temp = zz_get_reg16(REG_ZZ_TEMPERATURE);
+	uint16_t raw_vaux = zz_get_reg16(REG_ZZ_VOLTAGE_AUX);
+	uint16_t raw_usb = zz_get_reg16(REG_ZZ_USB_STATUS);
+	uint16_t raw_sd = zz_get_reg16(ZZTOP_REG_SD_STATUS);
+	uint16_t raw_sd_boot = zz_get_reg16(ZZTOP_REG_SD_BOOT_STATUS);
+	uint16_t raw_scanline = zz_get_reg16(ZZTOP_REG_SCANLINE_MODE);
+	uint16_t raw_parity = zz_get_reg16(ZZTOP_REG_SCANLINE_PARITY);
 
 	int fwrev_major = fwrev>>8;
 	int fwrev_minor = fwrev&0xff;
@@ -180,13 +312,19 @@ void refresh_zz_info(struct Window* win)
 		t_filt=0.1*t+0.9*t_old;
 	t_old=t_filt;
 
+	if (t_min == 0 || t < t_min) t_min = t;
+	if (t_max == 0 || t > t_max) t_max = t;
+
 	GT_SetGadgetAttrs(gads[MYGAD_ZORROVER], win, NULL, GTIN_Number, zorro_version, TAG_END);
 
-	snprintf(txt_buf, 20, "ZZ9000 %d.%d", fwrev_major, fwrev_minor);
+	snprintf(txt_buf, 20, "ABI %d.%d", fwrev_major, fwrev_minor);
 	GT_SetGadgetAttrs(gads[MYGAD_FWVER], win, NULL, GTST_String, txt_buf, TAG_END);
 
 	snprintf(txt_buf, 20, "%.1f", t_filt);
 	GT_SetGadgetAttrs(gads[MYGAD_TEMP], win, NULL, GTST_String, txt_buf, TAG_END);
+
+	snprintf(txt_buf, 20, "%.1f / %.1f", t_min, t_max);
+	GT_SetGadgetAttrs(gads[MYGAD_TEMP_MINMAX], win, NULL, GTST_String, txt_buf, TAG_END);
 
 	snprintf(txt_buf, 20, "%.2f", vaux);
 	GT_SetGadgetAttrs(gads[MYGAD_VAUX], win, NULL, GTST_String, txt_buf, TAG_END);
@@ -199,6 +337,14 @@ void refresh_zz_info(struct Window* win)
 	} else {
 		GT_SetGadgetAttrs(gads[MYGAD_Z9AX], win, NULL, GTST_String, (STRPTR)"Not present", TAG_END);
 	}
+
+	snprintf(txt_buf, 64, "AX:%c USB:%04x SD:%04x B:%04x",
+		z9ax_present ? 'Y' : 'N', raw_usb, raw_sd, raw_sd_boot);
+	GT_SetGadgetAttrs(gads[MYGAD_STATUS], win, NULL, GTST_String, txt_buf, TAG_END);
+
+	snprintf(txt_buf, 64, "S:%04x P:%04x T:%04x A:%04x",
+		raw_scanline, raw_parity, raw_temp, raw_vaux);
+	GT_SetGadgetAttrs(gads[MYGAD_RAWREGS], win, NULL, GTST_String, txt_buf, TAG_END);
 }
 
 ULONG zz_perform_memtest(uint32_t offset)
@@ -207,32 +353,33 @@ ULONG zz_perform_memtest(uint32_t offset)
 	volatile uint16_t* bufferw = (volatile uint16_t*)bufferl;
 	uint32_t i = 0;
 	uint32_t errors = 0;
+	uint32_t long_count = ZZTOP_BUS_TEST_BYTES / 4;
+	uint32_t word_count = ZZTOP_BUS_TEST_BYTES / 2;
 
-	printf("zz_perform_memtest...\n");
-
-	for (i=0; i<1024*256; i++) {
+	for (i=0; i<long_count; i++) {
 		uint32_t v2 = 0;
 		uint32_t v = (i%2)?0xaaaa5555:0x33337777;
-		uint16_t v4 = 0;
-		uint16_t v3 = (i%2)?0xffff:0x0000;
 
 		bufferl[i] = v;
 		v2 = bufferl[i];
 
 		if (v!=v2) {
-			printf("32-bit mismatch at 0x%p: 0x%lx should be 0x%lx\n",&bufferl[i],v2,v);
 			errors++;
 		}
+	}
+
+	for (i=0; i<word_count; i++) {
+		uint16_t v4 = 0;
+		uint16_t v3 = (i%2)?0xffff:0x0000;
 
 		bufferw[i] = v3;
 		v4 = bufferw[i];
 
 		if (v3!=v4) {
-			printf("16-bit mismatch at 0x%p: 0x%x should be 0x%x\n",&bufferw[i],v4,v3);
 			errors++;
 		}
 	}
-	printf("Done. %ld errors.\n", errors);
+
 	return errors;
 }
 
@@ -240,81 +387,89 @@ ULONG zz_perform_memtest_rand(uint32_t offset, int rep)
 {
 	uint32_t errors = 0;
 	const int sz = 16;
+	uint32_t word_count = ZZTOP_BUS_TEST_BYTES / 2;
 	volatile uint16_t* buffer = (volatile uint16_t*)(zz_cd->cd_BoardAddr+offset);
-
-	printf("zz_perform_memtest_rand...\n");
-
-	uint16_t* tbuf = malloc(2*sz);
-	if (!tbuf) {
-		printf("Error: Could not allocate memory for test buffer\n");
-		return 1;
-	}
+	uint16_t tbuf[16];
 
 	for (int k = 0; k < rep; k++) {
-		if ((k % 128) == 0) {
-			printf("`-- Test 0x%lx %d/%d...\n", offset, k, rep);
-		}
-		// step 1: fill buffer with random data
-		for (int i=0; i<sz; i++) {
-			tbuf[sz] = rand();
-		}
-
-		buffer[0] = tbuf[0];
-		buffer[1] = tbuf[1];
-		buffer[2] = tbuf[2];
-		buffer[3] = tbuf[3];
-		buffer[4] = tbuf[4];
-		buffer[5] = tbuf[5];
-		buffer[6] = tbuf[6];
-		buffer[7] = tbuf[7];
-		buffer[8] = tbuf[8];
-		buffer[9] = tbuf[9];
-		buffer[10] = tbuf[10];
-		buffer[11] = tbuf[11];
-		buffer[12] = tbuf[12];
-		buffer[13] = tbuf[13];
-		buffer[14] = tbuf[14];
-		buffer[15] = tbuf[15];
+		uint32_t pos = (k * sz) % (word_count - sz);
+		volatile uint16_t* slot = buffer + pos;
 
 		for (int i=0; i<sz; i++) {
-			uint16_t v = buffer[i];
+			tbuf[i] = rand();
+		}
+
+		for (int i=0; i<sz; i++) {
+			slot[i] = tbuf[i];
+		}
+
+		for (int i=0; i<sz; i++) {
+			uint16_t v = slot[i];
 			if (v != tbuf[i]) {
-				if (errors<100) printf("Mismatch at 0x%p: 0x%x should be 0x%x\n",&buffer[i],v,tbuf[i]);
 				errors++;
 			}
 		}
 	}
 
-	free(tbuf);
-
-	printf("Done. %ld errors.\n", errors);
 	return errors;
 }
 
 ULONG zz_perform_memtest_fpgareg() {
 	volatile uint16_t* d1 = (volatile uint16_t*)(zz_cd->cd_BoardAddr+0x1030);
 	volatile uint16_t* d2 = (volatile uint16_t*)(zz_cd->cd_BoardAddr+0x1034);
-	volatile uint16_t* dr = (volatile uint16_t*)(zz_cd->cd_BoardAddr+0x1030);
-
-	printf("zz_perform_memtest_fpgareg...\n");
 
 	*d2 = 1;
 	for (int i = 0; i < 0x100000*2; i++) {
 		*d1 = i;
 	}
 
-	printf("Done. Result: %lx\n", *dr);
-
 	return 0;
 }
 
+uint32_t zztop_bus_test_offset(void)
+{
+	uint32_t top;
+
+	if (zorro_version == 3) {
+		top = ZZTOP_BUS_TEST_Z3_TOP;
+	} else {
+		uint32_t board_size = (uint32_t)zz_cd->cd_BoardSize;
+
+		if (board_size <= ZZTOP_BUS_TEST_Z2_RESERVED) return 0;
+		top = board_size - ZZTOP_BUS_TEST_Z2_RESERVED;
+	}
+
+	if (top <= ZZTOP_BUS_TEST_MEM_BASE + ZZTOP_BUS_TEST_BYTES) return 0;
+	return top - ZZTOP_BUS_TEST_BYTES;
+}
+
 ULONG zz_perform_memtest_multi() {
-	uint32_t offset = 0x100000;
-	zz_perform_memtest(offset);
-	zz_perform_memtest_rand(offset, 1024);
+	uint32_t offset = zztop_bus_test_offset();
+	volatile uint8_t* test_base;
+	uint8_t* backup;
+	ULONG errors = 0;
+
+	if (offset == 0) return ZZTOP_BUS_TEST_NO_RANGE;
+
+	backup = malloc(ZZTOP_BUS_TEST_BYTES);
+	if (!backup) return ZZTOP_BUS_TEST_NO_BACKUP;
+
+	test_base = (volatile uint8_t*)(zz_cd->cd_BoardAddr+offset);
+	for (uint32_t i=0; i<ZZTOP_BUS_TEST_BYTES; i++) {
+		backup[i] = test_base[i];
+	}
+
+	errors += zz_perform_memtest(offset);
+	errors += zz_perform_memtest_rand(offset, 1024);
 	//zz_perform_memtest_fpgareg();
 
-	return 0;
+	for (uint32_t i=0; i<ZZTOP_BUS_TEST_BYTES; i++) {
+		test_base[i] = backup[i];
+	}
+
+	free(backup);
+
+	return errors;
 }
 
 VOID handleGadgetEvent(struct Window *win, struct Gadget *gad, ULONG code)
@@ -326,7 +481,28 @@ VOID handleGadgetEvent(struct Window *win, struct Gadget *gad, ULONG code)
 			break;
 		}
 		case MYGAD_BTN_TEST: {
-			zz_perform_memtest_multi();
+			ULONG errors;
+
+			GT_SetGadgetAttrs(gads[MYGAD_TEST_RESULT], win, NULL,
+				GTST_String, (STRPTR)"Running...", TAG_END);
+			errors = zz_perform_memtest_multi();
+			if (errors == ZZTOP_BUS_TEST_NO_RANGE) {
+				GT_SetGadgetAttrs(gads[MYGAD_TEST_RESULT], win, NULL,
+					GTST_String, (STRPTR)"No safe range", TAG_END);
+			} else if (errors == ZZTOP_BUS_TEST_NO_BACKUP) {
+				GT_SetGadgetAttrs(gads[MYGAD_TEST_RESULT], win, NULL,
+					GTST_String, (STRPTR)"No backup RAM", TAG_END);
+			} else if (errors == 0) {
+				snprintf(txt_buf, 20, "OK %luK",
+					(unsigned long)(ZZTOP_BUS_TEST_BYTES / 1024));
+				GT_SetGadgetAttrs(gads[MYGAD_TEST_RESULT], win, NULL,
+					GTST_String, txt_buf, TAG_END);
+			} else {
+				snprintf(txt_buf, 20, "%lu errors", (unsigned long)errors);
+				GT_SetGadgetAttrs(gads[MYGAD_TEST_RESULT], win, NULL,
+					GTST_String, txt_buf, TAG_END);
+			}
+			refresh_zz_info(win);
 			break;
 		}
 		case MYGAD_LPF: {
@@ -334,13 +510,26 @@ VOID handleGadgetEvent(struct Window *win, struct Gadget *gad, ULONG code)
 			break;
 		}
 		case MYGAD_SCANLINES: {
-			scanline_mode = code;
-			zz_set_scanline_mode(code);
+			scanline_mode = (scanline_mode + 1) % SCANLINE_MODE_COUNT;
+			zz_set_scanline_mode(scanline_mode);
+			GT_SetGadgetAttrs(gads[MYGAD_SCANLINES], win, NULL,
+				GTCY_Active, scanline_mode, TAG_END);
+			refresh_zz_info(win);
 			break;
 		}
 		case MYGAD_PARITY: {
-			scanline_parity = code;
-			zz_set_scanline_parity(code);
+			scanline_parity = (scanline_parity + 1) & 0x1;
+			zz_set_scanline_parity(scanline_parity);
+			GT_SetGadgetAttrs(gads[MYGAD_PARITY], win, NULL,
+				GTCY_Active, scanline_parity, TAG_END);
+			refresh_zz_info(win);
+			break;
+		}
+		case MYGAD_REFRESHMODE: {
+			refresh_mode = (refresh_mode + 1) % REFRESH_MODE_COUNT;
+			GT_SetGadgetAttrs(gads[MYGAD_REFRESHMODE], win, NULL,
+				GTCY_Active, refresh_mode, TAG_END);
+			zztop_restart_timer();
 			break;
 		}
 	}
@@ -353,76 +542,85 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
 	gad = CreateContext(glistptr);
 
-	ng.ng_LeftEdge	 = 20;
-	ng.ng_TopEdge		 = 240+topborder;
-	ng.ng_Width			 = 100;
+	ng.ng_LeftEdge	 = 170;
+	ng.ng_TopEdge		 = 20+topborder;
+	ng.ng_Width			 = 220;
 	ng.ng_Height		 = 14;
-	ng.ng_GadgetText = (STRPTR)"Bus Test";
+	ng.ng_GadgetText = (STRPTR)"Zorro Version";
 	ng.ng_TextAttr	 = &Topaz80;
 	ng.ng_VisualInfo = vi;
-	ng.ng_GadgetID	 = MYGAD_BTN_TEST;
-	ng.ng_Flags			 = 0;
-
-	gads[MYGAD_BTN_REFRESH] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
-										TAG_END);
-
-	ng.ng_LeftEdge	= 160;
-	ng.ng_GadgetID	 = MYGAD_BTN_REFRESH;
-	ng.ng_GadgetText = (STRPTR)"Refresh";
-
-	gads[MYGAD_BTN_TEST] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
-										TAG_END);
-
-	ng.ng_LeftEdge	= 160;
-	ng.ng_TopEdge	= 20+topborder;
-	ng.ng_GadgetID	= MYGAD_ZORROVER;
-	ng.ng_GadgetText = (STRPTR)"Zorro Version";
+	ng.ng_GadgetID	 = MYGAD_ZORROVER;
+	ng.ng_Flags			 = PLACETEXT_LEFT;
 
 	gads[MYGAD_ZORROVER] = gad = CreateGadget(INTEGER_KIND, gad, &ng,
-										GTIN_Number, 0,
-										TAG_END);
+											GTIN_Number, 0,
+											TAG_END);
 
 	ng.ng_TopEdge	= 40+topborder;
 	ng.ng_GadgetID	= MYGAD_FWVER;
-	ng.ng_GadgetText = (STRPTR)"Firmware Version";
+	ng.ng_GadgetText = (STRPTR)"Firmware ABI";
 
 	gads[MYGAD_FWVER] = gad = CreateGadget(STRING_KIND, gad, &ng,
-										GTST_String, "",
-										TAG_END);
+											GTST_String, "",
+											TAG_END);
 
 	ng.ng_TopEdge	= 60+topborder;
 	ng.ng_GadgetID	= MYGAD_TEMP;
-	ng.ng_GadgetText = (STRPTR)"Core �C";
+	ng.ng_GadgetText = (STRPTR)"Die \260C";
 
 	gads[MYGAD_TEMP] = gad = CreateGadget(STRING_KIND, gad, &ng,
-										GTST_String, "",
-										TAG_END);
+											GTST_String, "",
+											TAG_END);
 
 	ng.ng_TopEdge	= 80+topborder;
-	ng.ng_GadgetID	= MYGAD_VAUX;
-	ng.ng_GadgetText = (STRPTR)"Aux Voltage V";
+	ng.ng_GadgetID	= MYGAD_TEMP_MINMAX;
+	ng.ng_GadgetText = (STRPTR)"Die Min/Max \260C";
 
-	gads[MYGAD_VAUX] = gad = CreateGadget(STRING_KIND, gad, &ng,
-										GTST_String, "",
-										TAG_END);
+	gads[MYGAD_TEMP_MINMAX] = gad = CreateGadget(STRING_KIND, gad, &ng,
+											GTST_String, "",
+											TAG_END);
 
 	ng.ng_TopEdge	= 100+topborder;
-	ng.ng_GadgetID	= MYGAD_VINT;
-	ng.ng_GadgetText = (STRPTR)"Core Voltage V";
+	ng.ng_GadgetID	= MYGAD_VAUX;
+	ng.ng_GadgetText = (STRPTR)"VCCAUX V";
 
-	gads[MYGAD_VINT] = gad = CreateGadget(STRING_KIND, gad, &ng,
-										GTST_String, "",
-										TAG_END);
+	gads[MYGAD_VAUX] = gad = CreateGadget(STRING_KIND, gad, &ng,
+											GTST_String, "",
+											TAG_END);
 
 	ng.ng_TopEdge	= 120+topborder;
+	ng.ng_GadgetID	= MYGAD_VINT;
+	ng.ng_GadgetText = (STRPTR)"VCCINT V";
+
+	gads[MYGAD_VINT] = gad = CreateGadget(STRING_KIND, gad, &ng,
+											GTST_String, "",
+											TAG_END);
+
+	ng.ng_TopEdge	= 140+topborder;
 	ng.ng_GadgetID	= MYGAD_Z9AX;
 	ng.ng_GadgetText = (STRPTR)"ZZ9000AX";
 
 	gads[MYGAD_Z9AX] = gad = CreateGadget(STRING_KIND, gad, &ng,
-										GTST_String, "",
-										TAG_END);
+											GTST_String, "",
+											TAG_END);
 
-	ng.ng_TopEdge	= 140+topborder;
+	ng.ng_TopEdge	= 160+topborder;
+	ng.ng_GadgetID	= MYGAD_STATUS;
+	ng.ng_GadgetText = (STRPTR)"Status";
+
+	gads[MYGAD_STATUS] = gad = CreateGadget(STRING_KIND, gad, &ng,
+											GTST_String, "",
+											TAG_END);
+
+	ng.ng_TopEdge	= 180+topborder;
+	ng.ng_GadgetID	= MYGAD_RAWREGS;
+	ng.ng_GadgetText = (STRPTR)"Raw Regs";
+
+	gads[MYGAD_RAWREGS] = gad = CreateGadget(STRING_KIND, gad, &ng,
+											GTST_String, "",
+											TAG_END);
+
+	ng.ng_TopEdge	= 205+topborder;
 	ng.ng_GadgetID	= MYGAD_LPF;
 	ng.ng_GadgetText = (STRPTR)"AX Lowpass";
 
@@ -432,31 +630,60 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 										GTSL_Level, 23900,
 										GTSL_LevelFormat, "%ld Hz",
 										GTSL_MaxLevelLen, 10,
-										GTSL_LevelPlace, PLACETEXT_BELOW,
-										TAG_END);
+											GTSL_LevelPlace, PLACETEXT_BELOW,
+											TAG_END);
 
-	ng.ng_TopEdge	= 175+topborder;
+	ng.ng_TopEdge	= 240+topborder;
 	ng.ng_GadgetID	= MYGAD_SCANLINES;
 	ng.ng_GadgetText = (STRPTR)"Scanlines";
 
-	/* V2 modes: 0=off 1=classic 2=soft 3=gradient. */
-	gads[MYGAD_SCANLINES] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
-										GTSL_Min, 0,
-										GTSL_Max, 3,
-										GTSL_Level, scanline_mode,
-										GTSL_LevelFormat, "Mode %ld",
-										GTSL_MaxLevelLen, 10,
-										GTSL_LevelPlace, PLACETEXT_BELOW,
-										TAG_END);
+	gads[MYGAD_SCANLINES] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+											GTCY_Labels, scanline_labels,
+											GTCY_Active, scanline_mode,
+											TAG_END);
 
-	ng.ng_TopEdge	= 210+topborder;
+	ng.ng_TopEdge	= 265+topborder;
 	ng.ng_GadgetID	= MYGAD_PARITY;
 	ng.ng_GadgetText = (STRPTR)"Parity";
 
 	gads[MYGAD_PARITY] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
-										GTCY_Labels, parity_labels,
-										GTCY_Active, scanline_parity,
-										TAG_END);
+											GTCY_Labels, parity_labels,
+											GTCY_Active, scanline_parity,
+											TAG_END);
+
+	ng.ng_TopEdge	= 290+topborder;
+	ng.ng_GadgetID	= MYGAD_REFRESHMODE;
+	ng.ng_GadgetText = (STRPTR)"Auto Refresh";
+
+	gads[MYGAD_REFRESHMODE] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+											GTCY_Labels, refresh_labels,
+											GTCY_Active, refresh_mode,
+											TAG_END);
+
+	ng.ng_TopEdge	= 320+topborder;
+	ng.ng_GadgetID	= MYGAD_TEST_RESULT;
+	ng.ng_GadgetText = (STRPTR)"Bus Result";
+
+	gads[MYGAD_TEST_RESULT] = gad = CreateGadget(STRING_KIND, gad, &ng,
+											GTST_String, (STRPTR)"Not run",
+											TAG_END);
+
+	ng.ng_LeftEdge	 = 20;
+	ng.ng_TopEdge		 = 345+topborder;
+	ng.ng_Width			 = 110;
+	ng.ng_GadgetText = (STRPTR)"Bus Test";
+	ng.ng_GadgetID	 = MYGAD_BTN_TEST;
+	ng.ng_Flags			 = PLACETEXT_IN;
+
+	gads[MYGAD_BTN_TEST] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+											TAG_END);
+
+	ng.ng_LeftEdge	= 170;
+	ng.ng_GadgetID	 = MYGAD_BTN_REFRESH;
+	ng.ng_GadgetText = (STRPTR)"Refresh";
+
+	gads[MYGAD_BTN_REFRESH] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+											TAG_END);
 
 	return(gad);
 }
@@ -468,38 +695,26 @@ VOID process_window_events(struct Window *mywin)
 	UWORD imsgCode;
 	struct Gadget *gad;
 	BOOL terminated = FALSE;
+	ULONG user_sig = 1U << mywin->UserPort->mp_SigBit;
+	ULONG timer_sig = 0;
 
-	/*if((timerport = CreateMsgPort())) {
-		if((timerio=(struct timerequest *)CreateIORequest(timerport, sizeof(struct timerequest)))) {
-			if(OpenDevice((STRPTR) TIMERNAME, UNIT_MICROHZ, (struct IORequest *) timerio,0) == 0) {
-				TimerBase = (struct Library *)timerio->tr_node.io_Device;
-			}
-			else {
-				DeleteIORequest((struct IORequest *)timerio);
-				DeleteMsgPort(timerport);
-			}
-		}
-		else {
-			DeleteMsgPort(timerport);
-		}
+	if (zztop_open_timer()) {
+		timer_sig = 1U << timerport->mp_SigBit;
+		zztop_schedule_timer();
+	} else {
+		errorMessage("Auto refresh disabled: can't open timer.device");
 	}
-
-	if(!TimerBase) {
-		errorMessage("Can't open timer.device");
-		return;
-	}
-
-	timerio->tr_node.io_Command = TR_ADDREQUEST;
-	timerio->tr_time.tv_secs = 1;
-	timerio->tr_time.tv_micro = 0;
-	SendIO((struct IORequest *) timerio);*/
 
 	while (!terminated) {
-		Wait ((1U << mywin->UserPort->mp_SigBit)); // | (1U << timerport->mp_SigBit) );
+		ULONG signals = Wait(user_sig | timer_sig);
 
-		/*if ((!terminated) && (1U << timerport->mp_SigBit)) {
+		if (timer_sig && (signals & timer_sig) && timer_pending &&
+			CheckIO((struct IORequest *)timerio)) {
+			WaitIO((struct IORequest *)timerio);
+			timer_pending = FALSE;
 			refresh_zz_info(mywin);
-		}*/
+			zztop_schedule_timer();
+		}
 
 		while ((!terminated) && (imsg = GT_GetIMsg(mywin->UserPort))) {
 			gad = (struct Gadget *)imsg->IAddress;
@@ -514,8 +729,13 @@ VOID process_window_events(struct Window *mywin)
 				** messages.	This is NOT true for standard Intuition messages,
 				** but is an added feature of GadTools.
 				*/
-				case IDCMP_GADGETDOWN:
 				case IDCMP_MOUSEMOVE:
+					if (gad && gad->GadgetID == MYGAD_LPF) {
+						handleGadgetEvent(mywin, gad, imsgCode);
+					}
+					break;
+				case IDCMP_GADGETDOWN:
+					break;
 				case IDCMP_GADGETUP:
 					handleGadgetEvent(mywin, gad, imsgCode);
 					break;
@@ -534,20 +754,9 @@ VOID process_window_events(struct Window *mywin)
 					break;
 			}
 		}
-
-		/*timerio->tr_node.io_Command = TR_ADDREQUEST;
-		timerio->tr_time.tv_secs = 1;
-		timerio->tr_time.tv_micro = 0;
-		SendIO((struct IORequest *) timerio);*/
 	}
 
-	/*if(TimerBase) {
-		WaitIO((struct IORequest *) timerio);
-		CloseDevice((struct IORequest *) timerio);
-		DeleteIORequest((struct IORequest *) timerio);
-		DeleteMsgPort(timerport);
-		TimerBase = NULL;
-	}*/
+	zztop_close_timer();
 }
 
 VOID gadtoolsWindow(VOID) {
@@ -573,16 +782,16 @@ VOID gadtoolsWindow(VOID) {
 					errorMessage("createAllGadgets() failed");
 				else {
 					if (NULL == (mywin = OpenWindowTags(NULL,
-							WA_Title,			"MNT ZZTop 1.11",
+							WA_Title,			"MNT ZZTop " ZZTOP_RELEASE,
 							WA_Gadgets,		glist,			WA_AutoAdjust,		TRUE,
-							WA_Width,				280,			WA_MinWidth,			 280,
-							WA_InnerHeight, 260,			WA_MinHeight,			 260,
+							WA_Width,				430,			WA_MinWidth,			 430,
+							WA_InnerHeight, 370,			WA_MinHeight,			 370,
 							WA_DragBar,		 TRUE,			WA_DepthGadget,		TRUE,
 							WA_Activate,	 TRUE,			WA_CloseGadget,		TRUE,
 							WA_SizeGadget, FALSE,			WA_SimpleRefresh, TRUE,
 							WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
-							IDCMP_VANILLAKEY | SLIDERIDCMP | STRINGIDCMP |
-							BUTTONIDCMP,
+								IDCMP_VANILLAKEY | SLIDERIDCMP | STRINGIDCMP |
+								BUTTONIDCMP | CYCLEIDCMP,
 							WA_PubScreen, mysc,
 							TAG_END))) {
 						errorMessage("OpenWindow() failed");
