@@ -218,12 +218,6 @@ jobs:
         with:
           path: artifacts
       - name: Assemble release bundle
-        # Two-layer bundle:
-        #   1. Flat copies of every artifact at the staging root — for
-        #      users who want to cherry-pick files manually.
-        #   2. The Commodore Installer drawer, populated in-place from
-        #      the same artifacts so a user can just double-click
-        #      "Install ZZ9000" without fishing files out of the root.
         # The installer drawer's binary slots are .gitignored / unpopulated
         # in the repo; CI fills them during release assembly so nothing
         # stale ever ships.
@@ -232,19 +226,6 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
           STAGING="zz9000-drivers-${TAG}"
           mkdir -p "$STAGING"
-
-          # Flat copies for manual installation.
-          cp artifacts/ZZ9000.card/ZZ9000.card              "$STAGING/"
-          cp artifacts/ZZTop/ZZTop                          "$STAGING/"
-          cp artifacts/ZZScanlines/ZZScanlines              "$STAGING/"
-          cp artifacts/zzusbhw.device/zzusbhw.device        "$STAGING/"
-          cp artifacts/zzsd.device/zzsd.device              "$STAGING/"
-          cp artifacts/ZZ9000Net.device/ZZ9000Net.device    "$STAGING/"
-          cp artifacts/zznetstats/zznetstats                "$STAGING/"
-          cp artifacts/mhizz9000.library/mhizz9000.library  "$STAGING/"
-          cp artifacts/zz9000ax.audio/zz9000ax.audio        "$STAGING/"
-          cp artifacts/ZZ9000AX/ZZ9000AX                    "$STAGING/"
-          cp artifacts/axmp3/axmp3                          "$STAGING/"
 
           # Populate the installer drawer with fresh artifacts in the
           # exact layout the Install ZZ9000 script reads from. Mirrors
@@ -259,13 +240,9 @@ jobs:
           install -Dm755 artifacts/ZZScanlines/ZZScanlines             "$INST/Tools/ZZScanlines"
           install -Dm755 artifacts/zznetstats/zznetstats               "$INST/Tools/zznetstats"
           install -Dm755 artifacts/axmp3/axmp3                         "$INST/Tools/axmp3"
+          install -Dm644 ahi/README.md                                 "$INST/Docs/ahi-README.md"
 
           cp -r installer   "$STAGING/installer"
-          cp README.md      "$STAGING/"
-          # Bundle the audio-stack ENV-tunables doc that the installer's
-          # final audio message points users at. Renamed so it doesn't
-          # collide with the top-level README.md at the staging root.
-          cp ahi/README.md  "$STAGING/ahi-README.md"
           zip -r "$STAGING.zip" "$STAGING"
           ls -lh "$STAGING.zip"
       - name: Create GitHub Release

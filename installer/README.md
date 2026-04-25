@@ -18,6 +18,8 @@ installer/
     ├── Install ZZ9000                Installer script (what the user double-clicks)
     ├── Install ZZ9000.info           Script icon
     ├── Tools.info                    Sub-drawer icon
+    ├── Docs/
+    │   └── ahi-README.md             Audio tunables doc populated by CI
     ├── Devs/
     │   ├── Picasso96Settings         P96 screenmode config  (committed)
     │   ├── NetInterfaces/
@@ -69,25 +71,25 @@ Then copy the `installer/` tree onto your Amiga and double-click
 
 ## Release bundle layout
 
-The CI release job (tag push `v*`) produces a zip that contains both
-a **flat layout** (every artifact at the root — useful for manual
-cherry-picking) and a **populated installer drawer** (for the
-double-click install path). The two layers coexist in the same zip.
+The CI release job (tag push `v*`) produces a zip containing only the
+populated `installer/` drawer. Driver and tool binaries are not
+duplicated as loose files at the zip root; they live in the exact
+drawer paths consumed by `Install ZZ9000`.
 
-Alongside those, the zip also includes `ahi-README.md` at its root —
-a copy of `ahi/README.md` from this repo, covering the three audio
-ENV tunables (`ZZ9K_MIX_LEVELS`, `ZZ9000AX-NOLPF`, `ZZ9K_INT2`). The
-installer's final audio message points users there.
+The release job also copies `ahi/README.md` to
+`installer/ZZ9000Installer/Docs/ahi-README.md`, covering the three
+audio ENV tunables (`ZZ9K_MIX_LEVELS`, `ZZ9000AX-NOLPF`,
+`ZZ9K_INT2`). The installer's final audio message points users there.
 
 ## What doesn't go through this Installer
 
-A few artifacts from the release zip are **not** handled by this
-Installer script because they don't live on the AmigaOS filesystem:
+A few CI-built artifacts are **not** handled by this Installer script
+because they don't live on the AmigaOS filesystem:
 
 | Artifact            | Install path                                                   |
 |---------------------|----------------------------------------------------------------|
-| `zzsd.device`       | Packed into `BOOT.bin` on the SD card — see [sd-boot/README.md](../sd-boot/README.md). |
-| `zzusbhw.device`    | Registered with Poseidon (currently shipped inside the ZZ9000's autoboot ROM firmware). |
+| `zzsd.device`       | Packed into firmware `BOOT.bin` — see [sd-boot/README.md](../sd-boot/README.md). |
+| `zzusbhw.device`    | Shipped inside the ZZ9000's autoboot ROM firmware and registered with Poseidon from there. |
 
 ## Updating the script
 

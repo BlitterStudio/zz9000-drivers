@@ -191,7 +191,7 @@
          (dest "LIBS:")
          (confirm))
 
-      (message "ZZ9000AX audio installed.\n\nOptional runtime tunables (full details in ahi-README.md at the root of the release zip you unpacked):\n\n  ENV:ZZ9K_MIX_LEVELS  — Paula / AHI mixer balance (for early Rev.1 boards with the U4 opamp still in place)\n  ENV:ZZ9000AX-NOLPF   — disable the AHI auto low-pass filter\n  ENV:ZZ9K_INT2        — move both audio drivers to INT2\n\nSetting these is optional — defaults are correct for current-revision hardware.")
+      (message "ZZ9000AX audio installed.\n\nOptional runtime tunables (full details in Docs/ahi-README.md inside this installer drawer):\n\n  ENV:ZZ9K_MIX_LEVELS  — Paula / AHI mixer balance (for early Rev.1 boards with the U4 opamp still in place)\n  ENV:ZZ9000AX-NOLPF   — disable the AHI auto low-pass filter\n  ENV:ZZ9K_INT2        — move both audio drivers to INT2\n\nSetting these is optional — defaults are correct for current-revision hardware.")
    )
 )
 
