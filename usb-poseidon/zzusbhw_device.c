@@ -126,9 +126,10 @@ const char device_name[] = DEVICE_NAME;
 const char device_id_string[] = DEVICE_ID_STRING;
 
 /*
- * AmigaOS `version DEVS:zzusbhw.device FILE` scans the binary for a
- * `$VER:` tag and prints the version/revision that follows. Without
- * the tag, `version` falls back to a generic "v1.0" which defeats
+ * AmigaOS `version DEVS:USBHardware/zzusbhw.device FILE` scans the
+ * binary for a `$VER:` tag and prints the version/revision that
+ * follows. Without the tag, `version` falls back to a generic "v1.0"
+ * which defeats
  * field verification of driver deployment. Include a (date) after
  * the version number per standard Amiga $VER convention — some
  * tools require it to parse the version correctly.

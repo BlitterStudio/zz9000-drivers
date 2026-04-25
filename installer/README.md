@@ -19,9 +19,11 @@ installer/
     ├── Install ZZ9000.info           Script icon
     ├── Tools.info                    Sub-drawer icon
     ├── Docs/
-    │   └── ahi-README.md             Audio tunables doc populated by CI
+    │   ├── ahi-README.md             Audio tunables doc populated by CI
+    │   └── usb-poseidon-README.md    Poseidon setup doc populated by CI
     ├── Devs/
     │   ├── Picasso96Settings         P96 screenmode config  (committed)
+    │   ├── USBHardware/              ← zzusbhw.device populated by CI
     │   ├── NetInterfaces/
     │   │   └── ZZ9000Net             Roadshow NetInterface template  (committed)
     │   ├── AHI/                      ← zz9000ax.audio populated by CI
@@ -57,6 +59,7 @@ using the same layout CI uses:
 INST=installer/ZZ9000Installer
 install -Dm644 rtg/ZZ9000.card                 "$INST/Libs/Picasso96/ZZ9000.card"
 install -Dm644 mhi/mhizz9000.library           "$INST/Libs/MHI/mhizz9000.library"
+install -Dm644 usb-poseidon/zzusbhw.device     "$INST/Devs/USBHardware/zzusbhw.device"
 install -Dm644 net/ZZ9000Net.device            "$INST/Devs/Networks/ZZ9000Net.device"
 install -Dm644 ahi/driver/zz9000ax.audio       "$INST/Devs/AHI/zz9000ax.audio"
 install -Dm644 ahi/driver/ZZ9000AX             "$INST/Devs/AudioModes/ZZ9000AX"
@@ -64,6 +67,8 @@ install -Dm755 ZZTop/ZZTop                     "$INST/Tools/ZZTop"
 install -Dm755 ZZScanlines/ZZScanlines         "$INST/Tools/ZZScanlines"
 install -Dm755 net/zznetstats/zznetstats       "$INST/Tools/zznetstats"
 install -Dm755 ax-direct/axmp3                 "$INST/Tools/axmp3"
+install -Dm644 ahi/README.md                   "$INST/Docs/ahi-README.md"
+install -Dm644 usb-poseidon/README.md          "$INST/Docs/usb-poseidon-README.md"
 ```
 
 Then copy the `installer/` tree onto your Amiga and double-click
@@ -84,20 +89,20 @@ zz9000-drivers-<tag>/
 Driver and tool binaries are not duplicated as loose files at the zip
 root; they live in the exact drawer paths consumed by `Install ZZ9000`.
 
-The release job also copies `ahi/README.md` to
-`ZZ9000Installer/Docs/ahi-README.md`, covering the three audio ENV
-tunables (`ZZ9K_MIX_LEVELS`, `ZZ9000AX-NOLPF`, `ZZ9K_INT2`). The
-installer's final audio message points users there.
+The release job also copies component docs into `ZZ9000Installer/Docs/`:
+`ahi-README.md` covers the three audio ENV tunables
+(`ZZ9K_MIX_LEVELS`, `ZZ9000AX-NOLPF`, `ZZ9K_INT2`), and
+`usb-poseidon-README.md` covers Poseidon registration and
+troubleshooting.
 
 ## What doesn't go through this Installer
 
-A few CI-built artifacts are **not** handled by this Installer script
-because they don't live on the AmigaOS filesystem:
+The CI-built artifact below is **not** handled by this Installer script
+because it doesn't live on the AmigaOS filesystem:
 
 | Artifact            | Install path                                                   |
 |---------------------|----------------------------------------------------------------|
 | `zzsd.device`       | Packed into firmware `BOOT.bin` — see [sd-boot/README.md](../sd-boot/README.md). |
-| `zzusbhw.device`    | Shipped inside the ZZ9000's autoboot ROM firmware and registered with Poseidon from there. |
 
 ## Updating the script
 

@@ -126,7 +126,7 @@ For manual installs or component-by-component replacement:
 | `net/ZZ9000Net.device`            | `Devs:Networks/`        |
 | `ahi/driver/zz9000ax.audio`       | `Devs:AHI/`             |
 | `mhi/mhizz9000.library`           | `Libs:MHI/`             |
-| `usb-poseidon/zzusbhw.device`     | Registered with Poseidon|
+| `usb-poseidon/zzusbhw.device`     | `Devs:USBHardware/` then registered with Poseidon |
 | `sd-boot/zzsd.device`             | Packed into `BOOT.bin` — see [sd-boot/README.md](sd-boot/README.md) |
 
 ## Credits

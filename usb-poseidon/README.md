@@ -29,29 +29,25 @@ EHCI itself.
 
 ## Where the driver lives
 
-`zzusbhw.device` is shipped inside the **ZZ9000's autoboot ROM
-firmware**, not on the Amiga's filesystem. That means:
+Release packages ship `zzusbhw.device` inside the Commodore Installer
+drawer. The installer copies it to
+`DEVS:USBHardware/zzusbhw.device`; for a manual install, copy
+`usb-poseidon/zzusbhw.device` to `DEVS:USBHardware/` yourself and then
+register it with Poseidon.
 
-- You do not need to copy a file into `DEVS:` to use it — the ZZ9000
-  exposes the driver directly from its ROM at power-on.
-- Updating the driver is done by flashing a newer ZZ9000 firmware
-  image, not by replacing a file on the boot disk. See the firmware
-  repo for details:
-  <https://github.com/BlitterStudio/zz9000-firmware>.
-- The source for the driver is kept in this folder
-  (`usb-poseidon/zzusbhw_device.c`, `zzusbhw.h`) so it can be read,
-  patched and rebuilt out-of-tree during development.
+The matching ZZ9000 firmware still provides the ARM-side USB stack and
+mailbox protocol, so keep the board firmware current:
+<https://github.com/BlitterStudio/zz9000-firmware>.
 
-The `*.device` binary produced by CI here is useful for testing a
-pre-release driver by placing it in `DEVS:` and pointing Poseidon at
-it, but end users on a released firmware never need to touch this
-file.
+Some firmware images may also expose a ROM copy of the hardware driver,
+but the filesystem copy in `DEVS:USBHardware/` is the release package's
+explicit installation path and can be updated with the driver package.
 
 ## Registering the driver with Poseidon
 
-On a ZZ9000 running recent firmware, Poseidon will typically pick up
-`zzusbhw.device` automatically during its hardware scan. If it does
-not appear, add it from Poseidon's Trident GUI:
+After `zzusbhw.device` is in `DEVS:USBHardware/`, Poseidon may pick it
+up during a hardware scan. If it does not appear, add it from
+Poseidon's Trident GUI:
 
 1. Launch **Trident** (Poseidon's configuration GUI — usually in
    `SYS:Prefs/Poseidon`).
@@ -99,8 +95,9 @@ cd usb-poseidon
 ```
 
 Produces `zzusbhw.device`. For a normal Amiga test, copy it to
-`DEVS:` and point Poseidon at it via the Trident steps above. For a
-release, the driver is folded back into the ZZ9000 firmware image.
+`DEVS:USBHardware/` and point Poseidon at it via the Trident steps
+above. For a release, CI places the driver in the installer drawer so
+the Commodore Installer can copy it to `DEVS:USBHardware/`.
 
 ## License
 

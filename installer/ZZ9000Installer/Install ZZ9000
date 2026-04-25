@@ -127,16 +127,74 @@
 
 
 ; --------------------------------------------------------------------
+; USB Poseidon hardware driver (zzusbhw.device)
+; --------------------------------------------------------------------
+
+(if (askbool (prompt "Install the Poseidon USB hardware driver (zzusbhw.device)? Requires an existing Poseidon USB stack.")
+             (help "Installs zzusbhw.device into DEVS:USBHardware/. If Poseidon does not auto-detect it, add driver name zzusbhw.device, unit 0, from Trident's Hardware page."))
+   (
+      (set #installusb 1)
+
+      (if (not (exists "Devs:USBHardware"))
+          (
+             (if (askbool (prompt "DEVS:USBHardware does not exist. Poseidon may not be installed.\n\nCreate DEVS:USBHardware and install zzusbhw.device anyway?")
+                          (help "Poseidon hardware drivers are normally stored in DEVS:USBHardware/. If you plan to install Poseidon later, creating this drawer now is harmless."))
+                 (makedir "Devs:USBHardware"
+                    (prompt "Create DEVS:USBHardware")
+                    (help "Creates the standard Poseidon hardware-driver drawer.")
+                    (infos))
+                 (set #installusb 0))
+          ))
+
+      (if #installusb
+          (
+             (set #newver   (getversion "Devs/USBHardware/zzusbhw.device"))
+             (set #newmajor (/ #newver 65536))
+             (set #newminor (- #newver (* #newmajor 65536)))
+
+             (if (exists "Devs:USBHardware/zzusbhw.device")
+                 (
+                    (set #oldver   (getversion "Devs:USBHardware/zzusbhw.device"))
+                    (set #oldmajor (/ #oldver 65536))
+                    (set #oldminor (- #oldver (* #oldmajor 65536)))
+
+                    (if (askbool (prompt "Replace existing zzusbhw.device (Poseidon USB driver)?\n\nInstalled version: " #oldmajor "." #oldminor "\nNew version: " #newmajor "." #newminor "\n\nProceed with overwrite?")
+                                 (help "The Poseidon hardware driver that exposes the ZZ9000 USB controller to Poseidon's class drivers."))
+                        (copyfiles
+                           (prompt "Install zzusbhw.device into DEVS:USBHardware/")
+                           (help "The Poseidon hardware driver that exposes the ZZ9000 USB controller to Poseidon's class drivers.")
+                           (source "Devs/USBHardware/zzusbhw.device")
+                           (infos)
+                           (dest "Devs:USBHardware")))
+                 )
+                 (if (askbool (prompt "Install zzusbhw.device into DEVS:USBHardware/?\n\nNew version: " #newmajor "." #newminor)
+                              (help "The Poseidon hardware driver that exposes the ZZ9000 USB controller to Poseidon's class drivers."))
+                     (copyfiles
+                        (prompt "Install zzusbhw.device into DEVS:USBHardware/")
+                        (help "The Poseidon hardware driver that exposes the ZZ9000 USB controller to Poseidon's class drivers.")
+                        (source "Devs/USBHardware/zzusbhw.device")
+                        (infos)
+                        (dest "Devs:USBHardware"))))
+
+             (message "Poseidon USB driver installed.\n\nIf Poseidon does not bind it automatically, open Trident, go to Hardware, add driver zzusbhw.device with unit 0, save, then reboot or restart Poseidon.\n\nFull setup notes are in Docs/usb-poseidon-README.md inside this installer drawer.")
+          ))
+   )
+)
+
+(complete 60)
+
+
+; --------------------------------------------------------------------
 ; Obsolete driver cleanup
 ; --------------------------------------------------------------------
 
 (if (exists "Devs:ZZ9000USBStorage.device")
     (delete "Devs:ZZ9000USBStorage.device"
-       (prompt "Remove Devs:ZZ9000USBStorage.device? It has been superseded by zzusbhw.device, which is provided by the ZZ9000's autoboot ROM firmware.")
-       (help "This old USB storage driver is no longer needed; current firmware bundles a Poseidon-compatible replacement.")
+       (prompt "Remove Devs:ZZ9000USBStorage.device? It has been superseded by the Poseidon USB hardware driver, zzusbhw.device.")
+       (help "This old USB storage-only driver is no longer needed; zzusbhw.device covers USB through Poseidon's class drivers.")
        (infos)))
 
-(complete 55)
+(complete 65)
 
 
 ; --------------------------------------------------------------------
@@ -197,7 +255,7 @@
    )
 )
 
-(complete 65)
+(complete 75)
 
 
 ; --------------------------------------------------------------------
@@ -285,7 +343,7 @@
    )
 )
 
-(complete 80)
+(complete 85)
 
 
 ; --------------------------------------------------------------------
