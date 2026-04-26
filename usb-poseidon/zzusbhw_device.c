@@ -169,12 +169,56 @@ static void dhex8(void* regs, uint32_t v)
     dhex4(regs, v >> 4);
     dhex4(regs, v);
 }
+static void dhex16(void* regs, uint32_t v)
+{
+    dhex8(regs, v >> 8);
+    dhex8(regs, v);
+}
 static void __attribute__((unused)) dhex32(void* regs, uint32_t v)
 {
     dhex8(regs, v >> 24);
     dhex8(regs, v >> 16);
     dhex8(regs, v >> 8);
     dhex8(regs, v);
+}
+
+static void trace_port_state(struct ZZUSBUnit *unit, char *tag)
+{
+    void *regs = unit->zz_Registers;
+
+    dstr(regs, "[zzusbhw] ");
+    dstr(regs, tag);
+    dstr(regs, " ps=");
+    dhex16(regs, unit->zz_PortStatus);
+    dstr(regs, " ch=");
+    dhex16(regs, unit->zz_PortChange);
+    dstr(regs, " sp=");
+    dhex8(regs, unit->zz_Speed);
+    dstr(regs, " pr=");
+    dhex8(regs, unit->zz_PortPresent ? 1 : 0);
+    dstr(regs, " dead=");
+    dhex8(regs, unit->zz_PortDead ? 1 : 0);
+    dstr(regs, "\r\n");
+}
+
+static void trace_port_state_status(struct ZZUSBUnit *unit,
+                                    char *tag,
+                                    uint16_t status,
+                                    uint16_t speed)
+{
+    void *regs = unit->zz_Registers;
+
+    dstr(regs, "[zzusbhw] ");
+    dstr(regs, tag);
+    dstr(regs, " rc=");
+    dhex16(regs, status);
+    dstr(regs, " fwsp=");
+    dhex8(regs, speed);
+    dstr(regs, " ps=");
+    dhex16(regs, unit->zz_PortStatus);
+    dstr(regs, " ch=");
+    dhex16(regs, unit->zz_PortChange);
+    dstr(regs, "\r\n");
 }
 
 /*
@@ -467,6 +511,7 @@ static void update_port_state(struct ZZUSBUnit *unit,
             unit->zz_Speed = r->speed;
             unit->zz_PortStatus = port_status;
             unit->zz_PortChange = UPSF_C_PORT_CONNECTION;
+            trace_port_state(unit, "PORT_CONNECT");
         } else {
             unit->zz_PortStatus = port_status;
         }
@@ -485,6 +530,7 @@ static void update_port_state(struct ZZUSBUnit *unit,
             unit->zz_PortChange = UPSF_C_PORT_CONNECTION;
             unit->zz_BulkErrCount = 0;
             abort_int_iors_offline(unit, aborted, aborted_count, aborted_max);
+            trace_port_state(unit, "PORT_DISCONNECT");
         }
     }
 }
@@ -867,6 +913,7 @@ static void handle_roothub_control(struct ZZUSBUnit *unit,
                 uint16_t ps[2];
                 ps[0] = unit->zz_PortStatus;
                 ps[1] = unit->zz_PortChange;
+                trace_port_state(unit, "GET_STATUS");
                 uint16_t len = (ior->iouh_Length < 4) ? ior->iouh_Length : 4;
                 if (ior->iouh_Data) {
                     safe_copy(ps, ior->iouh_Data, len);
@@ -889,6 +936,7 @@ static void handle_roothub_control(struct ZZUSBUnit *unit,
                     {
                         unit->zz_PortStatus |= UPSF_PORT_RESET;
                         unit->zz_PortChange &= ~UPSF_C_PORT_RESET;
+                        trace_port_state(unit, "SET_RESET_START");
 
                         struct ZZUSBCommand rcmd;
                         volatile uint8_t *rbase = (volatile uint8_t*)unit->zz_Registers;
@@ -897,11 +945,13 @@ static void handle_roothub_control(struct ZZUSBUnit *unit,
                         rcmd.timeout_ms = 5000;
 
                         uint16_t rstatus = send_usb_cmd(rbase, &rcmd, NULL, 0);
+                        uint16_t fw_speed = 0;
 
                         unit->zz_PortStatus &= ~UPSF_PORT_RESET;
                         if (rstatus == ZZUSB_STATUS_OK) {
                             volatile struct ZZUSBCommand *rresult =
                                 (volatile struct ZZUSBCommand*)(rbase + 0xa000);
+                            fw_speed = rresult->speed;
                             unit->zz_Speed = rresult->speed;
                             unit->zz_PortStatus |= UPSF_PORT_ENABLE;
                             unit->zz_PortStatus &= ~UPSF_PORT_HIGH_SPEED;
@@ -913,6 +963,9 @@ static void handle_roothub_control(struct ZZUSBUnit *unit,
                                                      UPSF_PORT_HIGH_SPEED);
                         }
                         unit->zz_PortChange |= UPSF_C_PORT_RESET;
+                        trace_port_state_status(unit, "SET_RESET_FW",
+                                                rstatus, fw_speed);
+                        trace_port_state(unit, "SET_RESET_DONE");
                         ior->iouh_Actual = 0;
                         ior->iouh_Req.io_Error = 0;
                         return;
@@ -941,31 +994,37 @@ static void handle_roothub_control(struct ZZUSBUnit *unit,
                 switch (wValue) {
                 case UFS_PORT_ENABLE:
                     unit->zz_PortStatus &= ~UPSF_PORT_ENABLE;
+                    trace_port_state(unit, "CLR_ENABLE");
                     ior->iouh_Actual = 0;
                     ior->iouh_Req.io_Error = 0;
                     return;
                 case UFS_C_PORT_CONNECTION:
                     unit->zz_PortChange &= ~UPSF_C_PORT_CONNECTION;
+                    trace_port_state(unit, "CLR_C_CONN");
                     ior->iouh_Actual = 0;
                     ior->iouh_Req.io_Error = 0;
                     return;
                 case UFS_C_PORT_ENABLE:
                     unit->zz_PortChange &= ~UPSF_C_PORT_ENABLE;
+                    trace_port_state(unit, "CLR_C_ENABLE");
                     ior->iouh_Actual = 0;
                     ior->iouh_Req.io_Error = 0;
                     return;
                 case UFS_C_PORT_RESET:
                     unit->zz_PortChange &= ~UPSF_C_PORT_RESET;
+                    trace_port_state(unit, "CLR_C_RESET");
                     ior->iouh_Actual = 0;
                     ior->iouh_Req.io_Error = 0;
                     return;
                 case UFS_C_PORT_SUSPEND:
                     unit->zz_PortChange &= ~UPSF_C_PORT_SUSPEND;
+                    trace_port_state(unit, "CLR_C_SUSP");
                     ior->iouh_Actual = 0;
                     ior->iouh_Req.io_Error = 0;
                     return;
                 case UFS_C_PORT_OVER_CURRENT:
                     unit->zz_PortChange &= ~UPSF_C_PORT_OVER_CURRENT;
+                    trace_port_state(unit, "CLR_C_OC");
                     ior->iouh_Actual = 0;
                     ior->iouh_Req.io_Error = 0;
                     return;
@@ -1009,6 +1068,7 @@ static void handle_roothub_int(struct ZZUSBUnit *unit,
         }
         uint8_t change_bitmap[2] = { 0x02, 0x00 };
         uint16_t len = (ior->iouh_Length < 2) ? ior->iouh_Length : 2;
+        trace_port_state(unit, "HUB_INT");
         safe_copy(change_bitmap, ior->iouh_Data, len);
         ior->iouh_Actual = len;
         ior->iouh_Req.io_Error = 0;
@@ -1127,10 +1187,12 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
             cmd.timeout_ms = 5000;
 
             uint16_t status = send_usb_cmd(base, &cmd, NULL, 0);
+            uint16_t fw_speed = 0;
 
             if (status == ZZUSB_STATUS_OK) {
                 volatile struct ZZUSBCommand *result =
                     (volatile struct ZZUSBCommand*)(base + 0xa000);
+                fw_speed = result->speed;
                 /*
                  * Only flag POWER + CONNECTION + speed here.
                  * Poseidon's hub class drives the enable / C_RESET
@@ -1156,6 +1218,8 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
                 unit->zz_PortChange = 0;
                 unit->zz_Speed = 0;
             }
+            trace_port_state_status(unit, "USBRESET_FW", status, fw_speed);
+            trace_port_state(unit, "USBRESET_DONE");
 
             /*
              * USBRESET always-OK reporting (matches v1.53 behaviour).
