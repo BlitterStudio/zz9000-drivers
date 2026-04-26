@@ -51,7 +51,7 @@ struct ExecBase* SysBase;
  * routines parse it consistently.
  */
 #define DEVICE_ID_STRING DEVICE_NAME " " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) \
-    " (25.4.2026) Poseidon USB driver for ZZ9000 " \
+    " (26.4.2026) Poseidon USB driver for ZZ9000 " \
     "(C) Copyright 2026 Dimitris Panokostas"
 
 /* USB request constants (from usb.h) */
@@ -137,7 +137,7 @@ const char device_id_string[] = DEVICE_ID_STRING;
  */
 static const char __attribute__((used)) version_tag[] =
     "$VER: " DEVICE_NAME " " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION)
-    " (25.4.2026) Poseidon USB driver for ZZ9000 "
+    " (26.4.2026) Poseidon USB driver for ZZ9000 "
     "(C) Copyright 2026 Dimitris Panokostas";
 
 typedef char ZZUSBCommand_size_must_match_protocol[
@@ -455,6 +455,10 @@ static void update_port_state(struct ZZUSBUnit *unit,
         volatile struct ZZUSBCommand *r =
             (volatile struct ZZUSBCommand*)(base + 0xa000);
         UWORD port_status = UPSF_PORT_POWER | UPSF_PORT_CONNECTION;
+        if (unit->zz_PortPresent && unit->zz_Speed == r->speed) {
+            port_status |= unit->zz_PortStatus &
+                           (UPSF_PORT_ENABLE | UPSF_PORT_SUSPEND);
+        }
         if (r->speed == ZZUSB_SPEED_HIGH) {
             port_status |= UPSF_PORT_HIGH_SPEED;
         }
@@ -1139,6 +1143,8 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
                 UWORD port_status = UPSF_PORT_POWER | UPSF_PORT_CONNECTION;
                 if (result->speed == ZZUSB_SPEED_HIGH) {
                     port_status |= UPSF_PORT_HIGH_SPEED;
+                } else {
+                    port_status |= UPSF_PORT_ENABLE;
                 }
                 unit->zz_Speed = result->speed;
                 unit->zz_PortPresent = TRUE;
