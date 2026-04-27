@@ -87,20 +87,33 @@
 
       (complete 30)
 
-      (if (and (exists "Devs:Picasso96Settings") (not (exists "Devs:Picasso96Settings.bak")))
-          (copyfiles
-             (prompt "Back up your existing Picasso96Settings to Picasso96Settings.bak")
-             (help "Saves Devs:Picasso96Settings as Picasso96Settings.bak before we overwrite it.")
-             (source "Devs:Picasso96Settings")
-             (dest "Devs:")
-             (newname "Picasso96Settings.bak")
-             (confirm)))
+      (if (exists "Devs:Picasso96Settings")
+         (
+            (message "Picasso96Settings migration required\n\nZZ9000.card 2.4 and newer identifies the board as BT_MNT_ZZ9000 instead of the older uaegfx board type. Existing Picasso96Settings files saved for board type 14 may not attach their modes to the new driver identity.\n\nThe installer will back up your current Devs:Picasso96Settings before installing the ZZ9000 settings file bundled with this release.")
+
+            (if (not (exists "Devs:Picasso96Settings.pre-ZZ9000-2.4"))
+                (copyfiles
+                   (prompt "Back up your existing Picasso96Settings to Picasso96Settings.pre-ZZ9000-2.4")
+                   (help "Preserves your current Picasso96 settings before installing the native BT_MNT_ZZ9000 settings file required by ZZ9000.card 2.4 and newer.")
+                   (source "Devs:Picasso96Settings")
+                   (dest "Devs:")
+                   (newname "Picasso96Settings.pre-ZZ9000-2.4")))
+
+            (if (not (exists "Devs:Picasso96Settings.bak"))
+                (copyfiles
+                   (prompt "Back up your existing Picasso96Settings to Picasso96Settings.bak")
+                   (help "Saves Devs:Picasso96Settings as Picasso96Settings.bak before we overwrite it.")
+                   (source "Devs:Picasso96Settings")
+                   (dest "Devs:")
+                   (newname "Picasso96Settings.bak")))
+         )
+         (message "Installing the ZZ9000 Picasso96Settings file for the native BT_MNT_ZZ9000 board identity used by ZZ9000.card 2.4 and newer."))
 
       (complete 40)
 
       (copyfiles
-         (prompt "Install ZZ9000 Picasso96Settings")
-         (help "Installs the Picasso96 configuration containing ZZ9000-specific screenmodes.")
+         (prompt "Install native ZZ9000 Picasso96Settings")
+         (help "Installs the Picasso96 configuration containing ZZ9000-specific screenmodes. ZZ9000.card 2.4 and newer use the native BT_MNT_ZZ9000 board type, so this matching settings file is required when upgrading from older releases.")
          (source "Devs/Picasso96Settings")
          (dest "Devs:")
          (confirm))

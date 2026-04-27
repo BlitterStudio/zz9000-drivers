@@ -47,19 +47,21 @@ struct GFXBase {
 	char *Name;
 };
 
+struct DOSBase;
+
 #ifndef DEBUG
 #define KPrintF(...)
 #endif
 #define __saveds__
 
 #define DEVICE_VERSION 2
-#define DEVICE_REVISION 0
+#define DEVICE_REVISION 4
 #define REQUIRED_FW_VERSION_MAJOR 2
 #define REQUIRED_FW_VERSION_MINOR 0
 #define DEVICE_PRIORITY 0
-#define DEVICE_ID_STRING "$VER ZZ9000.card+blitter " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
+#define DEVICE_ID_STRING "$VER: ZZ9000.card+blitter " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
 #define DEVICE_NAME "ZZ9000.card"
-#define DEVICE_DATE "(24.04.2026)"
+#define DEVICE_DATE "(27.04.2026)"
 
 int __attribute__((no_reorder)) _start()
 {
@@ -108,13 +110,27 @@ char dummies[128];
 #define Z3_TEMPLATE_ADDR (0x3210000 - 0x10000)
 #define ZZVMODE_800x600 1
 #define ZZVMODE_720x576 6
+#define ZZ_CARD_DATA_GFXDATA 0
+#define ZZ_CARD_DATA_SCANDBL_800X600 1
+#define ZZ_CARD_DATA_NSVSYNC 2
+#define ZZ_CARD_DATA_MONITOR_SWITCH 3
+#define ZZ_CARD_DATA_DISPLAY_ENABLED 4
+#define ZZ_CARD_DATA_SECONDARY_PALETTE 5
+#define MNT_MANUFACTURER 0x6d6e
+#define ZZ9000_PRODUCT_Z2 0x3
+#define ZZ9000_PRODUCT_Z3 0x4
+#define ZZ_SUPPORTED_RGB_FORMATS (1UL | 2UL | 512UL | 1024UL | 2048UL)
+
+#ifndef CDF_CONFIGME
+#define CDF_CONFIGME (1 << 1)
+#endif
 
 struct ExecBase *SysBase;
-static LONG scandoubler_800x600 = 0;
-static LONG secondary_palette_enabled = 0;
+static struct ConfigDev *reserved_cd = NULL;
 
-static volatile struct GFXData *gfxdata;
-MNTZZ9KRegs* registers;
+static inline volatile struct GFXData *zz_gfxdata(struct BoardInfo *b) {
+	return (volatile struct GFXData *)b->CardData[ZZ_CARD_DATA_GFXDATA];
+}
 
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 
@@ -155,6 +171,187 @@ static inline uint16_t panning_colormode(uint16_t colormode) {
 
 static inline UBYTE direct_color_mask(uint16_t colormode, UBYTE mask) {
 	return (colormode == MNTVA_COLOR_32BIT) ? 0xFF : mask;
+}
+
+static inline BOOL supported_rgb_format(RGBFTYPE format) {
+	if (format >= 32)
+		return FALSE;
+
+	return (ZZ_SUPPORTED_RGB_FORMATS & (1UL << format)) != 0;
+}
+
+static BOOL chars_equal_ci(char a, char b) {
+	if (a >= 'a' && a <= 'z')
+		a -= ('a' - 'A');
+	if (b >= 'a' && b <= 'z')
+		b -= ('a' - 'A');
+
+	return a == b;
+}
+
+static BOOL string_equal_ci(const char *a, const char *b) {
+	if (!a || !b)
+		return FALSE;
+
+	while (*a && *b) {
+		if (!chars_equal_ci(*a, *b))
+			return FALSE;
+		a++;
+		b++;
+	}
+
+	return *a == *b;
+}
+
+static BOOL tooltype_name_matches(const char *entry, const char *name) {
+	const char *p = entry;
+
+	if (!entry || !name)
+		return FALSE;
+
+	while (*name && *p && *p != '=') {
+		if (!chars_equal_ci(*p, *name))
+			return FALSE;
+		p++;
+		name++;
+	}
+
+	return *name == 0 && (*p == 0 || *p == '=');
+}
+
+static const char *tooltype_value(char **tool_types, const char *name) {
+	if (!tool_types)
+		return NULL;
+
+	while (*tool_types) {
+		const char *entry = *tool_types;
+		if (tooltype_name_matches(entry, name)) {
+			while (*entry && *entry != '=')
+				entry++;
+			return (*entry == '=') ? entry + 1 : "";
+		}
+		tool_types++;
+	}
+
+	return NULL;
+}
+
+static BOOL value_is_false(const char *value) {
+	return value &&
+		(string_equal_ci(value, "NO") ||
+		 string_equal_ci(value, "FALSE") ||
+		 string_equal_ci(value, "OFF") ||
+		 string_equal_ci(value, "0"));
+}
+
+static BOOL value_is_true(const char *value) {
+	return !value || *value == 0 ||
+		string_equal_ci(value, "YES") ||
+		string_equal_ci(value, "TRUE") ||
+		string_equal_ci(value, "ON") ||
+		string_equal_ci(value, "1");
+}
+
+static BOOL env_flag_exists(struct DOSBase *DOSBase, const char *name) {
+	BPTR f = Open((APTR)name, MODE_OLDFILE);
+	if (f) {
+		Close(f);
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+static LONG tooltype_vcap_800x600(char **tool_types, LONG current) {
+	const char *value = tooltype_value(tool_types, "ZZ9000-VCAP-800x600");
+	if (value)
+		current = !value_is_false(value);
+
+	value = tooltype_value(tool_types, "VCAP");
+	if (!value)
+		return current;
+
+	if (string_equal_ci(value, "800x600") ||
+		string_equal_ci(value, "60") ||
+		string_equal_ci(value, "60HZ") ||
+		value_is_true(value)) {
+		return 1;
+	}
+
+	if (string_equal_ci(value, "720x576") ||
+		string_equal_ci(value, "50") ||
+		string_equal_ci(value, "50HZ") ||
+		value_is_false(value)) {
+		return 0;
+	}
+
+	return current;
+}
+
+static LONG tooltype_nonstandard_vsync(char **tool_types, LONG current) {
+	const char *value = tooltype_value(tool_types, "ZZ9000-NS-VSYNC");
+	if (value)
+		current = value_is_false(value) ? 0 : 1;
+
+	value = tooltype_value(tool_types, "ZZ9000-NS-VSYNC-NTSC");
+	if (value)
+		current = value_is_false(value) ? 0 : 2;
+
+	value = tooltype_value(tool_types, "NSVSYNC");
+	if (!value)
+		return current;
+
+	if (string_equal_ci(value, "NTSC"))
+		return 2;
+	if (string_equal_ci(value, "PAL") || value_is_true(value))
+		return 1;
+	if (value_is_false(value))
+		return 0;
+
+	return current;
+}
+
+static inline void zzwrite16(volatile uint16_t* reg, uint16_t value);
+
+static struct ConfigDev *find_unconfigured_configdev(struct ExpansionBase *ExpansionBase, UWORD manufacturer, UBYTE product) {
+	struct ConfigDev *cd = NULL;
+
+	while ((cd = (struct ConfigDev *)FindConfigDev(cd, manufacturer, product))) {
+		if ((cd->cd_Flags & CDF_CONFIGME) && cd != reserved_cd)
+			return cd;
+	}
+
+	return NULL;
+}
+
+static void apply_vcap_settings(MNTZZ9KRegs *regs, LONG scandoubler_800x600) {
+	if (scandoubler_800x600) {
+		KPrintF("ZZ9000.card: 800x600 60hz scandoubler mode.\n");
+		regs->videocap_vmode = ZZVMODE_800x600;
+	} else {
+		KPrintF("ZZ9000.card: 720x576 50hz scandoubler mode.\n");
+		regs->videocap_vmode = ZZVMODE_720x576;
+	}
+}
+
+static void apply_nonstandard_vsync_settings(MNTZZ9KRegs *regs, LONG nonstandard_vsync_mode) {
+	zzwrite16(&regs->blitter_user1, CARD_FEATURE_NONSTANDARD_VSYNC);
+	zzwrite16(&regs->set_feature_status, (UWORD)nonstandard_vsync_mode);
+}
+
+static void apply_card_settings(struct BoardInfo *b, char **tool_types) {
+	if (!b || !b->RegisterBase)
+		return;
+
+	MNTZZ9KRegs *regs = (MNTZZ9KRegs *)b->RegisterBase;
+
+	b->CardData[ZZ_CARD_DATA_SCANDBL_800X600] = tooltype_vcap_800x600(
+		tool_types, (LONG)b->CardData[ZZ_CARD_DATA_SCANDBL_800X600]);
+	b->CardData[ZZ_CARD_DATA_NSVSYNC] = tooltype_nonstandard_vsync(
+		tool_types, (LONG)b->CardData[ZZ_CARD_DATA_NSVSYNC]);
+
+	apply_vcap_settings(regs, (LONG)b->CardData[ZZ_CARD_DATA_SCANDBL_800X600]);
+	apply_nonstandard_vsync_settings(regs, (LONG)b->CardData[ZZ_CARD_DATA_NSVSYNC]);
 }
 
 static inline UWORD abs_word(WORD value) {
@@ -398,8 +595,14 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 
 	zorro_version = 0;
 	b->CardFlags = 0;
-	if ((cd = (struct ConfigDev*)FindConfigDev(cd,0x6d6e,0x4))) zorro_version = 3;
-	else if ((cd = (struct ConfigDev*)FindConfigDev(cd,0x6d6e,0x3))) zorro_version = 2;
+	b->CardData[ZZ_CARD_DATA_GFXDATA] = 0;
+	b->CardData[ZZ_CARD_DATA_SCANDBL_800X600] = 0;
+	b->CardData[ZZ_CARD_DATA_NSVSYNC] = 0;
+	b->CardData[ZZ_CARD_DATA_MONITOR_SWITCH] = 1;
+	b->CardData[ZZ_CARD_DATA_DISPLAY_ENABLED] = 1;
+	b->CardData[ZZ_CARD_DATA_SECONDARY_PALETTE] = 0;
+	if ((cd = find_unconfigured_configdev(ExpansionBase, MNT_MANUFACTURER, ZZ9000_PRODUCT_Z3))) zorro_version = 3;
+	else if ((cd = find_unconfigured_configdev(ExpansionBase, MNT_MANUFACTURER, ZZ9000_PRODUCT_Z2))) zorro_version = 2;
 
 	// Find Z3 or Z2 model
 	if (zorro_version>=2) {
@@ -412,14 +615,16 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 			// one full HD screen @8bit ~ 2MB
 			b->MemorySize = 0x3000000 - 0x10000;
 			b->CardFlags |= CARDFLAG_ZORRO_3;
-			gfxdata = (struct GFXData*)(((uint32_t)b->MemoryBase) + (uint32_t)Z3_GFXDATA_ADDR);
-			memset((void *)gfxdata, 0x00, sizeof(struct GFXData));
+			volatile struct GFXData *gd = (struct GFXData*)(((uint32_t)b->MemoryBase) + (uint32_t)Z3_GFXDATA_ADDR);
+			b->CardData[ZZ_CARD_DATA_GFXDATA] = (ULONG)gd;
+			memset((void *)gd, 0x00, sizeof(struct GFXData));
 		}
+		b->MemorySpaceBase = b->MemoryBase;
+		b->MemorySpaceSize = b->MemorySize;
 		b->RegisterBase = (void *)(cd->cd_BoardAddr);
-		registers = (MNTZZ9KRegs *)b->RegisterBase;
-#ifdef DEBUG
+	#ifdef DEBUG
 		hwrev = ((uint16_t*)b->RegisterBase)[0];
-#endif
+	#endif
 		fwrev = ((uint16_t*)b->RegisterBase)[0xC0/2];
 		fwrev_major = fwrev >> 8;
 		fwrev_minor = fwrev & 0xFF;
@@ -440,30 +645,17 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 		}
 
 		MNTZZ9KRegs* registers = (MNTZZ9KRegs *)b->RegisterBase;
-		BPTR f;
-		if ((f = Open((APTR)"ENV:ZZ9000-VCAP-800x600", MODE_OLDFILE))) {
-			Close(f);
-			KPrintF("ZZ9000.card: 800x600 60hz scandoubler mode.\n");
-			scandoubler_800x600 = 1;
-			registers->videocap_vmode = ZZVMODE_800x600; // 60hz
-		} else {
-			KPrintF("ZZ9000.card: 720x576 50hz scandoubler mode.\n");
-			scandoubler_800x600 = 0;
-			registers->videocap_vmode = ZZVMODE_720x576; // 50hz
-		}
+		b->CardData[ZZ_CARD_DATA_SCANDBL_800X600] = env_flag_exists(DOSBase, "ENV:ZZ9000-VCAP-800x600");
+		if (env_flag_exists(DOSBase, "ENV:ZZ9000-NS-VSYNC"))
+			b->CardData[ZZ_CARD_DATA_NSVSYNC] = 1;
+		else if (env_flag_exists(DOSBase, "ENV:ZZ9000-NS-VSYNC-NTSC"))
+			b->CardData[ZZ_CARD_DATA_NSVSYNC] = 2;
 
-		if ((f = Open((APTR)"ENV:ZZ9000-NS-VSYNC", MODE_OLDFILE))) {
-			Close(f);
-			zzwrite16(&registers->blitter_user1, CARD_FEATURE_NONSTANDARD_VSYNC);
-			zzwrite16(&registers->set_feature_status, 1);
-		} else if ((f = Open((APTR)"ENV:ZZ9000-NS-VSYNC-NTSC", MODE_OLDFILE))) {
-			Close(f);
-			zzwrite16(&registers->blitter_user1, CARD_FEATURE_NONSTANDARD_VSYNC);
-			zzwrite16(&registers->set_feature_status, 2);
-		} else {
-			zzwrite16(&registers->blitter_user1, CARD_FEATURE_NONSTANDARD_VSYNC);
-			zzwrite16(&registers->set_feature_status, 0);
-		}
+		apply_vcap_settings(registers, (LONG)b->CardData[ZZ_CARD_DATA_SCANDBL_800X600]);
+		apply_nonstandard_vsync_settings(registers, (LONG)b->CardData[ZZ_CARD_DATA_NSVSYNC]);
+
+		cd->cd_Flags &= ~CDF_CONFIGME;
+		reserved_cd = cd;
 
 		return 1;
 	} else {
@@ -472,19 +664,22 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 	}
 }
 
-int __attribute__((used)) InitCard(__REGA0(struct BoardInfo* b)) {
+#define gfxdata zz_gfxdata(b)
+
+int __attribute__((used)) InitCard(__REGA0(struct BoardInfo* b), __REGA1(char **tool_types)) {
 	int i;
 
 	b->CardBase = (struct CardBase *)_gfxbase;
 	b->ExecBase = SysBase;
 	b->BoardName = "ZZ9000";
-	b->BoardType = 14;
-	b->PaletteChipType = PCT_S3ViRGE;
-	b->GraphicsControllerType = GCT_S3ViRGE;
+	b->BoardType = BT_MNT_ZZ9000;
+	b->PaletteChipType = PCT_MNT_ZZ9000;
+	b->GraphicsControllerType = GCT_MNT_ZZ9000;
 
 	b->Flags |= BIF_GRANTDIRECTACCESS | BIF_HARDWARESPRITE | BIF_FLICKERFIXER | BIF_VGASCREENSPLIT | BIF_PALETTESWITCH | BIF_BLITTER;
 
-	b->RGBFormats = 1 | 2 | 512 | 1024 | 2048;
+	b->MoniSwitch = (UWORD)b->CardData[ZZ_CARD_DATA_MONITOR_SWITCH];
+	b->RGBFormats = ZZ_SUPPORTED_RGB_FORMATS;
 	b->SoftSpriteFlags = 0;
 	b->BitsPerCannon = 8;
 
@@ -560,12 +755,24 @@ int __attribute__((used)) InitCard(__REGA0(struct BoardInfo* b)) {
 	//b->SetFeatureAttrs = (void *)NULL;
 	//b->DeleteFeature = (void *)NULL;
 
+	apply_card_settings(b, tool_types);
+
 	return 1;
 }
 
 // None of these five really have to do anything.
 void SetDAC (__REGA0(struct BoardInfo *b), __REGD7(RGBFTYPE format)) { }
-void WaitBlitter (__REGA0(struct BoardInfo *b)) { }
+void WaitBlitter (__REGA0(struct BoardInfo *b)) {
+	if (!b || !b->RegisterBase)
+		return;
+
+	MNTZZ9KRegs *regs = (MNTZZ9KRegs *)b->RegisterBase;
+	// Firmware register writes dispatch the blitter synchronously; this gives
+	// P96's wait hook a register-read fence without inventing a fake busy bit.
+	volatile UWORD fence = regs->blitter_dma_op;
+	fence = regs->blitter_acc_op;
+	(void)fence;
+}
 void SetClock (__REGA0(struct BoardInfo *b)) { }
 void SetMemoryMode (__REGA0(struct BoardInfo *b), __REGD7(RGBFTYPE format)) { }
 void SetWriteMask (__REGA0(struct BoardInfo *b), __REGD0(UBYTE mask)) { }
@@ -579,80 +786,119 @@ void SetReadPlane (__REGA0(struct BoardInfo *b), __REGD0(UBYTE plane)) { }
 	#define dmy_cache
 #endif
 
-void init_modeline(MNTZZ9KRegs* registers, uint16_t w, uint16_t h, uint8_t colormode, uint8_t scalemode) {
-	uint16_t mode = 0;
-
+static BOOL modeline_id(uint16_t w, uint16_t h, uint16_t *mode) {
 	if (w == 1280 && h == 720) {
-		mode = 0;
+		*mode = 0;
 	} else if (w == 800 && h == 600) {
-		mode = 1;
+		*mode = 1;
 	} else if (w == 640 && h == 480) {
-		mode = 2;
+		*mode = 2;
 	} else if (w == 640 && h == 400) {
-		mode = 16;
+		*mode = 16;
 	} else if (w == 1024 && h == 768) {
-		mode = 3;
+		*mode = 3;
 	} else if (w == 1280 && h == 1024) {
-		mode = 4;
+		*mode = 4;
 	} else if (w == 1920 && h == 1080) {
-		mode = 5;
+		*mode = 5;
 	} else if (w == 720 && h == 576) {
-		mode = 6;
+		*mode = 6;
 	} else if (w == 720 && h == 480) {
-		mode = 8;
+		*mode = 8;
 	} else if (w == 640 && h == 512) {
-		mode = 9;
+		*mode = 9;
 	} else if (w == 1600 && h == 1200) {
-		mode = 10;
+		*mode = 10;
 	} else if (w == 2560 && h == 1440) {
-		mode = 11;
+		*mode = 11;
 	} else if (w == 1920 && h == 800) {
-		mode = 17;
+		*mode = 17;
+	} else {
+		return FALSE;
 	}
 
+	return TRUE;
+}
+
+static BOOL adjusted_mode_dimensions(struct ModeInfo *mode_info, uint16_t *w, uint16_t *h, uint16_t *scale) {
+	uint16_t mode;
+
+	if (!mode_info || mode_info->Width < 320 || mode_info->Height < 200)
+		return FALSE;
+
+	if (mode_info->Height >= 480 || mode_info->Width >= 640) {
+		*scale = 0;
+		*w = mode_info->Width;
+		*h = mode_info->Height;
+	} else {
+		// small doublescan modes are scaled 2x
+		// and output as 640x480 wrapped in 800x600 sync
+		*scale = 3;
+		*w = 2 * mode_info->Width;
+		*h = 2 * mode_info->Height;
+	}
+
+	return modeline_id(*w, *h, &mode);
+}
+
+static BOOL init_modeline(MNTZZ9KRegs* registers, uint16_t w, uint16_t h, uint8_t colormode, uint8_t scalemode) {
+	uint16_t mode;
+
+	if (!modeline_id(w, h, &mode))
+		return FALSE;
+
 	zzwrite16(&registers->mode, mode|(colormode<<8)|(scalemode<<12));
+	return TRUE;
+}
+
+static inline void sanitize_mode_flags(struct ModeInfo *mode_info) {
+	mode_info->Flags &= (UBYTE)~(GMF_INTERLACE | GMF_DOUBLECLOCK);
 }
 
 void SetGC(__REGA0(struct BoardInfo *b), __REGA1(struct ModeInfo *mode_info), __REGD0(BOOL border)) {
-	MNTZZ9KRegs* registers = (MNTZZ9KRegs *)b->RegisterBase;
 	uint16_t scale = 0;
 	uint16_t w;
 	uint16_t h;
 	uint16_t colormode;
 
+	if (!b || !mode_info)
+		return;
+
+	MNTZZ9KRegs* registers = (MNTZZ9KRegs *)b->RegisterBase;
+
 	b->ModeInfo = mode_info;
 	b->Border = border;
+	sanitize_mode_flags(mode_info);
 
 	if (mode_info->Width < 320 || mode_info->Height < 200)
 		return;
 
 	colormode = mnt_colormode(b->RGBFormat);
+	if (colormode == MNTVA_COLOR_NO_USE)
+		return;
 
-	if (mode_info->Height >= 480 || mode_info->Width >= 640) {
-		scale = 0;
+	if (!adjusted_mode_dimensions(mode_info, &w, &h, &scale))
+		return;
 
-		w = mode_info->Width;
-		h = mode_info->Height;
-	} else {
-		// small doublescan modes are scaled 2x
-		// and output as 640x480 wrapped in 800x600 sync
-		scale = 3;
-
-		w = 2 * mode_info->Width;
-		h = 2 * mode_info->Height;
+	if (!init_modeline(registers, w, h, colormode, scale)) {
+		KPrintF("ZZ9000.card: unsupported mode %ldx%ld.\n", (LONG)w, (LONG)h);
 	}
-
-	init_modeline(registers, w, h, colormode, scale);
 }
 
-int setswitch = -1;
 UWORD SetSwitch(__REGA0(struct BoardInfo *b), __REGD0(UWORD enabled)) {
+	UWORD old = b ? (UWORD)b->CardData[ZZ_CARD_DATA_MONITOR_SWITCH] : 1;
+
+	if (!b || !b->RegisterBase)
+		return old;
+
+	b->CardData[ZZ_CARD_DATA_MONITOR_SWITCH] = enabled ? 1 : 0;
+	b->MoniSwitch = (UWORD)b->CardData[ZZ_CARD_DATA_MONITOR_SWITCH];
 	MNTZZ9KRegs* registers = (MNTZZ9KRegs *)b->RegisterBase;
 
 	if (enabled == 0) {
 		// capture 24 bit amiga video to 0xe00000
 
-		if (scandoubler_800x600) {
+		if (b->CardData[ZZ_CARD_DATA_SCANDBL_800X600]) {
 			// slightly adjusted centering
 			zzwrite16(&registers->pan_ptr_hi, 0x00df);
 			zzwrite16(&registers->pan_ptr_lo, 0xf2f8);
@@ -668,15 +914,17 @@ UWORD SetSwitch(__REGA0(struct BoardInfo *b), __REGD0(UWORD enabled)) {
 		// rtg mode
 		*(volatile uint16_t*)((uint32_t)registers + 0x1006) = 0; // capture mode
 
-		SetGC(b, b->ModeInfo, b->Border);
+		if (b->ModeInfo)
+			SetGC(b, b->ModeInfo, b->Border);
 	}
 
-	return 1 - enabled;
+	return old;
 }
 
-void SetPanning(__REGA0(struct BoardInfo *b), __REGA1(UBYTE *addr), __REGD0(UWORD width), __REGD1(WORD x_offset), __REGD2(WORD y_offset), __REGD7(RGBFTYPE format)) {
+void SetPanning(__REGA0(struct BoardInfo *b), __REGA1(UBYTE *addr), __REGD0(UWORD width), __REGD1(WORD x_offset), __REGD2(WORD y_offset), __REGD4(UWORD height), __REGD7(RGBFTYPE format)) {
 	b->XOffset = x_offset;
 	b->YOffset = y_offset;
+	MNTZZ9KRegs* registers = (MNTZZ9KRegs *)b->RegisterBase;
 
 	if (b->CardFlags & CARDFLAG_ZORRO_3) {
 		dmy_cache
@@ -688,7 +936,6 @@ void SetPanning(__REGA0(struct BoardInfo *b), __REGA1(UBYTE *addr), __REGD0(UWOR
 		gfxdata->u8_user[GFXDATA_U8_COLORMODE] = (uint8)panning_colormode(mnt_colormode(format & 0xFF));
 		zzwrite16(&registers->blitter_dma_op, OP_PAN);
 	} else {
-		MNTZZ9KRegs* registers = (MNTZZ9KRegs *)b->RegisterBase;
 		uint32_t offset = ((uint32_t)addr - (uint32_t)b->MemoryBase);
 
 		writeBlitterX1(registers, x_offset);
@@ -708,10 +955,10 @@ void SetColorArray(__REGA0(struct BoardInfo *b), __REGD0(UWORD start), __REGD1(U
 	UWORD count = (num > 256) ? 256 : num;
 
 	if (start >= 256) {
-		if (!secondary_palette_enabled) {
+		if (!b->CardData[ZZ_CARD_DATA_SECONDARY_PALETTE]) {
 			zzwrite16(&registers->blitter_user1, CARD_FEATURE_SECONDARY_PALETTE);
 			zzwrite16(&registers->set_feature_status, 1);
-			secondary_palette_enabled = 1;
+			b->CardData[ZZ_CARD_DATA_SECONDARY_PALETTE] = 1;
 		}
 	}
 
@@ -765,26 +1012,50 @@ uint16_t pitch_to_shift(uint16_t p) {
 	return 0;
 }
 
-UWORD CalculateBytesPerRow(__REGA0(struct BoardInfo *b), __REGD0(UWORD width), __REGD7(RGBFTYPE format)) {
+UWORD CalculateBytesPerRow(__REGA0(struct BoardInfo *b), __REGA1(struct ModeInfo *mode_info), __REGD0(UWORD width), __REGD1(UWORD height), __REGD7(RGBFTYPE format)) {
 	if (!b)
+		return 0;
+	if (!supported_rgb_format(format))
 		return 0;
 
 	return calc_pitch_bytes(width, mnt_colormode(format));
 }
 
-APTR CalculateMemory(__REGA0(struct BoardInfo *b), __REGA1(unsigned long addr), __REGD7(RGBFTYPE format)) {
-	return (APTR)addr;
+APTR CalculateMemory(__REGA0(struct BoardInfo *b), __REGA1(APTR addr), __REGD0(struct RenderInfo *r), __REGD7(RGBFTYPE format)) {
+	if (!b || !supported_rgb_format(format))
+		return NULL;
+
+	return addr;
 }
 
 ULONG GetCompatibleFormats(__REGA0(struct BoardInfo *b), __REGD7(RGBFTYPE format)) {
-	return 0xFFFFFFFF;
+	if (!supported_rgb_format(format))
+		return 0;
+
+	return b ? b->RGBFormats : ZZ_SUPPORTED_RGB_FORMATS;
 }
 
 UWORD SetDisplay(__REGA0(struct BoardInfo *b), __REGD0(UWORD enabled)) {
-	return 1;
+	UWORD old = b ? (UWORD)b->CardData[ZZ_CARD_DATA_DISPLAY_ENABLED] : 1;
+
+	if (b)
+		b->CardData[ZZ_CARD_DATA_DISPLAY_ENABLED] = enabled ? 1 : 0;
+	// No firmware display-blanking register is exposed; keep sync and report
+	// the previous logical state as required by the P96 callback contract.
+	return old;
 }
 
 LONG ResolvePixelClock(__REGA0(struct BoardInfo *b), __REGA1(struct ModeInfo *mode_info), __REGD0(ULONG pixel_clock), __REGD7(RGBFTYPE format)) {
+	uint16_t w;
+	uint16_t h;
+	uint16_t scale;
+
+	if (!mode_info || !supported_rgb_format(format))
+		return -1;
+	sanitize_mode_flags(mode_info);
+	if (!adjusted_mode_dimensions(mode_info, &w, &h, &scale))
+		return -1;
+
 	mode_info->PixelClock = CLOCK_HZ;
 	mode_info->pll1.Clock = 0;
 	mode_info->pll2.ClockDivide = 1;
@@ -793,25 +1064,43 @@ LONG ResolvePixelClock(__REGA0(struct BoardInfo *b), __REGA1(struct ModeInfo *mo
 }
 
 ULONG GetPixelClock(__REGA0(struct BoardInfo *b), __REGA1(struct ModeInfo *mode_info), __REGD0(ULONG index), __REGD7(RGBFTYPE format)) {
+	uint16_t w;
+	uint16_t h;
+	uint16_t scale;
+
+	if (index != 0 || !mode_info || !supported_rgb_format(format))
+		return 0;
+	if (!adjusted_mode_dimensions(mode_info, &w, &h, &scale))
+		return 0;
+
 	return CLOCK_HZ;
 }
 
-void WaitVerticalSync(__REGA0(struct BoardInfo *b), __REGD0(BOOL toggle)) {
-	uint32_t vblank_state = ((volatile uint16_t*)b->RegisterBase)[0x800];
+#define VBLANK_WAIT_LIMIT 200000UL
 
-	while(vblank_state != 0) {
-		vblank_state = ((volatile uint16_t*)b->RegisterBase)[0x800];
-	}
+static inline BOOL vblank_state(struct BoardInfo *b) {
+	MNTZZ9KRegs *regs = (MNTZZ9KRegs *)b->RegisterBase;
+	return regs->vblank_status != 0;
+}
 
-	while(vblank_state == 0) {
-		vblank_state = ((volatile uint16_t*)b->RegisterBase)[0x800];
+void WaitVerticalSync(__REGA0(struct BoardInfo *b), __REGD0(BOOL end)) {
+	ULONG guard = VBLANK_WAIT_LIMIT;
+
+	if (!b || !b->RegisterBase)
+		return;
+
+	if (end) {
+		while (vblank_state(b) && --guard) { }
+	} else {
+		while (!vblank_state(b) && --guard) { }
 	}
 }
 
-BOOL GetVSyncState(__REGA0(struct BoardInfo *b), __REGD0(BOOL toggle)) {
-	uint32_t vblank_state = ((uint16_t*)b->RegisterBase)[0x800];
+BOOL GetVSyncState(__REGA0(struct BoardInfo *b), __REGD0(BOOL expected)) {
+	if (!b || !b->RegisterBase)
+		return expected;
 
-	return vblank_state;
+	return vblank_state(b);
 }
 
 
@@ -819,6 +1108,8 @@ static inline void fill_rect_accel(struct BoardInfo *b, struct RenderInfo *r,
 	WORD x, WORD y, WORD w, WORD h, ULONG color, UBYTE mask,
 	RGBFTYPE format, uint16_t colormode)
 {
+	MNTZZ9KRegs* registers = (MNTZZ9KRegs *)b->RegisterBase;
+
 	if (b->CardFlags & CARDFLAG_ZORRO_3) {
 		dmy_cache
 		gfxdata->offset[GFXDATA_DST] = ((uint32_t)r->Memory - (uint32_t)b->MemoryBase);
@@ -840,7 +1131,6 @@ static inline void fill_rect_accel(struct BoardInfo *b, struct RenderInfo *r,
 			b->FillRectDefault(b, r, x, y, w, h, color, mask, format);
 			return;
 		}
-		MNTZZ9KRegs* registers = (MNTZZ9KRegs *)b->RegisterBase;
 		uint32_t offset = ((uint32_t)r->Memory - (uint32_t)b->MemoryBase);
 
 		writeBlitterDstOffset(registers, offset);
@@ -856,10 +1146,15 @@ static inline void fill_rect_accel(struct BoardInfo *b, struct RenderInfo *r,
 }
 
 void FillRect(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REGD0(WORD x), __REGD1(WORD y), __REGD2(WORD w), __REGD3(WORD h), __REGD4(ULONG color), __REGD5(UBYTE mask), __REGD7(RGBFTYPE format)) {
-	if (!r) return;
+	if (!b || !r) return;
 	if (w<1 || h<1) return;
 
-	uint16_t colormode = mnt_colormode(r->RGBFormat);
+	uint16_t colormode = mnt_colormode(format);
+	if (colormode == MNTVA_COLOR_NO_USE) {
+		if (b->FillRectDefault)
+			b->FillRectDefault(b, r, x, y, w, h, color, mask, format);
+		return;
+	}
 	mask = direct_color_mask(colormode, mask);
 
 	fill_rect_accel(b, r, x, y, w, h, color, mask, format, colormode);
@@ -869,7 +1164,14 @@ void InvertRect(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __R
 	if (!b || !r)
 		return;
 
-	uint16_t colormode = mnt_colormode(r->RGBFormat);
+	uint16_t colormode = mnt_colormode(format);
+	if (colormode == MNTVA_COLOR_NO_USE) {
+		if (b->InvertRectDefault)
+			b->InvertRectDefault(b, r, x, y, w, h, mask, format);
+		return;
+	}
+	mask = direct_color_mask(colormode, mask);
+	MNTZZ9KRegs* registers = (MNTZZ9KRegs *)b->RegisterBase;
 
 	if (b->CardFlags & CARDFLAG_ZORRO_3) {
 		dmy_cache
@@ -891,7 +1193,6 @@ void InvertRect(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __R
 			b->InvertRectDefault(b, r, x, y, w, h, mask, format);
 			return;
 		}
-		MNTZZ9KRegs* registers = (MNTZZ9KRegs *)b->RegisterBase;
 		uint32_t offset = ((uint32_t)r->Memory - (uint32_t)b->MemoryBase);
 
 		writeBlitterDstOffset(registers, offset);
@@ -910,9 +1211,15 @@ void InvertRect(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __R
 // This function shall copy a rectangular image region in the video RAM.
 void BlitRect(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REGD0(WORD x), __REGD1(WORD y), __REGD2(WORD dx), __REGD3(WORD dy), __REGD4(WORD w), __REGD5(WORD h), __REGD6(UBYTE mask), __REGD7(RGBFTYPE format)) {
 	if (w<1 || h<1) return;
-	if (!r) return;
+	if (!b || !r) return;
 
 	uint16_t colormode = mnt_colormode(format);
+	if (colormode == MNTVA_COLOR_NO_USE) {
+		if (b->BlitRectDefault)
+			b->BlitRectDefault(b, r, x, y, dx, dy, w, h, mask, format);
+		return;
+	}
+	MNTZZ9KRegs* registers = (MNTZZ9KRegs *)b->RegisterBase;
 
 	if (b->CardFlags & CARDFLAG_ZORRO_3) {
 		dmy_cache
@@ -943,8 +1250,6 @@ void BlitRect(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 		// Source and destination rectangle may be overlapping, a proper copy operation shall be performed in either case.
 		zzwrite16(&registers->blitter_dma_op, OP_COPYRECT);
 	} else {
-		MNTZZ9KRegs* registers = (MNTZZ9KRegs *)b->RegisterBase;
-
 		writeBlitterY1(registers, dy);
 		writeBlitterY2(registers, h);
 		writeBlitterY3(registers, y);
@@ -967,9 +1272,15 @@ void BlitRect(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 // This function shall copy one rectangle in video RAM to another rectangle in video RAM using a mode given in d6. A mask is not applied.
 void BlitRectNoMaskComplete(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *rs), __REGA2(struct RenderInfo *rt), __REGD0(WORD x), __REGD1(WORD y), __REGD2(WORD dx), __REGD3(WORD dy), __REGD4(WORD w), __REGD5(WORD h), __REGD6(UBYTE minterm), __REGD7(RGBFTYPE format)) {
 	if (w<1 || h<1) return;
-	if (!rs || !rt) return;
+	if (!b || !rs || !rt) return;
 
 	uint16_t colormode = mnt_colormode(format);
+	if (colormode == MNTVA_COLOR_NO_USE) {
+		if (b->BlitRectNoMaskCompleteDefault)
+			b->BlitRectNoMaskCompleteDefault(b, rs, rt, x, y, dx, dy, w, h, minterm, format);
+		return;
+	}
+	MNTZZ9KRegs* registers = (MNTZZ9KRegs *)b->RegisterBase;
 
 	// b->BlitRectNoMaskCompleteDefault(b, rs, rt, x, y, dx, dy, w, h, minterm, format);
 	// return;
@@ -1001,8 +1312,6 @@ void BlitRectNoMaskComplete(__REGA0(struct BoardInfo *b), __REGA1(struct RenderI
 
 		zzwrite16(&registers->blitter_dma_op, OP_COPYRECT_NOMASK);
 	} else {
-		MNTZZ9KRegs* registers = (MNTZZ9KRegs *)b->RegisterBase;
-
 		writeBlitterY1(registers, dy);
 		writeBlitterY2(registers, h);
 		writeBlitterY3(registers, y);
@@ -1026,15 +1335,20 @@ void BlitRectNoMaskComplete(__REGA0(struct BoardInfo *b), __REGA1(struct RenderI
 }
 
 void BlitTemplate(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REGA2(struct Template *t), __REGD0(WORD x), __REGD1(WORD y), __REGD2(WORD w), __REGD3(WORD h), __REGD4(UBYTE mask), __REGD7(RGBFTYPE format)) {
-	if (!r) return;
+	if (!b || !r) return;
 	if (w<1 || h<1) return;
 	if (!t) return;
 
-	uint16_t colormode = mnt_colormode(r->RGBFormat);
+	uint16_t colormode = mnt_colormode(format);
+	if (colormode == MNTVA_COLOR_NO_USE) {
+		if (b->BlitTemplateDefault)
+			b->BlitTemplateDefault(b, r, t, x, y, w, h, mask, format);
+		return;
+	}
 	mask = direct_color_mask(colormode, mask);
+	MNTZZ9KRegs* registers = (MNTZZ9KRegs *)b->RegisterBase;
 
 	if (!(b->CardFlags & CARDFLAG_ZORRO_3)) {
-		MNTZZ9KRegs* registers = (MNTZZ9KRegs *)b->RegisterBase;
 		uint32_t offset = ((uint32_t)r->Memory - (uint32_t)b->MemoryBase);
 		writeBlitterDstOffset(registers, offset);
 	}
@@ -1087,15 +1401,20 @@ void BlitTemplate(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), _
 }
 
 void BlitPattern(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REGA2(struct Pattern *pat), __REGD0(WORD x), __REGD1(WORD y), __REGD2(WORD w), __REGD3(WORD h), __REGD4(UBYTE mask), __REGD7(RGBFTYPE format)) {
-	if (!r) return;
+	if (!b || !r) return;
 	if (w<1 || h<1) return;
 	if (!pat) return;
 
-	uint16_t colormode = mnt_colormode(r->RGBFormat);
+	uint16_t colormode = mnt_colormode(format);
+	if (colormode == MNTVA_COLOR_NO_USE) {
+		if (b->BlitPatternDefault)
+			b->BlitPatternDefault(b, r, pat, x, y, w, h, mask, format);
+		return;
+	}
 	mask = direct_color_mask(colormode, mask);
+	MNTZZ9KRegs* registers = (MNTZZ9KRegs *)b->RegisterBase;
 
 	if (!(b->CardFlags & CARDFLAG_ZORRO_3)) {
-		MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
 		uint32_t offset = ((uint32_t)r->Memory - (uint32_t)b->MemoryBase);
 		writeBlitterDstOffset(registers, offset);
 	}
@@ -1150,11 +1469,17 @@ void BlitPattern(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __
 }
 
 void DrawLine(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REGA2(struct Line *l), __REGD0(UBYTE mask), __REGD7(RGBFTYPE format)) {
-	if (!l || !r)
+	if (!b || !l || !r)
 		return;
 
-	uint16_t colormode = mnt_colormode(r->RGBFormat);
+	uint16_t colormode = mnt_colormode(format);
+	if (colormode == MNTVA_COLOR_NO_USE) {
+		if (b->DrawLineDefault)
+			b->DrawLineDefault(b, r, l, mask, format);
+		return;
+	}
 	mask = direct_color_mask(colormode, mask);
+	MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
 
 	if (l->DrawMode == 0 && l->LinePtrn == 0xFFFF && mask == 0xFF && l->dY == 0) {
 		UWORD len = line_length(l);
@@ -1195,7 +1520,6 @@ void DrawLine(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 
 		zzwrite16(&registers->blitter_dma_op, OP_DRAWLINE);
 	} else {
-		MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
 		uint32_t offset = ((uint32_t)r->Memory - (uint32_t)b->MemoryBase);
 
 		writeBlitterDstOffset(registers, offset);
@@ -1223,6 +1547,7 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 	if (!(b->CardFlags & CARDFLAG_ZORRO_3))
 		return NULL;
 
+	MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
 	ULONG rgbformat = RGBFB_CLUT;
 	ULONG bytesperrow_override = 0;
 
@@ -1241,7 +1566,7 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 	}
 
 	uint16_t bytesperrow = bytesperrow_override ? bytesperrow_override :
-		CalculateBytesPerRow(b, width, rgbformat);
+		CalculateBytesPerRow(b, NULL, width, height, rgbformat);
 	uint32_t size = (uint32_t)bytesperrow * height;
 	if (!size) return NULL;
 
@@ -1273,6 +1598,7 @@ BOOL ZZ_FreeBitMap(__REGA0(struct BoardInfo *b), __REGA1(struct BitMap *bm), __R
 	if (!bm) return FALSE;
 
 	if (b->CardFlags & CARDFLAG_ZORRO_3) {
+		MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
 		uint32_t card_offset = (uint32_t)bm->Planes[0] - (uint32_t)b->MemoryBase;
 		dmy_cache
 		gfxdata->offset[0] = card_offset;
@@ -1478,13 +1804,28 @@ void BlitPlanar2Direct(__REGA0(struct BoardInfo *b), __REGA1(struct BitMap *bm),
 	}
 }
 
-void SetSprite(__REGA0(struct BoardInfo *b), __REGD0(BOOL what), __REGD7(RGBFTYPE format)) {
+BOOL SetSprite(__REGA0(struct BoardInfo *b), __REGD0(BOOL what), __REGD7(RGBFTYPE format)) {
+	if (!b || !b->RegisterBase)
+		return FALSE;
+
 	MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
+
+	/*
+	 * Keep the legacy ZZ9000 behavior here: the existing firmware/driver
+	 * path expects SetSprite() to assert hardware-sprite visibility even
+	 * when P96 passes FALSE during setup or screen transitions.
+	 */
 	zzwrite16(&registers->sprite_bitmap, 1);
+	return TRUE;
 }
 
 void SetSpritePosition(__REGA0(struct BoardInfo *b), __REGD0(WORD x), __REGD1(WORD y), __REGD7(RGBFTYPE format)) {
-	// see http://wiki.icomp.de/wiki/P96_Driver_Development#SetSpritePosition
+	if (!b || !b->RegisterBase)
+		return;
+
+	MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
+	// The firmware stores b->XOffset/YOffset through SetPanning/SetSpriteImage
+	// and applies the P96 sprite offset adjustment when positioning the sprite.
 	b->MouseX = x;
 	b->MouseY = y;
 
@@ -1495,8 +1836,6 @@ void SetSpritePosition(__REGA0(struct BoardInfo *b), __REGD0(WORD x), __REGD1(WO
 
 		zzwrite16(&registers->blitter_dma_op, OP_SPRITE_XY);
 	} else {
-		MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
-
 		writeBlitterX1(registers, x);
 		writeBlitterY1(registers, y + b->YSplit);
 		zzwrite16(&registers->sprite_y, 1);
@@ -1504,6 +1843,7 @@ void SetSpritePosition(__REGA0(struct BoardInfo *b), __REGD0(WORD x), __REGD1(WO
 }
 
 void SetSpriteImage(__REGA0(struct BoardInfo *b), __REGD7(RGBFTYPE format)) {
+	MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
 	uint32_t zz_template_addr = Z3_TEMPLATE_ADDR;
 	if (!(b->CardFlags & CARDFLAG_ZORRO_3)) {
 		zz_template_addr = b->MemorySize;
@@ -1530,7 +1870,6 @@ void SetSpriteImage(__REGA0(struct BoardInfo *b), __REGD7(RGBFTYPE format)) {
 
 		zzwrite16(&registers->blitter_dma_op, OP_SPRITE_BITMAP);
 	} else {
-		MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
 		writeBlitterSrcOffset(registers, zz_template_addr);
 
 		writeBlitterX1(registers, b->XOffset);
@@ -1543,6 +1882,8 @@ void SetSpriteImage(__REGA0(struct BoardInfo *b), __REGD7(RGBFTYPE format)) {
 }
 
 void SetSpriteColor(__REGA0(struct BoardInfo *b), __REGD0(UBYTE idx), __REGD1(UBYTE R), __REGD2(UBYTE G), __REGD3(UBYTE B), __REGD7(RGBFTYPE format)) {
+	MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
+
 	if (b->CardFlags & CARDFLAG_ZORRO_3) {
 		dmy_cache
 		((char *)&gfxdata->rgb[0])[0] = B;
@@ -1553,8 +1894,6 @@ void SetSpriteColor(__REGA0(struct BoardInfo *b), __REGD0(UBYTE idx), __REGD1(UB
 
 		zzwrite16(&registers->blitter_dma_op, OP_SPRITE_COLOR);
 	} else {
-		MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
-
 		zzwrite16(&registers->blitter_user1, R);
 		zzwrite16(&registers->blitter_user2, B | (G << 8));
 		zzwrite16(&registers->sprite_colors, idx + 1);
@@ -1562,16 +1901,31 @@ void SetSpriteColor(__REGA0(struct BoardInfo *b), __REGD0(UBYTE idx), __REGD1(UB
 }
 
 void SetSplitPosition(__REGA0(struct BoardInfo *b),__REGD0(SHORT pos)) {
-	b->YSplit = pos;
+	if (!b)
+		return;
 
-	uint32_t offset = ((uint32_t)b->VisibleBitMap->Planes[0]) - ((uint32_t)b->MemoryBase);
+	b->YSplit = pos;
+	if (!b->RegisterBase)
+		return;
+
+	MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
+	uint32_t offset = 0;
+
+	if (pos != 0) {
+		if (!b->VisibleBitMap || !b->VisibleBitMap->Planes[0]) {
+			pos = 0;
+			b->YSplit = 0;
+		} else {
+			offset = ((uint32_t)b->VisibleBitMap->Planes[0]) - ((uint32_t)b->MemoryBase);
+		}
+	}
+
 	if (b->CardFlags & CARDFLAG_ZORRO_3) {
+		dmy_cache
 		gfxdata->offset[0] = offset;
 		gfxdata->y[0] = pos;
 		zzwrite16(&registers->blitter_dma_op, OP_SET_SPLIT_POS);
 	} else {
-		MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
-
 		writeBlitterSrcOffset(registers, offset);
 		zzwrite16(&registers->blitter_set_split_pos, pos);
 	}

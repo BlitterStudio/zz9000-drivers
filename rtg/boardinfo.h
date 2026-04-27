@@ -427,9 +427,9 @@ struct BoardInfo{
 
         void ASM                                        (*SetDAC)(__REGA0(struct BoardInfo *), __REGD7(RGBFTYPE));
         void ASM                                        (*SetGC)(__REGA0(struct BoardInfo *), __REGA1(struct ModeInfo *), __REGD0(BOOL));
-        void ASM                                        (*SetPanning)(__REGA0(struct BoardInfo *), __REGA1(UBYTE *), __REGD0(UWORD), __REGD1(WORD), __REGD2(WORD), __REGD7(RGBFTYPE));
-        UWORD ASM                                       (*CalculateBytesPerRow)(__REGA0(struct BoardInfo *), __REGD0(UWORD), __REGD7(RGBFTYPE));
-        APTR ASM                                        (*CalculateMemory)(__REGA0(struct BoardInfo *), __REGA1(APTR), __REGD7(RGBFTYPE));
+        void ASM                                        (*SetPanning)(__REGA0(struct BoardInfo *), __REGA1(UBYTE *), __REGD0(UWORD), __REGD1(WORD), __REGD2(WORD), __REGD4(UWORD), __REGD7(RGBFTYPE));
+        UWORD ASM                                       (*CalculateBytesPerRow)(__REGA0(struct BoardInfo *), __REGA1(struct ModeInfo *), __REGD0(UWORD), __REGD1(UWORD), __REGD7(RGBFTYPE));
+        APTR ASM                                        (*CalculateMemory)(__REGA0(struct BoardInfo *), __REGA1(APTR), __REGD0(struct RenderInfo *), __REGD7(RGBFTYPE));
         ULONG ASM                                       (*GetCompatibleFormats)(__REGA0(struct BoardInfo *), __REGD7(RGBFTYPE));
         BOOL ASM                                        (*SetDisplay)(__REGA0(struct BoardInfo *), __REGD0(BOOL));
 
