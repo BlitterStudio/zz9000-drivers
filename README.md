@@ -118,11 +118,23 @@ The easiest path is the Commodore Installer bundled in `installer/` (or
 inside the release zip) — it handles file placement, icons, and the
 Picasso96 entries for you. That's the recommended route for end users.
 
+`ZZ9000.card` 2.4 and newer identifies the board as the native
+`BT_MNT_ZZ9000` P96 board type. When upgrading the RTG driver manually,
+also install the matching `Picasso96Settings` from
+`installer/ZZ9000Installer/Devs/Picasso96Settings`; older settings files
+that were saved with the legacy `uaegfx` board type may not attach their
+screenmodes to the new driver identity.
+
+The installer backs up an existing `Devs:Picasso96Settings` to
+`Devs:Picasso96Settings.pre-ZZ9000-2.4` before installing the migrated
+settings file.
+
 For manual installs or component-by-component replacement:
 
 | Artifact                          | Destination             |
 |-----------------------------------|-------------------------|
 | `rtg/ZZ9000.card`                 | `Libs:Picasso96/`       |
+| `installer/ZZ9000Installer/Devs/Picasso96Settings` | `Devs:` |
 | `net/ZZ9000Net.device`            | `Devs:Networks/`        |
 | `ahi/driver/zz9000ax.audio`       | `Devs:AHI/`             |
 | `mhi/mhizz9000.library`           | `Libs:MHI/`             |

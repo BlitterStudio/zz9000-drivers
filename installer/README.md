@@ -49,6 +49,15 @@ This means a fresh `git clone` will **not** produce a runnable
 Installer drawer on its own — CI must have populated it, or you must
 copy the binaries in by hand.
 
+`ZZ9000.card` 2.4 and newer uses the native `BT_MNT_ZZ9000` Picasso96
+board type. Upgrade tests should copy the committed
+`ZZ9000Installer/Devs/Picasso96Settings` file along with the new RTG
+driver; old settings saved under the legacy `uaegfx` board type are not
+guaranteed to attach to the new driver identity.
+The installer backs up the previous settings file as
+`Devs:Picasso96Settings.pre-ZZ9000-2.4` before installing the migrated
+settings file.
+
 ## Trying the installer locally
 
 If you want to test the installer with your own local builds (rather
@@ -73,6 +82,10 @@ install -Dm644 usb-poseidon/README.md          "$INST/Docs/usb-poseidon-README.m
 
 Then copy the `installer/` tree onto your Amiga and double-click
 `Install ZZ9000`.
+
+For a direct RTG-only test, copy `rtg/ZZ9000.card` to
+`Libs:Picasso96/` and copy
+`installer/ZZ9000Installer/Devs/Picasso96Settings` to `Devs:`.
 
 ## Release bundle layout
 
