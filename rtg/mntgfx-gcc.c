@@ -571,7 +571,7 @@ ULONG ExtFuncLib(void)
 
 #define LOADLIB(a, b) if ((a = (struct a*)OpenLibrary((STRPTR)b,0L))==NULL) { \
 		KPrintF((STRPTR)"ZZ9000.card: Failed to load %s.\n", b); \
-		return 0; \
+		goto cleanup; \
 	} \
 
 
@@ -585,6 +585,7 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 	LONG fwrev_major = 0;
 	LONG fwrev_minor = 0;
 	LONG fwrev = 0;
+	int result = 0;
 #ifdef DEBUG
 	LONG hwrev = 0;
 #endif
@@ -641,7 +642,7 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 			(fwrev_major == REQUIRED_FW_VERSION_MAJOR && fwrev_minor < REQUIRED_FW_VERSION_MINOR)) {
 			char *alert = "\x00\x14\x14ZZ9000.card 2.0 needs at least firmware (BOOT.bin) 2.0.\x00\x00";
 			DisplayAlert(RECOVERY_ALERT, (APTR)alert, 52);
-			return 0;
+			goto cleanup;
 		}
 
 		MNTZZ9KRegs* registers = (MNTZZ9KRegs *)b->RegisterBase;
@@ -657,11 +658,18 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 		cd->cd_Flags &= ~CDF_CONFIGME;
 		reserved_cd = cd;
 
-		return 1;
+		result = 1;
+		goto cleanup;
 	} else {
 		KPrintF("ZZ9000.card: MNT ZZ9000 not found!\n");
-		return 0;
 	}
+
+cleanup:
+	if (IntuitionBase) CloseLibrary((struct Library *)IntuitionBase);
+	if (DOSBase) CloseLibrary((struct Library *)DOSBase);
+	if (ExpansionBase) CloseLibrary((struct Library *)ExpansionBase);
+
+	return result;
 }
 
 #define gfxdata zz_gfxdata(b)
@@ -676,7 +684,7 @@ int __attribute__((used)) InitCard(__REGA0(struct BoardInfo* b), __REGA1(char **
 	b->PaletteChipType = PCT_MNT_ZZ9000;
 	b->GraphicsControllerType = GCT_MNT_ZZ9000;
 
-	b->Flags |= BIF_GRANTDIRECTACCESS | BIF_HARDWARESPRITE | BIF_FLICKERFIXER | BIF_VGASCREENSPLIT | BIF_PALETTESWITCH | BIF_BLITTER;
+	b->Flags |= BIF_GRANTDIRECTACCESS | BIF_HARDWARESPRITE | BIF_FLICKERFIXER | BIF_VGASCREENSPLIT | BIF_PALETTESWITCH | BIF_BLITTER | BIF_CACHEMODECHANGE | BIF_VIDEOCAPTURE;
 
 	b->MoniSwitch = (UWORD)b->CardData[ZZ_CARD_DATA_MONITOR_SWITCH];
 	b->RGBFormats = ZZ_SUPPORTED_RGB_FORMATS;
@@ -922,6 +930,7 @@ UWORD SetSwitch(__REGA0(struct BoardInfo *b), __REGD0(UWORD enabled)) {
 }
 
 void SetPanning(__REGA0(struct BoardInfo *b), __REGA1(UBYTE *addr), __REGD0(UWORD width), __REGD1(WORD x_offset), __REGD2(WORD y_offset), __REGD4(UWORD height), __REGD7(RGBFTYPE format)) {
+	if (!b) return;
 	b->XOffset = x_offset;
 	b->YOffset = y_offset;
 	MNTZZ9KRegs* registers = (MNTZZ9KRegs *)b->RegisterBase;
@@ -947,7 +956,7 @@ void SetPanning(__REGA0(struct BoardInfo *b), __REGA1(UBYTE *addr), __REGD0(UWOR
 }
 
 void SetColorArray(__REGA0(struct BoardInfo *b), __REGD0(UWORD start), __REGD1(UWORD num)) {
-	if (!num)
+	if (!b || !num)
 		return;
 
 	MNTZZ9KRegs* registers = (MNTZZ9KRegs *)b->RegisterBase;
@@ -1494,6 +1503,19 @@ void DrawLine(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 		return;
 	}
 
+	if (l->DrawMode == 0 && l->LinePtrn == 0xFFFF && mask == 0xFF && l->dX == 0) {
+		UWORD len = line_length(l);
+		WORD x = l->X;
+		WORD y = l->Y;
+		WORD h = (WORD)(len + 1);
+
+		if (l->dY < 0)
+			y -= len;
+
+		fill_rect_accel(b, r, x, y, 1, h, l->FgPen, mask, format, colormode);
+		return;
+	}
+
 	if (b->CardFlags & CARDFLAG_ZORRO_3) {
 		dmy_cache
 		gfxdata->offset[GFXDATA_DST] = (uint32_t)r->Memory - (uint32_t)b->MemoryBase;
@@ -1843,6 +1865,7 @@ void SetSpritePosition(__REGA0(struct BoardInfo *b), __REGD0(WORD x), __REGD1(WO
 }
 
 void SetSpriteImage(__REGA0(struct BoardInfo *b), __REGD7(RGBFTYPE format)) {
+	if (!b) return;
 	MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
 	uint32_t zz_template_addr = Z3_TEMPLATE_ADDR;
 	if (!(b->CardFlags & CARDFLAG_ZORRO_3)) {
@@ -1882,6 +1905,7 @@ void SetSpriteImage(__REGA0(struct BoardInfo *b), __REGD7(RGBFTYPE format)) {
 }
 
 void SetSpriteColor(__REGA0(struct BoardInfo *b), __REGD0(UBYTE idx), __REGD1(UBYTE R), __REGD2(UBYTE G), __REGD3(UBYTE B), __REGD7(RGBFTYPE format)) {
+	if (!b) return;
 	MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
 
 	if (b->CardFlags & CARDFLAG_ZORRO_3) {
@@ -1950,7 +1974,7 @@ struct InitTable
 };
 
 const uint32_t auto_init_tables[4] = {
-	sizeof(struct Library),
+	sizeof(struct GFXBase),
 	(uint32_t)device_vectors,
 	0,
 	(uint32_t)InitLib,
