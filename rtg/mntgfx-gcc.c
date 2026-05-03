@@ -1113,6 +1113,72 @@ BOOL GetVSyncState(__REGA0(struct BoardInfo *b), __REGD0(BOOL expected)) {
 }
 
 
+// Direct horizontal line draw for Z2: bypasses register setup overhead.
+static inline void draw_hline_z2(uint8_t *fb, WORD x, WORD y, WORD w,
+	ULONG color, UWORD bpr, uint16_t colormode)
+{
+	uint8_t *row = fb + (UWORD)y * bpr;
+	switch (colormode) {
+	case MNTVA_COLOR_8BIT:
+		memset(row + x, (uint8_t)(color >> 24), w);
+		break;
+	case MNTVA_COLOR_16BIT565:
+	case MNTVA_COLOR_15BIT: {
+		uint16_t *p = (uint16_t *)row + x;
+		uint16_t c16 = (uint16_t)color;
+		WORD n = w;
+		while (n--) *p++ = c16;
+		break;
+	}
+	case MNTVA_COLOR_32BIT: {
+		uint32_t *p = (uint32_t *)row + x;
+		WORD n = w;
+		while (n--) *p++ = color;
+		break;
+	}
+	}
+}
+
+// Direct vertical line draw for Z2: bypasses register setup overhead.
+static inline void draw_vline_z2(uint8_t *fb, WORD x, WORD y, WORD h,
+	ULONG color, UWORD bpr, uint16_t colormode)
+{
+	switch (colormode) {
+	case MNTVA_COLOR_8BIT: {
+		uint8_t *p = fb + (UWORD)y * bpr + x;
+		uint8_t c8 = (uint8_t)(color >> 24);
+		while (h >= 4) {
+			p[0] = c8; p[bpr] = c8; p[bpr*2] = c8; p[bpr*3] = c8;
+			p += bpr * 4; h -= 4;
+		}
+		while (h--) { *p = c8; p += bpr; }
+		break;
+	}
+	case MNTVA_COLOR_16BIT565:
+	case MNTVA_COLOR_15BIT: {
+		uint16_t *p = (uint16_t *)(fb + (UWORD)y * bpr) + x;
+		uint16_t c16 = (uint16_t)color;
+		UWORD step = bpr >> 1;
+		while (h >= 4) {
+			p[0] = c16; p[step] = c16; p[step*2] = c16; p[step*3] = c16;
+			p += step * 4; h -= 4;
+		}
+		while (h--) { *p = c16; p += step; }
+		break;
+	}
+	case MNTVA_COLOR_32BIT: {
+		uint32_t *p = (uint32_t *)(fb + (UWORD)y * bpr) + x;
+		UWORD step = bpr >> 2;
+		while (h >= 4) {
+			p[0] = color; p[step] = color; p[step*2] = color; p[step*3] = color;
+			p += step * 4; h -= 4;
+		}
+		while (h--) { *p = color; p += step; }
+		break;
+	}
+	}
+}
+
 static inline void fill_rect_accel(struct BoardInfo *b, struct RenderInfo *r,
 	WORD x, WORD y, WORD w, WORD h, ULONG color, UBYTE mask,
 	RGBFTYPE format, uint16_t colormode)
@@ -1136,7 +1202,11 @@ static inline void fill_rect_accel(struct BoardInfo *b, struct RenderInfo *r,
 		zzwrite16(&registers->blitter_dma_op, OP_FILLRECT);
 	} else {
 		// Don't waste ~11 ZorroII write cycles to draw a very small rectangle.
-		if ((w*h) < 32) {
+		// Use min dimension so that thin lines (w=1 or h=1) always use the
+		// blitter when their length exceeds the threshold.
+		WORD min_dim = (w < h) ? w : h;
+		WORD max_dim = (w > h) ? w : h;
+		if (min_dim < 6 && max_dim < 32) {
 			b->FillRectDefault(b, r, x, y, w, h, color, mask, format);
 			return;
 		}
@@ -1198,7 +1268,9 @@ void InvertRect(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __R
 		zzwrite16(&registers->blitter_dma_op, OP_INVERTRECT);
 	} else {
 		// Don't waste ~9 ZorroII write cycles to invert a very small rectangle.
-		if ((w*h) < 32) {
+		WORD min_dim = (w < h) ? w : h;
+		WORD max_dim = (w > h) ? w : h;
+		if (min_dim < 6 && max_dim < 32) {
 			b->InvertRectDefault(b, r, x, y, w, h, mask, format);
 			return;
 		}
@@ -1499,6 +1571,11 @@ void DrawLine(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 		if (l->dX < 0)
 			x -= len;
 
+		if (!(b->CardFlags & CARDFLAG_ZORRO_3)) {
+			draw_hline_z2(r->Memory, x, y, w, l->FgPen,
+				r->BytesPerRow, colormode);
+			return;
+		}
 		fill_rect_accel(b, r, x, y, w, 1, l->FgPen, mask, format, colormode);
 		return;
 	}
@@ -1512,6 +1589,11 @@ void DrawLine(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 		if (l->dY < 0)
 			y -= len;
 
+		if (!(b->CardFlags & CARDFLAG_ZORRO_3)) {
+			draw_vline_z2(r->Memory, x, y, h, l->FgPen,
+				r->BytesPerRow, colormode);
+			return;
+		}
 		fill_rect_accel(b, r, x, y, 1, h, l->FgPen, mask, format, colormode);
 		return;
 	}
