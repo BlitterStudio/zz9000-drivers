@@ -119,7 +119,7 @@ char dummies[128];
 #define MNT_MANUFACTURER 0x6d6e
 #define ZZ9000_PRODUCT_Z2 0x3
 #define ZZ9000_PRODUCT_Z3 0x4
-#define ZZ_SUPPORTED_RGB_FORMATS (1UL | 2UL | 512UL | 1024UL | 2048UL)
+#define ZZ_SUPPORTED_RGB_FORMATS (1UL | 2UL | 32UL | 256UL | 512UL | 1024UL | 2048UL | 8192UL)
 
 #ifndef CDF_CONFIGME
 #define CDF_CONFIGME (1 << 1)
@@ -971,7 +971,7 @@ void SetColorArray(__REGA0(struct BoardInfo *b), __REGD0(UWORD start), __REGD1(U
 		}
 	}
 
-	if ((b->CardFlags & CARDFLAG_ZORRO_3) && count >= 16) {
+	if (b->CardFlags & CARDFLAG_ZORRO_3) {
 		dmy_cache
 		for (int i = 0; i < count; i++) {
 			int ci = (start + i) & 0xFF;
@@ -1135,8 +1135,8 @@ static inline void fill_rect_accel(struct BoardInfo *b, struct RenderInfo *r,
 
 		zzwrite16(&registers->blitter_dma_op, OP_FILLRECT);
 	} else {
-		// Don't waste ~12 ZorroII write cycles to draw a rectangle smaller than 16 pixels.
-		if((w*h) < 16) {
+		// Don't waste ~11 ZorroII write cycles to draw a very small rectangle.
+		if ((w*h) < 32) {
 			b->FillRectDefault(b, r, x, y, w, h, color, mask, format);
 			return;
 		}
@@ -1197,8 +1197,8 @@ void InvertRect(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __R
 
 		zzwrite16(&registers->blitter_dma_op, OP_INVERTRECT);
 	} else {
-		// Don't waste ~10 ZorroII write cycles to invert a rectangle smaller than 16 pixels.
-		if((w*h) < 16) {
+		// Don't waste ~9 ZorroII write cycles to invert a very small rectangle.
+		if ((w*h) < 32) {
 			b->InvertRectDefault(b, r, x, y, w, h, mask, format);
 			return;
 		}
