@@ -103,6 +103,16 @@ struct ExecBase* SysBase;
 
 static struct ZZUSBBase *PollBase;
 
+/*
+ * Saved seglist for expunge. Stored as a static rather than a struct
+ * member because struct ZZUSBBase has a frozen v2.0.0 layout — the
+ * hand-written AddTask inline asm in begin_io and the firmware-side
+ * tooling expect specific field offsets, and inserting a member
+ * shifts everything after it. Single-instance driver, so a static
+ * is functionally equivalent.
+ */
+static uint8_t *DeviceSegList;
+
 static void hotplug_poll_task(void);
 
 asm("romtag:                                \n"
@@ -365,6 +375,9 @@ static struct Library* __attribute__((used)) init_device(uint8_t *seg_list asm("
         return 0;
     }
 
+    /* Saved for expunge so the loader can release our segments. */
+    DeviceSegList = seg_list;
+
     dev->lib_Node.ln_Type = NT_DEVICE;
     dev->lib_Node.ln_Name = (char *)device_name;
     dev->lib_Version = DEVICE_VERSION;
@@ -409,9 +422,51 @@ static struct Library* __attribute__((used)) init_device(uint8_t *seg_list asm("
     return dev;
 }
 
+/*
+ * Unload helper, callable from both expunge and close. Caller must
+ * ensure lib_OpenCnt is zero before invoking. Returns 0 (and re-asserts
+ * LIBF_DELEXP) if the poll task is still alive — its Task struct and
+ * stack live inside ZZBase, so freeing the base out from under it
+ * would crash on the next wake-up. The poll task is created lazily
+ * on the first INT transfer and never torn down in current builds,
+ * so once it exists the driver effectively becomes non-unloadable;
+ * acceptable for a hardware driver normally only unloaded at reboot.
+ */
+static uint8_t *unload_device(struct Library *dev)
+{
+    struct ZZUSBBase *ZZBase = (struct ZZUSBBase *)dev;
+
+    if (ZZBase->zz_PollTask) {
+        dev->lib_Flags |= LIBF_DELEXP;
+        return 0;
+    }
+
+    uint8_t *seg = DeviceSegList;
+
+    /*
+     * Forbid() prevents another task from FindDevice'ing us between
+     * the Remove and FreeMem and dereferencing a half-freed base.
+     */
+    Forbid();
+    Remove(&dev->lib_Node);
+    FreeMem((char *)dev - dev->lib_NegSize,
+            dev->lib_NegSize + dev->lib_PosSize);
+    Permit();
+    return seg;
+}
+
 static uint8_t* __attribute__((used)) expunge(struct Library *dev asm("a6"))
 {
-    return 0;
+    /*
+     * Defer the unload if any unit is still open. Without this guard
+     * the caller would FreeMem our base while live IORequests still
+     * point at it, crashing on the next BeginIO.
+     */
+    if (dev->lib_OpenCnt) {
+        dev->lib_Flags |= LIBF_DELEXP;
+        return 0;
+    }
+    return unload_device(dev);
 }
 
 static void __attribute__((used)) open(struct Library *dev asm("a6"), struct IOUsbHWReq *ior asm("a1"),
@@ -430,8 +485,14 @@ static void __attribute__((used)) open(struct Library *dev asm("a6"), struct IOU
             io_err = 0;
             ior->iouh_Req.io_Unit = (struct Unit*)unit;
             ior->iouh_Req.io_Unit->unit_flags = UNITF_ACTIVE;
-            ior->iouh_Req.io_Unit->unit_OpenCnt = 1;
+            ior->iouh_Req.io_Unit->unit_OpenCnt++;
             dev->lib_OpenCnt++;
+            /*
+             * A pending expunge is being cancelled by this open — clear
+             * only on success, otherwise a failed open would silently
+             * lose a previous deferred-expunge request.
+             */
+            dev->lib_Flags &= ~LIBF_DELEXP;
         }
     }
 
@@ -440,7 +501,23 @@ static void __attribute__((used)) open(struct Library *dev asm("a6"), struct IOU
 
 static uint8_t* __attribute__((used)) close(struct Library *dev asm("a6"), struct IOUsbHWReq *ior asm("a1"))
 {
-    dev->lib_OpenCnt--;
+    if (ior) {
+        struct Unit *unit = ior->iouh_Req.io_Unit;
+        if (unit && unit != (struct Unit *)-1 && unit->unit_OpenCnt) {
+            unit->unit_OpenCnt--;
+        }
+        /* Sentinel values let exec catch use-after-close on this IOR. */
+        ior->iouh_Req.io_Unit = (struct Unit *)-1;
+        ior->iouh_Req.io_Device = (struct Device *)-1;
+    }
+
+    if (dev->lib_OpenCnt) {
+        dev->lib_OpenCnt--;
+    }
+
+    if (dev->lib_OpenCnt == 0 && (dev->lib_Flags & LIBF_DELEXP)) {
+        return unload_device(dev);
+    }
     return 0;
 }
 
@@ -1078,7 +1155,12 @@ static void handle_roothub_int(struct ZZUSBUnit *unit,
     }
 }
 
-static void fill_querydevice_tags(struct TagItem *tags)
+/*
+ * Returns the number of UHA_* tags actually populated. Caller writes
+ * this into iouh_Actual so NSD-aware Poseidon tools can detect tag
+ * coverage.
+ */
+static int fill_querydevice_tags(struct TagItem *tags)
 {
     /*
      * Poseidon normally sends a flat taglist, but TagItem control
@@ -1088,11 +1170,12 @@ static void fill_querydevice_tags(struct TagItem *tags)
      * unknown newer Poseidon tags untouched.
      */
     int guard = 64;
+    int count = 0;
 
     while (tags && guard-- > 0) {
         switch (tags->ti_Tag) {
         case TAG_DONE:
-            return;
+            return count;
         case TAG_IGNORE:
             tags++;
             continue;
@@ -1104,38 +1187,82 @@ static void fill_querydevice_tags(struct TagItem *tags)
             continue;
         case UHA_DriverVersion:
             tags->ti_Data = 0x0200;
+            count++;
             break;
         case UHA_Version:
             tags->ti_Data = DEVICE_VERSION;
+            count++;
             break;
         case UHA_Revision:
             tags->ti_Data = DEVICE_REVISION;
+            count++;
             break;
         case UHA_State:
             tags->ti_Data = UHSF_OPERATIONAL;
+            count++;
             break;
         case UHA_Manufacturer:
             tags->ti_Data = (ULONG)(uintptr_t)"MNT Research GmbH";
+            count++;
             break;
         case UHA_ProductName:
             tags->ti_Data = (ULONG)(uintptr_t)"ZZ9000 USB Host Controller";
+            count++;
             break;
         case UHA_Description:
             tags->ti_Data = (ULONG)(uintptr_t)
                 "Poseidon USB hardware driver for the ZZ9000 "
                 "Zorro card (Zynq ChipIdea EHCI)";
+            count++;
             break;
         case UHA_Copyright:
             tags->ti_Data = (ULONG)(uintptr_t)
                 "(C) Copyright 2026 Dimitris Panokostas. "
                 "Licensed under GNU GPL v3 or later.";
+            count++;
             break;
         default:
             break;
         }
         tags++;
     }
+    return count;
 }
+
+/*
+ * NSD (NewStyleDevice) capability table. Listed in the order Poseidon
+ * tends to query. UHCMD_ISOXFER is intentionally absent — we return
+ * UHIOERR_BADPARAMS for it, so advertising support would be a lie.
+ */
+#ifndef NSCMD_DEVICEQUERY
+#define NSCMD_DEVICEQUERY 0x4000
+#endif
+#ifndef NSDEVTYPE_USBHARDWARE
+#define NSDEVTYPE_USBHARDWARE 14
+#endif
+
+static const UWORD NSDSupportedCommands[] = {
+    CMD_RESET,
+    CMD_FLUSH,
+    NSCMD_DEVICEQUERY,
+    UHCMD_QUERYDEVICE,
+    UHCMD_USBRESET,
+    UHCMD_USBRESUME,
+    UHCMD_USBSUSPEND,
+    UHCMD_USBOPER,
+    UHCMD_CONTROLXFER,
+    UHCMD_BULKXFER,
+    UHCMD_INTXFER,
+    0
+};
+
+struct ZZNSDeviceQueryResult {
+    ULONG  DevQueryFormat;
+    ULONG  SizeAvailable;
+    UWORD  DeviceType;
+    UWORD  DeviceSubType;
+    const UWORD *SupportedCommands;
+};
 
 static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct IOUsbHWReq *ior asm("a1"))
 {
@@ -1173,9 +1300,43 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
     switch (ior->iouh_Req.io_Command) {
     case UHCMD_QUERYDEVICE:
         {
-            fill_querydevice_tags((struct TagItem *)ior->iouh_Data);
-            ior->iouh_Actual = 0;
+            int filled = fill_querydevice_tags((struct TagItem *)ior->iouh_Data);
+            ior->iouh_Actual = filled;
             ior->iouh_Req.io_Error = 0;
+        }
+        break;
+
+    case NSCMD_DEVICEQUERY:
+        {
+            /*
+             * NSD probe. The IOR is only guaranteed to be sized as
+             * IOStdReq (callers may not pass an IOUsbHWReq); use the
+             * IOStdReq overlay for io_Data / io_Length / io_Actual.
+             */
+            struct IOStdReq *std = (struct IOStdReq *)ior;
+            struct ZZNSDeviceQueryResult *q =
+                (struct ZZNSDeviceQueryResult *)std->io_Data;
+            /*
+             * SizeAvailable is an output field per the NSD spec, but
+             * real callers reuse the buffer between probes — strict
+             * "must be zero on entry" enforcement (as Deneb does) makes
+             * the second probe spuriously fail. We only validate the
+             * fields the caller is unambiguously responsible for: a
+             * non-null buffer, sufficient length, and DevQueryFormat
+             * being the only format we know how to fill (0).
+             */
+            if (!q ||
+                std->io_Length < sizeof(struct ZZNSDeviceQueryResult) ||
+                q->DevQueryFormat != 0) {
+                std->io_Error = IOERR_NOCMD;
+                break;
+            }
+            q->SizeAvailable     = sizeof(struct ZZNSDeviceQueryResult);
+            q->DeviceType        = NSDEVTYPE_USBHARDWARE;
+            q->DeviceSubType     = 0;
+            q->SupportedCommands = NSDSupportedCommands;
+            std->io_Actual       = sizeof(struct ZZNSDeviceQueryResult);
+            std->io_Error        = 0;
         }
         break;
 
@@ -1488,6 +1649,17 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
 
     case UHCMD_BULKXFER:
         {
+            /*
+             * USB 2.0 forbids low-speed bulk; firmware behaviour is
+             * undefined for this combination. Reject up front so a
+             * misconfigured class driver gets a clear answer instead
+             * of a silent stall later.
+             */
+            if (ior->iouh_Flags & UHFF_LOWSPEED) {
+                ior->iouh_Actual = 0;
+                ior->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+                break;
+            }
             /*
              * Chunked bulk-transfer loop.
              *
