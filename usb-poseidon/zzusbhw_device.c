@@ -103,6 +103,16 @@ struct ExecBase* SysBase;
 
 static struct ZZUSBBase *PollBase;
 
+/*
+ * Saved seglist for expunge. Stored as a static rather than a struct
+ * member because struct ZZUSBBase has a frozen v2.0.0 layout — the
+ * hand-written AddTask inline asm in begin_io and the firmware-side
+ * tooling expect specific field offsets, and inserting a member
+ * shifts everything after it. Single-instance driver, so a static
+ * is functionally equivalent.
+ */
+static uint8_t *DeviceSegList;
+
 static void hotplug_poll_task(void);
 
 asm("romtag:                                \n"
@@ -366,7 +376,7 @@ static struct Library* __attribute__((used)) init_device(uint8_t *seg_list asm("
     }
 
     /* Saved for expunge so the loader can release our segments. */
-    ZZBase->zz_SegList = seg_list;
+    DeviceSegList = seg_list;
 
     dev->lib_Node.ln_Type = NT_DEVICE;
     dev->lib_Node.ln_Name = (char *)device_name;
@@ -431,7 +441,7 @@ static uint8_t *unload_device(struct Library *dev)
         return 0;
     }
 
-    uint8_t *seg = ZZBase->zz_SegList;
+    uint8_t *seg = DeviceSegList;
 
     /*
      * Forbid() prevents another task from FindDevice'ing us between
