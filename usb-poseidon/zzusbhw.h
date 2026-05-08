@@ -45,7 +45,7 @@
 
 #define DEVICE_NAME      "zzusbhw.device"
 #define DEVICE_VERSION   1
-#define DEVICE_REVISION  93
+#define DEVICE_REVISION  94
 
 #define ZZ_NUM_PORTS     1
 
@@ -140,6 +140,7 @@ struct ZZUSBCommand {
  */
 struct ZZUSBBase {
     struct Device      zz_Device;
+    uint8_t           *zz_SegList;          /* saved by init_device for expunge */
     struct SignalSemaphore zz_Lock;
     struct Task       *zz_PollTask;
     ULONG              zz_PollSignal;       /* signal-mask the poll task waits on */
