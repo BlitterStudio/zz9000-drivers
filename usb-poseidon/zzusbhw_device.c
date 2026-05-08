@@ -414,16 +414,34 @@ static struct Library* __attribute__((used)) init_device(uint8_t *seg_list asm("
 
 /*
  * Unload helper, callable from both expunge and close. Caller must
- * ensure lib_OpenCnt is zero before invoking.
+ * ensure lib_OpenCnt is zero before invoking. Returns 0 (and re-asserts
+ * LIBF_DELEXP) if the poll task is still alive — its Task struct and
+ * stack live inside ZZBase, so freeing the base out from under it
+ * would crash on the next wake-up. The poll task is created lazily
+ * on the first INT transfer and never torn down in current builds,
+ * so once it exists the driver effectively becomes non-unloadable;
+ * acceptable for a hardware driver normally only unloaded at reboot.
  */
 static uint8_t *unload_device(struct Library *dev)
 {
     struct ZZUSBBase *ZZBase = (struct ZZUSBBase *)dev;
+
+    if (ZZBase->zz_PollTask) {
+        dev->lib_Flags |= LIBF_DELEXP;
+        return 0;
+    }
+
     uint8_t *seg = ZZBase->zz_SegList;
 
+    /*
+     * Forbid() prevents another task from FindDevice'ing us between
+     * the Remove and FreeMem and dereferencing a half-freed base.
+     */
+    Forbid();
     Remove(&dev->lib_Node);
     FreeMem((char *)dev - dev->lib_NegSize,
             dev->lib_NegSize + dev->lib_PosSize);
+    Permit();
     return seg;
 }
 
