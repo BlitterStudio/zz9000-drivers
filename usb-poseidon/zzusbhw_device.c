@@ -451,12 +451,6 @@ static void __attribute__((used)) open(struct Library *dev asm("a6"), struct IOU
         return;
     }
 
-    /*
-     * A pending expunge is being cancelled by this open — clear the
-     * flag so the unit stays loaded.
-     */
-    dev->lib_Flags &= ~LIBF_DELEXP;
-
     if (unitnum < ZZ_NUM_PORTS) {
         struct ZZUSBUnit* unit = &ZZBase->zz_Units[unitnum];
         if (unit->zz_Enabled) {
@@ -465,6 +459,12 @@ static void __attribute__((used)) open(struct Library *dev asm("a6"), struct IOU
             ior->iouh_Req.io_Unit->unit_flags = UNITF_ACTIVE;
             ior->iouh_Req.io_Unit->unit_OpenCnt++;
             dev->lib_OpenCnt++;
+            /*
+             * A pending expunge is being cancelled by this open — clear
+             * only on success, otherwise a failed open would silently
+             * lose a previous deferred-expunge request.
+             */
+            dev->lib_Flags &= ~LIBF_DELEXP;
         }
     }
 
@@ -1288,10 +1288,18 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
             struct IOStdReq *std = (struct IOStdReq *)ior;
             struct ZZNSDeviceQueryResult *q =
                 (struct ZZNSDeviceQueryResult *)std->io_Data;
+            /*
+             * SizeAvailable is an output field per the NSD spec, but
+             * real callers reuse the buffer between probes — strict
+             * "must be zero on entry" enforcement (as Deneb does) makes
+             * the second probe spuriously fail. We only validate the
+             * fields the caller is unambiguously responsible for: a
+             * non-null buffer, sufficient length, and DevQueryFormat
+             * being the only format we know how to fill (0).
+             */
             if (!q ||
                 std->io_Length < sizeof(struct ZZNSDeviceQueryResult) ||
-                q->DevQueryFormat != 0 ||
-                q->SizeAvailable != 0) {
+                q->DevQueryFormat != 0) {
                 std->io_Error = IOERR_NOCMD;
                 break;
             }
