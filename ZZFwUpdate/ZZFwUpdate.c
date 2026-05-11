@@ -41,6 +41,7 @@
 #define REG_FWUP_CMD       0xCA
 #define REG_FWUP_LEN       0xCC
 #define REG_FWUP_STATUS    0xCE
+#define REG_FW_VERSION     0xC0
 #define ZZ_BUFFER_OFFSET   0xA000
 
 #define FWUP_CMD_OPEN      1
@@ -55,6 +56,8 @@
  * the chunk size the SD-boot path uses, so we share the same buffer
  * residency story. */
 #define FWUP_CHUNK_BYTES   16384
+#define FWUP_REQUIRED_FW_MAJOR 2
+#define FWUP_REQUIRED_FW_MINOR 1
 
 /* Roughly matches SD-boot's poll budget — each FatFs write can stall
  * for tens of ms on a slow SD card, so a small counter wouldn't
@@ -122,6 +125,31 @@ static UWORD poll_status(volatile UWORD *status_reg) {
     return FWUP_STATUS_BUSY;
 }
 
+static int firmware_supports_fwup(UWORD fwrev) {
+    UWORD major = fwrev >> 8;
+    UWORD minor = fwrev & 0xff;
+
+    return (major > FWUP_REQUIRED_FW_MAJOR) ||
+           (major == FWUP_REQUIRED_FW_MAJOR &&
+            minor >= FWUP_REQUIRED_FW_MINOR);
+}
+
+static void abort_transfer(volatile UWORD *cmd_reg,
+                           volatile UWORD *status_reg,
+                           const char *dest_name) {
+    UWORD st;
+
+    *cmd_reg = FWUP_CMD_ABORT;
+    st = poll_status(status_reg);
+    if (st == FWUP_OK) {
+        printf("Partial transfer aborted; 0:/%s deleted on the card.\n",
+               dest_name);
+    } else {
+        printf("WARNING: ABORT failed: %s (0x%04x); 0:/%s may remain.\n",
+               fwup_strerror(st), st, dest_name);
+    }
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2 || argc > 3 || argv[1][0] == '?') {
         printf("Usage: %s <source-file> [dest-name]\n", argv[0]);
@@ -144,6 +172,16 @@ int main(int argc, char *argv[]) {
     ULONG board = find_zz9000();
     if (!board) {
         printf("ERROR: ZZ9000 not found in expansion bus\n");
+        return 1;
+    }
+
+    volatile UWORD *fw_version_reg = (volatile UWORD *)(board + REG_FW_VERSION);
+    UWORD fwrev = *fw_version_reg;
+    if (!firmware_supports_fwup(fwrev)) {
+        printf("ERROR: firmware %u.%u does not support ZZFwUpdate; "
+               "requires %u.%u or later\n",
+               (unsigned)(fwrev >> 8), (unsigned)(fwrev & 0xff),
+               FWUP_REQUIRED_FW_MAJOR, FWUP_REQUIRED_FW_MINOR);
         return 1;
     }
 
@@ -237,13 +275,12 @@ int main(int argc, char *argv[]) {
             printf("Done. %lu bytes written to 0:/%s\n",
                    (unsigned long)total, dest_name);
         }
-    } else {
+    }
+
+    if (rc != 0) {
         /* Tell the firmware to delete the partially-written file
          * rather than leaving a corrupt one on the card. */
-        *cmd_reg = FWUP_CMD_ABORT;
-        (void)poll_status(status_reg);
-        printf("Partial transfer aborted; 0:/%s deleted on the card.\n",
-               dest_name);
+        abort_transfer(cmd_reg, status_reg, dest_name);
     }
 
     FreeMem(chunk, FWUP_CHUNK_BYTES);
