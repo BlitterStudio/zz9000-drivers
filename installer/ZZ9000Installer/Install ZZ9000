@@ -383,7 +383,7 @@
 
       (copyfiles
          (prompt "Install ZZFwUpdate into C:")
-         (help "Pushes a file (e.g. a new BOOT.bin) onto the ZZ9000's FAT32 SD card via the Zorro bus, so firmware updates can be applied without removing the card. Requires firmware 2.1.0 or later.")
+         (help "Pushes a file (e.g. a new BOOT.bin) onto the ZZ9000's FAT32 SD card via the Zorro bus, so firmware updates can be applied without removing the card. Requires firmware with FWUP protocol support.")
          (source "Tools/ZZFwUpdate")
          (dest "C:")
          (confirm))

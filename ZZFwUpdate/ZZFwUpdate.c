@@ -4,7 +4,7 @@
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * Talks to the firmware's REG_ZZ_FWUP_* protocol (firmware >= 2.1):
+ * Talks to firmware builds that expose the REG_ZZ_FWUP_* protocol:
  *   1. stage NUL-terminated filename in shared buffer at board+0xA000
  *   2. CMD = OPEN, poll STATUS
  *   3. per chunk: stage bytes, LEN = chunk_bytes, CMD = WRITE, poll
@@ -13,7 +13,7 @@
  * Typical use:
  *   ZZFwUpdate ram:BOOT.bin                  -> writes 0:/BOOT.bin
  *   ZZFwUpdate ram:BOOT.bin BOOT.bin         -> same, explicit dest name
- *   ZZFwUpdate sys:Storage/zz9000-2.1.0.bin BOOT.bin
+ *   ZZFwUpdate sys:Storage/zz9000-fw.bin BOOT.bin
  *
  * Filename rules on the SD side: flat root, [A-Za-z0-9._-], max 64
  * chars. The firmware will reject anything else with FWUP_ERR_BAD_NAME.
@@ -41,7 +41,6 @@
 #define REG_FWUP_CMD       0xCA
 #define REG_FWUP_LEN       0xCC
 #define REG_FWUP_STATUS    0xCE
-#define REG_FW_VERSION     0xC0
 #define ZZ_BUFFER_OFFSET   0xA000
 
 #define FWUP_CMD_OPEN      1
@@ -51,13 +50,13 @@
 
 #define FWUP_STATUS_BUSY   0xFFFF
 #define FWUP_OK            0x0000
+#define FWUP_ERR_STATE     0x0007
+#define FWUP_ERR_LEN       0x0008
 
 /* Stays well under the firmware's FWUP_MAX_CHUNK (24576) and matches
  * the chunk size the SD-boot path uses, so we share the same buffer
  * residency story. */
 #define FWUP_CHUNK_BYTES   16384
-#define FWUP_REQUIRED_FW_MAJOR 2
-#define FWUP_REQUIRED_FW_MINOR 1
 
 /* Roughly matches SD-boot's poll budget — each FatFs write can stall
  * for tens of ms on a slow SD card, so a small counter wouldn't
@@ -72,8 +71,8 @@ static const char *fwup_strerror(UWORD code) {
     case 0x04: return "firmware f_open failed";
     case 0x05: return "firmware f_write failed";
     case 0x06: return "firmware f_close/f_sync failed";
-    case 0x07: return "protocol state error (WRITE/CLOSE without OPEN?)";
-    case 0x08: return "chunk length out of range";
+    case FWUP_ERR_STATE: return "protocol state error (WRITE/CLOSE without OPEN?)";
+    case FWUP_ERR_LEN: return "chunk length out of range";
     case 0x09: return "unknown FWUP command";
     default:   return "unknown error";
     }
@@ -125,13 +124,23 @@ static UWORD poll_status(volatile UWORD *status_reg) {
     return FWUP_STATUS_BUSY;
 }
 
-static int firmware_supports_fwup(UWORD fwrev) {
-    UWORD major = fwrev >> 8;
-    UWORD minor = fwrev & 0xff;
+static int probe_fwup_protocol(volatile UWORD *cmd_reg,
+                               volatile UWORD *len_reg,
+                               volatile UWORD *status_reg) {
+    UWORD st;
 
-    return (major > FWUP_REQUIRED_FW_MAJOR) ||
-           (major == FWUP_REQUIRED_FW_MAJOR &&
-            minor >= FWUP_REQUIRED_FW_MINOR);
+    /* Old firmware leaves these formerly-unused registers reading as
+     * OK, so use a non-destructive command that only a FWUP-capable
+     * firmware answers with a protocol error. ABORT first also clears
+     * any stale interrupted transfer. */
+    *cmd_reg = FWUP_CMD_ABORT;
+    st = poll_status(status_reg);
+    if (st == FWUP_STATUS_BUSY) return 0;
+
+    *len_reg = 0;
+    *cmd_reg = FWUP_CMD_WRITE;
+    st = poll_status(status_reg);
+    return (st == FWUP_ERR_STATE || st == FWUP_ERR_LEN);
 }
 
 static void abort_transfer(volatile UWORD *cmd_reg,
@@ -175,13 +184,14 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    volatile UWORD *fw_version_reg = (volatile UWORD *)(board + REG_FW_VERSION);
-    UWORD fwrev = *fw_version_reg;
-    if (!firmware_supports_fwup(fwrev)) {
-        printf("ERROR: firmware %u.%u does not support ZZFwUpdate; "
-               "requires %u.%u or later\n",
-               (unsigned)(fwrev >> 8), (unsigned)(fwrev & 0xff),
-               FWUP_REQUIRED_FW_MAJOR, FWUP_REQUIRED_FW_MINOR);
+    volatile UWORD *cmd_reg    = (volatile UWORD *)(board + REG_FWUP_CMD);
+    volatile UWORD *len_reg    = (volatile UWORD *)(board + REG_FWUP_LEN);
+    volatile UWORD *status_reg = (volatile UWORD *)(board + REG_FWUP_STATUS);
+    UBYTE          *buffer     = (UBYTE *)(board + ZZ_BUFFER_OFFSET);
+
+    if (!probe_fwup_protocol(cmd_reg, len_reg, status_reg)) {
+        printf("ERROR: firmware does not support the FWUP file-push protocol\n");
+        printf("       Update BOOT.bin to a firmware build with FWUP support.\n");
         return 1;
     }
 
@@ -206,11 +216,6 @@ int main(int argc, char *argv[]) {
         Close(fh);
         return 1;
     }
-
-    volatile UWORD *cmd_reg    = (volatile UWORD *)(board + REG_FWUP_CMD);
-    volatile UWORD *len_reg    = (volatile UWORD *)(board + REG_FWUP_LEN);
-    volatile UWORD *status_reg = (volatile UWORD *)(board + REG_FWUP_STATUS);
-    UBYTE          *buffer     = (UBYTE *)(board + ZZ_BUFFER_OFFSET);
 
     /* Stage filename + NUL in the shared buffer for the OPEN command.
      * The firmware caps reads at 256 bytes, so a sub-64 byte name is
