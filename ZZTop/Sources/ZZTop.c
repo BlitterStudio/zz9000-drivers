@@ -37,7 +37,7 @@
 static const char version[] __attribute__((used)) =
 	"$VER: ZZTop " ZZTOP_RELEASE " (" ZZTOP_DATE ")\r\n";
 
-struct Gadget *gads[16];
+struct Gadget *gads[17];
 
 #define MYGAD_ZORROVER     (0)
 #define MYGAD_FWVER        (1)
@@ -55,11 +55,22 @@ struct Gadget *gads[16];
 #define MYGAD_BTN_TEST     (13)
 #define MYGAD_BTN_REFRESH  (14)
 #define MYGAD_TEST_RESULT  (15)
+#define MYGAD_VIDEOCAP     (16)
 
 #define ZZTOP_REG_SD_STATUS       (0xBC)
 #define ZZTOP_REG_SD_BOOT_STATUS  (0xC4)
 #define ZZTOP_REG_SCANLINE_MODE   (0x100C)
 #define ZZTOP_REG_SCANLINE_PARITY (0x100E)
+
+/* Bit layout for REG_ZZ_VIDEOCAP_STATS (issue #11 diagnostic).
+ *   [9:0]   videocap_ymax  (lines per detected field, max 1023)
+ *   [11:10] top 2 bits of the per-field max HSYNC pulse width
+ *           (0=short, 3=very wide)
+ *   [15:12] reserved (always 0) */
+#define VCAP_LINES_MASK    (0x3FF)
+#define VCAP_PW_TIER_SHIFT (10)
+#define VCAP_PW_TIER_MASK  (0x3)
+#define VCAP_PW_TIER_MAX   (3)
 
 #define SCANLINE_MODE_COUNT 4
 #define REFRESH_MODE_COUNT  3
@@ -301,6 +312,7 @@ void refresh_zz_info(struct Window* win)
 	uint16_t raw_sd_boot = zz_get_reg16(ZZTOP_REG_SD_BOOT_STATUS);
 	uint16_t raw_scanline = zz_get_reg16(ZZTOP_REG_SCANLINE_MODE);
 	uint16_t raw_parity = zz_get_reg16(ZZTOP_REG_SCANLINE_PARITY);
+	uint16_t raw_vcap = zz_get_reg16(REG_ZZ_VIDEOCAP_STATS);
 
 	int fwrev_major = fwrev>>8;
 	int fwrev_minor = fwrev&0xff;
@@ -349,6 +361,17 @@ void refresh_zz_info(struct Window* win)
 	snprintf(txt_buf, 64, "S:%04x P:%04x T:%04x A:%04x",
 		raw_scanline, raw_parity, raw_temp, raw_vaux);
 	GT_SetGadgetAttrs(gads[MYGAD_RAWREGS], win, NULL, GTST_String, txt_buf, TAG_END);
+
+	/* Videocap diagnostic readout (issue #11 genlock investigation).
+	 * Pulse-width tier is the per-field max, so a wide-sync reading is
+	 * sticky across the frame and won't be missed by an unlucky sample. */
+	{
+		uint16_t lines = raw_vcap & VCAP_LINES_MASK;
+		uint16_t pw_tier = (raw_vcap >> VCAP_PW_TIER_SHIFT) & VCAP_PW_TIER_MASK;
+		snprintf(txt_buf, 64, "Lines:%u  PW:%u/%u",
+			lines, pw_tier, VCAP_PW_TIER_MAX);
+		GT_SetGadgetAttrs(gads[MYGAD_VIDEOCAP], win, NULL, GTST_String, txt_buf, TAG_END);
+	}
 }
 
 ULONG zz_perform_register_probe(void)
@@ -513,7 +536,15 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 											GTST_String, "",
 											TAG_END);
 
-	ng.ng_TopEdge	= 205+topborder;
+	ng.ng_TopEdge	= 200+topborder;
+	ng.ng_GadgetID	= MYGAD_VIDEOCAP;
+	ng.ng_GadgetText = (STRPTR)"VideoCap";
+
+	gads[MYGAD_VIDEOCAP] = gad = CreateGadget(STRING_KIND, gad, &ng,
+											GTST_String, "",
+											TAG_END);
+
+	ng.ng_TopEdge	= 225+topborder;
 	ng.ng_GadgetID	= MYGAD_LPF;
 	ng.ng_GadgetText = (STRPTR)"AX Lowpass";
 
@@ -526,7 +557,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 											GTSL_LevelPlace, PLACETEXT_BELOW,
 											TAG_END);
 
-	ng.ng_TopEdge	= 240+topborder;
+	ng.ng_TopEdge	= 260+topborder;
 	ng.ng_GadgetID	= MYGAD_SCANLINES;
 	ng.ng_GadgetText = (STRPTR)"Scanlines";
 
@@ -535,7 +566,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 											GTCY_Active, scanline_mode,
 											TAG_END);
 
-	ng.ng_TopEdge	= 265+topborder;
+	ng.ng_TopEdge	= 285+topborder;
 	ng.ng_GadgetID	= MYGAD_PARITY;
 	ng.ng_GadgetText = (STRPTR)"Parity";
 
@@ -544,7 +575,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 											GTCY_Active, scanline_parity,
 											TAG_END);
 
-	ng.ng_TopEdge	= 290+topborder;
+	ng.ng_TopEdge	= 310+topborder;
 	ng.ng_GadgetID	= MYGAD_REFRESHMODE;
 	ng.ng_GadgetText = (STRPTR)"Auto Refresh";
 
@@ -553,7 +584,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 											GTCY_Active, refresh_mode,
 											TAG_END);
 
-	ng.ng_TopEdge	= 320+topborder;
+	ng.ng_TopEdge	= 340+topborder;
 	ng.ng_GadgetID	= MYGAD_TEST_RESULT;
 	ng.ng_GadgetText = (STRPTR)"Result";
 
@@ -562,7 +593,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 											TAG_END);
 
 	ng.ng_LeftEdge	 = 20;
-	ng.ng_TopEdge		 = 345+topborder;
+	ng.ng_TopEdge		 = 365+topborder;
 	ng.ng_Width			 = 110;
 	ng.ng_GadgetText = (STRPTR)"Reg Probe";
 	ng.ng_GadgetID	 = MYGAD_BTN_TEST;
@@ -578,7 +609,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 	gads[MYGAD_BTN_REFRESH] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
 											TAG_END);
 
-	for (int i=0; i<16; i++) {
+	for (int i=0; i<17; i++) {
 		if (!gads[i]) return NULL;
 	}
 
@@ -678,7 +709,7 @@ VOID gadtoolsWindow(VOID) {
 							WA_Title,			"MNT ZZTop " ZZTOP_RELEASE,
 							WA_Gadgets,		glist,			WA_AutoAdjust,		TRUE,
 							WA_Width,				430,			WA_MinWidth,			 430,
-							WA_InnerHeight, 370,			WA_MinHeight,			 370,
+							WA_InnerHeight, 390,			WA_MinHeight,			 390,
 							WA_DragBar,		 TRUE,			WA_DepthGadget,		TRUE,
 							WA_Activate,	 TRUE,			WA_CloseGadget,		TRUE,
 							WA_SizeGadget, FALSE,			WA_SimpleRefresh, TRUE,
