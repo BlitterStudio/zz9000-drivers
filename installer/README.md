@@ -35,8 +35,8 @@ installer/
     └── Tools/
         ├── ZZTop.info                Icon  (committed)
         ├── axmp3.info                Icon  (committed)
-        └──                           ← ZZTop, ZZScanlines, zznetstats, axmp3
-                                        populated by CI
+        └──                           ← ZZTop, ZZScanlines, ZZFwUpdate,
+                                        zznetstats, axmp3 populated by CI
 ```
 
 Only **icons and configuration templates** are committed. Every binary
@@ -74,6 +74,7 @@ install -Dm644 ahi/driver/zz9000ax.audio       "$INST/Devs/AHI/zz9000ax.audio"
 install -Dm644 ahi/driver/ZZ9000AX             "$INST/Devs/AudioModes/ZZ9000AX"
 install -Dm755 ZZTop/ZZTop                     "$INST/Tools/ZZTop"
 install -Dm755 ZZScanlines/ZZScanlines         "$INST/Tools/ZZScanlines"
+install -Dm755 ZZFwUpdate/ZZFwUpdate           "$INST/Tools/ZZFwUpdate"
 install -Dm755 net/zznetstats/zznetstats       "$INST/Tools/zznetstats"
 install -Dm755 ax-direct/axmp3                 "$INST/Tools/axmp3"
 install -Dm644 ahi/README.md                   "$INST/Docs/ahi-README.md"

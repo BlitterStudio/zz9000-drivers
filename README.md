@@ -16,9 +16,9 @@
 AmigaOS driver set for the MNT ZZ9000 Zorro II/III card: RTG graphics,
 SANA-II networking, AHI/MHI audio for the ZZ9000AX daughterboard, USB
 (Poseidon), SD-card boot from a FAT32-hosted HDF, plus the ZZTop
-configuration GUI and a scanline CLI. Everything targets `m68k-amigaos`
-and builds headless via Docker. The matching FPGA logic and ARM
-firmware live in
+configuration GUI, scanline CLI, and firmware update tool. Everything
+targets `m68k-amigaos` and builds headless via Docker. The matching
+FPGA logic and ARM firmware live in
 [zz9000-firmware](https://github.com/BlitterStudio/zz9000-firmware).
 
 ## What this fork adds on top of upstream
@@ -32,6 +32,9 @@ firmware live in
 - **SD-card boot driver** (`zzsd.device`) — boots AmigaOS from a
   hardfile on a FAT32 SD card via the autoboot ROM. Size-constrained
   (7424 bytes); CI enforces the ceiling.
+- **Firmware update tool** (`ZZFwUpdate`) — pushes `BOOT.bin` or other
+  root-level files onto the ZZ9000 FAT32 microSD card from AmigaOS using
+  firmware builds with FWUP protocol support.
 - **ZZScanlines V2** — CLI front-end for the multi-mode scanline
   bitstream (classic / soft / gradient with parity control).
 - **ZZTop V2** — config GUI with scanline slider, hardware readback,
@@ -51,15 +54,16 @@ firmware live in
 | `mhi/`           | `mhizz9000.library`      | MHI library exposing the AX hardware MP3 decoder to MHI-aware players. Shares the AX card (and its ENV tunables) with the AHI driver — see [ahi/README.md](ahi/README.md). |
 | `usb-poseidon/`  | `zzusbhw.device`         | USB hardware driver for Poseidon — chunked bulk transfers, root-hub emulation, async INT via poll task, mailbox protocol. Paired with the ZZ9000OS firmware USB stack. |
 | `sd-boot/`       | `zzsd.device`            | Boots AmigaOS from a hardfile (`/zz9000.hdf`) on a FAT32 SD card, via the ZZ9000's autoboot ROM. See [sd-boot/README.md](sd-boot/README.md). |
+| `ZZFwUpdate/`    | `ZZFwUpdate`             | CLI tool that copies a file from AmigaOS to the ZZ9000 FAT32 microSD using the firmware FWUP protocol. |
 | `ZZTop/`         | `ZZTop`                  | Configuration GUI (resolution, scanlines, toggles, hardware readback). |
 | `ZZScanlines/`   | `ZZScanlines`            | CLI front-end for the V1/V2 scanline bitstream. |
 | `installer/`     | `ZZ9000Installer`        | Commodore Installer script and icon for end-user deployment. |
 
 ## Building
 
-Every component has a `build.sh` in its folder, and
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) builds all of
-them on every push and pull request. The simplest local path is the
+The main driver folders have `build.sh` scripts, while the smaller CLI
+tools are built directly by [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
+on every push and pull request. The simplest local path is the
 `sacredbanana/amiga-compiler:m68k-amigaos` Docker image, which ships a
 working `vbcc` + `m68k-amigaos-gcc` toolchain — the same image the
 CI uses.
@@ -87,6 +91,14 @@ ZZScanlines:
 docker run --rm -v "$(pwd)":/src -w /src/ZZScanlines \
   sacredbanana/amiga-compiler:m68k-amigaos \
   m68k-amigaos-gcc -O2 -noixemul -o ZZScanlines ZZScanlines.c -lamiga
+```
+
+ZZFwUpdate:
+
+```bash
+docker run --rm -v "$(pwd)":/src -w /src/ZZFwUpdate \
+  sacredbanana/amiga-compiler:m68k-amigaos \
+  m68k-amigaos-gcc -O2 -noixemul -Wall -Wextra -o ZZFwUpdate ZZFwUpdate.c -lamiga
 ```
 
 For the network, AHI, MHI, USB Poseidon and SD-boot drivers, run the
@@ -140,6 +152,16 @@ For manual installs or component-by-component replacement:
 | `mhi/mhizz9000.library`           | `Libs:MHI/`             |
 | `usb-poseidon/zzusbhw.device`     | `Devs:USBHardware/` then registered with Poseidon |
 | `sd-boot/zzsd.device`             | Packed into `BOOT.bin` — see [sd-boot/README.md](sd-boot/README.md) |
+| `ZZFwUpdate/ZZFwUpdate`            | `C:`                    |
+
+After installing `ZZFwUpdate`, a firmware image can be copied to the
+ZZ9000 FAT32 microSD card without removing the card:
+
+```text
+ZZFwUpdate RAM:BOOT.bin BOOT.bin
+```
+
+Power-cycle the Amiga after replacing `BOOT.bin`.
 
 ## Credits
 
@@ -148,7 +170,8 @@ For manual installs or component-by-component replacement:
   readback), USB Poseidon hardware driver (`zzusbhw.device`, chunked
   bulk transfers, root-hub emulation, async INT via poll task, Z3
   autoconfig preference, CopyMemQuick fast path, mailbox protocol,
-  throughput tuning), and SD-card boot driver (`zzsd.device`) —
+  throughput tuning), SD-card boot driver (`zzsd.device`), and firmware
+  update tool (`ZZFwUpdate`) —
   Dimitris Panokostas (midwan).
 - Scanline bitstream V1 and V2 — Xanxi. V2 adds multi-mode patterns
   (classic / soft / gradient) with odd/even parity, gated to AGA
