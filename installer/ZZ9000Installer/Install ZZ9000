@@ -364,7 +364,7 @@
 ; --------------------------------------------------------------------
 
 (if (askbool (prompt "Install the ZZ9000 command-line utilities and ZZTop configuration GUI?")
-             (help "Installs ZZTop (configuration GUI) to SYS:Tools/, and the ZZScanlines, zznetstats and axmp3 CLI tools to C:."))
+             (help "Installs ZZTop (configuration GUI) to SYS:Tools/, and the ZZScanlines, ZZFwUpdate, zznetstats and axmp3 CLI tools to C:."))
    (
       (copyfiles
          (prompt "Install ZZTop into SYS:Tools/")
@@ -378,6 +378,13 @@
          (prompt "Install ZZScanlines into C:")
          (help "CLI front-end for the ZZ9000's scanline bitstream (classic / soft / gradient patterns with parity control). Requires firmware 2.0.0 or later.")
          (source "Tools/ZZScanlines")
+         (dest "C:")
+         (confirm))
+
+      (copyfiles
+         (prompt "Install ZZFwUpdate into C:")
+         (help "Pushes a file (e.g. a new BOOT.bin) onto the ZZ9000's FAT32 SD card via the Zorro bus, so firmware updates can be applied without removing the card. Requires firmware with FWUP protocol support.")
+         (source "Tools/ZZFwUpdate")
          (dest "C:")
          (confirm))
 
