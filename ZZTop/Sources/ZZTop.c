@@ -470,7 +470,10 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
 	ng.ng_LeftEdge	 = 170;
 	ng.ng_TopEdge		 = 20+topborder;
-	ng.ng_Width			 = 220;
+	/* Width chosen to fit the widest readout (VideoCap's
+	 * "Lines:1023  Max:3/3  Min:3/3") at Topaz 8; the rest of the
+	 * column inherits the same width for visual alignment. */
+	ng.ng_Width			 = 240;
 	ng.ng_Height		 = 14;
 	ng.ng_GadgetText = (STRPTR)"Zorro Version";
 	ng.ng_TextAttr	 = &Topaz80;
@@ -549,15 +552,10 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 	ng.ng_TopEdge	= 200+topborder;
 	ng.ng_GadgetID	= MYGAD_VIDEOCAP;
 	ng.ng_GadgetText = (STRPTR)"VideoCap";
-	/* Slightly wider than the rest so the worst-case
-	 * "Lines:1023  Max:3/3  Min:3/3" fully displays at Topaz 8. */
-	ng.ng_Width	= 240;
 
 	gads[MYGAD_VIDEOCAP] = gad = CreateGadget(STRING_KIND, gad, &ng,
 											GTST_String, "",
 											TAG_END);
-
-	ng.ng_Width	= 220; /* restore default for following gadgets */
 
 	ng.ng_TopEdge	= 225+topborder;
 	ng.ng_GadgetID	= MYGAD_LPF;
