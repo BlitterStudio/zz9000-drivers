@@ -64,13 +64,18 @@ struct Gadget *gads[17];
 
 /* Bit layout for REG_ZZ_VIDEOCAP_STATS (issue #11 diagnostic).
  *   [9:0]   videocap_ymax  (lines per detected field, max 1023)
- *   [11:10] top 2 bits of the per-field max HSYNC pulse width
- *           (0=short, 3=very wide)
- *   [15:12] reserved (always 0) */
-#define VCAP_LINES_MASK    (0x3FF)
-#define VCAP_PW_TIER_SHIFT (10)
-#define VCAP_PW_TIER_MASK  (0x3)
-#define VCAP_PW_TIER_MAX   (3)
+ *   [11:10] top 2 bits of the per-field MAX HSYNC pulse width
+ *   [13:12] top 2 bits of the per-field MIN HSYNC pulse width
+ *           (0=short, 3=very wide; both tiers use the same scale)
+ *   [15:14] reserved (always 0)
+ * Comparing max and min tells genlock failure modes apart:
+ *   max only wide  => some pulses wide (CSYNC pulses in VBI)
+ *   max + min wide => every pulse wide (polarity flip / EXTSYNC timing) */
+#define VCAP_LINES_MASK         (0x3FF)
+#define VCAP_PW_MAX_TIER_SHIFT  (10)
+#define VCAP_PW_MIN_TIER_SHIFT  (12)
+#define VCAP_PW_TIER_MASK       (0x3)
+#define VCAP_PW_TIER_MAX        (3)
 
 #define SCANLINE_MODE_COUNT 4
 #define REFRESH_MODE_COUNT  3
@@ -363,13 +368,16 @@ void refresh_zz_info(struct Window* win)
 	GT_SetGadgetAttrs(gads[MYGAD_RAWREGS], win, NULL, GTST_String, txt_buf, TAG_END);
 
 	/* Videocap diagnostic readout (issue #11 genlock investigation).
-	 * Pulse-width tier is the per-field max, so a wide-sync reading is
-	 * sticky across the frame and won't be missed by an unlucky sample. */
+	 * Pulse-width tiers are the per-field max and min, so a wide-sync
+	 * reading is sticky across the frame and won't be missed by an
+	 * unlucky sample. Two tiers let the reporter tell apart "all pulses
+	 * wide" from "some pulses wide". */
 	{
 		uint16_t lines = raw_vcap & VCAP_LINES_MASK;
-		uint16_t pw_tier = (raw_vcap >> VCAP_PW_TIER_SHIFT) & VCAP_PW_TIER_MASK;
-		snprintf(txt_buf, 64, "Lines:%u  PW:%u/%u",
-			lines, pw_tier, VCAP_PW_TIER_MAX);
+		uint16_t pw_max = (raw_vcap >> VCAP_PW_MAX_TIER_SHIFT) & VCAP_PW_TIER_MASK;
+		uint16_t pw_min = (raw_vcap >> VCAP_PW_MIN_TIER_SHIFT) & VCAP_PW_TIER_MASK;
+		snprintf(txt_buf, 64, "Lines:%u  PWmax:%u/%u  PWmin:%u/%u",
+			lines, pw_max, VCAP_PW_TIER_MAX, pw_min, VCAP_PW_TIER_MAX);
 		GT_SetGadgetAttrs(gads[MYGAD_VIDEOCAP], win, NULL, GTST_String, txt_buf, TAG_END);
 	}
 }
