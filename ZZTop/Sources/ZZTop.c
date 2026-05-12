@@ -371,12 +371,14 @@ void refresh_zz_info(struct Window* win)
 	 * Pulse-width tiers are the per-field max and min, so a wide-sync
 	 * reading is sticky across the frame and won't be missed by an
 	 * unlucky sample. Two tiers let the reporter tell apart "all pulses
-	 * wide" from "some pulses wide". */
+	 * wide" from "some pulses wide". Label kept short so the worst-case
+	 * string ("Lines:1023  Max:3/3  Min:3/3") still fits the gadget
+	 * width at Topaz 8. */
 	{
 		uint16_t lines = raw_vcap & VCAP_LINES_MASK;
 		uint16_t pw_max = (raw_vcap >> VCAP_PW_MAX_TIER_SHIFT) & VCAP_PW_TIER_MASK;
 		uint16_t pw_min = (raw_vcap >> VCAP_PW_MIN_TIER_SHIFT) & VCAP_PW_TIER_MASK;
-		snprintf(txt_buf, 64, "Lines:%u  PWmax:%u/%u  PWmin:%u/%u",
+		snprintf(txt_buf, 64, "Lines:%u  Max:%u/%u  Min:%u/%u",
 			lines, pw_max, VCAP_PW_TIER_MAX, pw_min, VCAP_PW_TIER_MAX);
 		GT_SetGadgetAttrs(gads[MYGAD_VIDEOCAP], win, NULL, GTST_String, txt_buf, TAG_END);
 	}
@@ -547,10 +549,15 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 	ng.ng_TopEdge	= 200+topborder;
 	ng.ng_GadgetID	= MYGAD_VIDEOCAP;
 	ng.ng_GadgetText = (STRPTR)"VideoCap";
+	/* Slightly wider than the rest so the worst-case
+	 * "Lines:1023  Max:3/3  Min:3/3" fully displays at Topaz 8. */
+	ng.ng_Width	= 240;
 
 	gads[MYGAD_VIDEOCAP] = gad = CreateGadget(STRING_KIND, gad, &ng,
 											GTST_String, "",
 											TAG_END);
+
+	ng.ng_Width	= 220; /* restore default for following gadgets */
 
 	ng.ng_TopEdge	= 225+topborder;
 	ng.ng_GadgetID	= MYGAD_LPF;
