@@ -719,7 +719,7 @@ VOID gadtoolsWindow(VOID) {
 					errorMessage("createAllGadgets() failed");
 				else {
 					if (NULL == (mywin = OpenWindowTags(NULL,
-							WA_Title,			"MNT ZZTop " ZZTOP_RELEASE,
+							WA_Title,			"ZZTop " ZZTOP_RELEASE,
 							WA_Gadgets,		glist,			WA_AutoAdjust,		TRUE,
 							WA_Width,				430,			WA_MinWidth,			 430,
 							WA_InnerHeight, 390,			WA_MinHeight,			 390,
