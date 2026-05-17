@@ -28,16 +28,15 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "zz9000.h"
 
-#define ZZTOP_RELEASE "2.0.1"
-#define ZZTOP_DATE    "25.04.2026"
+#define ZZTOP_RELEASE "2.0.2"
+#define ZZTOP_DATE    "17.05.2026"
 
 static const char version[] __attribute__((used)) =
 	"$VER: ZZTop " ZZTOP_RELEASE " (" ZZTOP_DATE ")\r\n";
-
-struct Gadget *gads[17];
 
 #define MYGAD_ZORROVER     (0)
 #define MYGAD_FWVER        (1)
@@ -56,6 +55,38 @@ struct Gadget *gads[17];
 #define MYGAD_BTN_REFRESH  (14)
 #define MYGAD_TEST_RESULT  (15)
 #define MYGAD_VIDEOCAP     (16)
+#define MYGAD_COUNT        (17)
+
+#define LABEL_ZORROVER     "Zorro Version"
+#define LABEL_FWVER        "Firmware ABI"
+#define LABEL_TEMP         "Die \260C"
+#define LABEL_TEMP_MINMAX  "Die Min/Max \260C"
+#define LABEL_VAUX         "VCCAUX V"
+#define LABEL_VINT         "VCCINT V"
+#define LABEL_Z9AX         "ZZ9000AX"
+#define LABEL_STATUS       "Status"
+#define LABEL_RAWREGS      "Raw Regs"
+#define LABEL_VIDEOCAP     "VideoCap"
+#define LABEL_LPF          "AX Lowpass"
+#define LABEL_SCANLINES    "Scanlines"
+#define LABEL_PARITY       "Parity"
+#define LABEL_REFRESHMODE  "Auto Refresh"
+#define LABEL_TEST_RESULT  "Result"
+#define LABEL_BTN_TEST     "Reg Probe"
+#define LABEL_BTN_REFRESH  "Refresh"
+
+#define SAMPLE_FWVER       "ABI 255.255"
+#define SAMPLE_TEMP        "999.9"
+#define SAMPLE_TEMP_MINMAX "999.9 / 999.9"
+#define SAMPLE_VOLTAGE     "99.99"
+#define SAMPLE_Z9AX        "Not present"
+#define SAMPLE_STATUS      "AX:Y USB:ffff SD:ffff B:ffff"
+#define SAMPLE_RAWREGS     "S:ffff P:ffff T:ffff A:ffff"
+#define SAMPLE_VIDEOCAP    "Lines:1023  Max:3/3  Min:3/3"
+#define SAMPLE_LPF_LEVEL   "23900 Hz"
+#define SAMPLE_TEST_RESULT "No timer.device"
+
+struct Gadget *gads[MYGAD_COUNT];
 
 #define ZZTOP_REG_SD_STATUS       (0xBC)
 #define ZZTOP_REG_SD_BOOT_STATUS  (0xC4)
@@ -104,6 +135,67 @@ static STRPTR refresh_labels[] = {
 
 struct TextAttr Topaz80 = { (STRPTR)"topaz.font", 8, 0, 0, };
 
+struct ZZTopLayout {
+	WORD margin_x;
+	WORD margin_y;
+	WORD label_gap;
+	WORD gadget_left;
+	WORD gadget_width;
+	WORD gadget_height;
+	WORD row_step;
+	WORD section_gap;
+	WORD slider_step;
+	WORD control_step;
+	WORD button_width;
+	WORD button_top;
+	WORD window_width;
+	WORD window_height;
+	UWORD topborder;
+	const struct TextAttr *text_attr;
+};
+
+static CONST_STRPTR zztop_label_samples[] = {
+	(CONST_STRPTR)LABEL_ZORROVER,
+	(CONST_STRPTR)LABEL_FWVER,
+	(CONST_STRPTR)LABEL_TEMP,
+	(CONST_STRPTR)LABEL_TEMP_MINMAX,
+	(CONST_STRPTR)LABEL_VAUX,
+	(CONST_STRPTR)LABEL_VINT,
+	(CONST_STRPTR)LABEL_Z9AX,
+	(CONST_STRPTR)LABEL_STATUS,
+	(CONST_STRPTR)LABEL_RAWREGS,
+	(CONST_STRPTR)LABEL_VIDEOCAP,
+	(CONST_STRPTR)LABEL_LPF,
+	(CONST_STRPTR)LABEL_SCANLINES,
+	(CONST_STRPTR)LABEL_PARITY,
+	(CONST_STRPTR)LABEL_REFRESHMODE,
+	(CONST_STRPTR)LABEL_TEST_RESULT,
+	NULL
+};
+
+static CONST_STRPTR zztop_value_samples[] = {
+	(CONST_STRPTR)SAMPLE_FWVER,
+	(CONST_STRPTR)SAMPLE_TEMP,
+	(CONST_STRPTR)SAMPLE_TEMP_MINMAX,
+	(CONST_STRPTR)SAMPLE_VOLTAGE,
+	(CONST_STRPTR)SAMPLE_Z9AX,
+	(CONST_STRPTR)SAMPLE_STATUS,
+	(CONST_STRPTR)SAMPLE_RAWREGS,
+	(CONST_STRPTR)SAMPLE_VIDEOCAP,
+	(CONST_STRPTR)SAMPLE_LPF_LEVEL,
+	(CONST_STRPTR)SAMPLE_TEST_RESULT,
+	(CONST_STRPTR)"Gradient",
+	(CONST_STRPTR)"Even dark",
+	(CONST_STRPTR)"Manual",
+	NULL
+};
+
+static CONST_STRPTR zztop_button_samples[] = {
+	(CONST_STRPTR)LABEL_BTN_TEST,
+	(CONST_STRPTR)LABEL_BTN_REFRESH,
+	NULL
+};
+
 struct Library* IntuitionBase;
 struct Library* GfxBase;
 struct Library* GadToolsBase;
@@ -124,6 +216,110 @@ struct timerequest * timerio;
 struct MsgPort *timerport;
 struct Library *TimerBase;
 BOOL timer_pending = FALSE;
+char readout_bufs[MYGAD_COUNT][64];
+
+static WORD zztop_max_word(WORD a, WORD b)
+{
+	return (a > b) ? a : b;
+}
+
+static WORD zztop_text_width(struct RastPort *rp, CONST_STRPTR text, WORD fallback_char_width)
+{
+	ULONG len;
+
+	if (!text) return 0;
+
+	len = strlen((const char *)text);
+	if (rp && rp->Font) return TextLength(rp, text, len);
+
+	return (WORD)(len * fallback_char_width);
+}
+
+static WORD zztop_max_text_width(struct RastPort *rp, CONST_STRPTR *texts, WORD fallback_char_width)
+{
+	WORD width = 0;
+
+	while (*texts) {
+		width = zztop_max_word(width, zztop_text_width(rp, *texts, fallback_char_width));
+		texts++;
+	}
+
+	return width;
+}
+
+static void zztop_store_text_display(UWORD gadget_id, const char *text)
+{
+	if (gadget_id >= MYGAD_COUNT) return;
+
+	snprintf(readout_bufs[gadget_id], sizeof(readout_bufs[gadget_id]),
+		"%s", text ? text : "");
+}
+
+static void zztop_set_text_display(struct Window *win, UWORD gadget_id, const char *text)
+{
+	if (gadget_id >= MYGAD_COUNT || !gads[gadget_id]) return;
+
+	zztop_store_text_display(gadget_id, text);
+	GT_SetGadgetAttrs(gads[gadget_id], win, NULL,
+		GTTX_Text, readout_bufs[gadget_id],
+		TAG_END);
+}
+
+static void zztop_init_layout(struct ZZTopLayout *layout, struct Screen *screen)
+{
+	struct RastPort *rp = screen ? &screen->RastPort : NULL;
+	const struct TextAttr *text_attr = (screen && screen->Font) ? screen->Font : &Topaz80;
+	WORD font_x = (rp && rp->TxWidth) ? rp->TxWidth : 8;
+	WORD font_y = (rp && rp->TxHeight) ? rp->TxHeight : text_attr->ta_YSize;
+	WORD label_width;
+	WORD value_width;
+	WORD button_text_width;
+	WORD text_padding;
+	WORD button_gap;
+	WORD button_window_width;
+	WORD y;
+
+	if (font_x < 1) font_x = 8;
+	if (font_y < 1) font_y = 8;
+
+	layout->text_attr = text_attr;
+	layout->topborder = screen ? (UWORD)(screen->WBorTop + font_y + 1) : (UWORD)(font_y + 2);
+	layout->margin_x = zztop_max_word(20, font_x * 2 + 4);
+	layout->margin_y = zztop_max_word(20, font_y + 12);
+	layout->label_gap = zztop_max_word(16, font_x * 2);
+	layout->gadget_height = zztop_max_word(14, font_y + 6);
+	layout->row_step = layout->gadget_height + zztop_max_word(6, font_y / 2);
+	layout->section_gap = zztop_max_word(5, font_y / 2);
+	layout->slider_step = layout->gadget_height + font_y + zztop_max_word(13, (font_y / 2) + 8);
+	layout->control_step = layout->row_step + layout->section_gap;
+
+	text_padding = zztop_max_word(32, font_x * 4);
+	label_width = zztop_max_text_width(rp, zztop_label_samples, font_x);
+	value_width = zztop_max_text_width(rp, zztop_value_samples, font_x);
+	button_text_width = zztop_max_text_width(rp, zztop_button_samples, font_x);
+
+	layout->gadget_left = layout->margin_x + label_width + layout->label_gap;
+	layout->gadget_width = zztop_max_word(240, value_width + text_padding);
+	layout->button_width = zztop_max_word(110, button_text_width + text_padding);
+
+	button_gap = zztop_max_word(16, font_x * 3);
+	button_window_width = layout->margin_x + layout->button_width +
+		button_gap + layout->button_width + layout->margin_x;
+	layout->window_width = zztop_max_word(
+		layout->gadget_left + layout->gadget_width + layout->margin_x,
+		button_window_width);
+
+	y = layout->topborder + layout->margin_y;
+	y += layout->row_step * 10;
+	y += layout->section_gap;
+	y += layout->slider_step;
+	y += layout->control_step * 3;
+	y += layout->section_gap;
+	y += layout->row_step;
+	y += layout->section_gap;
+	layout->button_top = y;
+	layout->window_height = layout->button_top + layout->gadget_height + (layout->margin_y / 2);
+}
 
 void errorMessage(const char* error)
 {
@@ -336,51 +532,49 @@ void refresh_zz_info(struct Window* win)
 	if (t_min == 0 || t < t_min) t_min = t;
 	if (t_max == 0 || t > t_max) t_max = t;
 
-	GT_SetGadgetAttrs(gads[MYGAD_ZORROVER], win, NULL, GTIN_Number, zorro_version, TAG_END);
+	GT_SetGadgetAttrs(gads[MYGAD_ZORROVER], win, NULL, GTNM_Number, zorro_version, TAG_END);
 
 	snprintf(txt_buf, 20, "ABI %d.%d", fwrev_major, fwrev_minor);
-	GT_SetGadgetAttrs(gads[MYGAD_FWVER], win, NULL, GTST_String, txt_buf, TAG_END);
+	zztop_set_text_display(win, MYGAD_FWVER, txt_buf);
 
 	snprintf(txt_buf, 20, "%.1f", t_filt);
-	GT_SetGadgetAttrs(gads[MYGAD_TEMP], win, NULL, GTST_String, txt_buf, TAG_END);
+	zztop_set_text_display(win, MYGAD_TEMP, txt_buf);
 
 	snprintf(txt_buf, 20, "%.1f / %.1f", t_min, t_max);
-	GT_SetGadgetAttrs(gads[MYGAD_TEMP_MINMAX], win, NULL, GTST_String, txt_buf, TAG_END);
+	zztop_set_text_display(win, MYGAD_TEMP_MINMAX, txt_buf);
 
 	snprintf(txt_buf, 20, "%.2f", vaux);
-	GT_SetGadgetAttrs(gads[MYGAD_VAUX], win, NULL, GTST_String, txt_buf, TAG_END);
+	zztop_set_text_display(win, MYGAD_VAUX, txt_buf);
 
 	snprintf(txt_buf, 20, "%.2f", vint);
-	GT_SetGadgetAttrs(gads[MYGAD_VINT], win, NULL, GTST_String, txt_buf, TAG_END);
+	zztop_set_text_display(win, MYGAD_VINT, txt_buf);
 
 	if (z9ax_present) {
-		GT_SetGadgetAttrs(gads[MYGAD_Z9AX], win, NULL, GTST_String, (STRPTR)"Present", TAG_END);
+		zztop_set_text_display(win, MYGAD_Z9AX, "Present");
 	} else {
-		GT_SetGadgetAttrs(gads[MYGAD_Z9AX], win, NULL, GTST_String, (STRPTR)"Not present", TAG_END);
+		zztop_set_text_display(win, MYGAD_Z9AX, "Not present");
 	}
 
 	snprintf(txt_buf, 64, "AX:%c USB:%04x SD:%04x B:%04x",
 		z9ax_present ? 'Y' : 'N', raw_usb, raw_sd, raw_sd_boot);
-	GT_SetGadgetAttrs(gads[MYGAD_STATUS], win, NULL, GTST_String, txt_buf, TAG_END);
+	zztop_set_text_display(win, MYGAD_STATUS, txt_buf);
 
 	snprintf(txt_buf, 64, "S:%04x P:%04x T:%04x A:%04x",
 		raw_scanline, raw_parity, raw_temp, raw_vaux);
-	GT_SetGadgetAttrs(gads[MYGAD_RAWREGS], win, NULL, GTST_String, txt_buf, TAG_END);
+	zztop_set_text_display(win, MYGAD_RAWREGS, txt_buf);
 
 	/* Videocap diagnostic readout (issue #11 genlock investigation).
 	 * Pulse-width tiers are the per-field max and min, so a wide-sync
 	 * reading is sticky across the frame and won't be missed by an
 	 * unlucky sample. Two tiers let the reporter tell apart "all pulses
-	 * wide" from "some pulses wide". Label kept short so the worst-case
-	 * string ("Lines:1023  Max:3/3  Min:3/3") still fits the gadget
-	 * width at Topaz 8. */
+	 * wide" from "some pulses wide". */
 	{
 		uint16_t lines = raw_vcap & VCAP_LINES_MASK;
 		uint16_t pw_max = (raw_vcap >> VCAP_PW_MAX_TIER_SHIFT) & VCAP_PW_TIER_MASK;
 		uint16_t pw_min = (raw_vcap >> VCAP_PW_MIN_TIER_SHIFT) & VCAP_PW_TIER_MASK;
 		snprintf(txt_buf, 64, "Lines:%u  Max:%u/%u  Min:%u/%u",
 			lines, pw_max, VCAP_PW_TIER_MAX, pw_min, VCAP_PW_TIER_MAX);
-		GT_SetGadgetAttrs(gads[MYGAD_VIDEOCAP], win, NULL, GTST_String, txt_buf, TAG_END);
+		zztop_set_text_display(win, MYGAD_VIDEOCAP, txt_buf);
 	}
 }
 
@@ -413,16 +607,13 @@ VOID handleGadgetEvent(struct Window *win, struct Gadget *gad, ULONG code)
 		case MYGAD_BTN_TEST: {
 			ULONG errors;
 
-			GT_SetGadgetAttrs(gads[MYGAD_TEST_RESULT], win, NULL,
-				GTST_String, (STRPTR)"Reading...", TAG_END);
+			zztop_set_text_display(win, MYGAD_TEST_RESULT, "Reading...");
 			errors = zz_perform_register_probe();
 			if (errors == 0) {
-				GT_SetGadgetAttrs(gads[MYGAD_TEST_RESULT], win, NULL,
-					GTST_String, (STRPTR)"OK read-only", TAG_END);
+				zztop_set_text_display(win, MYGAD_TEST_RESULT, "OK read-only");
 			} else {
 				snprintf(txt_buf, 20, "%lu read errs", (unsigned long)errors);
-				GT_SetGadgetAttrs(gads[MYGAD_TEST_RESULT], win, NULL,
-					GTST_String, txt_buf, TAG_END);
+				zztop_set_text_display(win, MYGAD_TEST_RESULT, txt_buf);
 			}
 			refresh_zz_info(win);
 			break;
@@ -451,8 +642,7 @@ VOID handleGadgetEvent(struct Window *win, struct Gadget *gad, ULONG code)
 			refresh_mode = (refresh_mode + 1) % REFRESH_MODE_COUNT;
 			if (!zztop_restart_timer()) {
 				refresh_mode = 0;
-				GT_SetGadgetAttrs(gads[MYGAD_TEST_RESULT], win, NULL,
-					GTST_String, (STRPTR)"No timer.device", TAG_END);
+				zztop_set_text_display(win, MYGAD_TEST_RESULT, "No timer.device");
 			}
 			GT_SetGadgetAttrs(gads[MYGAD_REFRESHMODE], win, NULL,
 				GTCY_Active, refresh_mode, TAG_END);
@@ -461,105 +651,95 @@ VOID handleGadgetEvent(struct Window *win, struct Gadget *gad, ULONG code)
 	}
 }
 
-struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topborder)
+static struct Gadget *createTextReadoutGadget(struct Gadget *gad, struct NewGadget *ng,
+	UWORD gadget_id, STRPTR label, const char *initial)
+{
+	if (gadget_id >= MYGAD_COUNT) return NULL;
+
+	zztop_store_text_display(gadget_id, initial);
+	ng->ng_GadgetID = gadget_id;
+	ng->ng_GadgetText = label;
+
+	return CreateGadget(TEXT_KIND, gad, ng,
+		GTTX_Text, readout_bufs[gadget_id],
+		GTTX_Border, TRUE,
+		TAG_END);
+}
+
+struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, const struct ZZTopLayout *layout)
 {
 	struct NewGadget ng;
 	struct Gadget *gad;
+	WORD y;
 
 	gad = CreateContext(glistptr);
 
-	ng.ng_LeftEdge	 = 170;
-	ng.ng_TopEdge		 = 20+topborder;
-	/* Width chosen to fit the widest readout (VideoCap's
-	 * "Lines:1023  Max:3/3  Min:3/3") at Topaz 8; the rest of the
-	 * column inherits the same width for visual alignment. */
-	ng.ng_Width			 = 240;
-	ng.ng_Height		 = 14;
-	ng.ng_GadgetText = (STRPTR)"Zorro Version";
-	ng.ng_TextAttr	 = &Topaz80;
+	y = layout->topborder + layout->margin_y;
+
+	ng.ng_LeftEdge	 = layout->gadget_left;
+	ng.ng_TopEdge		 = y;
+	ng.ng_Width			 = layout->gadget_width;
+	ng.ng_Height		 = layout->gadget_height;
+	ng.ng_GadgetText = (STRPTR)LABEL_ZORROVER;
+	ng.ng_TextAttr	 = layout->text_attr;
 	ng.ng_VisualInfo = vi;
 	ng.ng_GadgetID	 = MYGAD_ZORROVER;
 	ng.ng_Flags			 = PLACETEXT_LEFT;
 
-	gads[MYGAD_ZORROVER] = gad = CreateGadget(INTEGER_KIND, gad, &ng,
-											GTIN_Number, 0,
+	gads[MYGAD_ZORROVER] = gad = CreateGadget(NUMBER_KIND, gad, &ng,
+											GTNM_Number, 0,
+											GTNM_Border, TRUE,
 											TAG_END);
+	y += layout->row_step;
 
-	ng.ng_TopEdge	= 40+topborder;
-	ng.ng_GadgetID	= MYGAD_FWVER;
-	ng.ng_GadgetText = (STRPTR)"Firmware ABI";
+	ng.ng_TopEdge	= y;
+	gads[MYGAD_FWVER] = gad = createTextReadoutGadget(gad, &ng,
+		MYGAD_FWVER, (STRPTR)LABEL_FWVER, "");
+	y += layout->row_step;
 
-	gads[MYGAD_FWVER] = gad = CreateGadget(STRING_KIND, gad, &ng,
-											GTST_String, "",
-											TAG_END);
+	ng.ng_TopEdge	= y;
+	gads[MYGAD_TEMP] = gad = createTextReadoutGadget(gad, &ng,
+		MYGAD_TEMP, (STRPTR)LABEL_TEMP, "");
+	y += layout->row_step;
 
-	ng.ng_TopEdge	= 60+topborder;
-	ng.ng_GadgetID	= MYGAD_TEMP;
-	ng.ng_GadgetText = (STRPTR)"Die \260C";
+	ng.ng_TopEdge	= y;
+	gads[MYGAD_TEMP_MINMAX] = gad = createTextReadoutGadget(gad, &ng,
+		MYGAD_TEMP_MINMAX, (STRPTR)LABEL_TEMP_MINMAX, "");
+	y += layout->row_step;
 
-	gads[MYGAD_TEMP] = gad = CreateGadget(STRING_KIND, gad, &ng,
-											GTST_String, "",
-											TAG_END);
+	ng.ng_TopEdge	= y;
+	gads[MYGAD_VAUX] = gad = createTextReadoutGadget(gad, &ng,
+		MYGAD_VAUX, (STRPTR)LABEL_VAUX, "");
+	y += layout->row_step;
 
-	ng.ng_TopEdge	= 80+topborder;
-	ng.ng_GadgetID	= MYGAD_TEMP_MINMAX;
-	ng.ng_GadgetText = (STRPTR)"Die Min/Max \260C";
+	ng.ng_TopEdge	= y;
+	gads[MYGAD_VINT] = gad = createTextReadoutGadget(gad, &ng,
+		MYGAD_VINT, (STRPTR)LABEL_VINT, "");
+	y += layout->row_step;
 
-	gads[MYGAD_TEMP_MINMAX] = gad = CreateGadget(STRING_KIND, gad, &ng,
-											GTST_String, "",
-											TAG_END);
+	ng.ng_TopEdge	= y;
+	gads[MYGAD_Z9AX] = gad = createTextReadoutGadget(gad, &ng,
+		MYGAD_Z9AX, (STRPTR)LABEL_Z9AX, "");
+	y += layout->row_step;
 
-	ng.ng_TopEdge	= 100+topborder;
-	ng.ng_GadgetID	= MYGAD_VAUX;
-	ng.ng_GadgetText = (STRPTR)"VCCAUX V";
+	ng.ng_TopEdge	= y;
+	gads[MYGAD_STATUS] = gad = createTextReadoutGadget(gad, &ng,
+		MYGAD_STATUS, (STRPTR)LABEL_STATUS, "");
+	y += layout->row_step;
 
-	gads[MYGAD_VAUX] = gad = CreateGadget(STRING_KIND, gad, &ng,
-											GTST_String, "",
-											TAG_END);
+	ng.ng_TopEdge	= y;
+	gads[MYGAD_RAWREGS] = gad = createTextReadoutGadget(gad, &ng,
+		MYGAD_RAWREGS, (STRPTR)LABEL_RAWREGS, "");
+	y += layout->row_step;
 
-	ng.ng_TopEdge	= 120+topborder;
-	ng.ng_GadgetID	= MYGAD_VINT;
-	ng.ng_GadgetText = (STRPTR)"VCCINT V";
+	ng.ng_TopEdge	= y;
+	gads[MYGAD_VIDEOCAP] = gad = createTextReadoutGadget(gad, &ng,
+		MYGAD_VIDEOCAP, (STRPTR)LABEL_VIDEOCAP, "");
+	y += layout->row_step + layout->section_gap;
 
-	gads[MYGAD_VINT] = gad = CreateGadget(STRING_KIND, gad, &ng,
-											GTST_String, "",
-											TAG_END);
-
-	ng.ng_TopEdge	= 140+topborder;
-	ng.ng_GadgetID	= MYGAD_Z9AX;
-	ng.ng_GadgetText = (STRPTR)"ZZ9000AX";
-
-	gads[MYGAD_Z9AX] = gad = CreateGadget(STRING_KIND, gad, &ng,
-											GTST_String, "",
-											TAG_END);
-
-	ng.ng_TopEdge	= 160+topborder;
-	ng.ng_GadgetID	= MYGAD_STATUS;
-	ng.ng_GadgetText = (STRPTR)"Status";
-
-	gads[MYGAD_STATUS] = gad = CreateGadget(STRING_KIND, gad, &ng,
-											GTST_String, "",
-											TAG_END);
-
-	ng.ng_TopEdge	= 180+topborder;
-	ng.ng_GadgetID	= MYGAD_RAWREGS;
-	ng.ng_GadgetText = (STRPTR)"Raw Regs";
-
-	gads[MYGAD_RAWREGS] = gad = CreateGadget(STRING_KIND, gad, &ng,
-											GTST_String, "",
-											TAG_END);
-
-	ng.ng_TopEdge	= 200+topborder;
-	ng.ng_GadgetID	= MYGAD_VIDEOCAP;
-	ng.ng_GadgetText = (STRPTR)"VideoCap";
-
-	gads[MYGAD_VIDEOCAP] = gad = CreateGadget(STRING_KIND, gad, &ng,
-											GTST_String, "",
-											TAG_END);
-
-	ng.ng_TopEdge	= 225+topborder;
+	ng.ng_TopEdge	= y;
 	ng.ng_GadgetID	= MYGAD_LPF;
-	ng.ng_GadgetText = (STRPTR)"AX Lowpass";
+	ng.ng_GadgetText = (STRPTR)LABEL_LPF;
 
 	gads[MYGAD_LPF] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
 										GTSL_Min, 0,
@@ -569,60 +749,60 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 										GTSL_MaxLevelLen, 10,
 											GTSL_LevelPlace, PLACETEXT_BELOW,
 											TAG_END);
+	y += layout->slider_step;
 
-	ng.ng_TopEdge	= 260+topborder;
+	ng.ng_TopEdge	= y;
 	ng.ng_GadgetID	= MYGAD_SCANLINES;
-	ng.ng_GadgetText = (STRPTR)"Scanlines";
+	ng.ng_GadgetText = (STRPTR)LABEL_SCANLINES;
 
 	gads[MYGAD_SCANLINES] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
 											GTCY_Labels, scanline_labels,
 											GTCY_Active, scanline_mode,
 											TAG_END);
+	y += layout->control_step;
 
-	ng.ng_TopEdge	= 285+topborder;
+	ng.ng_TopEdge	= y;
 	ng.ng_GadgetID	= MYGAD_PARITY;
-	ng.ng_GadgetText = (STRPTR)"Parity";
+	ng.ng_GadgetText = (STRPTR)LABEL_PARITY;
 
 	gads[MYGAD_PARITY] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
 											GTCY_Labels, parity_labels,
 											GTCY_Active, scanline_parity,
 											TAG_END);
+	y += layout->control_step;
 
-	ng.ng_TopEdge	= 310+topborder;
+	ng.ng_TopEdge	= y;
 	ng.ng_GadgetID	= MYGAD_REFRESHMODE;
-	ng.ng_GadgetText = (STRPTR)"Auto Refresh";
+	ng.ng_GadgetText = (STRPTR)LABEL_REFRESHMODE;
 
 	gads[MYGAD_REFRESHMODE] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
 											GTCY_Labels, refresh_labels,
 											GTCY_Active, refresh_mode,
 											TAG_END);
+	y += layout->control_step + layout->section_gap;
 
-	ng.ng_TopEdge	= 340+topborder;
-	ng.ng_GadgetID	= MYGAD_TEST_RESULT;
-	ng.ng_GadgetText = (STRPTR)"Result";
+	ng.ng_TopEdge	= y;
+	gads[MYGAD_TEST_RESULT] = gad = createTextReadoutGadget(gad, &ng,
+		MYGAD_TEST_RESULT, (STRPTR)LABEL_TEST_RESULT, "Not run");
 
-	gads[MYGAD_TEST_RESULT] = gad = CreateGadget(STRING_KIND, gad, &ng,
-											GTST_String, (STRPTR)"Not run",
-											TAG_END);
-
-	ng.ng_LeftEdge	 = 20;
-	ng.ng_TopEdge		 = 365+topborder;
-	ng.ng_Width			 = 110;
-	ng.ng_GadgetText = (STRPTR)"Reg Probe";
+	ng.ng_LeftEdge	 = layout->margin_x;
+	ng.ng_TopEdge		 = layout->button_top;
+	ng.ng_Width			 = layout->button_width;
+	ng.ng_GadgetText = (STRPTR)LABEL_BTN_TEST;
 	ng.ng_GadgetID	 = MYGAD_BTN_TEST;
 	ng.ng_Flags			 = PLACETEXT_IN;
 
 	gads[MYGAD_BTN_TEST] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
 											TAG_END);
 
-	ng.ng_LeftEdge	= 170;
+	ng.ng_LeftEdge	= layout->gadget_left;
 	ng.ng_GadgetID	 = MYGAD_BTN_REFRESH;
-	ng.ng_GadgetText = (STRPTR)"Refresh";
+	ng.ng_GadgetText = (STRPTR)LABEL_BTN_REFRESH;
 
 	gads[MYGAD_BTN_REFRESH] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
 											TAG_END);
 
-	for (int i=0; i<17; i++) {
+	for (int i=0; i<MYGAD_COUNT; i++) {
 		if (!gads[i]) return NULL;
 	}
 
@@ -697,55 +877,49 @@ VOID process_window_events(struct Window *mywin)
 }
 
 VOID gadtoolsWindow(VOID) {
-	struct TextFont *font;
 	struct Screen		*mysc;
 	struct Window		*mywin;
 	struct Gadget		*glist = NULL;
 	void						*vi;
-	UWORD						topborder;
+	struct ZZTopLayout layout;
 
-	if (NULL == (font = OpenFont(&Topaz80)))
-		errorMessage("Failed to open Topaz 80");
+	if (NULL == (mysc = LockPubScreen(NULL)))
+		errorMessage("Couldn't lock default public screen");
 	else {
-		if (NULL == (mysc = LockPubScreen(NULL)))
-			errorMessage("Couldn't lock default public screen");
+		if (NULL == (vi = GetVisualInfo(mysc, TAG_END)))
+			errorMessage("GetVisualInfo() failed");
 		else {
-			if (NULL == (vi = GetVisualInfo(mysc, TAG_END)))
-				errorMessage("GetVisualInfo() failed");
+			zztop_init_layout(&layout, mysc);
+
+			if (NULL == createAllGadgets(&glist, vi, &layout))
+				errorMessage("createAllGadgets() failed");
 			else {
-				topborder = mysc->WBorTop + (mysc->Font->ta_YSize + 1);
-
-				if (NULL == createAllGadgets(&glist, vi, topborder))
-					errorMessage("createAllGadgets() failed");
-				else {
-					if (NULL == (mywin = OpenWindowTags(NULL,
-							WA_Title,			"ZZTop " ZZTOP_RELEASE,
-							WA_Gadgets,		glist,			WA_AutoAdjust,		TRUE,
-							WA_Width,				430,			WA_MinWidth,			 430,
-							WA_InnerHeight, 390,			WA_MinHeight,			 390,
-							WA_DragBar,		 TRUE,			WA_DepthGadget,		TRUE,
-							WA_Activate,	 TRUE,			WA_CloseGadget,		TRUE,
-							WA_SizeGadget, FALSE,			WA_SimpleRefresh, TRUE,
-							WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
-								IDCMP_VANILLAKEY | SLIDERIDCMP | STRINGIDCMP |
-								BUTTONIDCMP | CYCLEIDCMP,
-							WA_PubScreen, mysc,
-							TAG_END))) {
-						errorMessage("OpenWindow() failed");
-					} else {
-						refresh_zz_info(mywin);
-						GT_RefreshWindow(mywin, NULL);
-						process_window_events(mywin);
-						CloseWindow(mywin);
-					}
+				if (NULL == (mywin = OpenWindowTags(NULL,
+						WA_Title,			"ZZTop " ZZTOP_RELEASE,
+						WA_Gadgets,		glist,			WA_AutoAdjust,		TRUE,
+						WA_Width,				layout.window_width,			WA_MinWidth,			 layout.window_width,
+						WA_InnerHeight, layout.window_height,			WA_MinHeight,			 layout.window_height,
+						WA_DragBar,		 TRUE,			WA_DepthGadget,		TRUE,
+						WA_Activate,	 TRUE,			WA_CloseGadget,		TRUE,
+						WA_SizeGadget, FALSE,			WA_SimpleRefresh, TRUE,
+						WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
+							IDCMP_VANILLAKEY | SLIDERIDCMP | BUTTONIDCMP |
+							CYCLEIDCMP,
+						WA_PubScreen, mysc,
+						TAG_END))) {
+					errorMessage("OpenWindow() failed");
+				} else {
+					refresh_zz_info(mywin);
+					GT_RefreshWindow(mywin, NULL);
+					process_window_events(mywin);
+					CloseWindow(mywin);
 				}
-
-				if (glist) FreeGadgets(glist);
-				FreeVisualInfo(vi);
 			}
-			UnlockPubScreen(NULL, mysc);
+
+			if (glist) FreeGadgets(glist);
+			FreeVisualInfo(vi);
 		}
-		CloseFont(font);
+		UnlockPubScreen(NULL, mysc);
 	}
 }
 
