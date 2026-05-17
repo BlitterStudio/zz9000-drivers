@@ -83,14 +83,22 @@ normal AmigaOS file.
 without removing the card. The usual firmware update flow is:
 
 ```text
-ZZFwUpdate RAM:BOOT.bin BOOT.bin
+ZZFwUpdate RAM:BOOT.bin
 ```
 
 Power-cycle the Amiga after replacing `BOOT.bin` so the ZZ9000 boots
 the new firmware.
 
-The destination name is a flat root-level FAT filename. It must be
-1-64 characters and contain only `A-Z`, `a-z`, `0-9`, `.`, `_`, or `-`.
+By default, the destination filename on the SD card is the source
+basename. To write a different root-level filename, pass it as the
+optional second argument:
+
+```text
+ZZFwUpdate SYS:Storage/zz9000-fw.bin BOOT.bin
+```
+
+The destination name must be 1-64 characters and contain only `A-Z`,
+`a-z`, `0-9`, `.`, `_`, or `-`.
 
 ### Network Diagnostics
 
