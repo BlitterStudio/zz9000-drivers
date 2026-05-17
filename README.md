@@ -1,190 +1,226 @@
 [![CI](https://github.com/BlitterStudio/zz9000-drivers/actions/workflows/ci.yml/badge.svg)](https://github.com/BlitterStudio/zz9000-drivers/actions/workflows/ci.yml)
 
-# ZZ9000 Drivers (AmigaOS) — BlitterStudio fork
+# ZZ9000 Drivers for AmigaOS
 
-> **Fork notice.** This repository is an independent fork and continued
-> development of the original MNT ZZ9000 AmigaOS driver sources. It is
-> maintained by Dimitris Panokostas / **BlitterStudio** and is **not
-> affiliated with, endorsed by, or supported by MNT Research GmbH**.
-> The ZZ9000 hardware itself is designed and manufactured by MNT
-> Research GmbH — hardware questions belong with them; driver issues
-> and fork-specific discussion belong in this repo's
-> [Issues](https://github.com/BlitterStudio/zz9000-drivers/issues).
->
-> Upstream (pre-fork): https://source.mnt.re/amiga/zz9000-drivers
+AmigaOS driver and utility package for the MNT ZZ9000 Zorro II/III card.
+It includes RTG graphics, SANA-II networking, ZZ9000AX audio, Poseidon
+USB, SD-card boot support, firmware-update tooling, diagnostics, and a
+Commodore Installer drawer for end-user releases.
 
-AmigaOS driver set for the MNT ZZ9000 Zorro II/III card: RTG graphics,
-SANA-II networking, AHI/MHI audio for the ZZ9000AX daughterboard, USB
-(Poseidon), SD-card boot from a FAT32-hosted HDF, plus the ZZTop
-configuration GUI, scanline CLI, and firmware update tool. Everything
-targets `m68k-amigaos` and builds headless via Docker. The matching
-FPGA logic and ARM firmware live in
+This repository contains the Amiga-side drivers and tools. Matching FPGA
+logic and ARM firmware live in
 [zz9000-firmware](https://github.com/BlitterStudio/zz9000-firmware).
 
-## What this fork adds on top of upstream
+## Fork Notice
 
-- **RTG driver optimizations** — SetColorArray Z3 batch palette path,
-  AllocBitMap improvements, general Picasso96 compatibility hardening.
-- **USB Poseidon driver** (`zzusbhw.device`) — chunked bulk transfers,
-  root-hub emulation, async INT via poll task, Z3 autoconfig preference,
-  CopyMemQuick fast path, mailbox protocol. Paired with the firmware's
-  new USB stack.
-- **SD-card boot driver** (`zzsd.device`) — boots AmigaOS from a
-  hardfile on a FAT32 SD card via the autoboot ROM. Size-constrained
-  (7424 bytes); CI enforces the ceiling.
-- **Firmware update tool** (`ZZFwUpdate`) — pushes `BOOT.bin` or other
-  root-level files onto the ZZ9000 FAT32 microSD card from AmigaOS using
-  firmware builds with FWUP protocol support.
-- **ZZScanlines V2** — CLI front-end for the multi-mode scanline
-  bitstream (classic / soft / gradient with parity control).
-- **ZZTop V2** — config GUI with scanline slider, hardware readback,
-  and the new toggles exposed by firmware 2.0.0.
-- **CI + releases** — GitHub Actions builds every component on push/PR
-  and publishes a tagged release zip on `v*` tags
-  ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
+This is an independent BlitterStudio-maintained fork of the original MNT
+ZZ9000 AmigaOS driver sources. It is maintained by Dimitris Panokostas
+and is not affiliated with, endorsed by, or supported by MNT Research
+GmbH. The ZZ9000 hardware itself is designed and manufactured by MNT
+Research GmbH.
+
+Hardware questions belong with MNT Research. Driver, installer, and
+fork-specific issues belong in this repository's
+[issue tracker](https://github.com/BlitterStudio/zz9000-drivers/issues).
+
+Upstream pre-fork source: <https://source.mnt.re/amiga/zz9000-drivers>
+
+## Quick Start
+
+For normal installation, use the latest GitHub Release zip:
+
+1. Download `zz9000-drivers-<tag>.zip` from
+   [Releases](https://github.com/BlitterStudio/zz9000-drivers/releases).
+2. Unpack it on the Amiga.
+3. Double-click `ZZ9000Installer/Install ZZ9000`.
+4. Reboot after installing or replacing drivers.
+
+The installer handles driver placement, tool installation, icons,
+Picasso96 settings, the optional Roadshow NetInterface template, and
+the `ENVARC:ZZ9K_MAC` prompt for networking.
+
+## Compatibility
+
+- Target OS/toolchain: `m68k-amigaos`
+- Hardware: MNT ZZ9000 Zorro II or Zorro III card
+- Optional hardware: ZZ9000AX daughterboard for AHI/MHI/AX tools
+- RTG stack: Picasso96
+- Networking: any SANA-II capable stack, such as Roadshow, Miami DX, or
+  AmiTCP
+- USB: Poseidon, with a matching firmware USB mailbox implementation
+
+Several features require current ZZ9000 firmware. In particular,
+`ZZFwUpdate` needs firmware with FWUP protocol support, USB needs the
+firmware USB stack, scanline V2 controls need the matching bitstream,
+and `zzsd.device` is packed into `BOOT.bin` rather than installed as a
+normal AmigaOS file.
 
 ## Components
 
-| Folder           | Artifact                 | What it does |
-|------------------|--------------------------|--------------|
-| `rtg/`           | `ZZ9000.card`            | Picasso96-compatible RTG graphics driver (not P96-derived). Installs under `Libs:Picasso96`. |
-| `net/`           | `ZZ9000Net.device`       | SANA-II network driver. Installs under `Devs:Networks`. |
-| `ahi/`           | `zz9000ax.audio`         | AHI audio driver for the ZZ9000AX daughterboard. `ahi/axtest/` has standalone tests. Runtime tunables (mixer balance, LPF, INT2) are documented in [ahi/README.md](ahi/README.md). |
-| `ax-direct/`     | `axtest`, `axmp3`        | Direct-register reference tools for the AX audio subsystem — bringup and hardware MP3 playback. |
-| `mhi/`           | `mhizz9000.library`      | MHI library exposing the AX hardware MP3 decoder to MHI-aware players. Shares the AX card (and its ENV tunables) with the AHI driver — see [ahi/README.md](ahi/README.md). |
-| `usb-poseidon/`  | `zzusbhw.device`         | USB hardware driver for Poseidon — chunked bulk transfers, root-hub emulation, async INT via poll task, mailbox protocol. Paired with the ZZ9000OS firmware USB stack. |
-| `sd-boot/`       | `zzsd.device`            | Boots AmigaOS from a hardfile (`/zz9000.hdf`) on a FAT32 SD card, via the ZZ9000's autoboot ROM. See [sd-boot/README.md](sd-boot/README.md). |
-| `ZZFwUpdate/`    | `ZZFwUpdate`             | CLI tool that copies a file from AmigaOS to the ZZ9000 FAT32 microSD using the firmware FWUP protocol. |
-| `ZZTop/`         | `ZZTop`                  | Configuration GUI (resolution, scanlines, toggles, hardware readback). |
-| `ZZScanlines/`   | `ZZScanlines`            | CLI front-end for the V1/V2 scanline bitstream. |
-| `installer/`     | `ZZ9000Installer`        | Commodore Installer script and icon for end-user deployment. |
+| Area | Artifact | Installed to | Notes |
+|------|----------|--------------|-------|
+| RTG graphics | `ZZ9000.card` | `Libs:Picasso96/` | Picasso96 RTG driver using the native `BT_MNT_ZZ9000` board identity in current builds. |
+| P96 settings | `Picasso96Settings` | `Devs:` | Installer backs up an existing file to `Devs:Picasso96Settings.pre-ZZ9000-2.4`. |
+| Networking | `ZZ9000Net.device` | `Devs:Networks/` | SANA-II Ethernet driver. |
+| Network template | `ZZ9000Net` | `Devs:NetInterfaces/` | Optional Roadshow DHCP template installed by the installer. |
+| Network diagnostics | `zznetstats` | `C:` | Dumps SANA-II counters plus firmware RX backlog/drop registers. |
+| AHI audio | `zz9000ax.audio` | `Devs:AHI/` | ZZ9000AX AHI driver. Runtime tunables are documented in [ahi/README.md](ahi/README.md). |
+| AHI mode | `ZZ9000AX` | `Devs:AudioModes/` | AudioMode file generated by the AHI build. |
+| MHI audio | `mhizz9000.library` | `Libs:MHI/` | Exposes the AX hardware MP3 decoder to MHI-aware players. |
+| USB | `zzusbhw.device` | `Devs:USBHardware/` | Poseidon USB hardware driver. See [usb-poseidon/README.md](usb-poseidon/README.md). |
+| SD boot | `zzsd.device` | Firmware `BOOT.bin` | Size-constrained boot driver for FAT32-hosted HDF boot. See [sd-boot/README.md](sd-boot/README.md). |
+| Configuration | `ZZTop` | `SYS:Tools/` | GUI for resolution, scanlines, hardware toggles, and hardware readback. |
+| Scanlines | `ZZScanlines` | `C:` | CLI for scanline V1/V2 modes. |
+| Firmware update | `ZZFwUpdate` | `C:` | Pushes `BOOT.bin` or another root-level file to the ZZ9000 FAT32 microSD card over Zorro. |
+| AX diagnostics | `axmp3` | `C:` | Direct-register MP3 playback test tool for ZZ9000AX. |
+| Installer | `ZZ9000Installer` | Release zip root | Commodore Installer drawer used for end-user deployment. |
 
-## Building
+## Command-Line Tools
 
-The main driver folders have `build.sh` scripts, while the smaller CLI
-tools are built directly by [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
-on every push and pull request. The simplest local path is the
-`sacredbanana/amiga-compiler:m68k-amigaos` Docker image, which ships a
-working `vbcc` + `m68k-amigaos-gcc` toolchain — the same image the
-CI uses.
+### Firmware Updates
 
-RTG driver:
-
-```bash
-docker run --rm -v "$(pwd)":/src -w /src/rtg \
-  sacredbanana/amiga-compiler:m68k-amigaos \
-  sh -c 'export PATH=/opt/amiga/bin:$PATH && sh build.sh'
-```
-
-ZZTop:
-
-```bash
-docker run --rm -v "$(pwd)":/src -w /src/ZZTop \
-  sacredbanana/amiga-compiler:m68k-amigaos \
-  m68k-amigaos-gcc Sources/ZZTop.c -m68030 -O2 -o ZZTop -Wall -Wextra \
-  -Wno-unused-parameter -lamiga -noixemul -lm
-```
-
-ZZScanlines:
-
-```bash
-docker run --rm -v "$(pwd)":/src -w /src/ZZScanlines \
-  sacredbanana/amiga-compiler:m68k-amigaos \
-  m68k-amigaos-gcc -O2 -noixemul -o ZZScanlines ZZScanlines.c -lamiga
-```
-
-ZZFwUpdate:
-
-```bash
-docker run --rm -v "$(pwd)":/src -w /src/ZZFwUpdate \
-  sacredbanana/amiga-compiler:m68k-amigaos \
-  m68k-amigaos-gcc -O2 -noixemul -Wall -Wextra -o ZZFwUpdate ZZFwUpdate.c -lamiga
-```
-
-For the network, AHI, MHI, USB Poseidon and SD-boot drivers, run the
-folder's `build.sh` (or copy the exact command from
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
-`zzsd.device` has a hard size ceiling of **7424 bytes** (FPGA-decoded
-boot ROM window minus the diag-area header and thunk) — CI enforces
-this.
-
-## Releases
-
-Pushing a tag matching `v*` (e.g. `v1.0.0`, `v2026.04`) triggers the
-full CI build and then publishes `zz9000-drivers-<tag>.zip` containing
-`README.md`, `ZZ9000Installer.info`, and the populated
-`ZZ9000Installer/` drawer at the package root. Built binaries are
-placed inside the installer drawer and are not duplicated as loose
-files at the zip root. Tags containing a `-` (e.g. `v1.0.0-rc1`) are
-marked as pre-releases. Release notes are generated automatically from
-commits and merged PRs since the previous tag.
-
-```bash
-git tag -a v1.0.0 -m "ZZ9000 drivers 1.0.0"
-git push origin v1.0.0
-```
-
-## Installing on a real ZZ9000
-
-The easiest path is the Commodore Installer bundled in `installer/` (or
-inside the release zip) — it handles file placement, icons, and the
-Picasso96 entries for you. That's the recommended route for end users.
-
-`ZZ9000.card` 2.4 and newer identifies the board as the native
-`BT_MNT_ZZ9000` P96 board type. When upgrading the RTG driver manually,
-also install the matching `Picasso96Settings` from
-`installer/ZZ9000Installer/Devs/Picasso96Settings`; older settings files
-that were saved with the legacy `uaegfx` board type may not attach their
-screenmodes to the new driver identity.
-
-The installer backs up an existing `Devs:Picasso96Settings` to
-`Devs:Picasso96Settings.pre-ZZ9000-2.4` before installing the migrated
-settings file.
-
-For manual installs or component-by-component replacement:
-
-| Artifact                          | Destination             |
-|-----------------------------------|-------------------------|
-| `rtg/ZZ9000.card`                 | `Libs:Picasso96/`       |
-| `installer/ZZ9000Installer/Devs/Picasso96Settings` | `Devs:` |
-| `net/ZZ9000Net.device`            | `Devs:Networks/`        |
-| `ahi/driver/zz9000ax.audio`       | `Devs:AHI/`             |
-| `mhi/mhizz9000.library`           | `Libs:MHI/`             |
-| `usb-poseidon/zzusbhw.device`     | `Devs:USBHardware/` then registered with Poseidon |
-| `sd-boot/zzsd.device`             | Packed into `BOOT.bin` — see [sd-boot/README.md](sd-boot/README.md) |
-| `ZZFwUpdate/ZZFwUpdate`            | `C:`                    |
-
-After installing `ZZFwUpdate`, a firmware image can be copied to the
-ZZ9000 FAT32 microSD card without removing the card:
+`ZZFwUpdate` copies a file from AmigaOS to the ZZ9000 FAT32 microSD card
+without removing the card. The usual firmware update flow is:
 
 ```text
 ZZFwUpdate RAM:BOOT.bin BOOT.bin
 ```
 
-Power-cycle the Amiga after replacing `BOOT.bin`.
+Power-cycle the Amiga after replacing `BOOT.bin` so the ZZ9000 boots
+the new firmware.
+
+The destination name is a flat root-level FAT filename. It must be
+1-64 characters and contain only `A-Z`, `a-z`, `0-9`, `.`, `_`, or `-`.
+
+### Network Diagnostics
+
+`zznetstats` opens `ZZ9000Net.device`, requests SANA-II global stats,
+and prints firmware RX queue/backpressure/drop counters:
+
+```text
+zznetstats
+zznetstats DEVICE=Networks/ZZ9000Net.device UNIT=0
+zznetstats Networks/ZZ9000Net.device 0
+```
+
+Run it before and after a throughput test to see whether drops are
+happening in the Amiga-side driver or firmware RX path.
+
+### Scanlines
+
+`ZZScanlines` controls the scanline bitstream modes exposed by recent
+firmware/bitstream builds:
+
+```text
+ZZScanlines 0
+ZZScanlines 1 0
+ZZScanlines 2 1
+ZZScanlines 3 0
+```
+
+Modes are `0=off`, `1=classic`, `2=soft`, `3=gradient`; parity is
+`0=odd dark`, `1=even dark`.
+
+## Building
+
+GitHub Actions is the source of truth for release builds. Every push and
+pull request builds each component inside
+`sacredbanana/amiga-compiler:m68k-amigaos`; tag builds assemble the
+release zip.
+
+The same image can be used locally with Docker or Podman:
+
+```bash
+IMAGE=sacredbanana/amiga-compiler:m68k-amigaos
+```
+
+Examples:
+
+```bash
+docker run --rm -v "$(pwd)":/src -w /src/ZZFwUpdate "$IMAGE" \
+  m68k-amigaos-gcc -O2 -noixemul -Wall -Wextra \
+    -o ZZFwUpdate ZZFwUpdate.c -lamiga
+```
+
+```bash
+docker run --rm -v "$(pwd)":/src -w /src/net/zznetstats "$IMAGE" \
+  m68k-amigaos-gcc -O2 -noixemul -Wall -Wextra -Wno-unused-parameter \
+    -o zznetstats zznetstats.c -lamiga
+```
+
+```bash
+docker run --rm -v "$(pwd)":/src -w /src/net "$IMAGE" sh -c 'make'
+```
+
+For exact commands for every artifact, use
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml). Some component
+folders also provide `build.sh` wrappers for local development.
+
+`sd-boot/zzsd.device` has a hard size ceiling of 7424 bytes because it
+must fit in the FPGA-decoded boot ROM window. CI enforces this limit.
+
+## Release Packaging
+
+Pushing a tag matching `v*` builds all artifacts and publishes a GitHub
+Release zip:
+
+```bash
+git tag -a v2.0.2 -m "ZZ9000 drivers 2.0.2"
+git push origin v2.0.2
+```
+
+The release bundle layout is:
+
+```text
+zz9000-drivers-<tag>/
+  README.md
+  ZZ9000Installer.info
+  ZZ9000Installer/
+```
+
+The release job populates `ZZ9000Installer/` with fresh CI-built
+binaries before zipping it. Binaries are not duplicated as loose files
+at the zip root. The release zip's `README.md` is copied from
+[installer/README.md](installer/README.md), which is focused on the
+installer drawer layout and local installer testing.
+
+Tags containing `-`, such as `v2.0.2-rc1`, are marked as pre-releases.
+GitHub release notes are generated automatically.
+
+## Repository Layout
+
+| Path | Purpose |
+|------|---------|
+| `.github/workflows/ci.yml` | CI, artifact builds, release assembly. |
+| `installer/` | End-user Commodore Installer drawer, icons, templates, and release packaging docs. |
+| `rtg/` | Picasso96 RTG driver. |
+| `net/` | SANA-II network driver and `zznetstats`. |
+| `ahi/` | ZZ9000AX AHI driver, AudioMode file, and audio runtime documentation. |
+| `mhi/` | ZZ9000AX MHI library. |
+| `usb-poseidon/` | Poseidon USB hardware driver and setup notes. |
+| `sd-boot/` | SD-card boot driver and boot-ROM integration notes. |
+| `ZZTop/` | Configuration GUI. |
+| `ZZScanlines/` | Scanline control CLI. |
+| `ZZFwUpdate/` | Firmware/file push CLI using the FWUP protocol. |
+| `ax-direct/` | Direct-register AX bring-up and MP3 test tools. |
 
 ## Credits
 
-- RTG driver optimizations (SetColorArray Z3 batch path, AllocBitMap),
-  scanline tooling (ZZScanlines V2 port, ZZTop V2 slider with hardware
-  readback), USB Poseidon hardware driver (`zzusbhw.device`, chunked
-  bulk transfers, root-hub emulation, async INT via poll task, Z3
-  autoconfig preference, CopyMemQuick fast path, mailbox protocol,
-  throughput tuning), SD-card boot driver (`zzsd.device`), and firmware
-  update tool (`ZZFwUpdate`) —
+- RTG optimization work, scanline tooling, ZZTop V2 updates, USB
+  Poseidon driver, SD-card boot driver, firmware update tool, network
+  diagnostics tool, CI/release packaging, and installer modernization:
   Dimitris Panokostas (midwan).
-- Scanline bitstream V1 and V2 — Xanxi. V2 adds multi-mode patterns
-  (classic / soft / gradient) with odd/even parity, gated to AGA
-  scandoubled modes and RTG resolutions below 350 lines. `ZZScanlines.c`
-  V2 is essentially Xanxi's reference implementation, adapted for this
-  repo's conventions.
-- Network driver originally based on work by Henryk Richter
-  <henryk.richter@gmx.net> (2018).
-- Upstream driver sources (pre-fork) — see the fork notice above.
+- Scanline bitstream V1 and V2: Xanxi. V2 adds multi-mode patterns
+  with odd/even parity, gated to AGA scandoubled modes and RTG
+  resolutions below 350 lines.
+- Network driver base: Henryk Richter <henryk.richter@gmx.net> (2018).
+- Original upstream driver sources: MNT Research pre-fork repository
+  listed above.
 
-Per-file copyright notices are preserved in each source file.
+Per-file copyright notices are preserved in source files.
 
 ## License
 
-SPDX-License-Identifier: **GPL-3.0-or-later**
-<https://spdx.org/licenses/GPL-3.0-or-later.html>
+SPDX-License-Identifier: `GPL-3.0-or-later`
+
+See <https://spdx.org/licenses/GPL-3.0-or-later.html>.

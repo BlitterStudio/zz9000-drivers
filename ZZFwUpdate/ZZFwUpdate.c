@@ -33,6 +33,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define ZZFWUPDATE_VERSION "1.1"
+#define ZZFWUPDATE_DATE    "17.05.2026"
+
+static const char version[] __attribute__((used)) =
+    "$VER: ZZFwUpdate " ZZFWUPDATE_VERSION " (" ZZFWUPDATE_DATE ")\r\n";
+
 #define MNT_MANUFACTURER   0x6d6e
 #define ZZ9000_PRODUCT_Z3  4
 #define ZZ9000_PRODUCT_Z2  3
@@ -62,6 +68,11 @@
  * for tens of ms on a slow SD card, so a small counter wouldn't
  * survive a real card under load. */
 #define FWUP_POLL_LIMIT    2000000
+#define FWUP_SPINNER_INTERVAL 32768UL
+#define FWUP_TICKS_PER_SECOND 50UL
+
+struct fwup_progress;
+static void update_busy_progress(struct fwup_progress *progress);
 
 static const char *fwup_strerror(UWORD code) {
     switch (code) {
@@ -74,8 +85,38 @@ static const char *fwup_strerror(UWORD code) {
     case FWUP_ERR_STATE: return "protocol state error (WRITE/CLOSE without OPEN?)";
     case FWUP_ERR_LEN: return "chunk length out of range";
     case 0x09: return "unknown FWUP command";
+    case FWUP_STATUS_BUSY: return "timed out waiting for firmware";
     default:   return "unknown error";
     }
+}
+
+static int valid_dest_char(char c) {
+    return (c >= 'A' && c <= 'Z') ||
+           (c >= 'a' && c <= 'z') ||
+           (c >= '0' && c <= '9') ||
+           c == '.' || c == '_' || c == '-';
+}
+
+static int validate_dest_name(const char *name) {
+    size_t len = strlen(name);
+    size_t i;
+
+    if (len == 0 || len > 64) {
+        printf("ERROR: destination name must be 1..64 chars\n");
+        return 0;
+    }
+
+    for (i = 0; i < len; i++) {
+        if (!valid_dest_char(name[i])) {
+            printf("ERROR: destination name may only contain "
+                   "A-Z, a-z, 0-9, '.', '_' and '-'\n");
+            printf("       Bad character at position %lu\n",
+                   (unsigned long)(i + 1));
+            return 0;
+        }
+    }
+
+    return 1;
 }
 
 static ULONG find_zz9000(void) {
@@ -110,7 +151,8 @@ static const char *basename_amigados(const char *p) {
     return last;
 }
 
-static UWORD poll_status(volatile UWORD *status_reg) {
+static UWORD poll_status(volatile UWORD *status_reg,
+                         struct fwup_progress *progress) {
     /* The firmware sets STATUS = 0xFFFF when it accepts a CMD and
      * clears it to the result once the FatFs call returns. Status
      * register sits in the cache-inhibit Zorro register window, so no
@@ -120,6 +162,8 @@ static UWORD poll_status(volatile UWORD *status_reg) {
     do {
         st = *status_reg;
         if (st != FWUP_STATUS_BUSY) return st;
+        if (progress && ((budget & (FWUP_SPINNER_INTERVAL - 1)) == 0))
+            update_busy_progress(progress);
     } while (--budget);
     return FWUP_STATUS_BUSY;
 }
@@ -134,12 +178,12 @@ static int probe_fwup_protocol(volatile UWORD *cmd_reg,
      * firmware answers with a protocol error. ABORT first also clears
      * any stale interrupted transfer. */
     *cmd_reg = FWUP_CMD_ABORT;
-    st = poll_status(status_reg);
+    st = poll_status(status_reg, NULL);
     if (st == FWUP_STATUS_BUSY) return 0;
 
     *len_reg = 0;
     *cmd_reg = FWUP_CMD_WRITE;
-    st = poll_status(status_reg);
+    st = poll_status(status_reg, NULL);
     return (st == FWUP_ERR_STATE || st == FWUP_ERR_LEN);
 }
 
@@ -149,13 +193,87 @@ static void abort_transfer(volatile UWORD *cmd_reg,
     UWORD st;
 
     *cmd_reg = FWUP_CMD_ABORT;
-    st = poll_status(status_reg);
+    st = poll_status(status_reg, NULL);
     if (st == FWUP_OK) {
         printf("Partial transfer aborted; 0:/%s deleted on the card.\n",
                dest_name);
+    } else if (st == FWUP_STATUS_BUSY) {
+        printf("WARNING: ABORT timed out; 0:/%s may remain.\n", dest_name);
     } else {
         printf("WARNING: ABORT failed: %s (0x%04x); 0:/%s may remain.\n",
                fwup_strerror(st), st, dest_name);
+    }
+}
+
+static void flush_stdout(void) {
+    fflush(stdout);
+    Flush(Output());
+}
+
+struct fwup_progress {
+    ULONG total;
+    LONG file_size;
+    UWORD spinner_pos;
+};
+
+static ULONG progress_percent(ULONG total, ULONG file_size) {
+    if (file_size == 0) return 0;
+    if (total >= file_size) return 100;
+    return (ULONG)(((unsigned long long)total * 100ULL) / file_size);
+}
+
+static void print_progress(ULONG total, LONG file_size, char marker) {
+    if (file_size > 0) {
+        printf("\r  %lu / %ld bytes (%lu%%) %c",
+               (unsigned long)total, (long)file_size,
+               (unsigned long)progress_percent(total, (ULONG)file_size),
+               marker);
+    } else {
+        printf("\r  %lu bytes %c", (unsigned long)total, marker);
+    }
+    flush_stdout();
+}
+
+static void update_busy_progress(struct fwup_progress *progress) {
+    static const char spinner[] = "|/-\\";
+
+    print_progress(progress->total, progress->file_size,
+                   spinner[progress->spinner_pos & 3]);
+    progress->spinner_pos++;
+}
+
+static ULONG elapsed_ticks(const struct DateStamp *start,
+                           const struct DateStamp *end) {
+    LONG days = end->ds_Days - start->ds_Days;
+    LONG minutes = end->ds_Minute - start->ds_Minute;
+    LONG ticks = end->ds_Tick - start->ds_Tick;
+    LONG total = ((days * 24L * 60L) + minutes) *
+                 60L * FWUP_TICKS_PER_SECOND + ticks;
+
+    return (total > 0) ? (ULONG)total : 0;
+}
+
+static void print_done(ULONG total, const char *dest_name, ULONG ticks) {
+    printf("Done. %lu bytes written to 0:/%s",
+           (unsigned long)total, dest_name);
+    if (ticks > 0) {
+        ULONG seconds = ticks / FWUP_TICKS_PER_SECOND;
+        ULONG tenths = ((ticks % FWUP_TICKS_PER_SECOND) * 10UL) /
+                       FWUP_TICKS_PER_SECOND;
+        ULONG kb_per_sec = ((total / 1024UL) * FWUP_TICKS_PER_SECOND) / ticks;
+        printf(" in %lu.%lus (%lu KB/s)",
+               (unsigned long)seconds, (unsigned long)tenths,
+               (unsigned long)kb_per_sec);
+    }
+    printf("\n");
+}
+
+static void print_cmd_error(const char *cmd, UWORD st) {
+    if (st == FWUP_STATUS_BUSY) {
+        printf("ERROR: %s timed out waiting for firmware\n", cmd);
+    } else {
+        printf("ERROR: %s failed: %s (0x%04x)\n",
+               cmd, fwup_strerror(st), st);
     }
 }
 
@@ -173,10 +291,8 @@ int main(int argc, char *argv[]) {
     const char *src_path  = argv[1];
     const char *dest_name = (argc == 3) ? argv[2] : basename_amigados(src_path);
 
-    if (strlen(dest_name) == 0 || strlen(dest_name) > 64) {
-        printf("ERROR: destination name must be 1..64 chars\n");
+    if (!validate_dest_name(dest_name))
         return 1;
-    }
 
     ULONG board = find_zz9000();
     if (!board) {
@@ -229,10 +345,14 @@ int main(int argc, char *argv[]) {
     if (file_size >= 0) printf(" (%ld bytes)", (long)file_size);
     printf("\n");
 
+    struct DateStamp started;
+    struct DateStamp finished;
+    DateStamp(&started);
+
     *cmd_reg = FWUP_CMD_OPEN;
-    UWORD st = poll_status(status_reg);
+    UWORD st = poll_status(status_reg, NULL);
     if (st != FWUP_OK) {
-        printf("ERROR: OPEN failed: %s (0x%04x)\n", fwup_strerror(st), st);
+        print_cmd_error("OPEN", st);
         FreeMem(chunk, FWUP_CHUNK_BYTES);
         Close(fh);
         return 1;
@@ -241,44 +361,52 @@ int main(int argc, char *argv[]) {
     ULONG total = 0;
     LONG  n;
     int   rc = 0;
+    struct fwup_progress progress;
+
+    progress.total = 0;
+    progress.file_size = file_size;
+    progress.spinner_pos = 0;
 
     while ((n = Read(fh, chunk, FWUP_CHUNK_BYTES)) > 0) {
         CopyMem(chunk, buffer, n);
         *len_reg = (UWORD)n;
         *cmd_reg = FWUP_CMD_WRITE;
-        st = poll_status(status_reg);
+        st = poll_status(status_reg, &progress);
         if (st != FWUP_OK) {
-            printf("\nERROR: WRITE at offset %lu failed: %s (0x%04x)\n",
-                   (unsigned long)total, fwup_strerror(st), st);
+            printf("\n");
+            if (st == FWUP_STATUS_BUSY) {
+                printf("ERROR: WRITE timed out at offset %lu "
+                       "after %ld-byte chunk\n",
+                       (unsigned long)total, (long)n);
+            } else {
+                printf("ERROR: WRITE at offset %lu failed: %s (0x%04x)\n",
+                       (unsigned long)total, fwup_strerror(st), st);
+            }
             rc = 1;
             break;
         }
         total += n;
-        if (file_size > 0) {
-            printf("\r  %lu / %ld bytes (%lu%%)",
-                   (unsigned long)total, (long)file_size,
-                   (unsigned long)((total * 100UL) / (ULONG)file_size));
-        } else {
-            printf("\r  %lu bytes", (unsigned long)total);
-        }
-        Flush(Output());
+        progress.total = total;
+        print_progress(total, file_size, ' ');
     }
-    printf("\n");
 
     if (n < 0) {
+        printf("\n");
         printf("ERROR: read error on %s\n", src_path);
         rc = 1;
     }
 
     if (rc == 0) {
+        print_progress(total, file_size, ' ');
+        printf("\n");
         *cmd_reg = FWUP_CMD_CLOSE;
-        st = poll_status(status_reg);
+        st = poll_status(status_reg, NULL);
         if (st != FWUP_OK) {
-            printf("ERROR: CLOSE failed: %s (0x%04x)\n", fwup_strerror(st), st);
+            print_cmd_error("CLOSE", st);
             rc = 1;
         } else {
-            printf("Done. %lu bytes written to 0:/%s\n",
-                   (unsigned long)total, dest_name);
+            DateStamp(&finished);
+            print_done(total, dest_name, elapsed_ticks(&started, &finished));
         }
     }
 

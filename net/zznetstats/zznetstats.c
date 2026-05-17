@@ -27,6 +27,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define ZZNETSTATS_VERSION "1.0"
+#define ZZNETSTATS_DATE    "17.05.2026"
+
+static const char version[] __attribute__((used)) =
+    "$VER: zznetstats " ZZNETSTATS_VERSION " (" ZZNETSTATS_DATE ")\r\n";
+
 #define DEFAULT_DEVICE "Networks/ZZ9000Net.device"
 #define DEFAULT_UNIT   0
 #define MNT_MANUFACTURER  0x6d6e
@@ -41,7 +47,7 @@ static ULONG find_zz9000(void)
     struct ConfigDev *cd = NULL;
     ULONG addr = 0;
 
-    ExpBase = (struct ExpansionBase *)OpenLibrary("expansion.library", 0);
+    ExpBase = (struct ExpansionBase *)OpenLibrary((CONST_STRPTR)"expansion.library", 0);
     if (!ExpBase) return 0;
 
     while ((cd = FindConfigDev(cd, MNT_MANUFACTURER, ZZ9000_PRODUCT_Z3)))
