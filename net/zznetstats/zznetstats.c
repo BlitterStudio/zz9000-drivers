@@ -10,10 +10,9 @@
  *
  * Defaults: DEVICE=Networks/ZZ9000Net.device UNIT=0
  *
- * Prints every field of Sana2DeviceStats so the Overruns counter
- * (hardware miss count) is visible. Run twice around a throughput
- * test and diff by eye to see whether the FPGA overwrote unread RX
- * slots during the test.
+ * Prints every field of Sana2DeviceStats plus the firmware RX backlog
+ * status registers. Run twice around a throughput test and diff by eye
+ * to see whether the driver or firmware is dropping frames.
  */
 
 #include <exec/types.h>
@@ -21,6 +20,7 @@
 #include <exec/memory.h>
 #include <devices/sana2.h>
 #include <proto/exec.h>
+#include <proto/expansion.h>
 #include <clib/alib_protos.h>
 
 #include <stdio.h>
@@ -29,6 +29,51 @@
 
 #define DEFAULT_DEVICE "Networks/ZZ9000Net.device"
 #define DEFAULT_UNIT   0
+#define MNT_MANUFACTURER  0x6d6e
+#define ZZ9000_PRODUCT_Z3 4
+#define ZZ9000_PRODUCT_Z2 3
+#define REG_ZZ_ETH_RX_STATUS 0x8c
+#define REG_ZZ_ETH_RX_STATS  0x8e
+
+static ULONG find_zz9000(void)
+{
+    struct ExpansionBase *ExpBase;
+    struct ConfigDev *cd = NULL;
+    ULONG addr = 0;
+
+    ExpBase = (struct ExpansionBase *)OpenLibrary("expansion.library", 0);
+    if (!ExpBase) return 0;
+
+    while ((cd = FindConfigDev(cd, MNT_MANUFACTURER, ZZ9000_PRODUCT_Z3)))
+        { addr = (ULONG)cd->cd_BoardAddr; break; }
+
+    if (!addr) {
+        cd = NULL;
+        while ((cd = FindConfigDev(cd, MNT_MANUFACTURER, ZZ9000_PRODUCT_Z2)))
+            { addr = (ULONG)cd->cd_BoardAddr; break; }
+    }
+
+    CloseLibrary((struct Library *)ExpBase);
+    return addr;
+}
+
+static void print_firmware_rx_stats(void)
+{
+    ULONG regs = find_zz9000();
+    if (!regs) {
+        printf("FirmwareRXStatus     = unavailable\n");
+        return;
+    }
+
+    UWORD status = *(volatile UWORD *)(regs + REG_ZZ_ETH_RX_STATUS);
+    UWORD stats  = *(volatile UWORD *)(regs + REG_ZZ_ETH_RX_STATS);
+
+    printf("FirmwareRXReady      = %u\n",  (unsigned)(status & 0x00ff));
+    printf("FirmwareRXReserved   = %u\n",  (unsigned)((status >> 8) & 0x007f));
+    printf("FirmwareRXBackpress  = %u\n",  (unsigned)((status >> 15) & 1));
+    printf("FirmwareRXDropped    = %u\n",  (unsigned)((stats >> 8) & 0x00ff));
+    printf("FirmwareRXPauseSent  = %u\n",  (unsigned)(stats & 0x00ff));
+}
 
 static int parse_args(int argc, char **argv, const char **dev, LONG *unit)
 {
@@ -106,6 +151,7 @@ int main(int argc, char **argv)
         printf("Reconfigurations     = %lu\n", (unsigned long)stats.Reconfigurations);
         printf("LastStart.tv_secs    = %lu\n", (unsigned long)stats.LastStart.tv_secs);
         printf("LastStart.tv_micro   = %lu\n", (unsigned long)stats.LastStart.tv_micro);
+        print_firmware_rx_stats();
     }
 
     CloseDevice((struct IORequest *)req);

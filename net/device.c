@@ -1003,7 +1003,7 @@ SAVEDS void frame_proc() {
 
       /* Gap detection: the firmware increments 'serial' once per
        * received frame; when the Amiga falls behind and the firmware
-       * backlog (FRAME_MAX_BACKLOG = 32) overflows, frames are dropped
+       * backlog overflows, frames are dropped
        * at the MAC layer and the next delivered frame's serial skips
        * ahead. A "reasonable" gap is bounded by the backlog depth.
        *
