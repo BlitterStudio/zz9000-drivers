@@ -52,7 +52,7 @@ struct ExecBase* SysBase;
  * routines parse it consistently.
  */
 #define DEVICE_ID_STRING DEVICE_NAME " " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) \
-    " (26.4.2026) Poseidon USB driver for ZZ9000 " \
+    " (17.05.2026) Poseidon USB driver for ZZ9000 " \
     "(C) Copyright 2026 Dimitris Panokostas"
 
 /* USB request constants (from usb.h) */
@@ -176,7 +176,7 @@ const char device_id_string[] = DEVICE_ID_STRING;
  */
 static const char __attribute__((used)) version_tag[] =
     "$VER: " DEVICE_NAME " " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION)
-    " (26.4.2026) Poseidon USB driver for ZZ9000 "
+    " (17.05.2026) Poseidon USB driver for ZZ9000 "
     "(C) Copyright 2026 Dimitris Panokostas";
 
 typedef char ZZUSBCommand_size_must_match_protocol[

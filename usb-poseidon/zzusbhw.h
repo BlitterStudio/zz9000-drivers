@@ -44,8 +44,8 @@
 #include <devices/usbhardware.h>
 
 #define DEVICE_NAME      "zzusbhw.device"
-#define DEVICE_VERSION   1
-#define DEVICE_REVISION  95
+#define DEVICE_VERSION   2
+#define DEVICE_REVISION  1
 
 #define ZZ_NUM_PORTS     1
 

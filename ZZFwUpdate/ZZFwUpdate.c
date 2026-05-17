@@ -33,7 +33,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define ZZFWUPDATE_VERSION "1.1"
+#define ZZFWUPDATE_VERSION "2.1"
 #define ZZFWUPDATE_DATE    "17.05.2026"
 
 static const char version[] __attribute__((used)) =

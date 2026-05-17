@@ -27,7 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define ZZNETSTATS_VERSION "1.0"
+#define ZZNETSTATS_VERSION "2.1"
 #define ZZNETSTATS_DATE    "17.05.2026"
 
 static const char version[] __attribute__((used)) =

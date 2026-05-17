@@ -32,7 +32,7 @@
 
 #include "zz9000.h"
 
-#define ZZTOP_RELEASE "2.0.2"
+#define ZZTOP_RELEASE "2.1"
 #define ZZTOP_DATE    "17.05.2026"
 
 static const char version[] __attribute__((used)) =

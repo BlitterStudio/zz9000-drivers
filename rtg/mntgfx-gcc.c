@@ -56,13 +56,13 @@ struct DOSBase;
 #define __saveds__
 
 #define DEVICE_VERSION 2
-#define DEVICE_REVISION 4
+#define DEVICE_REVISION 5
 #define REQUIRED_FW_VERSION_MAJOR 2
 #define REQUIRED_FW_VERSION_MINOR 0
 #define DEVICE_PRIORITY 0
 #define DEVICE_ID_STRING "$VER: ZZ9000.card+blitter " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
 #define DEVICE_NAME "ZZ9000.card"
-#define DEVICE_DATE "(27.04.2026)"
+#define DEVICE_DATE "(17.05.2026)"
 
 int __attribute__((no_reorder)) _start()
 {
