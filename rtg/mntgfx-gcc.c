@@ -120,7 +120,24 @@ char dummies[128];
 #define MNT_MANUFACTURER 0x6d6e
 #define ZZ9000_PRODUCT_Z2 0x3
 #define ZZ9000_PRODUCT_Z3 0x4
-#define ZZ_SUPPORTED_RGB_FORMATS (1UL | 2UL | 32UL | 256UL | 512UL | 1024UL | 2048UL | 8192UL)
+#define RGBFMT_BIT(format) (1UL << (format))
+#define ZZ_RGBFMT_NONE     0
+#define ZZ_RGBFMT_CLUT     1
+#define ZZ_RGBFMT_BGRA     9
+#define ZZ_RGBFMT_R5G6B5   10
+#define ZZ_RGBFMT_R5G5B5   11
+
+/*
+ * Only advertise formats the firmware/video formatter interprets natively.
+ * RGBA and the PC/BGR 15-bit variants use different byte or component order,
+ * but the firmware only has one 32-bit mode and one RGB555 mode.
+ */
+#define ZZ_SUPPORTED_RGB_FORMATS \
+	(RGBFMT_BIT(ZZ_RGBFMT_NONE) | \
+	 RGBFMT_BIT(ZZ_RGBFMT_CLUT) | \
+	 RGBFMT_BIT(ZZ_RGBFMT_BGRA) | \
+	 RGBFMT_BIT(ZZ_RGBFMT_R5G6B5) | \
+	 RGBFMT_BIT(ZZ_RGBFMT_R5G5B5))
 
 #ifndef CDF_CONFIGME
 #define CDF_CONFIGME (1 << 1)
@@ -142,15 +159,15 @@ static const uint16_t rtg_to_mnt[] = {
 	MNTVA_COLOR_NO_USE,		// 0x02 -- 24BPP RGB
 	MNTVA_COLOR_NO_USE,		// 0x03 -- 24BPP BGR
 	MNTVA_COLOR_NO_USE,		// 0x04 -- 16BPP R5G6B5PC
-	MNTVA_COLOR_15BIT,		// 0x05 -- 15BPP R5G5B5PC
+	MNTVA_COLOR_NO_USE,		// 0x05 -- 15BPP R5G5B5PC
 	MNTVA_COLOR_NO_USE,		// 0x06 -- 32BPP ARGB
 	MNTVA_COLOR_NO_USE,		// 0x07 -- 32BPP ABGR
-	MNTVA_COLOR_32BIT,		// 0x08 -- 32BPP RGBA
+	MNTVA_COLOR_NO_USE,		// 0x08 -- 32BPP RGBA
 	MNTVA_COLOR_32BIT,		// 0x09 -- 32BPP BGRA
 	MNTVA_COLOR_16BIT565,	// 0x0A -- 16BPP R5G6B5
 	MNTVA_COLOR_15BIT,		// 0x0B -- 15BPP R5G5B5
 	MNTVA_COLOR_NO_USE,		// 0x0C -- 16BPP B5G6R5PC
-	MNTVA_COLOR_15BIT,		// 0x0D -- 15BPP B5G5R5PC
+	MNTVA_COLOR_NO_USE,		// 0x0D -- 15BPP B5G5R5PC
 	MNTVA_COLOR_NO_USE,		// 0x0E -- YUV 4:2:2
 	MNTVA_COLOR_NO_USE,		// 0x0F -- YUV 4:1:1
 	MNTVA_COLOR_NO_USE,		// 0x10 -- YUV 4:1:1PC
