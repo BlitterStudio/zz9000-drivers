@@ -8,6 +8,7 @@
 *.nodma
 *.audio
 PREFSFILE*
+rtg/tests/build/
 sd-boot/zzsd-device.h
 attic
 
