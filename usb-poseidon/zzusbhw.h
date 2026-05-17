@@ -94,6 +94,9 @@
 #define ZZUSB_SPEED_FULL       1
 #define ZZUSB_SPEED_HIGH       2
 
+#define ZZUSB_FLAG_SPLIT       0x0001
+#define ZZUSB_FLAG_RESET_FSLS  0x0002
+
 /*
  * Command structure layout in shared buffer.
  * Written at card_base + 0xa000 via Zorro II bus.
@@ -122,8 +125,10 @@ struct ZZUSBCommand {
     uint16_t setup_wValue;
     uint16_t setup_wIndex;
     uint16_t setup_wLength;
-    /* Padding to the firmware-visible 48-byte command header. */
-    uint8_t  reserved[8];
+    uint16_t split_hub_addr; /* HS hub address for FS/LS split transactions */
+    uint16_t split_hub_port; /* downstream hub port for split transactions */
+    uint16_t flags;          /* ZZUSB_FLAG_* */
+    uint16_t reserved;
     /* Data follows at ZZUSB_DATA_OFFSET. */
 } __attribute__((packed));
 
@@ -161,13 +166,10 @@ struct ZZUSBBase {
         UWORD          zz_PortStatus;
         UWORD          zz_Speed;
         /*
-         * Async interrupt delivery — one pending IOR per endpoint
-         * (1..15). On UHCMD_INTXFER to a non-root-hub device, we
-         * stash the IOR here and return WITHOUT replying. A
-         * background task polls firmware; report data and idle
-         * zero-byte completions are both replied asynchronously.
-         * Clearing the data buffer on idle avoids replaying stale
-         * HID deltas while still keeping Poseidon's poll cadence alive.
+         * Reserved legacy async interrupt slots. The actual pending
+         * table is driver-static and keyed by device address, endpoint,
+         * and direction; this field stays here to preserve the frozen
+         * device-base layout.
          */
         struct IOUsbHWReq *zz_IntPending[16];
         /*

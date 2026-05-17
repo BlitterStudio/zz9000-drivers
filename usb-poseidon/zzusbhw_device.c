@@ -29,6 +29,7 @@
 
 #include <libraries/expansion.h>
 
+#include <devices/timer.h>
 #include <devices/usbhardware.h>
 
 #include <proto/exec.h>
@@ -80,6 +81,7 @@ struct ExecBase* SysBase;
 #define UPSF_PORT_OVER_CURRENT 0x0800
 #define UPSF_PORT_RESET       0x1000
 #define UPSF_PORT_POWER       0x0001
+#define UPSF_PORT_LOW_SPEED   0x0002
 #define UPSF_PORT_HIGH_SPEED  0x0004
 
 #define UFS_PORT_POWER        0x08
@@ -100,6 +102,19 @@ struct ExecBase* SysBase;
 #define UPSF_C_PORT_RESET      0x1000
 
 #define SWAP16(x) ((uint16_t)((uint16_t)(x) << 8) | ((uint16_t)(x) >> 8))
+#define ZZ_RH_POLL_DELAY_TICKS 10
+#define ZZ_INT_IDLE_REPLY_POLLS 10
+#define ZZ_INT_PENDING_SLOTS 32
+#define ZZ_ABORTED_REPLY_SLOTS (ZZ_INT_PENDING_SLOTS + ZZ_NUM_PORTS + 16)
+#ifndef UHCF_USB20
+#define UHCF_USB20 (1UL << 0)
+#endif
+#ifndef UHA_Capabilities
+#define UHA_Capabilities (UHA_Dummy + 0x21)
+#endif
+#ifndef UHA_RootHubAddr
+#define UHA_RootHubAddr (UHA_Dummy + 0x22)
+#endif
 
 static struct ZZUSBBase *PollBase;
 
@@ -112,6 +127,20 @@ static struct ZZUSBBase *PollBase;
  * is functionally equivalent.
  */
 static uint8_t *DeviceSegList;
+static struct IOUsbHWReq *RootHubIntPending[ZZ_NUM_PORTS];
+static uint8_t RootHubPollDelay[ZZ_NUM_PORTS];
+
+struct ZZIntPendingSlot {
+    struct ZZUSBUnit *unit;
+    struct IOUsbHWReq *ior;
+    uint8_t idle_polls;
+};
+
+static struct ZZIntPendingSlot IntPendingSlots[ZZ_INT_PENDING_SLOTS];
+
+static uint16_t request_speed(struct ZZUSBUnit *unit, struct IOUsbHWReq *ior);
+static int write_tag_ulong(struct TagItem *tag, ULONG value);
+static int write_tag_str(struct TagItem *tag, const char *value);
 
 static void hotplug_poll_task(void);
 
@@ -231,6 +260,92 @@ static void trace_port_state_status(struct ZZUSBUnit *unit,
     dstr(regs, "\r\n");
 }
 
+static void trace_control_status(struct ZZUSBUnit *unit,
+                                 char *tag,
+                                 struct IOUsbHWReq *ior,
+                                 uint16_t status)
+{
+    void *regs = unit->zz_Registers;
+
+    dstr(regs, "[zzusbhw] ");
+    dstr(regs, tag);
+    dstr(regs, " st=");
+    dhex16(regs, status);
+    dstr(regs, " dev=");
+    dhex8(regs, ior->iouh_DevAddr);
+    dstr(regs, " req=");
+    dhex8(regs, ior->iouh_SetupData.bmRequestType);
+    dstr(regs, "/");
+    dhex8(regs, ior->iouh_SetupData.bRequest);
+    dstr(regs, " fl=");
+    dhex16(regs, ior->iouh_Flags);
+    dstr(regs, " sp=");
+    dhex8(regs, request_speed(unit, ior));
+    dstr(regs, " split=");
+    dhex8(regs, (ior->iouh_Flags & UHFF_SPLITTRANS) ? 1 : 0);
+    dstr(regs, " hub=");
+    dhex8(regs, ior->iouh_SplitHubAddr);
+    dstr(regs, " port=");
+    dhex8(regs, ior->iouh_SplitHubPort);
+    dstr(regs, "\r\n");
+}
+
+static void __attribute__((unused)) trace_int_status(struct ZZUSBUnit *unit,
+                                                     char *tag,
+                                                     struct IOUsbHWReq *ior)
+{
+    void *regs = unit->zz_Registers;
+
+    dstr(regs, "[zzusbhw] ");
+    dstr(regs, tag);
+    dstr(regs, " dev=");
+    dhex8(regs, ior->iouh_DevAddr);
+    dstr(regs, " ep=");
+    dhex8(regs, ior->iouh_Endpoint);
+    dstr(regs, " len=");
+    dhex16(regs, ior->iouh_Length);
+    dstr(regs, " fl=");
+    dhex16(regs, ior->iouh_Flags);
+    dstr(regs, " split=");
+    dhex8(regs, (ior->iouh_Flags & UHFF_SPLITTRANS) ? 1 : 0);
+    dstr(regs, "\r\n");
+}
+
+static void trace_hub_int_data(struct ZZUSBUnit *unit,
+                               struct IOUsbHWReq *ior,
+                               uint32_t actual,
+                               volatile uint8_t *data)
+{
+    void *regs = unit->zz_Registers;
+
+    if (ior->iouh_Dir != UHDIR_IN || ior->iouh_Length > 2 || actual == 0)
+        return;
+    for (uint32_t i = 0; i < actual && i < 2; i++) {
+        if (data[i] != 0)
+            goto nonzero;
+    }
+    return;
+
+nonzero:
+    dstr(regs, "[zzusbhw] INT_DATA dev=");
+    dhex8(regs, ior->iouh_DevAddr);
+    dstr(regs, " ep=");
+    dhex8(regs, ior->iouh_Endpoint);
+    dstr(regs, " act=");
+    dhex16(regs, actual);
+    dstr(regs, " d=");
+    for (uint32_t i = 0; i < actual && i < 2; i++)
+        dhex8(regs, data[i]);
+    dstr(regs, "\r\n");
+}
+
+static int is_hid_set_idle(struct IOUsbHWReq *ior)
+{
+    return ior->iouh_SetupData.bmRequestType == 0x21 &&
+           ior->iouh_SetupData.bRequest == 0x0a &&
+           ior->iouh_Length == 0;
+}
+
 /*
  * Alignment-safe memcpy. Replaces AmigaOS CopyMem, which has been
  * observed to silently no-op on this toolchain with GCC 15.2 when
@@ -279,6 +394,187 @@ static void safe_zero(void *dst, uint32_t n)
 {
     uint8_t *d = (uint8_t *)dst;
     while (n--) *d++ = 0;
+}
+
+static uint16_t int_endpoint_key(struct IOUsbHWReq *ior)
+{
+    return ior->iouh_Endpoint & 0x0f;
+}
+
+static int int_slot_matches(struct ZZIntPendingSlot *slot,
+                            struct ZZUSBUnit *unit,
+                            struct IOUsbHWReq *ior)
+{
+    struct IOUsbHWReq *pending = slot->ior;
+
+    return pending &&
+        slot->unit == unit &&
+        pending->iouh_DevAddr == ior->iouh_DevAddr &&
+        int_endpoint_key(pending) == int_endpoint_key(ior) &&
+        pending->iouh_Dir == ior->iouh_Dir;
+}
+
+static void clear_int_slot(struct ZZIntPendingSlot *slot)
+{
+    slot->unit = NULL;
+    slot->ior = NULL;
+    slot->idle_polls = 0;
+}
+
+static void reset_int_slots(void)
+{
+    for (int i = 0; i < ZZ_INT_PENDING_SLOTS; i++)
+        clear_int_slot(&IntPendingSlots[i]);
+}
+
+static struct ZZIntPendingSlot *find_int_slot_for_ior(struct IOUsbHWReq *ior)
+{
+    for (int i = 0; i < ZZ_INT_PENDING_SLOTS; i++) {
+        if (IntPendingSlots[i].ior == ior)
+            return &IntPendingSlots[i];
+    }
+    return NULL;
+}
+
+static int queue_int_ior(struct ZZUSBUnit *unit,
+                         struct IOUsbHWReq *ior,
+                         struct IOUsbHWReq **replaced)
+{
+    struct ZZIntPendingSlot *free_slot = NULL;
+
+    if (replaced)
+        *replaced = NULL;
+
+    for (int i = 0; i < ZZ_INT_PENDING_SLOTS; i++) {
+        struct ZZIntPendingSlot *slot = &IntPendingSlots[i];
+        if (int_slot_matches(slot, unit, ior)) {
+            if (slot->ior && slot->ior != ior) {
+                if (replaced)
+                    *replaced = slot->ior;
+                slot->ior->iouh_Actual = 0;
+                slot->ior->iouh_Req.io_Error = IOERR_ABORTED;
+            }
+            slot->unit = unit;
+            slot->ior = ior;
+            slot->idle_polls = 0;
+            return 1;
+        }
+        if (!slot->ior && !free_slot)
+            free_slot = slot;
+    }
+
+    if (!free_slot)
+        return 0;
+
+    free_slot->unit = unit;
+    free_slot->ior = ior;
+    free_slot->idle_polls = 0;
+    return 1;
+}
+
+static int int_pending_for_unit(struct ZZUSBUnit *unit)
+{
+    for (int i = 0; i < ZZ_INT_PENDING_SLOTS; i++) {
+        if (IntPendingSlots[i].ior && IntPendingSlots[i].unit == unit)
+            return 1;
+    }
+    return 0;
+}
+
+static int is_addr0_ep0(struct IOUsbHWReq *ior)
+{
+    return ior->iouh_DevAddr == 0 && ior->iouh_Endpoint == 0;
+}
+
+static int is_direct_root_request(struct ZZUSBUnit *unit)
+{
+    /*
+     * Address zero is also used while enumerating devices behind an
+     * external high-speed hub. In that case Poseidon supplies valid split
+     * information and the root port itself remains high-speed. Only force
+     * root-port handling when the physical root port is already known to be
+     * FS/LS; this applies to every endpoint, not just address-zero EP0.
+     */
+    return unit->zz_PortPresent &&
+           unit->zz_Speed != ZZUSB_SPEED_HIGH;
+}
+
+static int is_direct_root_addr0(struct ZZUSBUnit *unit, struct IOUsbHWReq *ior)
+{
+    return is_addr0_ep0(ior) && is_direct_root_request(unit);
+}
+
+static int is_addr0_get_device_desc(struct IOUsbHWReq *ior)
+{
+    return is_addr0_ep0(ior) &&
+           ior->iouh_SetupData.bmRequestType == 0x80 &&
+           ior->iouh_SetupData.bRequest == 0x06 &&
+           SWAP16(ior->iouh_SetupData.wValue) == 0x0100;
+}
+
+static uint16_t request_speed(struct ZZUSBUnit *unit, struct IOUsbHWReq *ior)
+{
+    if (is_direct_root_request(unit))
+        return unit->zz_Speed;
+    if (ior->iouh_Flags & UHFF_SPLITTRANS) {
+        return (ior->iouh_Flags & UHFF_LOWSPEED)
+               ? ZZUSB_SPEED_LOW : ZZUSB_SPEED_FULL;
+    }
+    if (ior->iouh_Flags & UHFF_LOWSPEED)
+        return ZZUSB_SPEED_LOW;
+    if (ior->iouh_Flags & UHFF_HIGHSPEED)
+        return ZZUSB_SPEED_HIGH;
+    return unit->zz_Speed;
+}
+
+static void fill_split_fields(struct ZZUSBCommand *cmd,
+                              struct ZZUSBUnit *unit,
+                              struct IOUsbHWReq *ior)
+{
+    if (is_direct_root_request(unit))
+        return;
+
+    if ((ior->iouh_Flags & UHFF_SPLITTRANS) &&
+        ior->iouh_SplitHubAddr != 0 &&
+        ior->iouh_SplitHubPort != 0) {
+        cmd->split_hub_addr = ior->iouh_SplitHubAddr;
+        cmd->split_hub_port = ior->iouh_SplitHubPort;
+        cmd->flags |= ZZUSB_FLAG_SPLIT;
+    }
+}
+
+static void fill_root_reset_hint(struct ZZUSBCommand *cmd,
+                                 struct ZZUSBUnit *unit)
+{
+    cmd->speed = unit->zz_Speed;
+    /*
+     * Full-speed and high-speed devices both present J before reset. Forcing
+     * PFSC on a full-speed pre-reset hint prevents high-speed chirp, so only
+     * force the FS/LS reset path for a confirmed low-speed root attach.
+     */
+    if (unit->zz_PortPresent && unit->zz_Speed == ZZUSB_SPEED_LOW)
+        cmd->flags |= ZZUSB_FLAG_RESET_FSLS;
+}
+
+static void mark_direct_low_speed_unsupported(struct ZZUSBUnit *unit,
+                                              char *tag)
+{
+    unit->zz_PortDead = TRUE;
+    unit->zz_PortPresent = FALSE;
+    unit->zz_Speed = ZZUSB_SPEED_LOW;
+    unit->zz_PortStatus = UPSF_PORT_POWER;
+    unit->zz_PortChange = UPSF_C_PORT_CONNECTION;
+    unit->zz_BulkErrCount = 0;
+    trace_port_state(unit, tag);
+}
+
+static int is_zero_report(volatile uint8_t *buf, uint32_t len)
+{
+    while (len--) {
+        if (*buf++ != 0)
+            return 0;
+    }
+    return 1;
 }
 
 static int send_usb_cmd(volatile uint8_t *base, struct ZZUSBCommand *cmd,
@@ -341,7 +637,77 @@ static int send_usb_cmd(volatile uint8_t *base, struct ZZUSBCommand *cmd,
 
     CacheClearU();
 
+    if (result->status == ZZUSB_STATUS_PENDING) {
+        dstr((void*)base, "[zzusbhw] CMD_TIMEOUT cmd=");
+        dhex8((void*)base, cmd->cmd);
+        dstr((void*)base, " dev=");
+        dhex8((void*)base, cmd->dev_addr);
+        dstr((void*)base, " ep=");
+        dhex8((void*)base, cmd->endpoint);
+        dstr((void*)base, " wait=");
+        dhex16((void*)base, cmd->timeout_ms);
+        dstr((void*)base, "\r\n");
+    }
+
     return result->status;
+}
+
+static void ensure_poll_task(struct ZZUSBBase *ZZBase)
+{
+    if (ZZBase->zz_PollTask)
+        return;
+
+    Forbid();
+    if (!ZZBase->zz_PollTask) {
+        struct Task *poll = &ZZBase->zz_PollTaskStorage;
+
+        uint8_t *tp = (uint8_t*)poll;
+        for (unsigned i = 0; i < sizeof(struct Task); i++)
+            tp[i] = 0;
+
+        poll->tc_Node.ln_Type = NT_TASK;
+        poll->tc_Node.ln_Pri  = -1;
+        poll->tc_Node.ln_Name = (char *)"zzusbhw.poll";
+
+        poll->tc_SPLower = (APTR)&ZZBase->zz_PollStack[0];
+        poll->tc_SPUpper = (APTR)&ZZBase->zz_PollStack[1024];
+        poll->tc_SPReg   = (APTR)&ZZBase->zz_PollStack[1024];
+
+        poll->tc_MemEntry.lh_Head =
+            (struct Node *)&poll->tc_MemEntry.lh_Tail;
+        poll->tc_MemEntry.lh_Tail = NULL;
+        poll->tc_MemEntry.lh_TailPred =
+            (struct Node *)&poll->tc_MemEntry.lh_Head;
+        poll->tc_MemEntry.lh_Type = NT_MEMORY;
+
+        /*
+         * Reserve system signals 0..15 so AllocSignal(-1) in the task
+         * body returns a user bit (16..31), and initialize nest counts
+         * to the normal task state for exec variants that do not fix
+         * them up inside AddTask().
+         */
+        poll->tc_SigAlloc  = 0xFFFF;
+        poll->tc_IDNestCnt = -1;
+        poll->tc_TDNestCnt = -1;
+
+        PollBase = ZZBase;
+        ZZBase->zz_PollTask = poll;
+
+        {
+            struct Task *const _t = poll;
+            const APTR _ipc = (APTR)hotplug_poll_task;
+            const APTR _fpc = NULL;
+            register struct Task *_a1 __asm("a1") = _t;
+            register APTR _a2 __asm("a2") = _ipc;
+            register APTR _a3 __asm("a3") = _fpc;
+            register void *_a6 __asm("a6") = SysBase;
+            __asm volatile ("jsr a6@(-0x11a:W)"
+                : "+r"(_a1), "+r"(_a2), "+r"(_a3)
+                : "r"(_a6)
+                : "d0","d1","a0","cc","memory");
+        }
+    }
+    Permit();
 }
 
 static struct Library* __attribute__((used)) init_device(uint8_t *seg_list asm("a0"), struct Library *dev asm("d0"))
@@ -400,6 +766,9 @@ static struct Library* __attribute__((used)) init_device(uint8_t *seg_list asm("
     unit->zz_BulkErrCount = 0;
     for (int ep = 0; ep < 16; ep++)
         unit->zz_IntPending[ep] = NULL;
+    RootHubIntPending[0] = NULL;
+    RootHubPollDelay[0] = 0;
+    reset_int_slots();
 
     PollBase = ZZBase;
     /*
@@ -535,6 +904,18 @@ static void abort_int_iors_offline(struct ZZUSBUnit *unit,
                                     int *aborted_count,
                                     int aborted_max)
 {
+    for (int i = 0; i < ZZ_INT_PENDING_SLOTS; i++) {
+        struct ZZIntPendingSlot *slot = &IntPendingSlots[i];
+        struct IOUsbHWReq *p = slot->ior;
+        if (!p || slot->unit != unit) continue;
+        clear_int_slot(slot);
+        p->iouh_Actual = 0;
+        p->iouh_Req.io_Error = UHIOERR_USBOFFLINE;
+        if (aborted && aborted_count && *aborted_count < aborted_max) {
+            aborted[(*aborted_count)++] = p;
+        }
+    }
+
     for (int ep = 1; ep < 16; ep++) {
         struct IOUsbHWReq *p = unit->zz_IntPending[ep];
         if (!p) continue;
@@ -575,6 +956,19 @@ static void update_port_state(struct ZZUSBUnit *unit,
 
         volatile struct ZZUSBCommand *r =
             (volatile struct ZZUSBCommand*)(base + 0xa000);
+        if (r->speed == ZZUSB_SPEED_LOW) {
+            /*
+             * The Zynq/ChipIdea root port does not complete direct
+             * low-speed EP0. Hide these devices from Poseidon before it
+             * starts enumeration; low-speed devices behind a high-speed
+             * hub are still handled through split transactions because
+             * the root port speed remains HIGH in that topology.
+             */
+            if (!unit->zz_PortDead)
+                mark_direct_low_speed_unsupported(unit, "LS_ROOT_IGNORE");
+            return;
+        }
+
         UWORD port_status = UPSF_PORT_POWER | UPSF_PORT_CONNECTION;
         if (unit->zz_PortPresent && unit->zz_Speed == r->speed) {
             port_status |= unit->zz_PortStatus &
@@ -582,6 +976,8 @@ static void update_port_state(struct ZZUSBUnit *unit,
         }
         if (r->speed == ZZUSB_SPEED_HIGH) {
             port_status |= UPSF_PORT_HIGH_SPEED;
+        } else if (r->speed == ZZUSB_SPEED_LOW) {
+            port_status |= UPSF_PORT_LOW_SPEED;
         }
         if (!unit->zz_PortPresent || unit->zz_Speed != r->speed) {
             unit->zz_PortPresent = TRUE;
@@ -615,23 +1011,23 @@ static void update_port_state(struct ZZUSBUnit *unit,
 /*
  * Poll pending interrupt IORs on one unit. For each endpoint slot
  * with a pending IOR, issue an INT_XFER command to the firmware and
- * complete the request when firmware either returns report data or
- * explicitly reports an idle endpoint with actual=0. The zero-byte
- * completion is important: holding a HID IOR forever while the mouse
- * is idle makes Poseidon decide the endpoint is gone.
+ * complete the request when firmware returns report data or a real
+ * transfer error. Idle IN polls stay queued, matching Deneb-style
+ * hardware-driver behaviour: Poseidon should not see a fresh reply
+ * for every NAK/no-change interval.
  *
  * IMPORTANT: send_usb_cmd uses the single firmware mailbox, so the
  * poll task holds zz_Lock while the command is in flight. Keep the
- * firmware timeout short here so foreground Poseidon I/O is not held
- * behind idle interrupt endpoints for long.
+ * firmware timeout bounded here so foreground Poseidon I/O is not held
+ * indefinitely behind idle interrupt endpoints.
  */
 static void poll_int_pending(struct ZZUSBBase *base_dev,
                              struct ZZUSBUnit *unit)
 {
     volatile uint8_t *base = (volatile uint8_t*)unit->zz_Registers;
-    int ep;
 
-    for (ep = 1; ep < 16; ep++) {
+    for (int slot_index = 0; slot_index < ZZ_INT_PENDING_SLOTS; slot_index++) {
+        struct ZZIntPendingSlot *slot = &IntPendingSlots[slot_index];
         struct IOUsbHWReq *reply_now = NULL;
 
         /*
@@ -643,11 +1039,11 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
          */
         ObtainSemaphore(&base_dev->zz_Lock);
 
-        struct IOUsbHWReq *ior = unit->zz_IntPending[ep];
-        if (!ior) {
+        if (!slot->ior || slot->unit != unit) {
             ReleaseSemaphore(&base_dev->zz_Lock);
             continue;
         }
+        struct IOUsbHWReq *ior = slot->ior;
 
         struct ZZUSBCommand cmd;
         memset(&cmd, 0, sizeof(cmd));
@@ -656,18 +1052,21 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
         cmd.endpoint = ior->iouh_Endpoint;
         cmd.direction = (ior->iouh_Dir == UHDIR_IN) ? 0x80 : 0x00;
         cmd.max_pkt_size = ior->iouh_MaxPktSize;
-        cmd.speed = unit->zz_Speed;
+        cmd.speed = request_speed(unit, ior);
         cmd.data_length = ior->iouh_Length;
         cmd.interval = ior->iouh_Interval;
+        fill_split_fields(&cmd, unit, ior);
         /*
          * Firmware's current interrupt helper polls the EHCI queue for
          * up to 16 ms before reporting an idle IN endpoint as a clean
-         * zero-byte completion. Keep the Amiga-side mailbox wait above
-         * that window; timing out locally first would make Poseidon see
-         * a spurious UHIOERR_TIMEOUT while firmware may still be using
-         * the shared command buffer.
+         * zero-byte completion, then tears down the periodic queue with
+         * a defensive 500 ms guard. A high-speed hub with no downstream
+         * changes exercises this idle path continuously, so the mailbox
+         * wait must cover the firmware's whole bounded path. Timing out
+         * locally while firmware is still using the shared command buffer
+         * races the next Poseidon request and can wedge the stack.
          */
-        cmd.timeout_ms = 50;
+        cmd.timeout_ms = 1000;
 
         uint16_t status = send_usb_cmd(base, &cmd,
                                        (ior->iouh_Dir == UHDIR_OUT) ? ior->iouh_Data : NULL,
@@ -687,39 +1086,94 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
              * buffer error — prevents heap corruption in Poseidon. */
             if (actual > ior->iouh_Length) actual = ior->iouh_Length;
 
-            if (actual > 0 || ior->iouh_Dir == UHDIR_OUT) {
+            trace_hub_int_data(unit, ior, actual,
+                (volatile uint8_t*)(base + 0xa000 + ZZUSB_DATA_OFFSET));
+
+            int idle_in = (ior->iouh_Dir == UHDIR_IN && actual == 0);
+            if (ior->iouh_Dir == UHDIR_IN && actual > 0 && actual <= 2 &&
+                is_zero_report((volatile uint8_t*)(base + 0xa000 + ZZUSB_DATA_OFFSET),
+                               actual)) {
+                idle_in = 1;
+            }
+            int complete_idle = 0;
+
+            if (idle_in) {
+                /*
+                 * Idle interrupt IN. Deneb leaves this IOR queued and
+                 * only replies when the endpoint produces data. Some
+                 * high-speed hubs return a one-byte all-zero status
+                 * bitmap instead of NAKing when no downstream port
+                 * changed; treat that as idle too. This driver still
+                 * has to emulate the queue with synchronous firmware
+                 * mailbox polls, so periodically complete an idle IOR
+                 * to let Poseidon's bring-online code make progress.
+                 * Keep the zero-report test limited to <=2 bytes so
+                 * HID release reports are still delivered.
+                 */
+                if (slot->idle_polls < 0xff)
+                    slot->idle_polls++;
+                if (slot->idle_polls >= ZZ_INT_IDLE_REPLY_POLLS)
+                    complete_idle = 1;
+            } else if (actual > 0 || ior->iouh_Dir == UHDIR_OUT) {
                 if (ior->iouh_Dir == UHDIR_IN && ior->iouh_Data) {
                     safe_copy((void*)(base + 0xa000 + ZZUSB_DATA_OFFSET),
                               ior->iouh_Data, actual);
                 }
-            } else if (ior->iouh_Dir == UHDIR_IN && ior->iouh_Data &&
-                       ior->iouh_Length > 0) {
-                /*
-                 * Idle HID poll. Poseidon should key off Actual=0,
-                 * but some class-driver paths have historically read
-                 * stale bytes from iouh_Data anyway. Clear the buffer
-                 * so a zero-byte idle completion cannot replay the
-                 * previous mouse delta.
-                 */
-                safe_zero(ior->iouh_Data, ior->iouh_Length);
             }
-            ior->iouh_Actual = actual;
-            ior->iouh_Req.io_Error = 0;
-            unit->zz_IntPending[ep] = NULL;
-            reply_now = ior;
+
+            if (complete_idle) {
+                if (ior->iouh_Dir == UHDIR_IN && ior->iouh_Data) {
+                    if (actual > 0) {
+                        safe_copy((void*)(base + 0xa000 + ZZUSB_DATA_OFFSET),
+                                  ior->iouh_Data, actual);
+                    } else if (ior->iouh_Length > 0) {
+                        safe_zero(ior->iouh_Data, ior->iouh_Length);
+                    }
+                }
+                ior->iouh_Actual = actual;
+                ior->iouh_Req.io_Error = 0;
+                clear_int_slot(slot);
+                reply_now = ior;
+            } else if (!idle_in) {
+                ior->iouh_Actual = actual;
+                ior->iouh_Req.io_Error = 0;
+                clear_int_slot(slot);
+                reply_now = ior;
+            }
         } else {
-            /* Non-idle error — fail the IOR with a retryable code.
-             * Matches the v1.53 crash-safety policy: specific
-             * error codes (STALL/OVERFLOW/CRC) have triggered
-             * crashes in Poseidon's class-driver recovery paths,
-             * so map to TIMEOUT unless it's genuine offline. */
+            /*
+             * Interrupt IN errors on idle HID-style endpoints can be
+             * transient EHCI/poll artifacts. Replying UHIOERR_TIMEOUT
+             * here makes Poseidon clear endpoint halt immediately and
+             * retry, which we observed as an endless CLEAR_FEATURE loop
+             * on EP2 IN that starves the whole OS. Treat non-offline
+             * IN errors like an idle poll and periodically complete a
+             * zero-byte result to keep Poseidon moving.
+             */
             ior->iouh_Actual = 0;
-            if (status == ZZUSB_STATUS_OFFLINE)
+            if (status != ZZUSB_STATUS_OFFLINE &&
+                ior->iouh_Dir == UHDIR_IN) {
+                int complete_idle = 0;
+                if (slot->idle_polls < 0xff)
+                    slot->idle_polls++;
+                if (slot->idle_polls >= ZZ_INT_IDLE_REPLY_POLLS)
+                    complete_idle = 1;
+                if (complete_idle) {
+                    if (ior->iouh_Data && ior->iouh_Length > 0)
+                        safe_zero(ior->iouh_Data, ior->iouh_Length);
+                    ior->iouh_Req.io_Error = 0;
+                    clear_int_slot(slot);
+                    reply_now = ior;
+                }
+            } else if (status == ZZUSB_STATUS_OFFLINE) {
                 ior->iouh_Req.io_Error = UHIOERR_USBOFFLINE;
-            else
+                clear_int_slot(slot);
+                reply_now = ior;
+            } else {
                 ior->iouh_Req.io_Error = UHIOERR_TIMEOUT;
-            unit->zz_IntPending[ep] = NULL;
-            reply_now = ior;
+                clear_int_slot(slot);
+                reply_now = ior;
+            }
         }
 
         ReleaseSemaphore(&base_dev->zz_Lock);
@@ -727,24 +1181,111 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
         if (reply_now && !(reply_now->iouh_Req.io_Flags & IOF_QUICK)) {
             ReplyMsg(&reply_now->iouh_Req.io_Message);
         }
+        return;
     }
+}
+
+static int poll_roothub_pending(struct ZZUSBBase *base_dev,
+                                struct ZZUSBUnit *unit,
+                                int unit_index)
+{
+    volatile uint8_t *base = (volatile uint8_t*)unit->zz_Registers;
+    struct IOUsbHWReq *reply_now = NULL;
+    struct IOUsbHWReq *aborted_replies[ZZ_ABORTED_REPLY_SLOTS];
+    int aborted_count = 0;
+    int still_pending;
+
+    for (int i = 0; i < ZZ_ABORTED_REPLY_SLOTS; i++)
+        aborted_replies[i] = NULL;
+
+    ObtainSemaphore(&base_dev->zz_Lock);
+
+    struct IOUsbHWReq *ior = RootHubIntPending[unit_index];
+    if (!ior) {
+        ReleaseSemaphore(&base_dev->zz_Lock);
+        return 0;
+    }
+
+    if (unit->zz_PortChange == 0) {
+        if (RootHubPollDelay[unit_index] > 0) {
+            RootHubPollDelay[unit_index]--;
+            ReleaseSemaphore(&base_dev->zz_Lock);
+            return 1;
+        }
+        RootHubPollDelay[unit_index] = ZZ_RH_POLL_DELAY_TICKS;
+        update_port_state(unit, base, aborted_replies,
+                          &aborted_count, ZZ_ABORTED_REPLY_SLOTS);
+    }
+
+    if (unit->zz_PortChange != 0) {
+        uint8_t change_bitmap[2] = { 0x02, 0x00 };
+        uint16_t len = (ior->iouh_Length < 2) ? ior->iouh_Length : 2;
+
+        trace_port_state(unit, "HUB_INT");
+        safe_copy(change_bitmap, ior->iouh_Data, len);
+        ior->iouh_Actual = len;
+        ior->iouh_Req.io_Error = 0;
+        RootHubIntPending[unit_index] = NULL;
+        RootHubPollDelay[unit_index] = 0;
+        reply_now = ior;
+    }
+
+    still_pending = RootHubIntPending[unit_index] != NULL;
+
+    ReleaseSemaphore(&base_dev->zz_Lock);
+
+    if (reply_now && !(reply_now->iouh_Req.io_Flags & IOF_QUICK)) {
+        ReplyMsg(&reply_now->iouh_Req.io_Message);
+    }
+    for (int i = 0; i < aborted_count; i++) {
+        struct IOUsbHWReq *p = aborted_replies[i];
+        if (p && !(p->iouh_Req.io_Flags & IOF_QUICK)) {
+            ReplyMsg(&p->iouh_Req.io_Message);
+        }
+    }
+
+    return still_pending;
 }
 
 static void hotplug_poll_task(void)
 {
     /*
      * Async interrupt-delivery loop. The v1.52 design:
-     *  - begin_io UHCMD_INTXFER stashes IORs in zz_IntPending[ep]
-     *    and defers the reply.
+     *  - begin_io UHCMD_INTXFER stashes downstream IORs in
+     *    IntPendingSlots[] and root-hub IORs in RootHubIntPending[].
      *  - Signal() from begin_io wakes us up.
-     *  - We scan pending IORs and reply on report data, idle
-     *    zero-byte completions, or hard errors.
+     *  - We scan pending IORs and reply on report data, root-hub
+     *    changes, or hard errors.
      *  - Idle loop Wait()s on our signal; zero CPU when no pending.
      */
     BYTE sig = AllocSignal(-1);
     ULONG mask = (sig >= 0) ? (1UL << sig) : (1UL << 16);
+    BYTE timer_sig = AllocSignal(-1);
+    ULONG timer_mask = (timer_sig >= 0) ? (1UL << timer_sig) : 0;
+    struct MsgPort timer_port;
+    struct timerequest timer_req;
+    BOOL timer_open = FALSE;
 
     PollBase->zz_PollSignal = mask;
+
+    if (timer_mask) {
+        memset(&timer_port, 0, sizeof(timer_port));
+        memset(&timer_req, 0, sizeof(timer_req));
+        timer_port.mp_Node.ln_Type = NT_MSGPORT;
+        timer_port.mp_Flags = PA_SIGNAL;
+        timer_port.mp_SigBit = timer_sig;
+        timer_port.mp_SigTask = FindTask(NULL);
+        timer_port.mp_MsgList.lh_Head =
+            (struct Node *)&timer_port.mp_MsgList.lh_Tail;
+        timer_port.mp_MsgList.lh_Tail = NULL;
+        timer_port.mp_MsgList.lh_TailPred =
+            (struct Node *)&timer_port.mp_MsgList.lh_Head;
+        timer_port.mp_MsgList.lh_Type = NT_MESSAGE;
+        timer_req.tr_node.io_Message.mn_Node.ln_Type = NT_MESSAGE;
+        timer_req.tr_node.io_Message.mn_ReplyPort = &timer_port;
+        timer_open = (OpenDevice((CONST_STRPTR)"timer.device", UNIT_MICROHZ,
+                                 (struct IORequest*)&timer_req, 0) == 0);
+    }
 
     for (;;) {
         int any_pending = 0;
@@ -753,17 +1294,36 @@ static void hotplug_poll_task(void)
             struct ZZUSBUnit *unit = &PollBase->zz_Units[u];
             if (!unit->zz_Enabled) continue;
 
+            if (poll_roothub_pending(PollBase, unit, u)) {
+                any_pending = 1;
+            }
+
             poll_int_pending(PollBase, unit);
 
-            for (int ep = 1; ep < 16; ep++) {
-                if (unit->zz_IntPending[ep]) {
-                    any_pending = 1;
-                    break;
-                }
-            }
+            if (int_pending_for_unit(unit))
+                any_pending = 1;
         }
 
         if (!any_pending) {
+            Wait(mask);
+        } else if (timer_open) {
+            /*
+             * Pending interrupt IORs are normal. Do not spin in a CPU
+             * delay loop here: that made the whole OS feel stuck while
+             * Poseidon held a hub-status request open. Sleep on
+             * timer.device and wake early if begin_io signals new work.
+             */
+            SetSignal(0, timer_mask);
+            timer_req.tr_node.io_Command = TR_ADDREQUEST;
+            timer_req.tr_time.tv_secs = 0;
+            timer_req.tr_time.tv_micro = 100000;
+            SendIO((struct IORequest*)&timer_req);
+            Wait(mask | timer_mask);
+            if (!CheckIO((struct IORequest*)&timer_req)) {
+                AbortIO((struct IORequest*)&timer_req);
+            }
+            WaitIO((struct IORequest*)&timer_req);
+        } else {
             Wait(mask);
         }
     }
@@ -1011,6 +1571,24 @@ static void handle_roothub_control(struct ZZUSBUnit *unit,
                 switch (wValue) {
                 case UFS_PORT_RESET:
                     {
+                        if (unit->zz_PortDead) {
+                            /*
+                             * Direct root-port low-speed failed and was
+                             * deliberately hidden until physical unplug.
+                             * Poseidon may still have a queued hub-reset
+                             * request from the failed enumeration path;
+                             * answer it locally as an empty powered port.
+                             * Do not touch firmware or re-enable speed bits.
+                             */
+                            unit->zz_PortPresent = FALSE;
+                            unit->zz_PortStatus = UPSF_PORT_POWER;
+                            unit->zz_PortChange &= ~UPSF_C_PORT_RESET;
+                            trace_port_state(unit, "SET_RESET_DEAD");
+                            ior->iouh_Actual = 0;
+                            ior->iouh_Req.io_Error = 0;
+                            return;
+                        }
+
                         unit->zz_PortStatus |= UPSF_PORT_RESET;
                         unit->zz_PortChange &= ~UPSF_C_PORT_RESET;
                         trace_port_state(unit, "SET_RESET_START");
@@ -1020,24 +1598,40 @@ static void handle_roothub_control(struct ZZUSBUnit *unit,
                         memset(&rcmd, 0, sizeof(rcmd));
                         rcmd.cmd = ZZUSB_CMD_RESET_PORT;
                         rcmd.timeout_ms = 5000;
+                        fill_root_reset_hint(&rcmd, unit);
 
                         uint16_t rstatus = send_usb_cmd(rbase, &rcmd, NULL, 0);
                         uint16_t fw_speed = 0;
+                        volatile struct ZZUSBCommand *rresult =
+                            (volatile struct ZZUSBCommand*)(rbase + 0xa000);
+                        fw_speed = rresult->speed;
 
                         unit->zz_PortStatus &= ~UPSF_PORT_RESET;
-                        if (rstatus == ZZUSB_STATUS_OK) {
-                            volatile struct ZZUSBCommand *rresult =
-                                (volatile struct ZZUSBCommand*)(rbase + 0xa000);
-                            fw_speed = rresult->speed;
+                        if ((rstatus == ZZUSB_STATUS_OK ||
+                             rstatus == ZZUSB_STATUS_OFFLINE) &&
+                            fw_speed == ZZUSB_SPEED_LOW) {
+                            mark_direct_low_speed_unsupported(unit,
+                                                              "LS_ROOT_IGNORE");
+                            trace_port_state_status(unit, "SET_RESET_FW",
+                                                    rstatus, fw_speed);
+                            trace_port_state(unit, "SET_RESET_DONE");
+                            ior->iouh_Actual = 0;
+                            ior->iouh_Req.io_Error = 0;
+                            return;
+                        } else if (rstatus == ZZUSB_STATUS_OK) {
                             unit->zz_Speed = rresult->speed;
                             unit->zz_PortStatus |= UPSF_PORT_ENABLE;
-                            unit->zz_PortStatus &= ~UPSF_PORT_HIGH_SPEED;
+                            unit->zz_PortStatus &= ~(UPSF_PORT_HIGH_SPEED |
+                                                     UPSF_PORT_LOW_SPEED);
                             if (unit->zz_Speed == ZZUSB_SPEED_HIGH) {
                                 unit->zz_PortStatus |= UPSF_PORT_HIGH_SPEED;
+                            } else if (unit->zz_Speed == ZZUSB_SPEED_LOW) {
+                                unit->zz_PortStatus |= UPSF_PORT_LOW_SPEED;
                             }
                         } else {
                             unit->zz_PortStatus &= ~(UPSF_PORT_ENABLE |
-                                                     UPSF_PORT_HIGH_SPEED);
+                                                     UPSF_PORT_HIGH_SPEED |
+                                                     UPSF_PORT_LOW_SPEED);
                         }
                         unit->zz_PortChange |= UPSF_C_PORT_RESET;
                         trace_port_state_status(unit, "SET_RESET_FW",
@@ -1115,12 +1709,13 @@ static void handle_roothub_control(struct ZZUSBUnit *unit,
     ior->iouh_Actual = 0;
 }
 
-static void handle_roothub_int(struct ZZUSBUnit *unit,
-                                struct IOUsbHWReq *ior,
-                                volatile uint8_t *base,
-                                struct IOUsbHWReq **aborted,
-                                int *aborted_count,
-                                int aborted_max)
+static int handle_roothub_int(struct ZZUSBUnit *unit,
+                              int unit_index,
+                              struct IOUsbHWReq *ior,
+                              volatile uint8_t *base,
+                              struct IOUsbHWReq **aborted,
+                              int *aborted_count,
+                              int aborted_max)
 {
     if (ior->iouh_Endpoint == 1 && ior->iouh_Data) {
         /*
@@ -1135,13 +1730,19 @@ static void handle_roothub_int(struct ZZUSBUnit *unit,
             update_port_state(unit, base, aborted, aborted_count, aborted_max);
         }
         if (unit->zz_PortChange == 0) {
-            /* Idle hub INT reply — 0-byte change bitmap. */
-            uint8_t no_change[2] = { 0x00, 0x00 };
-            uint16_t len = (ior->iouh_Length < 2) ? ior->iouh_Length : 2;
-            safe_copy(no_change, ior->iouh_Data, len);
-            ior->iouh_Actual = len;
-            ior->iouh_Req.io_Error = 0;
-            return;
+            struct IOUsbHWReq *old = RootHubIntPending[unit_index];
+            if (old && old != ior) {
+                old->iouh_Actual = 0;
+                old->iouh_Req.io_Error = IOERR_ABORTED;
+                if (aborted && aborted_count && *aborted_count < aborted_max) {
+                    aborted[(*aborted_count)++] = old;
+                }
+            }
+            ior->iouh_Req.io_Flags &= ~IOF_QUICK;
+            RootHubIntPending[unit_index] = ior;
+            RootHubPollDelay[unit_index] = ZZ_RH_POLL_DELAY_TICKS;
+            trace_int_status(unit, "RH_INT_WAIT", ior);
+            return 1;
         }
         uint8_t change_bitmap[2] = { 0x02, 0x00 };
         uint16_t len = (ior->iouh_Length < 2) ? ior->iouh_Length : 2;
@@ -1153,6 +1754,7 @@ static void handle_roothub_int(struct ZZUSBUnit *unit,
         ior->iouh_Actual = 0;
         ior->iouh_Req.io_Error = UHIOERR_STALL;
     }
+    return 0;
 }
 
 /*
@@ -1160,14 +1762,14 @@ static void handle_roothub_int(struct ZZUSBUnit *unit,
  * this into iouh_Actual so NSD-aware Poseidon tools can detect tag
  * coverage.
  */
-static int fill_querydevice_tags(struct TagItem *tags)
+static int fill_querydevice_tags(struct ZZUSBUnit *unit, struct TagItem *tags)
 {
     /*
      * Poseidon normally sends a flat taglist, but TagItem control
      * tags are legal API input. Handle them here so a TAG_MORE or
      * TAG_SKIP list cannot make the driver walk unrelated memory.
-     * ti_Data is the direct value slot for UHCMD_QUERYDEVICE; leave
-     * unknown newer Poseidon tags untouched.
+     * Like Deneb, ti_Data points at the caller's output storage.
+     * Leave unknown newer Poseidon tags untouched.
      */
     int guard = 64;
     int count = 0;
@@ -1186,40 +1788,38 @@ static int fill_querydevice_tags(struct TagItem *tags)
             tags += tags->ti_Data + 1;
             continue;
         case UHA_DriverVersion:
-            tags->ti_Data = 0x0200;
-            count++;
+            count += write_tag_ulong(tags, 0x0200);
             break;
         case UHA_Version:
-            tags->ti_Data = DEVICE_VERSION;
-            count++;
+            count += write_tag_ulong(tags, DEVICE_VERSION);
             break;
         case UHA_Revision:
-            tags->ti_Data = DEVICE_REVISION;
-            count++;
+            count += write_tag_ulong(tags, DEVICE_REVISION);
             break;
         case UHA_State:
-            tags->ti_Data = UHSF_OPERATIONAL;
-            count++;
+            count += write_tag_ulong(tags, UHSF_OPERATIONAL);
             break;
         case UHA_Manufacturer:
-            tags->ti_Data = (ULONG)(uintptr_t)"MNT Research GmbH";
-            count++;
+            count += write_tag_str(tags, "MNT Research GmbH");
             break;
         case UHA_ProductName:
-            tags->ti_Data = (ULONG)(uintptr_t)"ZZ9000 USB Host Controller";
-            count++;
+            count += write_tag_str(tags, "ZZ9000 USB Host Controller");
             break;
         case UHA_Description:
-            tags->ti_Data = (ULONG)(uintptr_t)
+            count += write_tag_str(tags,
                 "Poseidon USB hardware driver for the ZZ9000 "
-                "Zorro card (Zynq ChipIdea EHCI)";
-            count++;
+                "Zorro card (Zynq ChipIdea EHCI)");
             break;
         case UHA_Copyright:
-            tags->ti_Data = (ULONG)(uintptr_t)
+            count += write_tag_str(tags,
                 "(C) Copyright 2026 Dimitris Panokostas. "
-                "Licensed under GNU GPL v3 or later.";
-            count++;
+                "Licensed under GNU GPL v3 or later.");
+            break;
+        case UHA_Capabilities:
+            count += write_tag_ulong(tags, UHCF_USB20);
+            break;
+        case UHA_RootHubAddr:
+            count += write_tag_ulong(tags, unit ? unit->zz_RootHubAddr : 0);
             break;
         default:
             break;
@@ -1240,6 +1840,23 @@ static int fill_querydevice_tags(struct TagItem *tags)
 #ifndef NSDEVTYPE_USBHARDWARE
 #define NSDEVTYPE_USBHARDWARE 14
 #endif
+static int write_tag_ulong(struct TagItem *tag, ULONG value)
+{
+    ULONG *out = (ULONG *)(uintptr_t)tag->ti_Data;
+    if (!out)
+        return 0;
+    *out = value;
+    return 1;
+}
+
+static int write_tag_str(struct TagItem *tag, const char *value)
+{
+    STRPTR *out = (STRPTR *)(uintptr_t)tag->ti_Data;
+    if (!out)
+        return 0;
+    *out = (STRPTR)value;
+    return 1;
+}
 
 static const UWORD NSDSupportedCommands[] = {
     CMD_RESET,
@@ -1277,7 +1894,7 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
      * the lock is held and replied once the lock is released.
      */
     struct IOUsbHWReq *deferred_old_ior = NULL;
-    enum { ABORTED_REPLY_MAX = 16 };
+    enum { ABORTED_REPLY_MAX = ZZ_ABORTED_REPLY_SLOTS };
     struct IOUsbHWReq *aborted_replies[ABORTED_REPLY_MAX];
     int aborted_count = 0;
     for (int _i = 0; _i < ABORTED_REPLY_MAX; _i++) aborted_replies[_i] = NULL;
@@ -1300,7 +1917,8 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
     switch (ior->iouh_Req.io_Command) {
     case UHCMD_QUERYDEVICE:
         {
-            int filled = fill_querydevice_tags((struct TagItem *)ior->iouh_Data);
+            int filled = fill_querydevice_tags(unit,
+                (struct TagItem *)ior->iouh_Data);
             ior->iouh_Actual = filled;
             ior->iouh_Req.io_Error = 0;
         }
@@ -1346,14 +1964,24 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
             memset(&cmd, 0, sizeof(cmd));
             cmd.cmd = ZZUSB_CMD_RESET_PORT;
             cmd.timeout_ms = 5000;
+            fill_root_reset_hint(&cmd, unit);
 
             uint16_t status = send_usb_cmd(base, &cmd, NULL, 0);
             uint16_t fw_speed = 0;
+            volatile struct ZZUSBCommand *result =
+                (volatile struct ZZUSBCommand*)(base + 0xa000);
+            fw_speed = result->speed;
 
             if (status == ZZUSB_STATUS_OK) {
-                volatile struct ZZUSBCommand *result =
-                    (volatile struct ZZUSBCommand*)(base + 0xa000);
-                fw_speed = result->speed;
+                if (result->speed == ZZUSB_SPEED_LOW) {
+                    mark_direct_low_speed_unsupported(unit, "LS_ROOT_IGNORE");
+                    trace_port_state_status(unit, "USBRESET_FW",
+                                            status, fw_speed);
+                    trace_port_state(unit, "USBRESET_DONE");
+                    ior->iouh_Req.io_Error = 0;
+                    ior->iouh_State = UHSF_OPERATIONAL;
+                    break;
+                }
                 /*
                  * Only flag POWER + CONNECTION + speed here.
                  * Poseidon's hub class drives the enable / C_RESET
@@ -1368,16 +1996,24 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
                     port_status |= UPSF_PORT_HIGH_SPEED;
                 } else {
                     port_status |= UPSF_PORT_ENABLE;
+                    if (result->speed == ZZUSB_SPEED_LOW) {
+                        port_status |= UPSF_PORT_LOW_SPEED;
+                    }
                 }
                 unit->zz_Speed = result->speed;
                 unit->zz_PortPresent = TRUE;
                 unit->zz_PortStatus = port_status;
                 unit->zz_PortChange = UPSF_C_PORT_CONNECTION;
             } else {
-                unit->zz_PortPresent = FALSE;
-                unit->zz_PortStatus = UPSF_PORT_POWER;
-                unit->zz_PortChange = 0;
-                unit->zz_Speed = 0;
+                if (status == ZZUSB_STATUS_OFFLINE &&
+                    fw_speed == ZZUSB_SPEED_LOW) {
+                    mark_direct_low_speed_unsupported(unit, "LS_ROOT_IGNORE");
+                } else {
+                    unit->zz_PortPresent = FALSE;
+                    unit->zz_PortStatus = UPSF_PORT_POWER;
+                    unit->zz_PortChange = 0;
+                    unit->zz_Speed = 0;
+                }
             }
             trace_port_state_status(unit, "USBRESET_FW", status, fw_speed);
             trace_port_state(unit, "USBRESET_DONE");
@@ -1417,6 +2053,12 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
                     break;
                 }
 
+                if (unit->zz_PortDead) {
+                    ior->iouh_Actual = 0;
+                    ior->iouh_Req.io_Error = UHIOERR_USBOFFLINE;
+                    break;
+                }
+
                 setup_in = (ior->iouh_SetupData.bmRequestType & 0x80) != 0;
 
                 memset(&cmd, 0, sizeof(cmd));
@@ -1425,11 +2067,35 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
                 cmd.endpoint = ior->iouh_Endpoint;
                 cmd.direction = setup_in ? 0x80 : 0x00;
                 cmd.max_pkt_size = ior->iouh_MaxPktSize;
-                cmd.speed = unit->zz_Speed;
+                cmd.speed = request_speed(unit, ior);
+                if (is_direct_root_addr0(unit, ior)) {
+                    /*
+                     * During address-0 enumeration Poseidon may not yet
+                     * have reliable per-device speed flags. The root hub
+                     * reset result is authoritative here; using a split
+                     * or high-speed flag from the IOR can mis-drive a
+                     * low-speed mouse as full-speed before it even has
+                     * an address.
+                     */
+                    cmd.speed = unit->zz_Speed;
+                }
                 cmd.data_length = ior->iouh_Length;
                 cmd.timeout_ms = (ior->iouh_Flags & UHFF_NAKTIMEOUT)
                                  ? (ior->iouh_NakTimeout ? ior->iouh_NakTimeout : 5000)
                                  : 0;
+                if (is_direct_root_addr0(unit, ior) &&
+                    unit->zz_Speed == ZZUSB_SPEED_LOW &&
+                    is_addr0_get_device_desc(ior)) {
+                    /*
+                     * Firmware has its own short internal bound for
+                     * this unsupported direct-LS root-port probe. Keep
+                     * the Amiga-side mailbox wait comfortably longer so
+                     * debug printing and EHCI cleanup cannot race the
+                     * next Poseidon command into the shared mailbox.
+                     */
+                    cmd.timeout_ms = 250;
+                }
+                fill_split_fields(&cmd, unit, ior);
 
                 cmd.setup_bRequestType = ior->iouh_SetupData.bmRequestType;
                 cmd.setup_bRequest = ior->iouh_SetupData.bRequest;
@@ -1468,15 +2134,45 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
                     }
                     ior->iouh_Actual = actual;
                     ior->iouh_Req.io_Error = 0;
+                } else if (status == ZZUSB_STATUS_STALL && is_hid_set_idle(ior)) {
+                    /*
+                     * Several HID receivers accept enumeration but stall
+                     * SET_IDLE. Treat that specific optional idle-rate
+                     * request as non-fatal; otherwise Poseidon's HID
+                     * recovery path can keep re-enumerating the device
+                     * and eventually wedge the stack.
+                     */
+                    trace_control_status(unit, "HID_IDLE_STALL_IGN", ior, status);
+                    ior->iouh_Actual = 0;
+                    ior->iouh_Req.io_Error = 0;
                 } else {
                     /*
-                     * Control error handling — v1.52 shape. Report
-                     * the error honestly; let Poseidon decide on
-                     * recovery. The v1.53 "mark port dead + fake
-                     * connection-change" recovery was implicated in
-                     * HID-bring-up crashes and has been removed.
+                     * Control error handling. Let explicit STALL and
+                     * OFFLINE through, but keep generic transaction
+                     * failures retryable. The v1.53 "mark port dead +
+                     * fake connection-change" recovery was implicated
+                     * in HID-bring-up crashes and has been removed.
                      */
+                    trace_control_status(unit, "CTRL_FAIL", ior, status);
                     ior->iouh_Actual = 0;
+                    if (is_direct_root_addr0(unit, ior) &&
+                        unit->zz_Speed == ZZUSB_SPEED_LOW &&
+                        is_addr0_get_device_desc(ior)) {
+                        /*
+                         * Zynq/ChipIdea EHCI is not completing direct
+                         * root-port LS EP0. Hide this device until
+                         * physical unplug so Poseidon stops retrying and
+                         * the Amiga remains responsive. LS devices behind
+                         * a HS hub still use split transactions above.
+                         */
+                        unit->zz_PortDead = TRUE;
+                        unit->zz_PortPresent = FALSE;
+                        unit->zz_PortStatus = UPSF_PORT_POWER;
+                        unit->zz_PortChange = UPSF_C_PORT_CONNECTION;
+                        ior->iouh_Req.io_Error = UHIOERR_USBOFFLINE;
+                        trace_port_state(unit, "LS_ROOT_OFFLINE");
+                        break;
+                    }
                     switch (status) {
                     case ZZUSB_STATUS_STALL:
                         ior->iouh_Req.io_Error = UHIOERR_STALL; break;
@@ -1485,13 +2181,16 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
                         ior->iouh_Req.io_Error = UHIOERR_TIMEOUT; break;
                     case ZZUSB_STATUS_OFFLINE:
                         ior->iouh_Req.io_Error = UHIOERR_USBOFFLINE; break;
-                    case ZZUSB_STATUS_CRC:
-                        ior->iouh_Req.io_Error = UHIOERR_CRCERROR; break;
-                    case ZZUSB_STATUS_OVERRUN:
-                    case ZZUSB_STATUS_BABBLE:
-                        ior->iouh_Req.io_Error = UHIOERR_HOSTERROR; break;
                     default:
-                        ior->iouh_Req.io_Error = UHIOERR_HOSTERROR; break;
+                        /*
+                         * Poseidon class drivers have repeatedly shown
+                         * fragile recovery behaviour for specific host
+                         * controller errors during enumeration. Treat
+                         * non-stall/non-offline control failures as a
+                         * retryable timeout; the UART trace still keeps
+                         * the firmware status for diagnosis.
+                         */
+                        ior->iouh_Req.io_Error = UHIOERR_TIMEOUT; break;
                     }
                 }
             }
@@ -1523,14 +2222,24 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
 
             if (((rh_addr == 0 && ior->iouh_DevAddr == 0) || ior->iouh_DevAddr == rh_addr)
                 && ior->iouh_Endpoint == 1) {
-                handle_roothub_int(unit, ior, base, aborted_replies,
-                                   &aborted_count, ABORTED_REPLY_MAX);
+                int unit_index = (int)(unit - &ZZBase->zz_Units[0]);
+                if (handle_roothub_int(unit, unit_index, ior, base,
+                                       aborted_replies, &aborted_count,
+                                       ABORTED_REPLY_MAX)) {
+                    deferred = 1;
+                    ensure_poll_task(ZZBase);
+                    if (ZZBase->zz_PollTask && ZZBase->zz_PollSignal) {
+                        Signal(ZZBase->zz_PollTask, ZZBase->zz_PollSignal);
+                    }
+                }
             } else {
                 /*
                  * Async delivery for downstream interrupt endpoints.
                  * Stash the IOR, Signal the poll task, defer the
-                 * reply. The task replies when firmware returns
-                 * data, an idle zero-length completion, or an error.
+                 * reply. The task replies on report data, occasional
+                 * idle completion, or real offline. This avoids a
+                 * tight Poseidon-side interrupt-poll loop while the
+                 * firmware-side EHCI poll remains bounded.
                  */
                 if (ior->iouh_Length > ZZUSB_MAX_XFER) {
                     ior->iouh_Req.io_Error = UHIOERR_PKTTOOLARGE;
@@ -1544,102 +2253,14 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
                     break;
                 }
 
-                /* If Poseidon re-queued on the same endpoint before
-                 * we replied to the last one, abort the old one so
-                 * the class driver doesn't leak msgs. Reply after
-                 * releasing zz_Lock. */
-                if (unit->zz_IntPending[ep]) {
-                    deferred_old_ior = unit->zz_IntPending[ep];
-                    deferred_old_ior->iouh_Actual = 0;
-                    deferred_old_ior->iouh_Req.io_Error = IOERR_ABORTED;
-                    unit->zz_IntPending[ep] = NULL;
-                }
-
-                /*
-                 * Once we queue an IOR for the poll task it is no
-                 * longer a quick completion. Clear IOF_QUICK so the
-                 * eventual ReplyMsg is delivered.
-                 */
                 ior->iouh_Req.io_Flags &= ~IOF_QUICK;
-                unit->zz_IntPending[ep] = ior;
-                deferred = 1;      /* do NOT ReplyMsg at bottom */
-
-                /* Lazy poll-task creation — on first downstream
-                 * INTXFER only. Root-hub INT / USBRESET / bulk /
-                 * control are all synchronous and don't need the
-                 * task; creating it only here means the empty-port
-                 * bring-online path never creates a task. */
-                Forbid();
-                if (!ZZBase->zz_PollTask) {
-                    struct Task *poll = &ZZBase->zz_PollTaskStorage;
-
-                    uint8_t *tp = (uint8_t*)poll;
-                    for (unsigned i = 0; i < sizeof(struct Task); i++)
-                        tp[i] = 0;
-
-                    poll->tc_Node.ln_Type = NT_TASK;
-                    poll->tc_Node.ln_Pri  = -1;
-                    poll->tc_Node.ln_Name = (char *)"zzusbhw.poll";
-
-                    poll->tc_SPLower = (APTR)&ZZBase->zz_PollStack[0];
-                    poll->tc_SPUpper = (APTR)&ZZBase->zz_PollStack[1024];
-                    poll->tc_SPReg   = (APTR)&ZZBase->zz_PollStack[1024];
-
-                    poll->tc_MemEntry.lh_Head =
-                        (struct Node *)&poll->tc_MemEntry.lh_Tail;
-                    poll->tc_MemEntry.lh_Tail = NULL;
-                    poll->tc_MemEntry.lh_TailPred =
-                        (struct Node *)&poll->tc_MemEntry.lh_Head;
-                    poll->tc_MemEntry.lh_Type = NT_MEMORY;
-
-                    /*
-                     * Reserve system signals 0..15 so AllocSignal(-1)
-                     * in the task body returns a user bit (16..31)
-                     * and doesn't steal signal 0 which exec uses
-                     * for port-reply machinery. Also set nest counts
-                     * to -1 ("not currently inside Forbid/Disable")
-                     * — these are supposed to be fixed up by AddTask
-                     * on some exec versions but not all.
-                     */
-                    poll->tc_SigAlloc  = 0xFFFF;
-                    poll->tc_IDNestCnt = -1;
-                    poll->tc_TDNestCnt = -1;
-
-                    PollBase = ZZBase;
-                    ZZBase->zz_PollTask = poll;
-
-                    /*
-                     * AddTask is called via hand-written inline asm
-                     * because the NDK's LP3 inline macro
-                     * (inline/macros.h) uses an "rf" constraint that
-                     * lets gcc allocate initPC and finalPC to d0/d1
-                     * instead of the AmigaOS-mandated a2/a3. MuForce
-                     * confirmed the bug: dispatched PC = 0 because
-                     * AddTask was reading initPC from a garbage a2.
-                     * This inline explicitly pins the arguments into
-                     * a1/a2/a3 as the ABI requires.
-                     *
-                     * Offset -0x11A (= -282) is AddTask's LVO.
-                     */
-                    {
-                        struct Task *const _t = poll;
-                        const APTR _ipc = (APTR)hotplug_poll_task;
-                        const APTR _fpc = NULL;
-                        register struct Task *_a1 __asm("a1") = _t;
-                        register APTR _a2 __asm("a2") = _ipc;
-                        register APTR _a3 __asm("a3") = _fpc;
-                        register void *_a6 __asm("a6") = SysBase;
-                        __asm volatile ("jsr a6@(-0x11a:W)"
-                            : "+r"(_a1), "+r"(_a2), "+r"(_a3)
-                            : "r"(_a6)
-                            : "d0","d1","a0","cc","memory");
-                    }
+                if (!queue_int_ior(unit, ior, &deferred_old_ior)) {
+                    ior->iouh_Req.io_Error = UHIOERR_OUTOFMEMORY;
+                    break;
                 }
-                Permit();
+                deferred = 1;      /* do NOT ReplyMsg at bottom */
+                ensure_poll_task(ZZBase);
 
-                /* Wake the task. Skip the Signal if the task hasn't
-                 * yet AllocSignal'd its bit — it'll pick up the
-                 * pending IOR on its first loop iteration. */
                 if (ZZBase->zz_PollTask && ZZBase->zz_PollSignal) {
                     Signal(ZZBase->zz_PollTask, ZZBase->zz_PollSignal);
                 }
@@ -1714,11 +2335,12 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
                 cmd.endpoint = ior->iouh_Endpoint;
                 cmd.direction = (ior->iouh_Dir == UHDIR_IN) ? 0x80 : 0x00;
                 cmd.max_pkt_size = ior->iouh_MaxPktSize;
-                cmd.speed = unit->zz_Speed;
+                cmd.speed = request_speed(unit, ior);
                 cmd.data_length = chunk;
                 cmd.timeout_ms = (ior->iouh_Flags & UHFF_NAKTIMEOUT)
                                  ? (ior->iouh_NakTimeout ? ior->iouh_NakTimeout : 500)
                                  : 500;
+                fill_split_fields(&cmd, unit, ior);
 
                 status = send_usb_cmd(base, &cmd,
                                       (ior->iouh_Dir == UHDIR_OUT && user_buf) ? user_buf : NULL,
@@ -1818,15 +2440,28 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
     case CMD_RESET:
     case CMD_FLUSH:
         /*
-         * Abort every queued downstream interrupt IOR. Collect them
+         * Abort every queued root/downstream interrupt IOR. Collect them
          * here; actual ReplyMsg happens AFTER zz_Lock is released
          * to avoid scheduling issues if a replied task immediately
          * re-enters our driver.
          */
-        for (int ep = 0; ep < 16; ep++) {
-            struct IOUsbHWReq *pending = unit->zz_IntPending[ep];
-            if (!pending) continue;
-            unit->zz_IntPending[ep] = NULL;
+        {
+            int unit_index = (int)(unit - &ZZBase->zz_Units[0]);
+            struct IOUsbHWReq *pending = RootHubIntPending[unit_index];
+            if (pending) {
+                RootHubIntPending[unit_index] = NULL;
+                RootHubPollDelay[unit_index] = 0;
+                pending->iouh_Actual = 0;
+                pending->iouh_Req.io_Error = IOERR_ABORTED;
+                if (aborted_count < ABORTED_REPLY_MAX)
+                    aborted_replies[aborted_count++] = pending;
+            }
+        }
+        for (int i = 0; i < ZZ_INT_PENDING_SLOTS; i++) {
+            struct ZZIntPendingSlot *slot = &IntPendingSlots[i];
+            struct IOUsbHWReq *pending = slot->ior;
+            if (!pending || slot->unit != unit) continue;
+            clear_int_slot(slot);
             pending->iouh_Actual = 0;
             pending->iouh_Req.io_Error = IOERR_ABORTED;
             if (aborted_count < ABORTED_REPLY_MAX)
@@ -1878,11 +2513,18 @@ static uint32_t __attribute__((used)) abort_io(struct Library *dev asm("a6"), st
 
     ObtainSemaphore(&ZZBase->zz_Lock);
     int found = 0;
-    for (int ep = 0; ep < 16; ep++) {
-        if (unit->zz_IntPending[ep] == ior) {
-            unit->zz_IntPending[ep] = NULL;
+    int unit_index = (int)(unit - &ZZBase->zz_Units[0]);
+    if (unit_index >= 0 && unit_index < ZZ_NUM_PORTS &&
+        RootHubIntPending[unit_index] == ior) {
+        RootHubIntPending[unit_index] = NULL;
+        RootHubPollDelay[unit_index] = 0;
+        found = 1;
+    }
+    {
+        struct ZZIntPendingSlot *slot = find_int_slot_for_ior(ior);
+        if (slot && slot->unit == unit) {
+            clear_int_slot(slot);
             found = 1;
-            break;
         }
     }
     ReleaseSemaphore(&ZZBase->zz_Lock);
