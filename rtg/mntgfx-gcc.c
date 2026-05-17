@@ -1505,6 +1505,7 @@ void BlitPattern(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __
 		zz_template_addr = b->MemorySize;
 	}
 
+	if (pat->Size > 15) return;
 	memcpy((uint8_t*)(((uint32_t)b->MemoryBase) + zz_template_addr), pat->Memory, 2 * (1 << pat->Size));
 
 	if (b->CardFlags & CARDFLAG_ZORRO_3) {
