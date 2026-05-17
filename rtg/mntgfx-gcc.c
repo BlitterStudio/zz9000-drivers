@@ -33,6 +33,7 @@
 
 #include "mntgfx-gcc.h"
 #include "zz9000.h"
+#include "blitter_cache.h"
 
 #define STR(s) #s
 #define XSTR(s) STR(s)
@@ -127,6 +128,7 @@ char dummies[128];
 
 struct ExecBase *SysBase;
 static struct ConfigDev *reserved_cd = NULL;
+static struct BlitterRegisterCache blitter_register_cache;
 
 static inline volatile struct GFXData *zz_gfxdata(struct BoardInfo *b) {
 	return (volatile struct GFXData *)b->CardData[ZZ_CARD_DATA_GFXDATA];
@@ -414,12 +416,32 @@ static inline void writeBlitterRGB(MNTZZ9KRegs* registers, ULONG color) {
 }
 
 static inline void writeBlitterSrcPitch(MNTZZ9KRegs* registers, UWORD srcpitch) {
-// This can't be cached here because the firmware doesn't cache it either!
-//	static UWORD old = 0;
-//	if(srcpitch != old) {
+	if (blitter_cache_write16_needed(&blitter_register_cache, registers,
+			BLITTER_CACHE_SRC_PITCH, &blitter_register_cache.src_pitch,
+			srcpitch)) {
 		zzwrite16(&registers->blitter_src_pitch, srcpitch);
-//		old = srcpitch;
-//	}
+	}
+}
+
+static inline void writeBlitterRGB2(MNTZZ9KRegs* registers, ULONG color) {
+	if (blitter_cache_write32_needed(&blitter_register_cache, registers,
+			BLITTER_CACHE_RGB2, &blitter_register_cache.rgb2, color)) {
+		zzwrite32(&registers->blitter_rgb2_hi, color);
+	}
+}
+
+static inline void writeBlitterUser1(MNTZZ9KRegs* registers, UWORD value) {
+	if (blitter_cache_write16_needed(&blitter_register_cache, registers,
+			BLITTER_CACHE_USER1, &blitter_register_cache.user1, value)) {
+		zzwrite16(&registers->blitter_user1, value);
+	}
+}
+
+static inline void writeBlitterUser2(MNTZZ9KRegs* registers, UWORD value) {
+	if (blitter_cache_write16_needed(&blitter_register_cache, registers,
+			BLITTER_CACHE_USER2, &blitter_register_cache.user2, value)) {
+		zzwrite16(&registers->blitter_user2, value);
+	}
 }
 
 static inline void writeBlitterDstPitch(MNTZZ9KRegs* registers, UWORD dstpitch) {
@@ -764,6 +786,7 @@ int __attribute__((used)) InitCard(__REGA0(struct BoardInfo* b), __REGA1(char **
 	//b->DeleteFeature = (void *)NULL;
 
 	apply_card_settings(b, tool_types);
+	blitter_cache_reset(&blitter_register_cache);
 
 	return 1;
 }
@@ -965,7 +988,7 @@ void SetColorArray(__REGA0(struct BoardInfo *b), __REGD0(UWORD start), __REGD1(U
 
 	if (start >= 256) {
 		if (!b->CardData[ZZ_CARD_DATA_SECONDARY_PALETTE]) {
-			zzwrite16(&registers->blitter_user1, CARD_FEATURE_SECONDARY_PALETTE);
+			writeBlitterUser1(registers, CARD_FEATURE_SECONDARY_PALETTE);
 			zzwrite16(&registers->set_feature_status, 1);
 			b->CardData[ZZ_CARD_DATA_SECONDARY_PALETTE] = 1;
 		}
@@ -1466,7 +1489,7 @@ void BlitTemplate(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), _
 		writeBlitterSrcOffset(registers, zz_template_addr);
 
 		writeBlitterRGB(registers, t->FgPen);
-		zzwrite32(&registers->blitter_rgb2_hi, t->BgPen);
+		writeBlitterRGB2(registers, t->BgPen);
 
 		writeBlitterSrcPitch(registers, t->BytesPerRow);
 		writeBlitterDstPitch(registers, r->BytesPerRow);
@@ -1534,9 +1557,9 @@ void BlitPattern(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __
 		writeBlitterSrcOffset(registers, zz_template_addr);
 
 		writeBlitterRGB(registers, pat->FgPen);
-		zzwrite32(&registers->blitter_rgb2_hi, pat->BgPen);
+		writeBlitterRGB2(registers, pat->BgPen);
 
-		zzwrite16(&registers->blitter_user1, mask);
+		writeBlitterUser1(registers, mask);
 		writeBlitterDstPitch(registers, r->BytesPerRow);
 		writeBlitterColorMode(registers, colormode | (pat->DrawMode << 8));
 		writeBlitterX1(registers, x);
@@ -1634,13 +1657,13 @@ void DrawLine(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 
 		writeBlitterRGB(registers, l->FgPen);
 
-		zzwrite32(&registers->blitter_rgb2_hi, l->BgPen);
+		writeBlitterRGB2(registers, l->BgPen);
 
 		writeBlitterX1(registers, l->X);
 		writeBlitterY1(registers, l->Y);
 		writeBlitterX2(registers, l->dX);
 		writeBlitterY2(registers, l->dY);
-		zzwrite16(&registers->blitter_user1, l->Length);
+		writeBlitterUser1(registers, l->Length);
 		writeBlitterX3(registers, l->LinePtrn);
 		writeBlitterY3(registers, l->PatternShift | (l->pad << 8));
 
@@ -1801,7 +1824,7 @@ void BlitPlanar2Chunky(__REGA0(struct BoardInfo *b), __REGA1(struct BitMap *bm),
 		writeBlitterX3(registers, w);
 		writeBlitterY3(registers, h);
 
-		zzwrite16(&registers->blitter_user2, zz_mask);
+		writeBlitterUser2(registers, zz_mask);
 
 		zzwrite16(&registers->blitter_op_p2c, mask | bm->Depth << 8);
 	}
@@ -1903,7 +1926,7 @@ void BlitPlanar2Direct(__REGA0(struct BoardInfo *b), __REGA1(struct BitMap *bm),
 		writeBlitterX3(registers, w);
 		writeBlitterY3(registers, h);
 
-		zzwrite16(&registers->blitter_user2, zz_mask);
+		writeBlitterUser2(registers, zz_mask);
 
 		zzwrite16(&registers->blitter_op_p2d, mask | bm->Depth << 8);
 	}
@@ -2001,8 +2024,8 @@ void SetSpriteColor(__REGA0(struct BoardInfo *b), __REGD0(UBYTE idx), __REGD1(UB
 
 		zzwrite16(&registers->blitter_dma_op, OP_SPRITE_COLOR);
 	} else {
-		zzwrite16(&registers->blitter_user1, R);
-		zzwrite16(&registers->blitter_user2, B | (G << 8));
+		writeBlitterUser1(registers, R);
+		writeBlitterUser2(registers, B | (G << 8));
 		zzwrite16(&registers->sprite_colors, idx + 1);
 	}
 }
