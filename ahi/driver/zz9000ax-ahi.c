@@ -296,7 +296,6 @@ void WorkerProcess() {
   }
 
   uint32_t signals = 0;
-  uint32_t buf_offset = 0;
 
   Signal(ahi_data->t_mainproc, 1L << ahi_data->mainproc_signal);
 
@@ -339,21 +338,21 @@ void WorkerProcess() {
       write_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_SCALE, AudioCtrl->ahiac_BuffSamples);
 
       // def. the faster way
-      CopyMem((void*)ahi_data->audio_buf_addr, (void*)ahi_data->audio_hw_buf_addr + buf_offset, bytes);
+      CopyMem((void*)ahi_data->audio_buf_addr, (void*)ahi_data->audio_hw_buf_addr + ahi_data->buf_offset, bytes);
       // byteswap, resample and play buffer
-      write_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_SWAB, buf_offset>>8);
+      write_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_SWAB, ahi_data->buf_offset>>8);
       overrun = read_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_SWAB);
 #endif
 
       if (overrun == 1) {
         //memset((void*)ahi_data->audio_buf_addr, 0, ZZ_AX_AUDIO_BUFSZ);
-        buf_offset = 0;
+        ahi_data->buf_offset = 0;
       } else {
-        buf_offset += ZZ_AX_BYTES_PER_PERIOD;
+        ahi_data->buf_offset += ZZ_AX_BYTES_PER_PERIOD;
       }
 
-      if (buf_offset >= ZZ_AX_AUDIO_BUFSZ) {
-        buf_offset = 0;
+      if (ahi_data->buf_offset >= ZZ_AX_AUDIO_BUFSZ) {
+        ahi_data->buf_offset = 0;
       }
 
       (*AudioCtrl->ahiac_PostTimer)();
@@ -436,6 +435,24 @@ static void enable_hw_interrupt(struct z9ax* ahi_data) {
 #endif
 }
 
+static void disable_hw_interrupt(struct z9ax* ahi_data) {
+#ifdef REAL_HARDWARE
+  write_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_CONFIG, 0);
+#else
+  (void)ahi_data;
+#endif
+}
+
+static void zero_hw_audio_ring(struct z9ax* ahi_data) {
+#ifdef REAL_HARDWARE
+  volatile uint8_t *hw_buf = (volatile uint8_t *)ahi_data->audio_hw_buf_addr;
+  uint32_t i;
+  for (i = 0; i < ZZ_AX_AUDIO_BUFSZ; i++) hw_buf[i] = 0;
+#else
+  (void)ahi_data;
+#endif
+}
+
 void destroy_interrupt(struct z9ax* ahi_data) {
   struct Interrupt* irq = &ahi_data->irq;
 
@@ -443,7 +460,7 @@ void destroy_interrupt(struct z9ax* ahi_data) {
 
 #ifdef REAL_HARDWARE
   // disable HW interrupt
-  write_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_CONFIG, 0);
+  disable_hw_interrupt(ahi_data);
 
   Forbid();
   if (ahi_data->flags & ZZ_AX_DEVF_INT2MODE) {
@@ -567,6 +584,7 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
   ahi_data->mainproc_signal = -1;
   ahi_data->zorro_version = zorro;
   ahi_data->t_mainproc = FindTask(NULL);
+  ahi_data->buf_offset = 0;
   // FIXME: see also zz_template_addr in RTG driver
   uint32_t offset_tx = Z9AXBase->hw_size - 0x20000;
   ahi_data->audio_hw_buf_addr = hw_addr + 0x10000 + offset_tx;
@@ -648,11 +666,7 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
   // be played as a short burst before the worker writes the first mixed
   // period. ZZ_AX_AUDIO_BUFSZ is the full ring size (8 periods); zeroing all
   // of it means the DAC plays silence until real data lands.
-  {
-    volatile uint8_t *hw_buf = (volatile uint8_t *)ahi_data->audio_hw_buf_addr;
-    uint32_t i;
-    for (i = 0; i < ZZ_AX_AUDIO_BUFSZ; i++) hw_buf[i] = 0;
-  }
+  zero_hw_audio_ring(ahi_data);
 
   ahi_data->mainproc_signal = AllocSignal(-1);
   if (ahi_data->mainproc_signal == -1) {
@@ -687,9 +701,8 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
   // yields 960 samples (3840 bytes) for 48000Hz
   AudioCtrl->ahiac_BuffSamples = AudioCtrl->ahiac_MixFreq/50;
 
-  // Worker is up and the period size is initialized; safe to let the
-  // hardware start firing audio interrupts.
-  enable_hw_interrupt(ahi_data);
+  // Worker is up and the period size is initialized. Start() will reset
+  // the ring and enable hardware interrupts when AHI begins playback.
 
   // none of that weird timing
   return AHISF_KNOWSTEREO | AHISF_MIXING; // | AHISF_TIMING;
@@ -756,7 +769,15 @@ static void __attribute__((used)) intAHIsub_Stop(uint32_t Flags asm("d0"), struc
   struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
   if (!ahi_data) return;
   if (Flags & AHISF_PLAY) {
+    Forbid();
     ahi_data->play_stop = 1;
+    disable_hw_interrupt(ahi_data);
+    ahi_data->buf_offset = 0;
+    Permit();
+
+    // Clear the 30 KB Zorro-side ring outside Forbid(); AHI serializes
+    // Start/Stop calls for this driver instance, and the hardware is off.
+    zero_hw_audio_ring(ahi_data);
   }
 }
 
@@ -764,7 +785,22 @@ static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), 
   struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
   if (!ahi_data) return AHIE_OK;
   if (flags & AHISF_PLAY) {
+    Forbid();
+    disable_hw_interrupt(ahi_data);
+    ahi_data->buf_offset = 0;
+    ahi_data->play_stop = 1;
+    Permit();
+
+    // Clear the 30 KB Zorro-side ring outside Forbid(); play_stop remains
+    // set so the worker drops any stale signal instead of racing this
+    // silence pass.
+    zero_hw_audio_ring(ahi_data);
+
+    Forbid();
+    ahi_data->buf_offset = 0;
     ahi_data->play_stop = 0;
+    enable_hw_interrupt(ahi_data);
+    Permit();
   }
   // Returns AHIE_OK if successful.
   return AHIE_OK;
@@ -783,6 +819,8 @@ static int32_t __attribute__((used)) intAHIsub_GetAttr(uint32_t attr_ asm("d0"),
     case AHIDB_Frequencies:
       return ZZ_NUM_FREQS;
     case AHIDB_Frequency:
+      if (arg < 0 || arg >= ZZ_NUM_FREQS)
+        return def;
       return freqs[arg];
     case AHIDB_Index:
       for (int i = 0; i < ZZ_NUM_FREQS; i++) {
