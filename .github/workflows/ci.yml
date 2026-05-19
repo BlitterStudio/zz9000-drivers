@@ -193,15 +193,7 @@ jobs:
       - uses: actions/checkout@v6
       - name: Build mhizz9000.library
         run: |
-          docker run --rm -v "$PWD":/src -w /src/mhi "$AMIGA_IMAGE" sh -c '
-            set -e
-            m68k-amigaos-gcc StartUp.c LibInit.c mhizz9000.c asmfuncs.s \
-              -m68020 -O3 -o mhizz9000.library.debug -g -ggdb \
-              -Wall -Wextra -Wno-unused-parameter \
-              -Wno-pointer-to-int-cast -Wno-pointer-sign \
-              -nostartfiles -ldebug
-            m68k-amigaos-strip -s -o mhizz9000.library mhizz9000.library.debug
-          '
+          docker run --rm -v "$PWD":/src -w /src/mhi "$AMIGA_IMAGE" ./build.sh
       - uses: actions/upload-artifact@v7
         with:
           name: mhizz9000.library
@@ -215,17 +207,7 @@ jobs:
       - uses: actions/checkout@v6
       - name: Build zz9000ax.audio + ZZ9000AX
         run: |
-          docker run --rm -v "$PWD":/src -w /src/ahi/driver "$AMIGA_IMAGE" sh -c '
-            set -e
-            vasmm68k_mot -quiet -phxass -Fhunk -m68020 \
-              -o PREFSFILE.uncut prefsfile.a \
-              -I/opt/amiga/m68k-amigaos/ndk-include \
-              -I/opt/amiga/m68k-amigaos/include
-            dd bs=1 skip=40 if=PREFSFILE.uncut of=ZZ9000AX
-            m68k-amigaos-gcc zz9000ax-ahi.c asmfuncs.s -O3 \
-              -o zz9000ax.audio -Wall -Wextra -Wno-unused-parameter \
-              -nostartfiles -m68020 -ldebug
-          '
+          docker run --rm -v "$PWD":/src -w /src/ahi/driver "$AMIGA_IMAGE" ./build.sh
       - uses: actions/upload-artifact@v7
         with:
           name: zz9000ax.audio

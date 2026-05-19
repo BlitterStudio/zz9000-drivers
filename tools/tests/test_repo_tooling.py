@@ -64,6 +64,11 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("ZZDiag:", ci)
         self.assertIn("ZZDiag/ZZDiag", ci)
 
+    def test_ci_audio_jobs_use_build_scripts(self):
+        ci = self.read(".github/workflows/ci.yml")
+        self.assertIn('-w /src/mhi "$AMIGA_IMAGE" ./build.sh', ci)
+        self.assertIn('-w /src/ahi/driver "$AMIGA_IMAGE" ./build.sh', ci)
+
     def test_release_script_mentions_every_packaged_artifact(self):
         script = self.read("tools/check-release.sh")
         for artifact in (
