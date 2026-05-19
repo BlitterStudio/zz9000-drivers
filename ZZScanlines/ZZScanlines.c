@@ -19,7 +19,8 @@
  * Active in AGA scandoubled modes and RTG resolutions below 350 lines;
  * disabled on interlaced modes and high-resolution RTG.
  *
- * Build: m68k-amigaos-gcc -O2 -noixemul -o ZZScanlines ZZScanlines.c -lamiga
+ * Build: m68k-amigaos-gcc -O2 -noixemul -I../include
+ *        -o ZZScanlines ZZScanlines.c -lamiga
  */
 
 #include <exec/types.h>
@@ -32,33 +33,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define MNT_MANUFACTURER  0x6d6e
-#define ZZ9000_PRODUCT_Z3 4
-#define ZZ9000_PRODUCT_Z2 3
-
-#define REG_MODE   0x100C
-#define REG_PARITY 0x100E
-
-static ULONG find_zz9000(void) {
-    struct ExpansionBase *ExpBase;
-    struct ConfigDev *cd = NULL;
-    ULONG addr = 0;
-
-    ExpBase = (struct ExpansionBase *)OpenLibrary("expansion.library", 0);
-    if (!ExpBase) return 0;
-
-    while ((cd = FindConfigDev(cd, MNT_MANUFACTURER, ZZ9000_PRODUCT_Z3)))
-        { addr = (ULONG)cd->cd_BoardAddr; break; }
-
-    if (!addr) {
-        cd = NULL;
-        while ((cd = FindConfigDev(cd, MNT_MANUFACTURER, ZZ9000_PRODUCT_Z2)))
-            { addr = (ULONG)cd->cd_BoardAddr; break; }
-    }
-
-    CloseLibrary((struct Library *)ExpBase);
-    return addr;
-}
+#include "zz9000_hw.h"
 
 int main(int argc, char *argv[]) {
     if (argc < 2 || argc > 3 || argv[1][0] == '?') {
@@ -75,13 +50,13 @@ int main(int argc, char *argv[]) {
     if (mode < 0 || mode > 3)     { printf("ERROR: mode must be 0-3\n");     return 1; }
     if (parity < 0 || parity > 1) { printf("ERROR: parity must be 0 or 1\n"); return 1; }
 
-    ULONG board_addr = find_zz9000();
+    ULONG board_addr = zz9000_find_board(NULL);
     if (!board_addr) { printf("ERROR: ZZ9000 not found\n"); return 1; }
 
     printf("ZZ9000 found at 0x%08lx\n", board_addr);
 
-    volatile UWORD * const reg_mode   = (volatile UWORD *)(board_addr + REG_MODE);
-    volatile UWORD * const reg_parity = (volatile UWORD *)(board_addr + REG_PARITY);
+    volatile UWORD * const reg_mode   = (volatile UWORD *)(board_addr + ZZ_SCANLINE_MODE_REG);
+    volatile UWORD * const reg_parity = (volatile UWORD *)(board_addr + ZZ_SCANLINE_PARITY_REG);
 
     *reg_parity = (UWORD)parity;
     *reg_mode   = (UWORD)mode;

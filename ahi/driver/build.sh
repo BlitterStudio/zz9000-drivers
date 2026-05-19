@@ -1,6 +1,12 @@
-#!/bin/bash
+#!/bin/sh
+set -eu
 
-export PATH=$PATH:/opt/amiga/bin
+if ! command -v m68k-amigaos-gcc >/dev/null 2>&1; then
+  script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+  exec "$script_dir/../../tools/amiga-docker.sh" ahi/driver ./build.sh "$@"
+fi
+
+export PATH=/opt/amiga/bin:$PATH
 
 vasmm68k_mot -quiet -phxass -Fhunk -m68020 -o PREFSFILE.uncut prefsfile.a -I/opt/amiga/m68k-amigaos/ndk-include -I/opt/amiga/m68k-amigaos/include
 

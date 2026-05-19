@@ -364,7 +364,7 @@
 ; --------------------------------------------------------------------
 
 (if (askbool (prompt "Install the ZZ9000 command-line utilities and ZZTop configuration GUI?")
-             (help "Installs ZZTop (configuration GUI) to SYS:Tools/, and the ZZScanlines, ZZFwUpdate, zznetstats and axmp3 CLI tools to C:."))
+             (help "Installs ZZTop (configuration GUI) to SYS:Tools/, and the ZZScanlines, ZZFwUpdate, ZZNetStats, ZZDiag and axmp3 CLI tools to C:."))
    (
       (copyfiles
          (prompt "Install ZZTop into SYS:Tools/")
@@ -389,9 +389,16 @@
          (confirm))
 
       (copyfiles
-         (prompt "Install zznetstats into C:")
+         (prompt "Install ZZNetStats into C:")
          (help "Dumps SANA-II global statistics for ZZ9000Net.device - useful for debugging link / throughput issues.")
-         (source "Tools/zznetstats")
+         (source "Tools/ZZNetStats")
+         (dest "C:")
+         (confirm))
+
+      (copyfiles
+         (prompt "Install ZZDiag into C:")
+         (help "Dumps ZZ9000 board, firmware, VideoCap, USB, SD, AX and Ethernet diagnostic registers.")
+         (source "Tools/ZZDiag")
          (dest "C:")
          (confirm))
 

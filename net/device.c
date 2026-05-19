@@ -264,7 +264,7 @@ SAVEDS LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
 	db->db_Lib.lib_OpenCnt++; /* avoid Expunge, see below for separate "unit" open count */
 
   /* Multi-open support: the original driver rejected any opener past the
-   * first. That blocks diagnostics like zznetstats from attaching while
+   * first. That blocks diagnostics like ZZNetStats from attaching while
    * Roadshow has the device open. SANA-II allows multiple openers with
    * independent BufferManagement — we do the heavy one-time init (RX
    * list, worker process, interrupt server, stats reset) only on the

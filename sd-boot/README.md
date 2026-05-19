@@ -109,14 +109,15 @@ sd-boot/
 ├── zzsd_cmd.h           ← struct SDBase, register map, protocol constants
 └── boot-rom/
     ├── boot.S           ← m68k DiagEntry/BootEntry + hunk relocator
-    ├── boot.bin         ← assembled artifact (tracked for CI)
+    ├── boot.bin         ← assembled artifact (generated, untracked)
     └── diag-code.h      ← hex dump of boot.bin, embedded in firmware
 ```
 
-`zzsd.device` and `zzsd-device.h` are build artifacts and are in
-`.gitignore`. After building here, copy `zzsd-device.h` into the
-firmware tree (`ZZ9000OS/src/zzsd-device.h`) and rebuild the firmware
-so the updated driver lands in `BOOT.bin`.
+`zzsd.device`, `zzsd-device.h`, `boot-rom/boot.o`, and
+`boot-rom/boot.bin` are build artifacts and are in `.gitignore`. After
+building here, copy `zzsd-device.h` into the firmware tree
+(`ZZ9000OS/src/zzsd-device.h`) and rebuild the firmware so the updated
+driver lands in `BOOT.bin`.
 
 ## Building
 

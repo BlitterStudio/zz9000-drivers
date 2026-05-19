@@ -18,7 +18,8 @@
  * Filename rules on the SD side: flat root, [A-Za-z0-9._-], max 64
  * chars. The firmware will reject anything else with FWUP_ERR_BAD_NAME.
  *
- * Build: m68k-amigaos-gcc -O2 -noixemul -o ZZFwUpdate ZZFwUpdate.c -lamiga
+ * Build: m68k-amigaos-gcc -O2 -noixemul -I../include
+ *        -o ZZFwUpdate ZZFwUpdate.c -lamiga
  */
 
 #include <exec/types.h>
@@ -33,21 +34,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "zz9000_hw.h"
+
 #define ZZFWUPDATE_VERSION "2.1"
 #define ZZFWUPDATE_DATE    "17.05.2026"
 
 static const char version[] __attribute__((used)) =
     "$VER: ZZFwUpdate " ZZFWUPDATE_VERSION " (" ZZFWUPDATE_DATE ")\r\n";
-
-#define MNT_MANUFACTURER   0x6d6e
-#define ZZ9000_PRODUCT_Z3  4
-#define ZZ9000_PRODUCT_Z2  3
-
-/* Mirrors zz9000-firmware/ZZ9000_proto.sdk/ZZ9000OS/src/zz_regs.h. */
-#define REG_FWUP_CMD       0xCA
-#define REG_FWUP_LEN       0xCC
-#define REG_FWUP_STATUS    0xCE
-#define ZZ_BUFFER_OFFSET   0xA000
 
 #define FWUP_CMD_OPEN      1
 #define FWUP_CMD_WRITE     2
@@ -117,27 +110,6 @@ static int validate_dest_name(const char *name) {
     }
 
     return 1;
-}
-
-static ULONG find_zz9000(void) {
-    struct ExpansionBase *ExpBase;
-    struct ConfigDev *cd = NULL;
-    ULONG addr = 0;
-
-    ExpBase = (struct ExpansionBase *)OpenLibrary((CONST_STRPTR)"expansion.library", 0);
-    if (!ExpBase) return 0;
-
-    while ((cd = FindConfigDev(cd, MNT_MANUFACTURER, ZZ9000_PRODUCT_Z3)))
-        { addr = (ULONG)cd->cd_BoardAddr; break; }
-
-    if (!addr) {
-        cd = NULL;
-        while ((cd = FindConfigDev(cd, MNT_MANUFACTURER, ZZ9000_PRODUCT_Z2)))
-            { addr = (ULONG)cd->cd_BoardAddr; break; }
-    }
-
-    CloseLibrary((struct Library *)ExpBase);
-    return addr;
 }
 
 /* Strip any AmigaDOS volume/path prefix so the user can pass
@@ -294,15 +266,15 @@ int main(int argc, char *argv[]) {
     if (!validate_dest_name(dest_name))
         return 1;
 
-    ULONG board = find_zz9000();
+    ULONG board = zz9000_find_board(NULL);
     if (!board) {
         printf("ERROR: ZZ9000 not found in expansion bus\n");
         return 1;
     }
 
-    volatile UWORD *cmd_reg    = (volatile UWORD *)(board + REG_FWUP_CMD);
-    volatile UWORD *len_reg    = (volatile UWORD *)(board + REG_FWUP_LEN);
-    volatile UWORD *status_reg = (volatile UWORD *)(board + REG_FWUP_STATUS);
+    volatile UWORD *cmd_reg    = (volatile UWORD *)(board + ZZ_REG_FWUP_CMD);
+    volatile UWORD *len_reg    = (volatile UWORD *)(board + ZZ_REG_FWUP_LEN);
+    volatile UWORD *status_reg = (volatile UWORD *)(board + ZZ_REG_FWUP_STATUS);
     UBYTE          *buffer     = (UBYTE *)(board + ZZ_BUFFER_OFFSET);
 
     if (!probe_fwup_protocol(cmd_reg, len_reg, status_reg)) {

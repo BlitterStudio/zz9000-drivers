@@ -7,9 +7,26 @@
 *.rom
 *.nodma
 *.audio
+*.library
+*.library.debug
 PREFSFILE*
+ZZFwUpdate/ZZFwUpdate
+ZZScanlines/ZZScanlines
+ZZTop/ZZTop
+ahi/axtest/axtest
+ahi/driver/ZZ9000AX
+ax-direct/axtest
 rtg/tests/build/
 sd-boot/zzsd-device.h
+sd-boot/boot-rom/boot.bin
+ZZDiag/ZZDiag
+ax-direct/axmp3
+net/ZZ9000Net.device.68000
+net/ZZNetStats/ZZNetStats
+installer/ZZ9000Installer/Tools/ZZDiag
+installer/ZZ9000Installer/Tools/ZZNetStats
+zz9000-drivers-*/
 attic
 
 .DS_Store
+__pycache__/

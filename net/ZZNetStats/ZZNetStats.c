@@ -1,12 +1,12 @@
 /*
- * zznetstats — dump SANA-II global stats for ZZ9000Net.device
+ * ZZNetStats - dump SANA-II global stats for ZZ9000Net.device
  *
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
  * Usage:
- *   zznetstats [DEVICE=<name>] [UNIT=<n>]
- *   zznetstats <name> [<unit>]
+ *   ZZNetStats [DEVICE=<name>] [UNIT=<n>]
+ *   ZZNetStats <name> [<unit>]
  *
  * Defaults: DEVICE=Networks/ZZ9000Net.device UNIT=0
  *
@@ -27,52 +27,27 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "zz9000_hw.h"
+
 #define ZZNETSTATS_VERSION "2.1"
 #define ZZNETSTATS_DATE    "17.05.2026"
 
 static const char version[] __attribute__((used)) =
-    "$VER: zznetstats " ZZNETSTATS_VERSION " (" ZZNETSTATS_DATE ")\r\n";
+    "$VER: ZZNetStats " ZZNETSTATS_VERSION " (" ZZNETSTATS_DATE ")\r\n";
 
 #define DEFAULT_DEVICE "Networks/ZZ9000Net.device"
 #define DEFAULT_UNIT   0
-#define MNT_MANUFACTURER  0x6d6e
-#define ZZ9000_PRODUCT_Z3 4
-#define ZZ9000_PRODUCT_Z2 3
-#define REG_ZZ_ETH_RX_STATUS 0x8c
-#define REG_ZZ_ETH_RX_STATS  0x8e
-
-static ULONG find_zz9000(void)
-{
-    struct ExpansionBase *ExpBase;
-    struct ConfigDev *cd = NULL;
-    ULONG addr = 0;
-
-    ExpBase = (struct ExpansionBase *)OpenLibrary((CONST_STRPTR)"expansion.library", 0);
-    if (!ExpBase) return 0;
-
-    while ((cd = FindConfigDev(cd, MNT_MANUFACTURER, ZZ9000_PRODUCT_Z3)))
-        { addr = (ULONG)cd->cd_BoardAddr; break; }
-
-    if (!addr) {
-        cd = NULL;
-        while ((cd = FindConfigDev(cd, MNT_MANUFACTURER, ZZ9000_PRODUCT_Z2)))
-            { addr = (ULONG)cd->cd_BoardAddr; break; }
-    }
-
-    CloseLibrary((struct Library *)ExpBase);
-    return addr;
-}
 
 static void print_firmware_rx_stats(void)
 {
-    ULONG regs = find_zz9000();
+    ULONG regs = zz9000_find_board(NULL);
     if (!regs) {
         printf("FirmwareRXStatus     = unavailable\n");
         return;
     }
 
-    UWORD status = *(volatile UWORD *)(regs + REG_ZZ_ETH_RX_STATUS);
-    UWORD stats  = *(volatile UWORD *)(regs + REG_ZZ_ETH_RX_STATS);
+    UWORD status = zz9000_read_reg16(regs, ZZ_REG_ETH_RX_STATUS);
+    UWORD stats  = zz9000_read_reg16(regs, ZZ_REG_ETH_RX_STATS);
 
     printf("FirmwareRXReady      = %u\n",  (unsigned)(status & 0x00ff));
     printf("FirmwareRXReserved   = %u\n",  (unsigned)((status >> 8) & 0x007f));
@@ -109,7 +84,7 @@ int main(int argc, char **argv)
     LONG        unit    = DEFAULT_UNIT;
 
     if (parse_args(argc, argv, &devname, &unit) < 0) {
-        printf("Usage: zznetstats [DEVICE=<name>] [UNIT=<n>]\n");
+        printf("Usage: ZZNetStats [DEVICE=<name>] [UNIT=<n>]\n");
         printf("  Default: DEVICE=%s UNIT=%d\n", DEFAULT_DEVICE, DEFAULT_UNIT);
         return 0;
     }

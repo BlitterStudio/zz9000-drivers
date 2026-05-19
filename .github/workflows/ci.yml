@@ -15,6 +15,18 @@ env:
   AMIGA_IMAGE: sacredbanana/amiga-compiler:m68k-amigaos
 
 jobs:
+  host-checks:
+    name: Host checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run host-side tests and repository checks
+        run: |
+          make rtg-tests
+          python3 -m unittest tools/tests/test_repo_tooling.py
+          tools/check-quality.sh
+          tools/check-release.sh --quick
+
   rtg:
     name: rtg — ZZ9000.card
     runs-on: ubuntu-latest
@@ -57,7 +69,8 @@ jobs:
       - name: Build ZZScanlines
         run: |
           docker run --rm -v "$PWD":/src -w /src/ZZScanlines "$AMIGA_IMAGE" \
-            m68k-amigaos-gcc -O2 -noixemul -o ZZScanlines ZZScanlines.c -lamiga
+            m68k-amigaos-gcc -O2 -noixemul -I../include \
+              -o ZZScanlines ZZScanlines.c -lamiga
       - uses: actions/upload-artifact@v7
         with:
           name: ZZScanlines
@@ -72,7 +85,7 @@ jobs:
       - name: Build ZZFwUpdate
         run: |
           docker run --rm -v "$PWD":/src -w /src/ZZFwUpdate "$AMIGA_IMAGE" \
-            m68k-amigaos-gcc -O2 -noixemul -Wall -Wextra \
+            m68k-amigaos-gcc -O2 -noixemul -Wall -Wextra -I../include \
               -o ZZFwUpdate ZZFwUpdate.c -lamiga
       - uses: actions/upload-artifact@v7
         with:
@@ -139,21 +152,38 @@ jobs:
           path: net/ZZ9000Net.device
           if-no-files-found: error
 
-  zznetstats:
-    name: net — zznetstats
+  ZZNetStats:
+    name: net — ZZNetStats
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Build zznetstats
+      - name: Build ZZNetStats
         run: |
-          docker run --rm -v "$PWD":/src -w /src/net/zznetstats "$AMIGA_IMAGE" \
+          docker run --rm -v "$PWD":/src -w /src/net/ZZNetStats "$AMIGA_IMAGE" \
             m68k-amigaos-gcc -O2 -noixemul -Wall -Wextra \
-              -Wno-unused-parameter \
-              -o zznetstats zznetstats.c -lamiga
+              -Wno-unused-parameter -I../../include \
+              -o ZZNetStats ZZNetStats.c -lamiga
       - uses: actions/upload-artifact@v7
         with:
-          name: zznetstats
-          path: net/zznetstats/zznetstats
+          name: ZZNetStats
+          path: net/ZZNetStats/ZZNetStats
+          if-no-files-found: error
+
+  ZZDiag:
+    name: ZZDiag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build ZZDiag
+        run: |
+          docker run --rm -v "$PWD":/src -w /src/ZZDiag "$AMIGA_IMAGE" \
+            m68k-amigaos-gcc ZZDiag.c -m68030 -O2 -o ZZDiag \
+              -Wall -Wextra -Wno-unused-parameter -I../include \
+              -lamiga -noixemul
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ZZDiag
+          path: ZZDiag/ZZDiag
           if-no-files-found: error
 
   mhi:
@@ -226,7 +256,7 @@ jobs:
   release:
     name: Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [rtg, zztop, zzscanlines, zzfwupdate, usb-poseidon, sd-boot, net, zznetstats, mhi, ahi, axmp3]
+    needs: [host-checks, rtg, zztop, zzscanlines, zzfwupdate, usb-poseidon, sd-boot, net, ZZNetStats, ZZDiag, mhi, ahi, axmp3]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -256,7 +286,8 @@ jobs:
           install -Dm755 artifacts/ZZTop/ZZTop                         "$INST/Tools/ZZTop"
           install -Dm755 artifacts/ZZScanlines/ZZScanlines             "$INST/Tools/ZZScanlines"
           install -Dm755 artifacts/ZZFwUpdate/ZZFwUpdate                "$INST/Tools/ZZFwUpdate"
-          install -Dm755 artifacts/zznetstats/zznetstats               "$INST/Tools/zznetstats"
+          install -Dm755 artifacts/ZZNetStats/ZZNetStats               "$INST/Tools/ZZNetStats"
+          install -Dm755 artifacts/ZZDiag/ZZDiag                       "$INST/Tools/ZZDiag"
           install -Dm755 artifacts/axmp3/axmp3                         "$INST/Tools/axmp3"
           install -Dm644 ahi/README.md                                 "$INST/Docs/ahi-README.md"
           install -Dm644 usb-poseidon/README.md                        "$INST/Docs/usb-poseidon-README.md"
