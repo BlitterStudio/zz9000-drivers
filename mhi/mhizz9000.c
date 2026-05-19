@@ -628,14 +628,14 @@ APTR i_MHIGetEmpty(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase
 	if(!mp || !mp->BufferList) return NULL;
 
 	// Walk + RemHead must be protected against the soft-IRQ fillFifo()
-	// that reads from the same list head.
+	// that reads from the same list head. Return one completed buffer per
+	// call: callers use repeated GetEmpty calls to reclaim every buffer,
+	// and draining multiple nodes here would lose all but the last pointer.
 	Forbid();
-	for(;;) {
-		BufferNode = (struct ListNode *)mp->BufferList->mlh_Head;
-		if(BufferNode == NULL) break;
-		if(BufferNode->Header.mln_Succ == NULL) break;
-		if(BufferNode->Played == FALSE) break;
-
+	BufferNode = (struct ListNode *)mp->BufferList->mlh_Head;
+	if(BufferNode != NULL &&
+	   BufferNode->Header.mln_Succ != NULL &&
+	   BufferNode->Played != FALSE) {
 		mhi_buffer = BufferNode->Buffer;
 		RemHead((struct List *)mp->BufferList);
 		FreeVec(BufferNode);

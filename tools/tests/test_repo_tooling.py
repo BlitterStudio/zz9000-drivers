@@ -187,6 +187,48 @@ class RepoToolingTests(unittest.TestCase):
         self.assertLess(source.index("!mhi_buffer"),
                         source.index("AllocVec(sizeof(struct ListNode)"))
 
+    def test_mhi_get_empty_returns_one_buffer_per_call(self):
+        source = self.read("mhi/mhizz9000.c")
+        body = source[
+            source.index("APTR i_MHIGetEmpty"):
+            source.index("UBYTE i_MHIGetStatus")
+        ]
+        self.assertNotIn("for(;;)", body)
+        self.assertIn("BufferNode->Played != FALSE", body)
+        self.assertIn("mhi_buffer = BufferNode->Buffer;", body)
+        self.assertIn("RemHead((struct List *)mp->BufferList);", body)
+
+    def test_ahi_frequency_attr_rejects_bad_indices(self):
+        source = self.read("ahi/driver/zz9000ax-ahi.c")
+        body = source[
+            source.index("case AHIDB_Frequency:"):
+            source.index("case AHIDB_Index:")
+        ]
+        self.assertIn("arg < 0", body)
+        self.assertIn("arg >= ZZ_NUM_FREQS", body)
+        self.assertLess(body.index("arg < 0"), body.index("freqs[arg]"))
+
+    def test_ahi_stop_start_silences_and_resets_ring(self):
+        header = self.read("ahi/driver/zz9000ax-ahi.h")
+        source = self.read("ahi/driver/zz9000ax-ahi.c")
+        stop_body = source[
+            source.index("intAHIsub_Stop"):
+            source.index("static uint32_t __attribute__((used)) intAHIsub_Start")
+        ]
+        start_body = source[
+            source.index("intAHIsub_Start"):
+            source.index("static int32_t __attribute__((used)) intAHIsub_GetAttr")
+        ]
+
+        self.assertIn("uint32_t buf_offset;", header)
+        self.assertIn("static void zero_hw_audio_ring", source)
+        self.assertIn("disable_hw_interrupt(ahi_data);", stop_body)
+        self.assertIn("ahi_data->buf_offset = 0;", stop_body)
+        self.assertIn("zero_hw_audio_ring(ahi_data);", stop_body)
+        self.assertIn("ahi_data->buf_offset = 0;", start_body)
+        self.assertIn("zero_hw_audio_ring(ahi_data);", start_body)
+        self.assertIn("enable_hw_interrupt(ahi_data);", start_body)
+
 
 if __name__ == "__main__":
     unittest.main()
