@@ -1,5 +1,3 @@
-#define DEVF_INT2MODE 1
-
 // Driver data
 struct z9ax {
   struct Task *t_mainproc;

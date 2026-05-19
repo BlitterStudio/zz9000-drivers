@@ -6,6 +6,6 @@
 # Uses m68k-amigaos-gcc from https://github.com/bebbo/amiga-gcc.
 # CI uses the `sacredbanana/amiga-compiler:m68k-amigaos` image; for
 # local builds this script puts /opt/amiga/bin on PATH before make.
-export PATH=$PATH:/opt/amiga/bin
+export PATH="$PATH":/opt/amiga/bin
 
 exec make "$@"

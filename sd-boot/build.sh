@@ -2,7 +2,7 @@
 set -eu
 
 if ! command -v m68k-amigaos-gcc >/dev/null 2>&1; then
-  script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+  script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
   exec "$script_dir/../tools/amiga-docker.sh" sd-boot ./build.sh "$@"
 fi
 
@@ -14,7 +14,7 @@ if [ -n "${DEBUG:-}" ]; then
   set -- -DZZSD_DRIVER_DEBUG=1
 fi
 
-export PATH=/opt/amiga/bin:$PATH
+export PATH=/opt/amiga/bin:"$PATH"
 
 write_c_array() {
   input=$1

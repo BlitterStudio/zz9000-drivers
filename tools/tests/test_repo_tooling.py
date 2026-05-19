@@ -97,6 +97,25 @@ class RepoToolingTests(unittest.TestCase):
         for relpath in scripts:
             subprocess.run(["sh", "-n", str(ROOT / relpath)], check=True)
 
+    def test_shell_scripts_avoid_ci_shellcheck_patterns(self):
+        bad_cdpath = []
+        bad_path_export = []
+        for path in ROOT.rglob("*.sh"):
+            relpath = path.relative_to(ROOT).as_posix()
+            text = path.read_text(encoding="utf-8")
+            if "CDPATH= cd" in text:
+                bad_cdpath.append(relpath)
+            if ("export PATH=/opt/amiga/bin:$PATH" in text and
+                    "shellcheck disable=SC2016" not in text):
+                bad_path_export.append(relpath)
+            if "export PATH=$PATH:/opt/amiga/bin" in text:
+                bad_path_export.append(relpath)
+            if 'export PATH=/opt/amiga/bin:""$PATH' in text:
+                bad_path_export.append(relpath)
+
+        self.assertEqual([], bad_cdpath)
+        self.assertEqual([], bad_path_export)
+
     def test_sd_boot_header_generation_does_not_require_xxd(self):
         script = self.read("sd-boot/build.sh")
         self.assertNotIn("xxd", script)
@@ -126,6 +145,42 @@ class RepoToolingTests(unittest.TestCase):
         )
         artifacts = [path for path in tracked if artifact_pattern.match(path)]
         self.assertEqual([], artifacts)
+
+    def test_audio_stack_uses_shared_ax_header(self):
+        header = self.read("include/zz9000_ax.h")
+        for token in (
+            "ZZ_AX_BYTES_PER_PERIOD",
+            "ZZ_AX_AUDIO_BUFSZ",
+            "ZZ_AX_MIX_LEVELS_ENV",
+            "ZZ_AX_IRQ_NAME_AHI",
+            "ZZ_AX_IRQ_NAME_MHI",
+            "ZZ_AX_AP_DSP_SET_VOLUMES",
+        ):
+            self.assertIn(token, header)
+
+        for relpath in (
+            "ahi/driver/zz9000ax-ahi.c",
+            "mhi/mhizz9000.c",
+        ):
+            source = self.read(relpath)
+            self.assertIn('#include "zz9000_ax.h"', source)
+            self.assertNotIn("#define ZZ_BYTES_PER_PERIOD", source)
+            self.assertNotIn("#define AUDIO_BUFSZ", source)
+            self.assertNotIn("#define REG_ZZ_AUDIO_CONFIG", source)
+            self.assertNotIn('"ENV:ZZ9K_MIX_LEVELS"', source)
+
+    def test_ahi_initializes_period_size_before_enabling_interrupt(self):
+        source = self.read("ahi/driver/zz9000ax-ahi.c")
+        assign = source.index("AudioCtrl->ahiac_BuffSamples =")
+        enable = source.index("enable_hw_interrupt(ahi_data);")
+        self.assertLess(assign, enable)
+
+    def test_mhi_queue_rejects_empty_buffers(self):
+        source = self.read("mhi/mhizz9000.c")
+        self.assertIn("!mhi_buffer", source)
+        self.assertIn("mhi_size == 0", source)
+        self.assertLess(source.index("!mhi_buffer"),
+                        source.index("AllocVec(sizeof(struct ListNode)"))
 
 
 if __name__ == "__main__":

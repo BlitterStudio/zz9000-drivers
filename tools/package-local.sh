@@ -2,8 +2,8 @@
 set -eu
 
 tag=${1:-local}
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+repo_root=$(CDPATH='' cd -- "$script_dir/.." && pwd)
 staging="$repo_root/zz9000-drivers-$tag"
 zipfile="$repo_root/zz9000-drivers-$tag.zip"
 inst="$repo_root/installer/ZZ9000Installer"

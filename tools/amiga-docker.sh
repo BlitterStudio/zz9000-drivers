@@ -9,8 +9,8 @@ fi
 workdir=$1
 shift
 
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+repo_root=$(CDPATH='' cd -- "$script_dir/.." && pwd)
 image=${AMIGA_IMAGE:-sacredbanana/amiga-compiler:m68k-amigaos}
 engine=${CONTAINER_ENGINE:-}
 
@@ -25,6 +25,8 @@ if [ -z "$engine" ]; then
     fi
 fi
 
+# Expand PATH inside the container, not on the host.
+# shellcheck disable=SC2016
 exec "$engine" run --rm \
     -v "$repo_root":/src \
     -w "/src/$workdir" \

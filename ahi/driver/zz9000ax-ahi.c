@@ -42,6 +42,7 @@
 #include <string.h>
 #include <stdint.h>
 
+#include "zz9000_ax.h"
 #include "zz9000ax-ahi.h"
 
 // Comment out to enable debug output:
@@ -59,28 +60,19 @@
 
 #define REAL_HARDWARE 1
 
-#define ZZ_BYTES_PER_PERIOD 3840
-// AUDIO_BUFSZ is the hardware-side ring size (8 periods). The CPU-side
+// ZZ_AX_AUDIO_BUFSZ is the hardware-side ring size (8 periods). The CPU-side
 // bounce buffer is only ever filled one period at a time — see BOUNCE_BUFSZ.
-#define AUDIO_BUFSZ (ZZ_BYTES_PER_PERIOD*8) // TODO: query from hardware
-#define BOUNCE_BUFSZ ZZ_BYTES_PER_PERIOD
+#define BOUNCE_BUFSZ ZZ_AX_BOUNCE_BUFSZ
 // AHI sample frames = 16-bit stereo => 4 bytes per frame. This is what
 // ahiac_BuffSamples counts and what AHIDB_MaxPlaySamples must advertise;
 // keep this in sync with the mixer byte math (bytes = BuffSamples << 2)
 // and with the bounce-buffer capacity check in WorkerProcess().
-#define BOUNCE_MAX_FRAMES (BOUNCE_BUFSZ / 4)
+#define BOUNCE_MAX_FRAMES ZZ_AX_BOUNCE_MAX_FRAMES
 // AmigaOS scheduling is strictly preemptive priority with no aging; any
 // task at or above this priority stuck in a CPU loop will starve the mixer
 // and produce audible stutter. Keep the mixer well above user-level tasks
 // and slightly below critical system servers (timer.device = 127).
 #define WORKER_PRIORITY 110
-
-#define REG_ZZ_CONFIG       0x04
-#define REG_ZZ_AUDIO_SWAB   0x70
-#define REG_ZZ_AUDIO_SCALE  0x74
-#define REG_ZZ_AUDIO_PARAM  0x76
-#define REG_ZZ_AUDIO_VAL    0x78
-#define REG_ZZ_AUDIO_CONFIG 0xF4
 
 struct ExecBase     *SysBase;
 struct Library      *UtilityBase;
@@ -120,9 +112,9 @@ static inline uint16_t read_reg(uint32_t base, uint16_t reg)
 
 static inline void write_audio_param(uint32_t base, uint16_t param, uint16_t val)
 {
-  *((volatile uint16_t*)(base+REG_ZZ_AUDIO_PARAM)) = param;
-  *((volatile uint16_t*)(base+REG_ZZ_AUDIO_VAL))   = val;
-  *((volatile uint16_t*)(base+REG_ZZ_AUDIO_PARAM)) = 0;
+  *((volatile uint16_t*)(base+ZZ_REG_AUDIO_PARAM)) = param;
+  *((volatile uint16_t*)(base+ZZ_REG_AUDIO_VAL))   = val;
+  *((volatile uint16_t*)(base+ZZ_REG_AUDIO_PARAM)) = 0;
 }
 
 const char device_name[] = DEVICE_NAME;
@@ -180,13 +172,15 @@ static uint32_t __attribute__((used)) init(BPTR seg_list asm("a0"), struct Libra
 
   // TW: Zorro2/3 detection during early init phase.
   // Find Z2 or Z3 model of MNT ZZ9000
-  if ((cd = (struct ConfigDev*)FindConfigDev(NULL,0x6d6e,0x4))) {
+  if ((cd = (struct ConfigDev*)FindConfigDev(NULL, ZZ9000_MNT_MANUFACTURER,
+                                             ZZ9000_PRODUCT_Z3))) {
     // ZORRO 3
     Z9AXBase->zorro_version = 3;
     Z9AXBase->hw_addr = (uint32_t)cd->cd_BoardAddr;
     Z9AXBase->hw_size = (uint32_t)cd->cd_BoardSize;
   }
-  else if ((cd = (struct ConfigDev*)FindConfigDev(NULL,0x6d6e,0x3))) {
+  else if ((cd = (struct ConfigDev*)FindConfigDev(NULL, ZZ9000_MNT_MANUFACTURER,
+                                                  ZZ9000_PRODUCT_Z2))) {
     // ZORRO 2
     Z9AXBase->zorro_version = 2;
     Z9AXBase->hw_addr = (uint32_t)cd->cd_BoardAddr;
@@ -197,10 +191,10 @@ static uint32_t __attribute__((used)) init(BPTR seg_list asm("a0"), struct Libra
   }
 
   BPTR fh;
-  if ((fh=Open((CONST_STRPTR)"ENV:ZZ9K_INT2",MODE_OLDFILE))) {
+  if ((fh=Open((CONST_STRPTR)ZZ_AX_INT2_ENV, MODE_OLDFILE))) {
     kprintf((CONST_STRPTR)"ZZ9000AX: Using INT2 mode.\n");
     Close(fh);
-    Z9AXBase->flags |= DEVF_INT2MODE;
+    Z9AXBase->flags |= ZZ_AX_DEVF_INT2MODE;
   } else {
     kprintf((CONST_STRPTR)"ZZ9000AX: Using INT6 mode (default).\n");
   }
@@ -282,7 +276,7 @@ void WorkerProcess() {
   struct AHIAudioCtrlDrv* AudioCtrl = ahi_data->audioctrl;
 
 #ifndef REAL_HARDWARE
-  uint8_t* glob_buf = AllocVec(ZZ_BYTES_PER_PERIOD*2, MEMF_ANY);
+  uint8_t* glob_buf = AllocVec(ZZ_AX_BYTES_PER_PERIOD * 2, MEMF_ANY);
 #endif
 
   ahi_data->worker_signal = AllocSignal(-1);
@@ -342,23 +336,23 @@ void WorkerProcess() {
 
       int overrun = 0;
 #ifdef REAL_HARDWARE
-      write_reg(ahi_data->hw_addr, REG_ZZ_AUDIO_SCALE, AudioCtrl->ahiac_BuffSamples);
+      write_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_SCALE, AudioCtrl->ahiac_BuffSamples);
 
       // def. the faster way
       CopyMem((void*)ahi_data->audio_buf_addr, (void*)ahi_data->audio_hw_buf_addr + buf_offset, bytes);
       // byteswap, resample and play buffer
-      write_reg(ahi_data->hw_addr, REG_ZZ_AUDIO_SWAB, buf_offset>>8);
-      overrun = read_reg(ahi_data->hw_addr, REG_ZZ_AUDIO_SWAB);
+      write_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_SWAB, buf_offset>>8);
+      overrun = read_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_SWAB);
 #endif
 
       if (overrun == 1) {
-        //memset((void*)ahi_data->audio_buf_addr, 0, AUDIO_BUFSZ);
+        //memset((void*)ahi_data->audio_buf_addr, 0, ZZ_AX_AUDIO_BUFSZ);
         buf_offset = 0;
       } else {
-        buf_offset += ZZ_BYTES_PER_PERIOD;
+        buf_offset += ZZ_AX_BYTES_PER_PERIOD;
       }
 
-      if (buf_offset>=AUDIO_BUFSZ) {
+      if (buf_offset >= ZZ_AX_AUDIO_BUFSZ) {
         buf_offset = 0;
       }
 
@@ -382,12 +376,12 @@ void WorkerProcess() {
 
 // TW: C interrupt service routine called by ASM wrapper.
 void cdev_isr(struct z9ax* data asm("a1")) {
-  USHORT status = *(USHORT*)(data->hw_addr+REG_ZZ_CONFIG);
+  USHORT status = *(USHORT*)(data->hw_addr+ZZ_REG_CONFIG);
 
   // audio interrupt signal set?
   if (status & 2) {
     // ack/clear audio interrupt
-    *(USHORT*)(data->hw_addr+REG_ZZ_CONFIG) = 8|32;
+    *(USHORT*)(data->hw_addr+ZZ_REG_CONFIG) = 8|32;
 
     if(data->disable_cnt) return;
     if(data->play_stop) return;
@@ -408,7 +402,7 @@ static void prepare_irq_struct(struct z9ax* ahi_data) {
 
   irq->is_Node.ln_Type = NT_INTERRUPT;
   irq->is_Node.ln_Pri = 126; // High priority: this ISR must react quickly.
-  irq->is_Node.ln_Name = "ZZ9000AX";
+  irq->is_Node.ln_Name = ZZ_AX_IRQ_NAME_AHI;
   irq->is_Data = ahi_data;
   irq->is_Code = (void*)dev_isr;
 }
@@ -419,7 +413,7 @@ static void prepare_irq_struct(struct z9ax* ahi_data) {
 static void install_irq_server_locked(struct z9ax* ahi_data) {
   struct Interrupt* irq = &ahi_data->irq;
 #ifdef REAL_HARDWARE
-  if (ahi_data->flags & DEVF_INT2MODE) {
+  if (ahi_data->flags & ZZ_AX_DEVF_INT2MODE) {
     AddIntServer(INTB_PORTS, irq);
   } else {
     AddIntServer(INTB_EXTER, irq);
@@ -434,9 +428,9 @@ static void install_irq_server_locked(struct z9ax* ahi_data) {
 // up and ready to handle the resulting signals.
 static void enable_hw_interrupt(struct z9ax* ahi_data) {
 #ifdef REAL_HARDWARE
-  USHORT hw_config = read_reg(ahi_data->hw_addr, REG_ZZ_AUDIO_CONFIG);
+  USHORT hw_config = read_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_CONFIG);
   hw_config |= 1;
-  write_reg(ahi_data->hw_addr, REG_ZZ_AUDIO_CONFIG, hw_config);
+  write_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_CONFIG, hw_config);
 #else
   (void)ahi_data;
 #endif
@@ -449,10 +443,10 @@ void destroy_interrupt(struct z9ax* ahi_data) {
 
 #ifdef REAL_HARDWARE
   // disable HW interrupt
-  write_reg(ahi_data->hw_addr, REG_ZZ_AUDIO_CONFIG, 0);
+  write_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_CONFIG, 0);
 
   Forbid();
-  if (ahi_data->flags & DEVF_INT2MODE) {
+  if (ahi_data->flags & ZZ_AX_DEVF_INT2MODE) {
     RemIntServer(INTB_PORTS, irq);
   } else {
     RemIntServer(INTB_EXTER, irq);
@@ -473,13 +467,13 @@ void destroy_interrupt(struct z9ax* ahi_data) {
 // RemIntServer from any task, so walking it unprotected would be unsafe.
 static BOOL mhi_present_locked(void) {
   struct List *IrqList;
-  if(Z9AXBase->flags & DEVF_INT2MODE) {
+  if(Z9AXBase->flags & ZZ_AX_DEVF_INT2MODE) {
     IrqList = (struct List *)SysBase->IntVects[INTB_PORTS].iv_Data;
   }
   else {
     IrqList = (struct List *)SysBase->IntVects[INTB_EXTER].iv_Data;
   }
-  return FindName(IrqList, (CONST_STRPTR)"mhizz9000") ? TRUE : FALSE;
+  return FindName(IrqList, (CONST_STRPTR)ZZ_AX_IRQ_NAME_MHI) ? TRUE : FALSE;
 }
 
 // Read an optional user override for AP_DSP_SET_VOLUMES from
@@ -499,7 +493,7 @@ static uint16_t read_mix_levels_env(uint16_t default_value)
   int i;
 
   if (!DOSBase) return default_value;
-  fh = Open((CONST_STRPTR)"ENV:ZZ9K_MIX_LEVELS", MODE_OLDFILE);
+  fh = Open((CONST_STRPTR)ZZ_AX_MIX_LEVELS_ENV, MODE_OLDFILE);
   if (!fh) return default_value;
   len = Read(fh, buf, sizeof(buf) - 1);
   Close(fh);
@@ -535,9 +529,9 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
   if(!hw_addr) return AHISF_ERROR; // TW: Only AHISF_xxx return codes are allowed here.
   if(!zorro) return AHISF_ERROR; // TW: Only AHISF_xxx return codes are allowed here.
 
-  // REG_ZZ_AUDIO_CONFIG bit 0 is the "AX present" strap; mask explicitly so
+  // ZZ_REG_AUDIO_CONFIG bit 0 is the "AX present" strap; mask explicitly so
   // other status bits can't ever make this look like detection succeeded.
-  int ax_present = read_reg(hw_addr, REG_ZZ_AUDIO_CONFIG) & 1;
+  int ax_present = read_reg(hw_addr, ZZ_REG_AUDIO_CONFIG) & 1;
   if (!ax_present) {
     const char *alert = "\x00\x14\x14ZZ9000AX not detected. AHI driver will exit.\x00\x00";
     if (!IntuitionBase) {
@@ -609,7 +603,7 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
   // first app launch" symptom. We must only do this once we own the
   // card (post install_irq_server_locked) so we can't stomp an
   // in-progress MHI session.
-  write_reg(hw_addr, REG_ZZ_AUDIO_CONFIG, 0);
+  write_reg(hw_addr, ZZ_REG_AUDIO_CONFIG, 0);
   Permit();
 
   int lpf_freq = AudioCtrl->ahiac_MixFreq / 2;
@@ -618,7 +612,7 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
   if (lpf_freq > 23900) lpf_freq = 23900;
 
   BPTR f;
-  if ((f = Open((APTR)"ENV:ZZ9000AX-NOLPF", MODE_OLDFILE))) {
+  if ((f = Open((APTR)ZZ_AX_NOLPF_ENV, MODE_OLDFILE))) {
     Close(f);
     // turn off auto low pass filter
     lpf_freq = 23900;
@@ -643,7 +637,8 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
   // Owners of an unfixed early R1 where raw Paula dominates over AHI
   // output can compensate via `setenv ZZ9K_MIX_LEVELS C040` (boost AHI,
   // cut Paula) — or any other 4-digit hex value — without rebuilding.
-  write_audio_param(hw_addr, 10, read_mix_levels_env(0x8080));
+  write_audio_param(hw_addr, ZZ_AX_AP_DSP_SET_VOLUMES,
+                    read_mix_levels_env(ZZ_AX_DEFAULT_MIX_LEVELS));
   Permit();
 
   // Zero the hardware audio ring buffer before we enable playback. The
@@ -651,12 +646,12 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
   // audio interrupt is armed, and whatever garbage was left there by a
   // previous MHI session, a previous AHI session, or power-on junk will
   // be played as a short burst before the worker writes the first mixed
-  // period. AUDIO_BUFSZ is the full ring size (8 periods); zeroing all
+  // period. ZZ_AX_AUDIO_BUFSZ is the full ring size (8 periods); zeroing all
   // of it means the DAC plays silence until real data lands.
   {
     volatile uint8_t *hw_buf = (volatile uint8_t *)ahi_data->audio_hw_buf_addr;
     uint32_t i;
-    for (i = 0; i < AUDIO_BUFSZ; i++) hw_buf[i] = 0;
+    for (i = 0; i < ZZ_AX_AUDIO_BUFSZ; i++) hw_buf[i] = 0;
   }
 
   ahi_data->mainproc_signal = AllocSignal(-1);
@@ -689,11 +684,12 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
     goto fail;
   }
 
-  // Worker is up; safe to let the hardware start firing audio interrupts.
-  enable_hw_interrupt(ahi_data);
-
   // yields 960 samples (3840 bytes) for 48000Hz
   AudioCtrl->ahiac_BuffSamples = AudioCtrl->ahiac_MixFreq/50;
+
+  // Worker is up and the period size is initialized; safe to let the
+  // hardware start firing audio interrupts.
+  enable_hw_interrupt(ahi_data);
 
   // none of that weird timing
   return AHISF_KNOWSTEREO | AHISF_MIXING; // | AHISF_TIMING;

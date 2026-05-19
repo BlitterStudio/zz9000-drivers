@@ -31,45 +31,13 @@
 
 #include <hardware/intbits.h>
 
+#include "zz9000_ax.h"
 #include "mhizz9000.h"
-#include "ax.h"
 
 #define OPTIMIZED_TRANSFER
 
 // Comment out to enable debug output:
 #define KPrintF(...)
-
-#define DEVF_INT2MODE 1
-
-#define ZZ_BYTES_PER_PERIOD 3840
-#define AUDIO_BUFSZ ZZ_BYTES_PER_PERIOD*8 // TODO: query from hardware
-
-#define REG_ZZ_CONFIG        0x04
-#define REG_ZZ_AUDIO_SWAB    0x70
-#define REG_ZZ_DECODER_FIFO  0x72
-#define REG_ZZ_AUDIO_SCALE   0x74
-#define REG_ZZ_AUDIO_PARAM   0x76
-#define REG_ZZ_AUDIO_VAL     0x78
-#define REG_ZZ_DECODER_PARAM 0x7A
-#define REG_ZZ_DECODER_VAL   0x7C
-#define REG_ZZ_DECODE        0x7E
-#define REG_ZZ_AUDIO_CONFIG  0xF4
-
-#define ID3V2_HEADER_LENGTH 10
-
-#define FIFOSIZE (1152*4)
-//#define FIFOSIZE (16*1024+1)
-
-typedef enum {
-	DECODE_CLEAR,
-	DECODE_INIT,
-	DECODE_RUN
-} DECODE_COMMAND;
-
-#define BSWAP_S(x) ((UWORD) ((((x) >> 8) & 0xff) | (((x) & 0xff) << 8)))
-#define BSWAP_L(x) (((((ULONG)x) & 0xff000000u) >> 24) | ((((ULONG)x) & 0x00ff0000u) >> 8) | ((((ULONG)x) & 0x0000ff00u) << 8) | ((((ULONG)x) & 0x000000ffu) << 24))
-#define BSWAP_P(x) (void*)(((((ULONG)x) & 0xff000000u) >> 24) | ((((ULONG)x) & 0x00ff0000u) >> 8) | ((((ULONG)x) & 0x0000ff00u) << 8) | ((((ULONG)x) & 0x000000ffu) << 24))
-
 
 /* ******************************** */
 /*  BEGIN ZZ9000AX parameter access */
@@ -85,14 +53,14 @@ static UWORD getRegister(struct MhiPlayer *mp, ULONG Register) {
 }
 
 static void setAudioParam(struct MhiPlayer *mp, ULONG Param, UWORD Value) {
-	*((volatile UWORD*)(mp->hw_addr+REG_ZZ_AUDIO_PARAM)) = Param;
-	*((volatile UWORD*)(mp->hw_addr+REG_ZZ_AUDIO_VAL))	 = Value;
-	*((volatile UWORD*)(mp->hw_addr+REG_ZZ_AUDIO_PARAM)) = 0;	
+	*((volatile UWORD*)(mp->hw_addr+ZZ_REG_AUDIO_PARAM)) = Param;
+	*((volatile UWORD*)(mp->hw_addr+ZZ_REG_AUDIO_VAL))	 = Value;
+	*((volatile UWORD*)(mp->hw_addr+ZZ_REG_AUDIO_PARAM)) = 0;
 }
 
 static void setDecoderParam(struct MhiPlayer *mp, ULONG Param, UWORD Value) {
-	*((volatile UWORD*)(mp->hw_addr+REG_ZZ_DECODER_PARAM)) = Param;
-	*((volatile UWORD*)(mp->hw_addr+REG_ZZ_DECODER_VAL))   = Value;
+	*((volatile UWORD*)(mp->hw_addr+ZZ_REG_DECODER_PARAM)) = Param;
+	*((volatile UWORD*)(mp->hw_addr+ZZ_REG_DECODER_VAL))   = Value;
 }
 
 // Read an optional user override for AP_DSP_SET_VOLUMES from
@@ -111,7 +79,7 @@ static UWORD read_mix_levels_env(UWORD default_value) {
 	int i;
 
 	if (!DOSBase) return default_value;
-	fh = Open((CONST_STRPTR)"ENV:ZZ9K_MIX_LEVELS", MODE_OLDFILE);
+	fh = Open((CONST_STRPTR)ZZ_AX_MIX_LEVELS_ENV, MODE_OLDFILE);
 	if (!fh) return default_value;
 	len = Read(fh, buf, sizeof(buf) - 1);
 	Close(fh);
@@ -151,7 +119,7 @@ static void clearFifo(struct MhiPlayer *mp) {
 	mp->FifoMode = FIFO_PREFILL;
 	mp->FifoWriteIdx = 0;
 	// ZZ_DECODE (clear)
-	setRegister(mp, REG_ZZ_DECODE, DECODE_CLEAR);
+	setRegister(mp, ZZ_REG_DECODE, ZZ_AX_DECODE_CLEAR);
 }
 
 static void fillFifo(struct MhiPlayer *mp) {
@@ -162,9 +130,9 @@ static void fillFifo(struct MhiPlayer *mp) {
 	LONG i;
 
 	// 1. Get FIFO Read Index from ZZ9k (we are the slave).
-	FifoReadIdx = getRegister(mp, REG_ZZ_DECODER_FIFO);
+	FifoReadIdx = getRegister(mp, ZZ_REG_DECODER_FIFO);
 	if(mp->FifoWriteIdx >= FifoReadIdx) {
-		Space = FIFOSIZE-(mp->FifoWriteIdx-FifoReadIdx);
+		Space = ZZ_AX_DECODER_FIFO_SIZE-(mp->FifoWriteIdx-FifoReadIdx);
 	}
 	else {
 		Space = FifoReadIdx-mp->FifoWriteIdx;
@@ -177,7 +145,7 @@ static void fillFifo(struct MhiPlayer *mp) {
 	}
 	// In operational mode fill it only half way to leave data for seeking back.
 	else {
-		Space -= FIFOSIZE/2;
+		Space -= ZZ_AX_DECODER_FIFO_SIZE/2;
 	}
 	if(Space <= 0) return;
 
@@ -195,7 +163,7 @@ static void fillFifo(struct MhiPlayer *mp) {
 					if((mp->FifoWriteIdx & 3) == 0) break;
 					if(Space) {
 						Buffer[mp->FifoWriteIdx++] = BufferNode->Buffer[BufferNode->Index++];
-						if(mp->FifoWriteIdx >= FIFOSIZE) mp->FifoWriteIdx = 0;
+						if(mp->FifoWriteIdx >= ZZ_AX_DECODER_FIFO_SIZE) mp->FifoWriteIdx = 0;
 						Space--;
 						BytesToCopy--;
 					}
@@ -209,7 +177,7 @@ static void fillFifo(struct MhiPlayer *mp) {
 			for(i=0; i<LongsToCopy; i++) {
 				*dst++ = *src++;
 				mp->FifoWriteIdx  += 4;
-				if(mp->FifoWriteIdx >= FIFOSIZE) {
+				if(mp->FifoWriteIdx >= ZZ_AX_DECODER_FIFO_SIZE) {
 					mp->FifoWriteIdx = 0;
 					dst = (ULONG*)Buffer;
 				}
@@ -223,7 +191,7 @@ static void fillFifo(struct MhiPlayer *mp) {
 			for(i=0; i<BytesToCopy; i++) {
 				if(Space) {
 					Buffer[mp->FifoWriteIdx++] = BufferNode->Buffer[BufferNode->Index++];
-					if(mp->FifoWriteIdx >= FIFOSIZE) mp->FifoWriteIdx = 0;
+					if(mp->FifoWriteIdx >= ZZ_AX_DECODER_FIFO_SIZE) mp->FifoWriteIdx = 0;
 					Space--;
 				}
 			}
@@ -242,7 +210,7 @@ static void fillFifo(struct MhiPlayer *mp) {
 	mp->FifoMode = FIFO_OPERATIONAL;
 
 	// 4. Set FIFO Write Index in ZZ9k (we are the master).
-	setRegister(mp, REG_ZZ_DECODER_FIFO, mp->FifoWriteIdx);
+	setRegister(mp, ZZ_REG_DECODER_FIFO, mp->FifoWriteIdx);
 }
 /* ********** */
 /*  END FIFO  */
@@ -256,13 +224,13 @@ static void fillFifo(struct MhiPlayer *mp) {
 // unprotected would be unsafe in its own right.
 static BOOL ahi_present_locked(struct MHI_LibBase *MhiLibBase) {
 	struct List *IrqList;
-	if(MhiLibBase->flags & DEVF_INT2MODE) {
+	if(MhiLibBase->flags & ZZ_AX_DEVF_INT2MODE) {
 		IrqList = (struct List *)SysBase->IntVects[INTB_PORTS].iv_Data;
 	}
 	else {
 		IrqList = (struct List *)SysBase->IntVects[INTB_EXTER].iv_Data;
 	}
-	return FindName(IrqList, "ZZ9000AX") ? TRUE : FALSE;
+	return FindName(IrqList, ZZ_AX_IRQ_NAME_AHI) ? TRUE : FALSE;
 }
 
 BOOL UserLibInit(struct MHI_LibBase *MhiLibBase) {
@@ -288,11 +256,13 @@ BOOL UserLibInit(struct MHI_LibBase *MhiLibBase) {
 	}
 
 	// Find Z2 or Z3 model of MNT ZZ9000.
-	if((cd = (struct ConfigDev*)FindConfigDev(NULL, 0x6D6E, 0x4))) {
+	if((cd = (struct ConfigDev*)FindConfigDev(NULL, ZZ9000_MNT_MANUFACTURER,
+	                                          ZZ9000_PRODUCT_Z3))) {
 		MhiLibBase->zorro_version = 3;
 		KPrintF("ZZ9000 Zorro 3 Version detected.\n");
 	}
-	else if((cd = (struct ConfigDev*)FindConfigDev(NULL, 0x6D6E, 0x3))) {
+	else if((cd = (struct ConfigDev*)FindConfigDev(NULL, ZZ9000_MNT_MANUFACTURER,
+	                                               ZZ9000_PRODUCT_Z2))) {
 		MhiLibBase->zorro_version = 2;
 		KPrintF("ZZ9000 Zorro 2 Version detected.\n");
 	}
@@ -311,9 +281,9 @@ BOOL UserLibInit(struct MHI_LibBase *MhiLibBase) {
 	hw_size = (ULONG)cd->cd_BoardSize;
 	CloseLibrary((struct Library*)ExpansionBase);
 
-	// REG_ZZ_AUDIO_CONFIG bit 0 is the "AX present" strap; mask explicitly
+	// ZZ_REG_AUDIO_CONFIG bit 0 is the "AX present" strap; mask explicitly
 	// so other status bits can't ever make detection look successful.
-	ax_present = (*((volatile UWORD*)(hw_addr+REG_ZZ_AUDIO_CONFIG))) & 1;
+	ax_present = (*((volatile UWORD*)(hw_addr+ZZ_REG_AUDIO_CONFIG))) & 1;
 	if(!ax_present) {
 		KPrintF("Error: ZZ9000AX not detected.\n");
 		return FALSE;
@@ -324,9 +294,9 @@ BOOL UserLibInit(struct MHI_LibBase *MhiLibBase) {
 	MhiLibBase->hw_size = hw_size;
 
 	BPTR fh;
-	if((fh=Open((CONST_STRPTR)"ENV:ZZ9K_INT2",MODE_OLDFILE))) {
+	if((fh=Open((CONST_STRPTR)ZZ_AX_INT2_ENV, MODE_OLDFILE))) {
 		Close(fh);
-		MhiLibBase->flags |= DEVF_INT2MODE;
+		MhiLibBase->flags |= ZZ_AX_DEVF_INT2MODE;
 	}
 
 	return TRUE;
@@ -338,7 +308,7 @@ void UserLibCleanup(struct MHI_LibBase *MhiLibBase) {
 
 extern ULONG dev_sisr(struct MhiPlayer *mp asm("a1"));
 ULONG cdev_sisr(struct MhiPlayer *mp asm("a1")) {
-	ULONG buf_samples = ZZ_BYTES_PER_PERIOD/4;
+	ULONG buf_samples = ZZ_AX_BOUNCE_MAX_FRAMES;
 	// Bail if the decoder is no longer playing. A hard ISR that fired
 	// between disable_hw_audio() and RemIntServer() can leave a soft IRQ
 	// queued on Exec's SoftInts list; when Stop/Free subsequently set
@@ -348,23 +318,23 @@ ULONG cdev_sisr(struct MhiPlayer *mp asm("a1")) {
 	if(mp->Status != MHIF_PLAYING) return 0;
 	fillFifo(mp);
 
-	setRegister(mp, REG_ZZ_AUDIO_SCALE, buf_samples);
+	setRegister(mp, ZZ_REG_AUDIO_SCALE, buf_samples);
 
 	setDecoderParam(mp, 4, (mp->decode_offset+mp->buf_offset)>>16);
 	setDecoderParam(mp, 5, (mp->decode_offset+mp->buf_offset)&0xffff);
-	setRegister(mp, REG_ZZ_DECODE, DECODE_RUN);
+	setRegister(mp, ZZ_REG_DECODE, ZZ_AX_DECODE_RUN);
 	
 	// play buffer
-	setRegister(mp, REG_ZZ_AUDIO_SWAB, (1<<15) | (mp->buf_offset >> 8)); // no byteswap, offset/256
-	int overrun = getRegister(mp, REG_ZZ_AUDIO_SWAB);
+	setRegister(mp, ZZ_REG_AUDIO_SWAB, (1<<15) | (mp->buf_offset >> 8)); // no byteswap, offset/256
+	int overrun = getRegister(mp, ZZ_REG_AUDIO_SWAB);
 	
 	if (overrun == 1) {
 	  mp->buf_offset = 0;
 	} else {
-	  mp->buf_offset += ZZ_BYTES_PER_PERIOD;
+	  mp->buf_offset += ZZ_AX_BYTES_PER_PERIOD;
 	}
 	
-	if (mp->buf_offset >= AUDIO_BUFSZ) {
+	if (mp->buf_offset >= ZZ_AX_AUDIO_BUFSZ) {
 	  mp->buf_offset = 0;
 	}
 	return 0;
@@ -372,12 +342,12 @@ ULONG cdev_sisr(struct MhiPlayer *mp asm("a1")) {
 
 extern ULONG dev_isr(struct MhiPlayer *mp asm("a1"));
 ULONG cdev_isr(struct MhiPlayer *mp asm("a1")) {
-	UWORD status = *(UWORD*)(mp->hw_addr+REG_ZZ_CONFIG);
+	UWORD status = *(UWORD*)(mp->hw_addr+ZZ_REG_CONFIG);
 
-	// audio interrupt signal set? (REG_ZZ_CONFIG bit 1, mask 0x02)
+	// audio interrupt signal set? (ZZ_REG_CONFIG bit 1, mask 0x02)
 	if(status & 2) {
 		// Ack/clear audio interrupt.
-		*(USHORT*)(mp->hw_addr+REG_ZZ_CONFIG) = 8|32;
+		*(USHORT*)(mp->hw_addr+ZZ_REG_CONFIG) = 8|32;
 		// Cause soft interrupt to do the rest.
 		Cause(&mp->sirq);
 	}
@@ -393,13 +363,13 @@ static void prepare_irq_structs(struct MhiPlayer *mp) {
 	// -32, -16, 0, +16, and +32
 	mp->sirq.is_Node.ln_Pri  = 0;
 	mp->sirq.is_Node.ln_Type = NT_INTERRUPT;
-	mp->sirq.is_Node.ln_Name = "mhizz9000s";
+	mp->sirq.is_Node.ln_Name = ZZ_AX_IRQ_NAME_MHI_SOFT;
 	mp->sirq.is_Data = mp;
 	mp->sirq.is_Code = (void*)dev_sisr;
 
 	mp->irq.is_Node.ln_Type = NT_INTERRUPT;
 	mp->irq.is_Node.ln_Pri  = 126; // High priority: this ISR must react quickly.
-	mp->irq.is_Node.ln_Name = "mhizz9000";
+	mp->irq.is_Node.ln_Name = ZZ_AX_IRQ_NAME_MHI;
 	mp->irq.is_Data = mp;
 	mp->irq.is_Code = (void*)dev_isr;
 }
@@ -407,7 +377,7 @@ static void prepare_irq_structs(struct MhiPlayer *mp) {
 // Install the hard interrupt server. MUST be called under Forbid() so the
 // caller can combine it with ahi_present_locked() atomically.
 static void install_irq_server_locked(struct MhiPlayer *mp) {
-	if (mp->flags & DEVF_INT2MODE) {
+	if (mp->flags & ZZ_AX_DEVF_INT2MODE) {
 		AddIntServer(INTB_PORTS, &mp->irq);
 	} else {
 		AddIntServer(INTB_EXTER, &mp->irq);
@@ -416,13 +386,13 @@ static void install_irq_server_locked(struct MhiPlayer *mp) {
 
 // Flip the HW-side audio interrupt bit. Called only when the decoder is
 // actually playing; the ISR is otherwise a no-op because dev_isr gates on
-// REG_ZZ_CONFIG bit 1 (mask 0x02) which the hardware only sets while running.
+// ZZ_REG_CONFIG bit 1 (mask 0x02) which the hardware only sets while running.
 static void enable_hw_audio(struct MhiPlayer *mp) {
-	setRegister(mp, REG_ZZ_AUDIO_CONFIG, 1);
+	setRegister(mp, ZZ_REG_AUDIO_CONFIG, 1);
 }
 
 static void disable_hw_audio(struct MhiPlayer *mp) {
-	setRegister(mp, REG_ZZ_AUDIO_CONFIG, 0);
+	setRegister(mp, ZZ_REG_AUDIO_CONFIG, 0);
 }
 
 /*
@@ -443,7 +413,7 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 		// FIFO offset as in axmp3 (this is still within Zorro3 address range).
 		mp->encoded_offset =  0x06000000;
 		// Decoded audio offset right after FIFO with a little padding to be cache line aligned.
-		mp->decode_offset  = (0x06000000 + FIFOSIZE + 32) & 0xFFFFFFE0;
+		mp->decode_offset  = (0x06000000 + ZZ_AX_DECODER_FIFO_SIZE + 32) & 0xFFFFFFE0;
 	} else {
 		// FIFO offset like offset_tx in AHI driver (this is still within Zorro2 address range).
 		mp->encoded_offset = MHI_LibBase->hw_size - 0x20000;
@@ -517,7 +487,8 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 	// output can compensate via `setenv ZZ9K_MIX_LEVELS C040` (boost MHI,
 	// cut Paula) — or any other 4-digit hex value — without rebuilding.
 	// (Ref: community.mnt.re/t/zz9000ax-mixing-levels-register/1011)
-	setAudioParam(mp, AP_DSP_SET_VOLUMES, read_mix_levels_env(0x8080));
+	setAudioParam(mp, ZZ_AX_AP_DSP_SET_VOLUMES,
+	              read_mix_levels_env(ZZ_AX_DEFAULT_MIX_LEVELS));
 
 	return mp;
 }
@@ -574,27 +545,27 @@ void i_MHIFreeDecoder(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibB
 	// can crash on warm boot with ahi.device trap 0x80000006 (mixer
 	// reads garbage / overflow trap) -- the user reproduced this on PR
 	// #3 after an MP3 -> MOD session.
-	setRegister(mp, REG_ZZ_DECODE, DECODE_CLEAR);
+	setRegister(mp, ZZ_REG_DECODE, ZZ_AX_DECODE_CLEAR);
 
-	setAudioParam(mp, AP_DSP_SET_STEREO_VOLUME, 100 | (50<<8));
-	setAudioParam(mp, AP_DSP_SET_PREFACTOR,     50);
-	setAudioParam(mp, AP_DSP_SET_EQ_BAND1,      50);
-	setAudioParam(mp, AP_DSP_SET_EQ_BAND2,      50);
-	setAudioParam(mp, AP_DSP_SET_EQ_BAND3,      50);
-	setAudioParam(mp, AP_DSP_SET_EQ_BAND4,      50);
-	setAudioParam(mp, AP_DSP_SET_EQ_BAND5,      50);
-	setAudioParam(mp, AP_DSP_SET_EQ_BAND6,      50);
-	setAudioParam(mp, AP_DSP_SET_EQ_BAND7,      50);
-	setAudioParam(mp, AP_DSP_SET_EQ_BAND8,      50);
-	setAudioParam(mp, AP_DSP_SET_EQ_BAND9,      50);
-	setAudioParam(mp, AP_DSP_SET_EQ_BAND10,     50);
+	setAudioParam(mp, ZZ_AX_AP_DSP_SET_STEREO_VOLUME, 100 | (50<<8));
+	setAudioParam(mp, ZZ_AX_AP_DSP_SET_PREFACTOR,     50);
+	setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND1,      50);
+	setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND2,      50);
+	setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND3,      50);
+	setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND4,      50);
+	setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND5,      50);
+	setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND6,      50);
+	setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND7,      50);
+	setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND8,      50);
+	setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND9,      50);
+	setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND10,     50);
 
 	// --- Phase 3: atomically release ownership. ---
 	// Only now do we give up the card: remove the IRQ node AND decrement
 	// NumAllocatedDecoders inside a single Forbid window so any racing
 	// AllocDecoder / AHI AllocAudio sees both state changes together.
 	Forbid();
-	if (mp->flags & DEVF_INT2MODE) {
+	if (mp->flags & ZZ_AX_DEVF_INT2MODE) {
 		RemIntServer(INTB_PORTS, &mp->irq);
 	} else {
 		RemIntServer(INTB_EXTER, &mp->irq);
@@ -618,7 +589,9 @@ BOOL i_MHIQueueBuffer(REGA3(APTR mhi_handle), REGA0(APTR mhi_buffer), REGD0(ULON
 	struct MhiPlayer *mp = (struct MhiPlayer *)mhi_handle;
 	struct ListNode *BufferNode;
 
-	if(mp == NULL || mp->BufferList == NULL) return FALSE;
+	if(mp == NULL || mp->BufferList == NULL || !mhi_buffer || mhi_size == 0) {
+		return FALSE;
+	}
 
 	BufferNode = AllocVec(sizeof(struct ListNode), MEMF_PUBLIC|MEMF_CLEAR);
 	if(!BufferNode) {
@@ -714,24 +687,24 @@ void i_MHIPlay(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 			fillFifo(mp);
 
 			// set tx buffer address to 127 MB offset
-			setAudioParam(mp, AP_TX_BUF_OFFS_HI, mp->decode_offset>>16);
-			setAudioParam(mp, AP_TX_BUF_OFFS_LO, mp->decode_offset&0xffff);
+			setAudioParam(mp, ZZ_AX_AP_TX_BUF_OFFS_HI, mp->decode_offset>>16);
+			setAudioParam(mp, ZZ_AX_AP_TX_BUF_OFFS_LO, mp->decode_offset&0xffff);
 
 			// set LPF to 20KHz
-			setAudioParam(mp, AP_DSP_SET_LOWPASS, 20000);
+			setAudioParam(mp, ZZ_AX_AP_DSP_SET_LOWPASS, 20000);
 
 			// set decoder params
 			setDecoderParam(mp, 0, mp->encoded_offset>>16);
 			setDecoderParam(mp, 1, mp->encoded_offset&0xffff);
-			setDecoderParam(mp, 2, FIFOSIZE>>16);
-			setDecoderParam(mp, 3, FIFOSIZE&0xffff);
+			setDecoderParam(mp, 2, ZZ_AX_DECODER_FIFO_SIZE>>16);
+			setDecoderParam(mp, 3, ZZ_AX_DECODER_FIFO_SIZE&0xffff);
 			setDecoderParam(mp, 4, mp->decode_offset>>16);
 			setDecoderParam(mp, 5, mp->decode_offset&0xffff);
 			setDecoderParam(mp, 6, mp->decode_chunk_sz>>16);
 			setDecoderParam(mp, 7, mp->decode_chunk_sz&0xffff);
 
 			// ZZ_DECODE (init)
-			setRegister(mp, REG_ZZ_DECODE, DECODE_INIT);
+			setRegister(mp, ZZ_REG_DECODE, ZZ_AX_DECODE_INIT);
 
 			// Status must be PLAYING BEFORE enable_hw_audio so cdev_sisr's
 			// Status gate is open when the first hard ISR fires.
@@ -875,60 +848,60 @@ void i_MHISetParam(REGA3(APTR mhi_handle), REGD0(UWORD mhi_param), REGD1(ULONG m
 				if(mhi_value > 100) mhi_value = 100;
 				mp->panning = mhi_value;
 				// set volume/panning
-				setAudioParam(mp, AP_DSP_SET_STEREO_VOLUME, mp->volume | (mp->panning<<8));
+				setAudioParam(mp, ZZ_AX_AP_DSP_SET_STEREO_VOLUME, mp->volume | (mp->panning<<8));
 				break;
 
 			case MHIP_VOLUME: // 0..100
 				if(mhi_value > 100) mhi_value = 100;
 				mp->volume = mhi_value;
 				// set volume/panning
-				setAudioParam(mp, AP_DSP_SET_STEREO_VOLUME, mp->volume | (mp->panning<<8));
+				setAudioParam(mp, ZZ_AX_AP_DSP_SET_STEREO_VOLUME, mp->volume | (mp->panning<<8));
 				break;
 
 			case MHIP_PREFACTOR: // 0..50..100
 				if(mhi_value > 100) mhi_value = 100;
-				setAudioParam(mp, AP_DSP_SET_PREFACTOR, mhi_value);
+				setAudioParam(mp, ZZ_AX_AP_DSP_SET_PREFACTOR, mhi_value);
 				break;
 
 			case MHIP_BAND1:
 				if(mhi_value > 100) mhi_value = 100;
-				setAudioParam(mp, AP_DSP_SET_EQ_BAND1, mhi_value);
+				setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND1, mhi_value);
 				break;
 			case MHIP_BAND2:
 				if(mhi_value > 100) mhi_value = 100;
-				setAudioParam(mp, AP_DSP_SET_EQ_BAND2, mhi_value);
+				setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND2, mhi_value);
 				break;
 			case MHIP_BAND3:
 				if(mhi_value > 100) mhi_value = 100;
-				setAudioParam(mp, AP_DSP_SET_EQ_BAND3, mhi_value);
+				setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND3, mhi_value);
 				break;
 			case MHIP_BAND4:
 				if(mhi_value > 100) mhi_value = 100;
-				setAudioParam(mp, AP_DSP_SET_EQ_BAND4, mhi_value);
+				setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND4, mhi_value);
 				break;
 			case MHIP_BAND5:
 				if(mhi_value > 100) mhi_value = 100;
-				setAudioParam(mp, AP_DSP_SET_EQ_BAND5, mhi_value);
+				setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND5, mhi_value);
 				break;
 			case MHIP_BAND6:
 				if(mhi_value > 100) mhi_value = 100;
-				setAudioParam(mp, AP_DSP_SET_EQ_BAND6, mhi_value);
+				setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND6, mhi_value);
 				break;
 			case MHIP_BAND7:
 				if(mhi_value > 100) mhi_value = 100;
-				setAudioParam(mp, AP_DSP_SET_EQ_BAND7, mhi_value);
+				setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND7, mhi_value);
 				break;
 			case MHIP_BAND8:
 				if(mhi_value > 100) mhi_value = 100;
-				setAudioParam(mp, AP_DSP_SET_EQ_BAND8, mhi_value);
+				setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND8, mhi_value);
 				break;
 			case MHIP_BAND9:
 				if(mhi_value > 100) mhi_value = 100;
-				setAudioParam(mp, AP_DSP_SET_EQ_BAND9, mhi_value);
+				setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND9, mhi_value);
 				break;
 			case MHIP_BAND10:
 				if(mhi_value > 100) mhi_value = 100;
-				setAudioParam(mp, AP_DSP_SET_EQ_BAND10, mhi_value);
+				setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND10, mhi_value);
 				break;
 
 			default:
@@ -937,4 +910,3 @@ void i_MHISetParam(REGA3(APTR mhi_handle), REGD0(UWORD mhi_param), REGD1(ULONG m
 		}
 	}
 }
-
