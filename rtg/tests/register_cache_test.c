@@ -19,31 +19,29 @@ static void expect_write(const char *name, int actual, int expected)
 int main(void)
 {
 	struct BlitterRegisterCache cache;
-	uint16_t src_pitch_a = 0;
-	uint16_t src_pitch_b = 0;
 	uint16_t user1 = 0;
 	uint16_t user2 = 0;
 	uint32_t rgb2 = 0;
-	int regs_a;
-	int regs_b;
+	int regs_a = 0;
+	int regs_b = 0;
 
 	blitter_cache_reset(&cache);
 
 	expect_write("first src pitch writes",
-		blitter_cache_write16_needed(&cache, &regs_a, BLITTER_CACHE_SRC_PITCH,
-			&src_pitch_a, 256), 1);
-	expect_write("same src pitch skips",
-		blitter_cache_write16_needed(&cache, &regs_a, BLITTER_CACHE_SRC_PITCH,
-			&src_pitch_a, 256), 0);
+		blitter_cache_src_pitch_write_needed(&cache, &regs_a, 256), 1);
+	expect_write("same src pitch still writes",
+		blitter_cache_src_pitch_write_needed(&cache, &regs_a, 256), 1);
 	expect_write("changed src pitch writes",
-		blitter_cache_write16_needed(&cache, &regs_a, BLITTER_CACHE_SRC_PITCH,
-			&src_pitch_a, 320), 1);
+		blitter_cache_src_pitch_write_needed(&cache, &regs_a, 320), 1);
 	expect_write("different board writes",
-		blitter_cache_write16_needed(&cache, &regs_b, BLITTER_CACHE_SRC_PITCH,
-			&src_pitch_b, 320), 1);
-	expect_write("same value after board switch skips",
-		blitter_cache_write16_needed(&cache, &regs_b, BLITTER_CACHE_SRC_PITCH,
-			&src_pitch_b, 320), 0);
+		blitter_cache_src_pitch_write_needed(&cache, &regs_b, 320), 1);
+	expect_write("same value after board switch writes",
+		blitter_cache_src_pitch_write_needed(&cache, &regs_b, 320), 1);
+	if (cache.src_pitch != 320) {
+		printf("FAIL src pitch cache slot actual=%u expected=320\n",
+			(unsigned)cache.src_pitch);
+		failures++;
+	}
 
 	blitter_cache_reset(&cache);
 	expect_write("first user1 writes",

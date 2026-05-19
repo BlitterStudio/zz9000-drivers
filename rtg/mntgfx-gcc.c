@@ -56,13 +56,13 @@ struct DOSBase;
 #define __saveds__
 
 #define DEVICE_VERSION 2
-#define DEVICE_REVISION 5
+#define DEVICE_REVISION 6
 #define REQUIRED_FW_VERSION_MAJOR 2
 #define REQUIRED_FW_VERSION_MINOR 0
 #define DEVICE_PRIORITY 0
 #define DEVICE_ID_STRING "$VER: ZZ9000.card+blitter " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
 #define DEVICE_NAME "ZZ9000.card"
-#define DEVICE_DATE "(17.05.2026)"
+#define DEVICE_DATE "(19.05.2026)"
 
 int __attribute__((no_reorder)) _start()
 {
@@ -433,9 +433,8 @@ static inline void writeBlitterRGB(MNTZZ9KRegs* registers, ULONG color) {
 }
 
 static inline void writeBlitterSrcPitch(MNTZZ9KRegs* registers, UWORD srcpitch) {
-	if (blitter_cache_write16_needed(&blitter_register_cache, registers,
-			BLITTER_CACHE_SRC_PITCH, &blitter_register_cache.src_pitch,
-			srcpitch)) {
+	if (blitter_cache_src_pitch_write_needed(&blitter_register_cache,
+			registers, srcpitch)) {
 		zzwrite16(&registers->blitter_src_pitch, srcpitch);
 	}
 }
@@ -723,7 +722,9 @@ int __attribute__((used)) InitCard(__REGA0(struct BoardInfo* b), __REGA1(char **
 	b->PaletteChipType = PCT_MNT_ZZ9000;
 	b->GraphicsControllerType = GCT_MNT_ZZ9000;
 
-	b->Flags |= BIF_GRANTDIRECTACCESS | BIF_HARDWARESPRITE | BIF_FLICKERFIXER | BIF_VGASCREENSPLIT | BIF_PALETTESWITCH | BIF_BLITTER | BIF_CACHEMODECHANGE | BIF_VIDEOCAPTURE;
+	b->Flags |= BIF_GRANTDIRECTACCESS | BIF_HARDWARESPRITE | BIF_FLICKERFIXER | BIF_VGASCREENSPLIT | BIF_PALETTESWITCH | BIF_BLITTER | BIF_VIDEOCAPTURE;
+	if (b->CardFlags & CARDFLAG_ZORRO_3)
+		b->Flags |= BIF_CACHEMODECHANGE;
 
 	b->MoniSwitch = (UWORD)b->CardData[ZZ_CARD_DATA_MONITOR_SWITCH];
 	b->RGBFormats = ZZ_SUPPORTED_RGB_FORMATS;

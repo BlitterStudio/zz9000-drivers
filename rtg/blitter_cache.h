@@ -58,6 +58,15 @@ static inline int blitter_cache_write16_needed(struct BlitterRegisterCache *cach
 	return 0;
 }
 
+static inline int blitter_cache_src_pitch_write_needed(struct BlitterRegisterCache *cache,
+	const volatile void *registers, uint16_t value)
+{
+	blitter_cache_select(cache, registers);
+	cache->src_pitch = value;
+	cache->valid &= ~BLITTER_CACHE_SRC_PITCH;
+	return 1;
+}
+
 static inline int blitter_cache_write32_needed(struct BlitterRegisterCache *cache,
 	const volatile void *registers, uint32_t bit, uint32_t *slot, uint32_t value)
 {
