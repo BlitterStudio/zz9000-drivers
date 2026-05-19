@@ -188,8 +188,8 @@ Pushing a tag matching `v*` builds all artifacts and publishes a GitHub
 Release zip:
 
 ```bash
-git tag -a v2.1.0 -m "ZZ9000 drivers 2.1.0"
-git push origin v2.1.0
+git tag -a v2.1.1 -m "ZZ9000 drivers 2.1.1"
+git push origin v2.1.1
 ```
 
 The release bundle layout is:
@@ -207,7 +207,7 @@ at the zip root. The release zip's `README.md` is copied from
 [installer/README.md](installer/README.md), which is focused on the
 installer drawer layout and local installer testing.
 
-Tags containing `-`, such as `v2.1.0-rc1`, are marked as pre-releases.
+Tags containing `-`, such as `v2.1.1-rc1`, are marked as pre-releases.
 GitHub release notes are generated automatically.
 
 ## Repository Layout
