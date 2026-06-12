@@ -360,6 +360,105 @@
 
 
 ; --------------------------------------------------------------------
+; SDK runtime (zz9k.library, accelerated mpega.library, picture datatype)
+; --------------------------------------------------------------------
+
+(if (exists "Libs/zz9k.library")
+   (if (askbool (prompt "Install the ZZ9000 SDK runtime?\n\nzz9k.library (firmware services), an ARM-accelerated mpega.library drop-in, and the zz9k-picture.datatype.\n\nRequires the SDK-service ZZ9000 firmware.")
+                (help "zz9k.library is the AmigaOS gateway to the ZZ9000's firmware services (image decode, audio, compression, crypto). mpega.library is a drop-in replacement that decodes MP3 on the ZZ9000's ARM cores. zz9k-picture.datatype accelerates picture decoding; its JPEG/PNG descriptors are staged inactive under SYS:Storage/DataTypes for explicit opt-in."))
+      (
+         (set #newver   (getversion "Libs/zz9k.library"))
+         (set #newmajor (/ #newver 65536))
+         (set #newminor (- #newver (* #newmajor 65536)))
+
+         (if (exists "LIBS:zz9k.library")
+             (
+                (set #oldver   (getversion "LIBS:zz9k.library"))
+                (set #oldmajor (/ #oldver 65536))
+                (set #oldminor (- #oldver (* #oldmajor 65536)))
+
+                (if (askbool (prompt "Replace existing zz9k.library?\n\nInstalled version: " #oldmajor "." #oldminor "\nNew version: " #newmajor "." #newminor "\n\nProceed with overwrite?")
+                             (help "The AmigaOS gateway library for the ZZ9000's firmware services."))
+                    (copyfiles
+                       (prompt "Install zz9k.library into LIBS:")
+                       (help "The AmigaOS gateway library for the ZZ9000's firmware services.")
+                       (source "Libs/zz9k.library")
+                       (dest "LIBS:")))
+             )
+             (copyfiles
+                (prompt "Install zz9k.library into LIBS:")
+                (help "The AmigaOS gateway library for the ZZ9000's firmware services.")
+                (source "Libs/zz9k.library")
+                (dest "LIBS:")))
+
+         (if (askbool (prompt "Install the ARM-accelerated mpega.library into LIBS:?\n\nThis replaces any existing software mpega.library (keep a backup if you want to revert).")
+                      (help "A drop-in MPEGA replacement: MP3 decoding runs on the ZZ9000's ARM cores instead of the 68k. Applications using mpega.library (e.g. AmigaAMP) need no changes."))
+             (copyfiles
+                (prompt "Install mpega.library into LIBS:")
+                (help "ARM-accelerated drop-in MPEGA replacement.")
+                (source "Libs/mpega.library")
+                (dest "LIBS:")))
+
+         (copyfiles
+            (prompt "Install zz9k-picture.datatype into SYS:Classes/DataTypes/")
+            (help "Hardware-accelerated picture datatype class.")
+            (source "Classes/DataTypes/zz9k-picture.datatype")
+            (dest "SYS:Classes/DataTypes")
+            (confirm))
+
+         (copyfiles
+            (prompt "Stage the JPEG/PNG datatype descriptors into SYS:Storage/DataTypes/ (inactive)")
+            (help "The descriptors stay inactive in SYS:Storage/DataTypes until you move them to DEVS:DataTypes yourself - activating them routes JPEG/PNG decoding through the ZZ9000.")
+            (source "Storage/DataTypes")
+            (all)
+            (dest "SYS:Storage/DataTypes")
+            (confirm))
+
+         (copyfiles
+            (prompt "Install the zz9k-info and zz9k-services diagnostics into C:")
+            (help "zz9k-info prints board/firmware details; zz9k-services lists the firmware services and capability flags (zz9k-services --check-release runs the release smoke check).")
+            (source "Tools")
+            (pattern "zz9k-#?")
+            (dest "C:")
+            (confirm))
+      )
+   )
+)
+
+(complete 90)
+
+
+; --------------------------------------------------------------------
+; Accelerated amissl.library (ZZ9000 TLS offload)
+; --------------------------------------------------------------------
+
+(if (exists "Libs/AmiSSL/amissl_v362.library")
+   (if (exists "LIBS:AmiSSL/amissl_v362.library")
+       (if (askbool (prompt "Install the ZZ9000-accelerated amissl.library?\n\nThis replaces LIBS:AmiSSL/amissl_v362.library with a build that offloads TLS cryptography (handshakes and AES-GCM/ChaCha20 records) to the ZZ9000. Without the board or its crypto firmware it behaves exactly like stock AmiSSL.\n\nA backup of the original is recommended.")
+                    (help "A drop-in AmiSSL 5.27 core library with the ZZ9000 crypto-offload provider compiled in: every AmiSSL application (browsers, mail clients) gets hardware-accelerated TLS with no changes. The combined binary is GPLv3; sources are public in the BlitterStudio zz9000-sdk repository."))
+           (
+              (copyfiles
+                 (prompt "Back up the original amissl_v362.library (copied to amissl_v362.library.orig)")
+                 (help "Keeps the stock AmiSSL core library next to the accelerated one so you can revert by deleting the new file and renaming the backup.")
+                 (source "LIBS:AmiSSL/amissl_v362.library")
+                 (newname "amissl_v362.library.orig")
+                 (dest "LIBS:AmiSSL")
+                 (optional "askuser"))
+              (copyfiles
+                 (prompt "Install the accelerated amissl_v362.library into LIBS:AmiSSL/")
+                 (help "The ZZ9000-accelerated AmiSSL core library.")
+                 (source "Libs/AmiSSL/amissl_v362.library")
+                 (dest "LIBS:AmiSSL"))
+           )
+       )
+       (message "The accelerated amissl.library was not installed:\n\nno existing AmiSSL 5.27 installation was found (LIBS:AmiSSL/amissl_v362.library).\n\nInstall AmiSSL 5.27 from Aminet first, then re-run this installer.")
+   )
+)
+
+(complete 95)
+
+
+; --------------------------------------------------------------------
 ; CLI tools and ZZTop
 ; --------------------------------------------------------------------
 
