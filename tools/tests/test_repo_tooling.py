@@ -83,6 +83,10 @@ class RepoToolingTests(unittest.TestCase):
             "ZZNetStats",
             "ZZDiag",
             "axmp3",
+            "zz9k.library",
+            "mpega.library",
+            "zz9k-picture.datatype",
+            "amissl_v362.library",
         ):
             self.assertIn(artifact, script)
 
@@ -98,6 +102,8 @@ class RepoToolingTests(unittest.TestCase):
             "usb-poseidon/build.sh",
             "sd-boot/build.sh",
             "ZZDiag/build.sh",
+            "sdk/build.sh",
+            "amissl/build.sh",
         )
         for relpath in scripts:
             subprocess.run(["sh", "-n", str(ROOT / relpath)], check=True)

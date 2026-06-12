@@ -25,6 +25,14 @@ net/ZZ9000Net.device.68000
 net/ZZNetStats/ZZNetStats
 installer/ZZ9000Installer/Tools/ZZDiag
 installer/ZZ9000Installer/Tools/ZZNetStats
+*.datatype
+sdk/work/
+sdk/out/
+amissl/work/
+amissl/out/
+installer/ZZ9000Installer/Tools/zz9k-info
+installer/ZZ9000Installer/Tools/zz9k-services
+installer/ZZ9000Installer/Storage/
 zz9000-drivers-*/
 attic
 

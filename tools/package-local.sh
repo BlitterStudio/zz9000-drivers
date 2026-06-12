@@ -28,6 +28,25 @@ install -Dm755 ax-direct/axmp3                  "$inst/Tools/axmp3"
 install -Dm644 ahi/README.md                    "$inst/Docs/ahi-README.md"
 install -Dm644 usb-poseidon/README.md           "$inst/Docs/usb-poseidon-README.md"
 
+# SDK runtime payloads (built by sdk/build.sh from the pinned zz9000-sdk ref).
+install -Dm644 sdk/out/Libs/zz9k.library        "$inst/Libs/zz9k.library"
+install -Dm644 sdk/out/Libs/mpega.library       "$inst/Libs/mpega.library"
+install -Dm644 sdk/out/Classes/DataTypes/zz9k-picture.datatype \
+                                                "$inst/Classes/DataTypes/zz9k-picture.datatype"
+mkdir -p "$inst/Storage/DataTypes"
+cp -R sdk/out/Storage/DataTypes/.               "$inst/Storage/DataTypes/"
+install -Dm755 sdk/out/C/zz9k-info              "$inst/Tools/zz9k-info"
+install -Dm755 sdk/out/C/zz9k-services          "$inst/Tools/zz9k-services"
+install -Dm644 sdk/README.md                    "$inst/Docs/sdk-README.md"
+
+# Accelerated amissl.library (optional: built by amissl/build.sh, slow).
+if [ -f amissl/out/amissl_v362.library ]; then
+    install -Dm644 amissl/out/amissl_v362.library "$inst/Libs/AmiSSL/amissl_v362.library"
+    install -Dm644 amissl/README.md               "$inst/Docs/amissl-README.md"
+else
+    echo "NOTE: amissl/out/amissl_v362.library not built; packaging without it" >&2
+fi
+
 mkdir -p "$staging"
 cp installer/README.md "$staging/README.md"
 cp installer/ZZ9000Installer.info "$staging/ZZ9000Installer.info"

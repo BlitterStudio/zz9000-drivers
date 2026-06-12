@@ -74,6 +74,11 @@ normal AmigaOS file.
 | Scanlines | `ZZScanlines` | `C:` | CLI for scanline V1/V2 modes. |
 | Firmware update | `ZZFwUpdate` | `C:` | Pushes `BOOT.bin` or another root-level file to the ZZ9000 FAT32 microSD card over Zorro. |
 | AX diagnostics | `axmp3` | `C:` | Direct-register MP3 playback test tool for ZZ9000AX. |
+| SDK services | `zz9k.library` | `Libs:` | AmigaOS gateway to the SDK v2 firmware services (image decode, audio, compression, crypto). Built from the pinned [zz9000-sdk](https://github.com/BlitterStudio/zz9000-sdk) ref by `sdk/build.sh`. |
+| MP3 decode | `mpega.library` | `Libs:` | ARM-accelerated drop-in MPEGA replacement (from zz9000-sdk). |
+| Picture datatype | `zz9k-picture.datatype` | `SYS:Classes/DataTypes/` | Hardware-accelerated picture datatype; JPEG/PNG descriptors staged inactive in `SYS:Storage/DataTypes` (from zz9000-sdk). |
+| SDK diagnostics | `zz9k-info`, `zz9k-services` | `C:` | Board/service introspection and release smoke check (from zz9000-sdk). |
+| TLS offload | `amissl_v362.library` | `Libs:AmiSSL/` | AmiSSL 5.27 core with the ZZ9000 crypto-offload provider compiled in; accelerates TLS for all AmiSSL applications. Requires an existing AmiSSL 5.27 install. |
 | Installer | `ZZ9000Installer` | Release zip root | Commodore Installer drawer used for end-user deployment. |
 
 ## Command-Line Tools
@@ -227,6 +232,8 @@ GitHub release notes are generated automatically.
 | `ZZScanlines/` | Scanline control CLI. |
 | `ZZFwUpdate/` | Firmware/file push CLI using the FWUP protocol. |
 | `ax-direct/` | Direct-register AX bring-up and MP3 test tools. |
+| `sdk/` | Pulls the pinned zz9000-sdk ref and collects its end-user payloads (libraries, datatype, diagnostics). |
+| `amissl/` | Builds the ZZ9000-accelerated `amissl.library` (adtools toolchain image + zz9000-sdk integration). |
 
 ## Credits
 

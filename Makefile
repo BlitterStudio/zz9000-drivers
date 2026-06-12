@@ -3,7 +3,7 @@ AMIGA_DOCKER = ./tools/amiga-docker.sh
 
 .PHONY: all build-all package-local check-release quality rtg-tests \
 	rtg zztop zzscanlines zzfwupdate usb-poseidon sd-boot net ZZNetStats \
-	mhi ahi axmp3 ZZDiag
+	mhi ahi axmp3 ZZDiag sdk amissl
 
 all: build-all
 
@@ -64,3 +64,10 @@ axmp3:
 
 ZZDiag:
 	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) ZZDiag ./build.sh
+
+# Host-side: these drive their own container invocations.
+sdk:
+	sdk/build.sh
+
+amissl:
+	amissl/build.sh

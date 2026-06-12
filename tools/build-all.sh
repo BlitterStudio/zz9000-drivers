@@ -23,5 +23,14 @@ cd "$repo_root"
 "$amiga_docker" ax-direct ./build-gcc.sh
 "$amiga_docker" ZZDiag ./build.sh
 
+# Runs its own Docker invocation (the SDK's build scripts wrap the same
+# image) — called directly, not through amiga-docker.sh.
+sdk/build.sh
+
+# amissl/build.sh is intentionally NOT part of build-all: it is a full
+# AmiSSL + OpenSSL cross-build (slow, separate adtools toolchain image).
+# Run it explicitly when cutting a release; package-local.sh stages its
+# output when present.
+
 make -C rtg/tests test
 tools/check-release.sh --quick

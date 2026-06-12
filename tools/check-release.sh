@@ -29,6 +29,9 @@ check_file installer/ZZ9000Installer/Devs/Picasso96Settings
 check_file installer/ZZ9000Installer/Devs/NetInterfaces/ZZ9000Net
 check_file ahi/README.md
 check_file usb-poseidon/README.md
+check_file sdk/README.md
+check_file sdk/SDK_REF
+check_file amissl/README.md
 
 if [ "$quick" -eq 0 ]; then
     check_file rtg/ZZ9000.card
@@ -44,6 +47,19 @@ if [ "$quick" -eq 0 ]; then
     check_exec net/ZZNetStats/ZZNetStats
     check_exec ZZDiag/ZZDiag
     check_exec ax-direct/axmp3
+
+    # SDK runtime payloads (sdk/build.sh).
+    check_file sdk/out/Libs/zz9k.library
+    check_file sdk/out/Libs/mpega.library
+    check_file sdk/out/Classes/DataTypes/zz9k-picture.datatype
+    check_file sdk/out/C/zz9k-info
+    check_file sdk/out/C/zz9k-services
+
+    # amissl_v362.library (amissl/build.sh) is optional for local packaging;
+    # release CI builds it. Warn without failing.
+    if [ ! -f amissl/out/amissl_v362.library ]; then
+        echo "NOTE: amissl/out/amissl_v362.library not built (amissl/build.sh)" >&2
+    fi
 
     if [ -f sd-boot/zzsd.device ]; then
         size=$(wc -c < sd-boot/zzsd.device | tr -d ' ')

@@ -53,6 +53,8 @@ Individual component targets: `make rtg`, `make zztop`, `make net`, `make ahi`, 
 | `ZZFwUpdate/` | `ZZFwUpdate` (firmware push CLI) | Single gcc invocation |
 | `ZZDiag/` | `ZZDiag` (board diagnostics CLI) | `./build.sh` |
 | `ax-direct/` | `axmp3`, `axtest` (AX direct-register tools) | `./build-gcc.sh` |
+| `sdk/` | `zz9k.library`, `mpega.library`, `zz9k-picture.datatype`, `zz9k-info`, `zz9k-services` (pulled from the pinned zz9000-sdk ref) | `sdk/build.sh` (host-side; drives the SDK's own Docker build) |
+| `amissl/` | `amissl_v362.library` (ZZ9000-accelerated AmiSSL core) | `amissl/build.sh` (host-side; adtools image, slow — not part of build-all) |
 | `installer/` | Commodore Installer drawer, icons, templates | Populated by CI/release scripts |
 
 ## Testing
@@ -65,10 +67,16 @@ CI runs `host-checks` (rtg-tests + Python tests + quality + quick release check)
 
 ## Release Flow
 
-1. Build all artifacts: `make build-all`
+1. Build all artifacts: `make build-all` (plus `amissl/build.sh` for the
+   accelerated AmiSSL library — slow, so not part of build-all)
 2. Verify: `tools/check-release.sh` (full, not --quick)
 3. Tag and push: `git tag -a v2.x.y -m "..." && git push origin v2.x.y`
 4. CI builds everything in parallel, assembles the installer drawer, creates a GitHub Release zip
+
+The `sdk/` and `amissl/` components consume the zz9000-sdk repository at the
+commit pinned in `sdk/SDK_REF` ("pull, not move" — sources, tests, and smoke
+procedures stay in the SDK repo). Their CI jobs need that repository to be
+public/cloneable.
 
 Local packaging alternative: `make package-local` (runs check-release first, then zips).
 
