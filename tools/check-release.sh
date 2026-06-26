@@ -56,9 +56,11 @@ if [ "$quick" -eq 0 ]; then
     check_file sdk/out/C/zz9k-services
 
     # amissl_v362.library (amissl/build.sh) is optional for local packaging;
-    # release CI builds it. Warn without failing.
-    if [ ! -f amissl/out/amissl_v362.library ]; then
-        echo "NOTE: amissl/out/amissl_v362.library not built (amissl/build.sh)" >&2
+    # release CI builds both CPU variants (Libs/AmiSSL/<cpu>/). Warn without
+    # failing if neither is present.
+    if [ ! -f amissl/out/68020-40/amissl_v362.library ] && \
+       [ ! -f amissl/out/68060/amissl_v362.library ]; then
+        echo "NOTE: amissl/out/<cpu>/amissl_v362.library not built (amissl/build.sh)" >&2
     fi
 
     if [ -f sd-boot/zzsd.device ]; then

@@ -2,18 +2,24 @@
 
 A drop-in `amissl.library` with the ZZ9000 crypto-offload OpenSSL provider
 compiled inside it, so every AmiSSL application (AWeb3, IBrowse, mail clients)
-gets hardware-accelerated TLS — X25519, ECDSA-P256 and RSA verify, AES-GCM and
-ChaCha20-Poly1305 — with no application changes. Operations fall back to
-AmiSSL's software crypto when the board, the firmware crypto service, or a
-specific algorithm is absent, so the library is safe on machines without a
-ZZ9000.
+gets hardware-accelerated TLS — X25519 key exchange and AES-GCM /
+ChaCha20-Poly1305 bulk records — with no application changes. Certificate
+signature verification (ECDSA/RSA) stays in AmiSSL's software. When the board,
+the firmware crypto service, or a specific algorithm is absent the provider
+advertises nothing and every operation runs in AmiSSL's software exactly as
+stock, so the library is safe on machines without a ZZ9000.
 
 The integration (provider sources, AmiSSL patch, pinned AmiSSL ref) lives in
 the zz9000-sdk repo under `integration/amissl/`; this component only builds
 and stages the result. `build.sh` creates the adtools toolchain image
 (`Dockerfile` — AmiSSL cannot be built with the sacredbanana image) and runs
-the SDK's `integration/amissl/build.sh` inside it. The library lands in
-`amissl/out/amissl_v362.library` and installs to `LIBS:AmiSSL/`.
+the SDK's `integration/amissl/build.sh` inside it. It produces both CPU builds
+AmiSSL itself ships — `amissl/out/68020-40/amissl_v362.library` (68020/030/040,
+and the Apollo 68080) and `amissl/out/68060/amissl_v362.library` — and the
+installer copies the one matching the host CPU to `LIBS:AmiSSL/`, mirroring
+AmiSSL's own installer. The match matters: an os3-68020 library on a 68060 traps
+and emulates 64-bit multiplies in software, which makes TLS crypto markedly
+slower than the native os3-68060 build.
 
 Notes:
 

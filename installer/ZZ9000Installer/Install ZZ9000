@@ -432,11 +432,29 @@
 ; Accelerated amissl.library (ZZ9000 TLS offload)
 ; --------------------------------------------------------------------
 
-(if (exists "Libs/AmiSSL/amissl_v362.library")
+(if (OR (exists "Libs/AmiSSL/68020-40/amissl_v362.library")
+        (exists "Libs/AmiSSL/68060/amissl_v362.library"))
    (if (exists "LIBS:AmiSSL/amissl_v362.library")
        (if (askbool (prompt "Install the ZZ9000-accelerated amissl.library?\n\nThis replaces LIBS:AmiSSL/amissl_v362.library with a build that offloads TLS cryptography (handshakes and AES-GCM/ChaCha20 records) to the ZZ9000. Without the board or its crypto firmware it behaves exactly like stock AmiSSL.\n\nA backup of the original is recommended.")
                     (help "A drop-in AmiSSL 5.27 core library with the ZZ9000 crypto-offload provider compiled in: every AmiSSL application (browsers, mail clients) gets hardware-accelerated TLS with no changes. The combined binary is GPLv3; sources are public in the BlitterStudio zz9000-sdk repository."))
            (
+              ; Pick the CPU build exactly as AmiSSL's own installer does: default
+              ; to the 68060 build when the OS reports a 68060, or 68060.library /
+              ; amithlon.resource is resident; otherwise the 68020-40 build
+              ; (68020/030/040, and the Apollo 68080). The two builds mirror the
+              ; ones AmiSSL itself ships.
+              (set #zz-amissl-cpu
+                 (if (OR (= (database "cpu") "68060")
+                     (OR (<> (getversion "68060.library" (resident)) 0)
+                         (<> (getversion "amithlon.resource" (resident)) 0)))
+                 1 0))
+              (set #zz-amissl-cpu
+                 (askchoice
+                    (prompt "Which CPU should the accelerated AmiSSL build target?")
+                    (help "Pick the AmiSSL core build matching this machine's CPU, exactly as AmiSSL's own installer does. The 68020-40 build is for 68020/030/040 (and the Apollo 68080); the 68060 build is for the 68060 (and Amithlon). Installing the 68020-40 build on a 68060 forces 64-bit multiplies to be trap-emulated in software, making TLS crypto markedly slower.")
+                    (choices "68020/030/040/080 or MorphOS" "68060 or Amithlon")
+                    (default #zz-amissl-cpu)))
+              (set #zz-amissl-dir (if (= 1 #zz-amissl-cpu) "68060" "68020-40"))
               (copyfiles
                  (prompt "Back up the original amissl_v362.library (copied to amissl_v362.library.orig)")
                  (help "Keeps the stock AmiSSL core library next to the accelerated one so you can revert by deleting the new file and renaming the backup.")
@@ -446,8 +464,8 @@
                  (optional "askuser"))
               (copyfiles
                  (prompt "Install the accelerated amissl_v362.library into LIBS:AmiSSL/")
-                 (help "The ZZ9000-accelerated AmiSSL core library.")
-                 (source "Libs/AmiSSL/amissl_v362.library")
+                 (help "The ZZ9000-accelerated AmiSSL core library for the selected CPU.")
+                 (source (tackon (tackon "Libs/AmiSSL" #zz-amissl-dir) "amissl_v362.library"))
                  (dest "LIBS:AmiSSL"))
            )
        )
