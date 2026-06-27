@@ -58,6 +58,15 @@ The installer backs up the previous settings file as
 `Devs:Picasso96Settings.pre-ZZ9000-2.4` before installing the migrated
 settings file.
 
+When installing the ZZ9000-accelerated `amissl.library`, the installer
+first backs up the stock `LIBS:AmiSSL/amissl_v362.library` to
+`amissl_v362.library.bak` — only if no `.bak` already exists, so
+re-running the installer always preserves the genuine original — then
+installs the build matching the host CPU (`Libs/AmiSSL/68020-40/` for
+68020/030/040 and the Apollo 68080, `Libs/AmiSSL/68060/` for the 68060),
+detected exactly as AmiSSL's own installer does. To revert, delete the
+accelerated `amissl_v362.library` and rename the `.bak` back.
+
 ## Trying the installer locally
 
 If you want to test the installer with your own local builds (rather

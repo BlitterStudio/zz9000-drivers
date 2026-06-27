@@ -435,7 +435,7 @@
 (if (OR (exists "Libs/AmiSSL/68020-40/amissl_v362.library")
         (exists "Libs/AmiSSL/68060/amissl_v362.library"))
    (if (exists "LIBS:AmiSSL/amissl_v362.library")
-       (if (askbool (prompt "Install the ZZ9000-accelerated amissl.library?\n\nThis replaces LIBS:AmiSSL/amissl_v362.library with a build that offloads TLS cryptography (handshakes and AES-GCM/ChaCha20 records) to the ZZ9000. Without the board or its crypto firmware it behaves exactly like stock AmiSSL.\n\nA backup of the original is recommended.")
+       (if (askbool (prompt "Install the ZZ9000-accelerated amissl.library?\n\nThis replaces LIBS:AmiSSL/amissl_v362.library with a build that offloads TLS cryptography (handshakes and AES-GCM/ChaCha20 records) to the ZZ9000. Without the board or its crypto firmware it behaves exactly like stock AmiSSL.\n\nThe original is backed up to amissl_v362.library.bak before it is replaced.")
                     (help "A drop-in AmiSSL 5.27 core library with the ZZ9000 crypto-offload provider compiled in: every AmiSSL application (browsers, mail clients) gets hardware-accelerated TLS with no changes. The combined binary is GPLv3; sources are public in the BlitterStudio zz9000-sdk repository."))
            (
               ; Pick the CPU build exactly as AmiSSL's own installer does: default
@@ -455,13 +455,18 @@
                     (choices "68020/030/040/080 or MorphOS" "68060 or Amithlon")
                     (default #zz-amissl-cpu)))
               (set #zz-amissl-dir (if (= 1 #zz-amissl-cpu) "68060" "68020-40"))
-              (copyfiles
-                 (prompt "Back up the original amissl_v362.library (copied to amissl_v362.library.orig)")
-                 (help "Keeps the stock AmiSSL core library next to the accelerated one so you can revert by deleting the new file and renaming the backup.")
-                 (source "LIBS:AmiSSL/amissl_v362.library")
-                 (newname "amissl_v362.library.orig")
-                 (dest "LIBS:AmiSSL")
-                 (optional "askuser"))
+              ; Always preserve the stock AmiSSL core library before overwriting
+              ; it, but only when no backup exists yet — so re-running the
+              ; installer never overwrites the genuine original with our
+              ; accelerated copy from a previous run (mirrors the
+              ; Picasso96Settings.bak handling above).
+              (if (not (exists "LIBS:AmiSSL/amissl_v362.library.bak"))
+                 (copyfiles
+                    (prompt "Back up the original amissl_v362.library to amissl_v362.library.bak")
+                    (help "Saves LIBS:AmiSSL/amissl_v362.library as amissl_v362.library.bak before we overwrite it, so you can revert: delete the accelerated amissl_v362.library and rename the .bak back. Made only if no .bak exists yet, so re-running this installer never overwrites your original stock library.")
+                    (source "LIBS:AmiSSL/amissl_v362.library")
+                    (newname "amissl_v362.library.bak")
+                    (dest "LIBS:AmiSSL")))
               (copyfiles
                  (prompt "Install the accelerated amissl_v362.library into LIBS:AmiSSL/")
                  (help "The ZZ9000-accelerated AmiSSL core library for the selected CPU.")

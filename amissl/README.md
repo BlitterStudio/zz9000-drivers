@@ -25,7 +25,12 @@ Notes:
 
 * Requires the SDK-service ZZ9000 firmware and an existing **AmiSSL 5.27**
   installation (the versioned library name must match what `amisslmaster.library`
-  loads). Keep a backup of the original `LIBS:AmiSSL/amissl_v362.library`.
+  loads).
+* The installer automatically backs up the stock library to
+  `LIBS:AmiSSL/amissl_v362.library.bak` before replacing it — but only if no
+  `.bak` already exists, so re-running never overwrites the genuine original.
+  To revert: delete the accelerated `amissl_v362.library` and rename the `.bak`
+  back.
 * The provider is GPL-3.0-or-later and AmiSSL/OpenSSL are Apache-2.0, so the
   combined binary is a GPLv3 work; redistributions carry GPLv3 obligations
   (sources are public in the two repos).
