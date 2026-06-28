@@ -2,11 +2,16 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    branches: ['**']
     tags: ['v*']
   pull_request:
-    branches: [master]
   workflow_dispatch:
+
+# Cancel superseded runs on the same branch/PR. Never cancel tag builds —
+# those feed the release job.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
   contents: write  # needed by the release job on tag pushes
@@ -15,6 +20,22 @@ env:
   AMIGA_IMAGE: sacredbanana/amiga-compiler:m68k-amigaos
 
 jobs:
+  lint:
+    name: lint (actionlint + shellcheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: actionlint (workflow files)
+        run: docker run --rm -v "$PWD":/repo:ro -w /repo rhysd/actionlint:latest -color
+      - name: shellcheck (shell scripts, errors only)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          files=$(git ls-files '*.sh')
+          if [ -n "$files" ]; then
+            echo "$files" | xargs shellcheck --severity=error
+          fi
+
   host-checks:
     name: Host checks
     runs-on: ubuntu-latest
