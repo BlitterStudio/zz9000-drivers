@@ -260,8 +260,11 @@ jobs:
         run: amissl/build.sh
       - uses: actions/upload-artifact@v7
         with:
-          name: amissl_v362.library
-          path: amissl/out/amissl_v362.library
+          # amissl/build.sh writes per-CPU outputs (out/68020-40/ and
+          # out/68060/), mirroring AmiSSL's own release layout. Upload the
+          # whole dir so the release job can install the CPU-matched build.
+          name: amissl-libs
+          path: amissl/out/
           if-no-files-found: error
 
   release:
@@ -313,8 +316,13 @@ jobs:
           install -Dm755 artifacts/sdk-payloads/C/zz9k-info            "$INST/Tools/zz9k-info"
           install -Dm755 artifacts/sdk-payloads/C/zz9k-services        "$INST/Tools/zz9k-services"
           install -Dm644 sdk/README.md                                 "$INST/Docs/sdk-README.md"
-          install -Dm644 artifacts/amissl_v362.library/amissl_v362.library \
-                                                                       "$INST/Libs/AmiSSL/amissl_v362.library"
+          # Accelerated amissl.library, per CPU (Libs/AmiSSL/<cpu>/) — laid out
+          # like AmiSSL's own release so the installer installs the CPU-matched
+          # build. Mirrors tools/package-local.sh.
+          for cpu in 68020-40 68060; do
+            install -Dm644 "artifacts/amissl-libs/$cpu/amissl_v362.library" \
+              "$INST/Libs/AmiSSL/$cpu/amissl_v362.library"
+          done
           install -Dm644 amissl/README.md                              "$INST/Docs/amissl-README.md"
 
           cp installer/README.md "$STAGING/README.md"
