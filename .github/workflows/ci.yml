@@ -313,8 +313,10 @@ jobs:
                                                                        "$INST/Classes/DataTypes/zz9k-picture.datatype"
           mkdir -p "$INST/Storage/DataTypes"
           cp -R artifacts/sdk-payloads/Storage/DataTypes/.             "$INST/Storage/DataTypes/"
-          install -Dm755 artifacts/sdk-payloads/C/zz9k-info            "$INST/Tools/zz9k-info"
-          install -Dm755 artifacts/sdk-payloads/C/zz9k-services        "$INST/Tools/zz9k-services"
+          # End-user CLI tools (diagnostics + feature tools) from sdk/build.sh.
+          for tool in zz9k-info zz9k-services zz9k-view zz9k-jpeg zz9k-png zz9k-mp3 zz9k-cryptobench zz9k-archive; do
+            install -Dm755 "artifacts/sdk-payloads/C/$tool" "$INST/Tools/$tool"
+          done
           install -Dm644 sdk/README.md                                 "$INST/Docs/sdk-README.md"
           # Accelerated amissl.library, per CPU (Libs/AmiSSL/<cpu>/) — laid out
           # like AmiSSL's own release so the installer installs the CPU-matched

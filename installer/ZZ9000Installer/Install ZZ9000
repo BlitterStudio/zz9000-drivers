@@ -415,8 +415,8 @@
             (confirm))
 
          (copyfiles
-            (prompt "Install the zz9k-info and zz9k-services diagnostics into C:")
-            (help "zz9k-info prints board/firmware details; zz9k-services lists the firmware services and capability flags (zz9k-services --check-release runs the release smoke check).")
+            (prompt "Install the ZZ9000 SDK command-line tools into C:")
+            (help "Diagnostics: zz9k-info (board/firmware details) and zz9k-services (firmware services + capability flags; zz9k-services --check-release runs the release smoke check). Feature tools: zz9k-view / zz9k-jpeg / zz9k-png (ZZ9000-accelerated image viewers), zz9k-mp3 (ARM MP3 player), zz9k-cryptobench (crypto-offload benchmark) and zz9k-archive (accelerated archive extraction). All require zz9k.library and the SDK-service firmware.")
             (source "Tools")
             (pattern "zz9k-#?")
             (dest "C:")

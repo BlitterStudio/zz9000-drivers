@@ -54,6 +54,12 @@ if [ "$quick" -eq 0 ]; then
     check_file sdk/out/Classes/DataTypes/zz9k-picture.datatype
     check_file sdk/out/C/zz9k-info
     check_file sdk/out/C/zz9k-services
+    check_file sdk/out/C/zz9k-view
+    check_file sdk/out/C/zz9k-jpeg
+    check_file sdk/out/C/zz9k-png
+    check_file sdk/out/C/zz9k-mp3
+    check_file sdk/out/C/zz9k-cryptobench
+    check_file sdk/out/C/zz9k-archive
 
     # amissl_v362.library (amissl/build.sh) is optional for local packaging;
     # release CI builds both CPU variants (Libs/AmiSSL/<cpu>/). Warn without

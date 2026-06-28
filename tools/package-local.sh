@@ -35,8 +35,10 @@ install -Dm644 sdk/out/Classes/DataTypes/zz9k-picture.datatype \
                                                 "$inst/Classes/DataTypes/zz9k-picture.datatype"
 mkdir -p "$inst/Storage/DataTypes"
 cp -R sdk/out/Storage/DataTypes/.               "$inst/Storage/DataTypes/"
-install -Dm755 sdk/out/C/zz9k-info              "$inst/Tools/zz9k-info"
-install -Dm755 sdk/out/C/zz9k-services          "$inst/Tools/zz9k-services"
+# End-user CLI tools collected by sdk/build.sh (diagnostics + feature tools).
+for tool in zz9k-info zz9k-services zz9k-view zz9k-jpeg zz9k-png zz9k-mp3 zz9k-cryptobench zz9k-archive; do
+    install -Dm755 "sdk/out/C/$tool" "$inst/Tools/$tool"
+done
 install -Dm644 sdk/README.md                    "$inst/Docs/sdk-README.md"
 
 # Accelerated amissl.library, per CPU (optional: built by amissl/build.sh,

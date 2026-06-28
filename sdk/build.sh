@@ -55,10 +55,13 @@ cp "$pkg/Libs/zz9k.library"                       "$out/Libs/"
 cp "$pkg/Libs/mpega.library"                      "$out/Libs/"
 cp "$pkg/Classes/DataTypes/zz9k-picture.datatype" "$out/Classes/DataTypes/"
 cp -R "$pkg/Storage/DataTypes/."                  "$out/Storage/DataTypes/"
-# End-user diagnostics; the rest of the SDK's C/ tools are developer-oriented
-# and ship with the SDK package instead.
-cp "$pkg/C/zz9k-info"     "$out/C/"
-cp "$pkg/C/zz9k-services" "$out/C/"
+# End-user CLI tools: runtime diagnostics plus the tools that exercise the
+# ZZ9000's accelerated features (image viewers, MP3, crypto bench, archive).
+# The remaining SDK C/ tools are developer-oriented and ship with the SDK
+# package instead.
+for tool in zz9k-info zz9k-services zz9k-view zz9k-jpeg zz9k-png zz9k-mp3 zz9k-cryptobench zz9k-archive; do
+    cp "$pkg/C/$tool" "$out/C/"
+done
 
 echo ">> SDK payloads collected:"
 find "$out" -type f | sort
