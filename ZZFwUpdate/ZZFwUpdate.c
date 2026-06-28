@@ -4,26 +4,26 @@
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * Talks to firmware builds that expose the REG_ZZ_FWUP_* protocol:
- *   1. stage NUL-terminated filename in shared buffer at board+0xA000
- *   2. CMD = OPEN, poll STATUS
- *   3. per chunk: stage bytes, LEN = chunk_bytes, CMD = WRITE, poll
- *   4. CMD = CLOSE (success) or CMD = ABORT (delete the partial)
+ * Thin CLI over the shared FWUP protocol client (common/fwup_client.c +
+ * common/fwup_amiga.c): this file owns argument parsing, input
+ * validation messages, progress display and the RESTORE confirmation;
+ * the register protocol and the file push live in the shared client.
  *
  * Typical use:
  *   ZZFwUpdate ram:BOOT.bin                  -> writes 0:/BOOT.bin
  *   ZZFwUpdate ram:BOOT.bin BOOT.bin         -> same, explicit dest name
  *   ZZFwUpdate sys:Storage/zz9000-fw.bin BOOT.bin
+ *   ZZFwUpdate RESTORE [name] [-y]           -> promote saved backup
  *
  * Filename rules on the SD side: flat root, [A-Za-z0-9._-], max 64
  * chars. The firmware will reject anything else with FWUP_ERR_BAD_NAME.
  *
- * Build: m68k-amigaos-gcc -O2 -noixemul -I../include
- *        -o ZZFwUpdate ZZFwUpdate.c -lamiga
+ * Build: m68k-amigaos-gcc -O2 -noixemul -I../include -I../common
+ *        -o ZZFwUpdate ZZFwUpdate.c ../common/fwup_amiga.c \
+ *        ../common/fwup_client.c -lamiga
  */
 
 #include <exec/types.h>
-#include <exec/memory.h>
 #include <libraries/expansion.h>
 #include <libraries/expansionbase.h>
 #include <dos/dos.h>
@@ -31,10 +31,11 @@
 #include <proto/expansion.h>
 #include <proto/dos.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "zz9000_hw.h"
+#include "fwup_client.h"
+#include "fwup_amiga.h"
 
 #define ZZFWUPDATE_VERSION "2.2"
 #define ZZFWUPDATE_DATE    "28.06.2026"
@@ -42,52 +43,7 @@
 static const char version[] __attribute__((used)) =
     "$VER: ZZFwUpdate " ZZFWUPDATE_VERSION " (" ZZFWUPDATE_DATE ")\r\n";
 
-#define FWUP_CMD_OPEN      1
-#define FWUP_CMD_WRITE     2
-#define FWUP_CMD_CLOSE     3
-#define FWUP_CMD_ABORT     4
-#define FWUP_CMD_RESTORE   5
-
-#define FWUP_STATUS_BUSY   0xFFFF
-#define FWUP_OK            0x0000
-#define FWUP_ERR_STATE     0x0007
-#define FWUP_ERR_LEN       0x0008
-#define FWUP_ERR_UNKNOWN   0x0009
-#define FWUP_ERR_NO_BACKUP 0x000A
-#define FWUP_ERR_RESTORE   0x000B
-
-/* Stays well under the firmware's FWUP_MAX_CHUNK (24576) and matches
- * the chunk size the SD-boot path uses, so we share the same buffer
- * residency story. */
-#define FWUP_CHUNK_BYTES   16384
-
-/* Roughly matches SD-boot's poll budget — each FatFs write can stall
- * for tens of ms on a slow SD card, so a small counter wouldn't
- * survive a real card under load. */
-#define FWUP_POLL_LIMIT    2000000
-#define FWUP_SPINNER_INTERVAL 32768UL
 #define FWUP_TICKS_PER_SECOND 50UL
-
-struct fwup_progress;
-static void update_busy_progress(struct fwup_progress *progress);
-
-static const char *fwup_strerror(UWORD code) {
-    switch (code) {
-    case 0x00: return "OK";
-    case 0x02: return "no SD card / FAT not mounted on firmware";
-    case 0x03: return "bad filename (flat-root, [A-Za-z0-9._-], <=64 chars)";
-    case 0x04: return "firmware f_open failed";
-    case 0x05: return "firmware f_write failed";
-    case 0x06: return "firmware f_close/f_sync failed";
-    case FWUP_ERR_STATE: return "protocol state error (WRITE/CLOSE without OPEN?)";
-    case FWUP_ERR_LEN: return "chunk length out of range";
-    case 0x09: return "unknown FWUP command";
-    case FWUP_ERR_NO_BACKUP: return "no backup file found to restore";
-    case FWUP_ERR_RESTORE: return "firmware restore (rename) failed";
-    case FWUP_STATUS_BUSY: return "timed out waiting for firmware";
-    default:   return "unknown error";
-    }
-}
 
 static int valid_dest_char(char c) {
     return (c >= 'A' && c <= 'Z') ||
@@ -96,12 +52,14 @@ static int valid_dest_char(char c) {
            c == '.' || c == '_' || c == '-';
 }
 
+/* CLI pre-check with friendly, position-specific messages. The shared
+ * client validates again (fwup_name_valid) as a safety net. */
 static int validate_dest_name(const char *name) {
     size_t len = strlen(name);
     size_t i;
 
-    if (len == 0 || len > 64) {
-        printf("ERROR: destination name must be 1..64 chars\n");
+    if (len == 0 || len > FWUP_NAME_MAX) {
+        printf("ERROR: destination name must be 1..%d chars\n", FWUP_NAME_MAX);
         return 0;
     }
 
@@ -129,70 +87,10 @@ static const char *basename_amigados(const char *p) {
     return last;
 }
 
-static UWORD poll_status(volatile UWORD *status_reg,
-                         struct fwup_progress *progress) {
-    /* The firmware sets STATUS = 0xFFFF when it accepts a CMD and
-     * clears it to the result once the FatFs call returns. Status
-     * register sits in the cache-inhibit Zorro register window, so no
-     * cache management is needed on the m68k side. */
-    ULONG budget = FWUP_POLL_LIMIT;
-    UWORD st;
-    do {
-        st = *status_reg;
-        if (st != FWUP_STATUS_BUSY) return st;
-        if (progress && ((budget & (FWUP_SPINNER_INTERVAL - 1)) == 0))
-            update_busy_progress(progress);
-    } while (--budget);
-    return FWUP_STATUS_BUSY;
-}
-
-static int probe_fwup_protocol(volatile UWORD *cmd_reg,
-                               volatile UWORD *len_reg,
-                               volatile UWORD *status_reg) {
-    UWORD st;
-
-    /* Old firmware leaves these formerly-unused registers reading as
-     * OK, so use a non-destructive command that only a FWUP-capable
-     * firmware answers with a protocol error. ABORT first also clears
-     * any stale interrupted transfer. */
-    *cmd_reg = FWUP_CMD_ABORT;
-    st = poll_status(status_reg, NULL);
-    if (st == FWUP_STATUS_BUSY) return 0;
-
-    *len_reg = 0;
-    *cmd_reg = FWUP_CMD_WRITE;
-    st = poll_status(status_reg, NULL);
-    return (st == FWUP_ERR_STATE || st == FWUP_ERR_LEN);
-}
-
-static void abort_transfer(volatile UWORD *cmd_reg,
-                           volatile UWORD *status_reg,
-                           const char *dest_name) {
-    UWORD st;
-
-    *cmd_reg = FWUP_CMD_ABORT;
-    st = poll_status(status_reg, NULL);
-    if (st == FWUP_OK) {
-        printf("Partial transfer aborted; 0:/%s deleted on the card.\n",
-               dest_name);
-    } else if (st == FWUP_STATUS_BUSY) {
-        printf("WARNING: ABORT timed out; 0:/%s may remain.\n", dest_name);
-    } else {
-        printf("WARNING: ABORT failed: %s (0x%04x); 0:/%s may remain.\n",
-               fwup_strerror(st), st, dest_name);
-    }
-}
-
 static void flush_stdout(void) {
     fflush(stdout);
     Flush(Output());
 }
-
-struct fwup_progress {
-    ULONG total;
-    LONG file_size;
-    UWORD spinner_pos;
-};
 
 static ULONG progress_percent(ULONG total, ULONG file_size) {
     if (file_size == 0) return 0;
@@ -212,12 +110,19 @@ static void print_progress(ULONG total, LONG file_size, char marker) {
     flush_stdout();
 }
 
-static void update_busy_progress(struct fwup_progress *progress) {
-    static const char spinner[] = "|/-\\";
+/* fwup_send_file reports progress once before the first chunk (done == 0)
+ * and once after each chunk; we redraw the byte/percent line each time. */
+struct cli_progress {
+    ULONG done;
+    LONG  file_size;
+};
 
-    print_progress(progress->total, progress->file_size,
-                   spinner[progress->spinner_pos & 3]);
-    progress->spinner_pos++;
+static void cli_progress_cb(void *ctx, ULONG done, LONG total) {
+    struct cli_progress *c = (struct cli_progress *)ctx;
+
+    c->done = done;
+    c->file_size = total;
+    print_progress(done, total, ' ');
 }
 
 static ULONG elapsed_ticks(const struct DateStamp *start,
@@ -285,14 +190,9 @@ static int prompt_confirm(const char *target) {
 }
 
 static int do_restore(ULONG board, const char *target, int force) {
-    volatile UWORD *cmd_reg    = (volatile UWORD *)(board + ZZ_REG_FWUP_CMD);
-    volatile UWORD *len_reg    = (volatile UWORD *)(board + ZZ_REG_FWUP_LEN);
-    volatile UWORD *status_reg = (volatile UWORD *)(board + ZZ_REG_FWUP_STATUS);
-    UBYTE          *buffer     = (UBYTE *)(board + ZZ_BUFFER_OFFSET);
-    size_t          name_len;
-    UWORD           st;
+    UWORD st;
 
-    if (!probe_fwup_protocol(cmd_reg, len_reg, status_reg)) {
+    if (!fwup_probe_board(board)) {
         printf("ERROR: firmware does not support the FWUP protocol\n");
         printf("       Update BOOT.bin to a firmware build with FWUP support.\n");
         return 1;
@@ -303,17 +203,12 @@ static int do_restore(ULONG board, const char *target, int force) {
         return 0;
     }
 
-    /* Stage the active firmware name; the firmware derives the matching
-     * backup (e.g. BOOT.bin -> BOOT.bak) on its side. */
-    name_len = strlen(target);
-    CopyMem((UBYTE *)target, buffer, name_len);
-    buffer[name_len] = '\0';
-
     printf("Restoring backup of 0:/%s ...\n", target);
     flush_stdout();
 
-    *cmd_reg = FWUP_CMD_RESTORE;
-    st = poll_status(status_reg, NULL);
+    /* The firmware derives the matching backup (e.g. BOOT.bin -> BOOT.bak)
+     * from the active name on its side. */
+    st = fwup_restore_board(board, target);
 
     if (st == FWUP_OK) {
         printf("Done. Backup promoted to 0:/%s. Reboot to run it.\n", target);
@@ -333,7 +228,50 @@ static int do_restore(ULONG board, const char *target, int force) {
     return 1;
 }
 
+static int do_push(ULONG board, const char *src_path, const char *dest_name) {
+    struct cli_progress prog = { 0, -1 };
+    struct DateStamp started;
+    struct DateStamp finished;
+    UWORD st;
+
+    if (!fwup_probe_board(board)) {
+        printf("ERROR: firmware does not support the FWUP file-push protocol\n");
+        printf("       Update BOOT.bin to a firmware build with FWUP support.\n");
+        return 1;
+    }
+
+    printf("ZZ9000 at 0x%08lx, pushing %s -> 0:/%s\n",
+           (unsigned long)board, src_path, dest_name);
+    flush_stdout();
+
+    DateStamp(&started);
+    st = fwup_send_file(board, src_path, dest_name, cli_progress_cb, &prog);
+    DateStamp(&finished);
+    printf("\n");
+
+    if (st == FWUP_OK) {
+        print_done(prog.done, dest_name, elapsed_ticks(&started, &finished));
+        return 0;
+    }
+
+    /* fwup_send_file aborts any partially-written file on the card itself. */
+    if (st == FWUP_ERR_FILE) {
+        printf("ERROR: cannot read %s\n", src_path);
+    } else if (st == FWUP_ERR_NOMEM) {
+        printf("ERROR: out of memory for the %d-byte transfer buffer\n",
+               FWUP_CHUNK_BYTES);
+    } else {
+        print_cmd_error("transfer", st);
+        printf("Any partial 0:/%s was aborted on the card.\n", dest_name);
+    }
+    return 1;
+}
+
 int main(int argc, char *argv[]) {
+    const char *src_path;
+    const char *dest_name;
+    ULONG board;
+
     /* Restore mode: ZZFwUpdate RESTORE [name] [-y] */
     if (argc >= 2 && streq_ci(argv[1], "RESTORE")) {
         const char *target = NULL;
@@ -354,7 +292,7 @@ int main(int argc, char *argv[]) {
         if (!validate_dest_name(target))
             return 1;
 
-        ULONG board = zz9000_find_board(NULL);
+        board = zz9000_find_board(NULL);
         if (!board) {
             printf("ERROR: ZZ9000 not found in expansion bus\n");
             return 1;
@@ -376,135 +314,17 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
-    const char *src_path  = argv[1];
-    const char *dest_name = (argc == 3) ? argv[2] : basename_amigados(src_path);
+    src_path  = argv[1];
+    dest_name = (argc == 3) ? argv[2] : basename_amigados(src_path);
 
     if (!validate_dest_name(dest_name))
         return 1;
 
-    ULONG board = zz9000_find_board(NULL);
+    board = zz9000_find_board(NULL);
     if (!board) {
         printf("ERROR: ZZ9000 not found in expansion bus\n");
         return 1;
     }
 
-    volatile UWORD *cmd_reg    = (volatile UWORD *)(board + ZZ_REG_FWUP_CMD);
-    volatile UWORD *len_reg    = (volatile UWORD *)(board + ZZ_REG_FWUP_LEN);
-    volatile UWORD *status_reg = (volatile UWORD *)(board + ZZ_REG_FWUP_STATUS);
-    UBYTE          *buffer     = (UBYTE *)(board + ZZ_BUFFER_OFFSET);
-
-    if (!probe_fwup_protocol(cmd_reg, len_reg, status_reg)) {
-        printf("ERROR: firmware does not support the FWUP file-push protocol\n");
-        printf("       Update BOOT.bin to a firmware build with FWUP support.\n");
-        return 1;
-    }
-
-    BPTR fh = Open((STRPTR)src_path, MODE_OLDFILE);
-    if (!fh) {
-        printf("ERROR: cannot open %s for reading\n", src_path);
-        return 1;
-    }
-
-    /* Determine size via Seek (END) for a progress estimate. Not
-     * strictly required by the protocol, but the user wants feedback
-     * — a multi-MB BOOT.bin transfer is otherwise silent. */
-    LONG file_size = -1;
-    if (Seek(fh, 0, OFFSET_END) >= 0) {
-        file_size = Seek(fh, 0, OFFSET_BEGINNING);
-    }
-
-    UBYTE *chunk = (UBYTE *)AllocMem(FWUP_CHUNK_BYTES, MEMF_PUBLIC);
-    if (!chunk) {
-        printf("ERROR: out of memory for %d-byte transfer buffer\n",
-               FWUP_CHUNK_BYTES);
-        Close(fh);
-        return 1;
-    }
-
-    /* Stage filename + NUL in the shared buffer for the OPEN command.
-     * The firmware caps reads at 256 bytes, so a sub-64 byte name is
-     * safely within that. */
-    size_t name_len = strlen(dest_name);
-    CopyMem((UBYTE *)dest_name, buffer, name_len);
-    buffer[name_len] = '\0';
-
-    printf("ZZ9000 at 0x%08lx, pushing %s -> 0:/%s",
-           (unsigned long)board, src_path, dest_name);
-    if (file_size >= 0) printf(" (%ld bytes)", (long)file_size);
-    printf("\n");
-
-    struct DateStamp started;
-    struct DateStamp finished;
-    DateStamp(&started);
-
-    *cmd_reg = FWUP_CMD_OPEN;
-    UWORD st = poll_status(status_reg, NULL);
-    if (st != FWUP_OK) {
-        print_cmd_error("OPEN", st);
-        FreeMem(chunk, FWUP_CHUNK_BYTES);
-        Close(fh);
-        return 1;
-    }
-
-    ULONG total = 0;
-    LONG  n;
-    int   rc = 0;
-    struct fwup_progress progress;
-
-    progress.total = 0;
-    progress.file_size = file_size;
-    progress.spinner_pos = 0;
-
-    while ((n = Read(fh, chunk, FWUP_CHUNK_BYTES)) > 0) {
-        CopyMem(chunk, buffer, n);
-        *len_reg = (UWORD)n;
-        *cmd_reg = FWUP_CMD_WRITE;
-        st = poll_status(status_reg, &progress);
-        if (st != FWUP_OK) {
-            printf("\n");
-            if (st == FWUP_STATUS_BUSY) {
-                printf("ERROR: WRITE timed out at offset %lu "
-                       "after %ld-byte chunk\n",
-                       (unsigned long)total, (long)n);
-            } else {
-                printf("ERROR: WRITE at offset %lu failed: %s (0x%04x)\n",
-                       (unsigned long)total, fwup_strerror(st), st);
-            }
-            rc = 1;
-            break;
-        }
-        total += n;
-        progress.total = total;
-        print_progress(total, file_size, ' ');
-    }
-
-    if (n < 0) {
-        printf("\n");
-        printf("ERROR: read error on %s\n", src_path);
-        rc = 1;
-    }
-
-    if (rc == 0) {
-        print_progress(total, file_size, ' ');
-        printf("\n");
-        *cmd_reg = FWUP_CMD_CLOSE;
-        st = poll_status(status_reg, NULL);
-        if (st != FWUP_OK) {
-            print_cmd_error("CLOSE", st);
-            rc = 1;
-        } else {
-            DateStamp(&finished);
-            print_done(total, dest_name, elapsed_ticks(&started, &finished));
-        }
-    }
-
-    if (rc != 0) {
-        /* Tell the firmware to delete the partially-written file
-         * rather than leaving a corrupt one on the card. */
-        abort_transfer(cmd_reg, status_reg, dest_name);
-    }
-
-    FreeMem(chunk, FWUP_CHUNK_BYTES);
-    Close(fh);
-    return rc;
+    return do_push(board, src_path, dest_name);
 }

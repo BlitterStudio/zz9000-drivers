@@ -108,8 +108,8 @@ jobs:
       - name: Build ZZFwUpdate
         run: |
           docker run --rm -v "$PWD":/src -w /src/ZZFwUpdate "$AMIGA_IMAGE" \
-            m68k-amigaos-gcc -O2 -noixemul -Wall -Wextra -I../include \
-              -o ZZFwUpdate ZZFwUpdate.c -lamiga
+            m68k-amigaos-gcc -O2 -noixemul -Wall -Wextra -I../include -I../common \
+              -o ZZFwUpdate ZZFwUpdate.c ../common/fwup_amiga.c ../common/fwup_client.c -lamiga
       - uses: actions/upload-artifact@v7
         with:
           name: ZZFwUpdate
