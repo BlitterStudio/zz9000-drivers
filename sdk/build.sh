@@ -59,7 +59,7 @@ cp -R "$pkg/Storage/DataTypes/."                  "$out/Storage/DataTypes/"
 # ZZ9000's accelerated features (image viewers, MP3, crypto bench, archive).
 # The remaining SDK C/ tools are developer-oriented and ship with the SDK
 # package instead.
-for tool in zz9k-info zz9k-services zz9k-view zz9k-jpeg zz9k-png zz9k-mp3 zz9k-cryptobench zz9k-archive; do
+for tool in zz9k-info zz9k-services zz9k-view zz9k-mp3 zz9k-cryptobench zz9k-archive; do
     cp "$pkg/C/$tool" "$out/C/"
 done
 
