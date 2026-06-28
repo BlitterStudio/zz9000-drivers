@@ -36,8 +36,8 @@
 
 #include "zz9000_hw.h"
 
-#define ZZFWUPDATE_VERSION "2.1"
-#define ZZFWUPDATE_DATE    "17.05.2026"
+#define ZZFWUPDATE_VERSION "2.2"
+#define ZZFWUPDATE_DATE    "28.06.2026"
 
 static const char version[] __attribute__((used)) =
     "$VER: ZZFwUpdate " ZZFWUPDATE_VERSION " (" ZZFWUPDATE_DATE ")\r\n";
@@ -46,11 +46,15 @@ static const char version[] __attribute__((used)) =
 #define FWUP_CMD_WRITE     2
 #define FWUP_CMD_CLOSE     3
 #define FWUP_CMD_ABORT     4
+#define FWUP_CMD_RESTORE   5
 
 #define FWUP_STATUS_BUSY   0xFFFF
 #define FWUP_OK            0x0000
 #define FWUP_ERR_STATE     0x0007
 #define FWUP_ERR_LEN       0x0008
+#define FWUP_ERR_UNKNOWN   0x0009
+#define FWUP_ERR_NO_BACKUP 0x000A
+#define FWUP_ERR_RESTORE   0x000B
 
 /* Stays well under the firmware's FWUP_MAX_CHUNK (24576) and matches
  * the chunk size the SD-boot path uses, so we share the same buffer
@@ -78,6 +82,8 @@ static const char *fwup_strerror(UWORD code) {
     case FWUP_ERR_STATE: return "protocol state error (WRITE/CLOSE without OPEN?)";
     case FWUP_ERR_LEN: return "chunk length out of range";
     case 0x09: return "unknown FWUP command";
+    case FWUP_ERR_NO_BACKUP: return "no backup file found to restore";
+    case FWUP_ERR_RESTORE: return "firmware restore (rename) failed";
     case FWUP_STATUS_BUSY: return "timed out waiting for firmware";
     default:   return "unknown error";
     }
@@ -249,14 +255,124 @@ static void print_cmd_error(const char *cmd, UWORD st) {
     }
 }
 
+static int streq_ci(const char *a, const char *b) {
+    while (*a && *b) {
+        char ca = *a, cb = *b;
+        if (ca >= 'a' && ca <= 'z') ca = (char)(ca - 32);
+        if (cb >= 'a' && cb <= 'z') cb = (char)(cb - 32);
+        if (ca != cb) return 0;
+        a++;
+        b++;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+/* Returns 1 if the user confirmed. A non-interactive stdin (EOF) counts
+ * as "no", so a scripted run without -y safely declines rather than
+ * silently restoring. */
+static int prompt_confirm(const char *target) {
+    char line[16];
+
+    printf("Restore the backup of 0:/%s as the active firmware?\n", target);
+    printf("The current 0:/%s will be discarded and no backup will remain.\n",
+           target);
+    printf("Continue? [y/N]: ");
+    flush_stdout();
+
+    if (!fgets(line, sizeof(line), stdin))
+        return 0;
+    return (line[0] == 'y' || line[0] == 'Y');
+}
+
+static int do_restore(ULONG board, const char *target, int force) {
+    volatile UWORD *cmd_reg    = (volatile UWORD *)(board + ZZ_REG_FWUP_CMD);
+    volatile UWORD *len_reg    = (volatile UWORD *)(board + ZZ_REG_FWUP_LEN);
+    volatile UWORD *status_reg = (volatile UWORD *)(board + ZZ_REG_FWUP_STATUS);
+    UBYTE          *buffer     = (UBYTE *)(board + ZZ_BUFFER_OFFSET);
+    size_t          name_len;
+    UWORD           st;
+
+    if (!probe_fwup_protocol(cmd_reg, len_reg, status_reg)) {
+        printf("ERROR: firmware does not support the FWUP protocol\n");
+        printf("       Update BOOT.bin to a firmware build with FWUP support.\n");
+        return 1;
+    }
+
+    if (!force && !prompt_confirm(target)) {
+        printf("Restore cancelled.\n");
+        return 0;
+    }
+
+    /* Stage the active firmware name; the firmware derives the matching
+     * backup (e.g. BOOT.bin -> BOOT.bak) on its side. */
+    name_len = strlen(target);
+    CopyMem((UBYTE *)target, buffer, name_len);
+    buffer[name_len] = '\0';
+
+    printf("Restoring backup of 0:/%s ...\n", target);
+    flush_stdout();
+
+    *cmd_reg = FWUP_CMD_RESTORE;
+    st = poll_status(status_reg, NULL);
+
+    if (st == FWUP_OK) {
+        printf("Done. Backup promoted to 0:/%s. Reboot to run it.\n", target);
+        return 0;
+    }
+    if (st == FWUP_ERR_UNKNOWN) {
+        printf("ERROR: this firmware does not support RESTORE.\n");
+        printf("       Update to a newer BOOT.bin first.\n");
+        return 1;
+    }
+    if (st == FWUP_ERR_NO_BACKUP) {
+        printf("ERROR: no backup found for 0:/%s; nothing to restore.\n",
+               target);
+        return 1;
+    }
+    print_cmd_error("RESTORE", st);
+    return 1;
+}
+
 int main(int argc, char *argv[]) {
+    /* Restore mode: ZZFwUpdate RESTORE [name] [-y] */
+    if (argc >= 2 && streq_ci(argv[1], "RESTORE")) {
+        const char *target = NULL;
+        int force = 0;
+        int i;
+
+        for (i = 2; i < argc; i++) {
+            if (streq_ci(argv[i], "-y") || streq_ci(argv[i], "FORCE")) {
+                force = 1;
+            } else if (!target) {
+                target = argv[i];
+            } else {
+                printf("ERROR: too many arguments for RESTORE\n");
+                return 1;
+            }
+        }
+        if (!target) target = "BOOT.bin";
+        if (!validate_dest_name(target))
+            return 1;
+
+        ULONG board = zz9000_find_board(NULL);
+        if (!board) {
+            printf("ERROR: ZZ9000 not found in expansion bus\n");
+            return 1;
+        }
+        return do_restore(board, target, force);
+    }
+
     if (argc < 2 || argc > 3 || argv[1][0] == '?') {
         printf("Usage: %s <source-file> [dest-name]\n", argv[0]);
+        printf("       %s RESTORE [name] [-y]\n", argv[0]);
         printf("  source-file : AmigaDOS path of the file to push\n");
         printf("                (e.g. ram:BOOT.bin)\n");
         printf("  dest-name   : filename on the SD card; defaults to\n");
         printf("                source basename. Must match\n");
         printf("                [A-Za-z0-9._-]{1,64} on a flat root.\n");
+        printf("  RESTORE     : promote the saved backup back to the active\n");
+        printf("                firmware [name] (default BOOT.bin). -y skips\n");
+        printf("                the confirmation prompt.\n");
         return 0;
     }
 

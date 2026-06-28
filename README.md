@@ -106,6 +106,22 @@ ZZFwUpdate SYS:Storage/zz9000-fw.bin BOOT.bin
 The destination name must be 1-64 characters and contain only `A-Z`,
 `a-z`, `0-9`, `.`, `_`, or `-`.
 
+When you replace `BOOT.bin`, the firmware automatically keeps the
+previous image as `BOOT.bak`. If a new firmware boots but misbehaves,
+you can roll back to that backup without removing the card:
+
+```text
+ZZFwUpdate RESTORE
+```
+
+This promotes `BOOT.bak` to the active `BOOT.bin` (discarding the
+replaced image, so no backup remains afterwards) after a confirmation
+prompt. Pass `-y` to skip the prompt, or a name to restore something
+other than `BOOT.bin`. Restore talks to the *running* firmware, so it
+recovers a booting-but-misbehaving update; a fully non-booting card
+still needs the microSD removed and restored on another computer.
+Requires firmware with RESTORE (FWUP cmd 5) support.
+
 ### Network Diagnostics
 
 `ZZNetStats` opens `ZZ9000Net.device`, requests SANA-II global stats,
