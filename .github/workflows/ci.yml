@@ -277,7 +277,22 @@ jobs:
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v6
+      # The library is fully determined by the pinned SDK commit (which carries
+      # the provider sources + AMISSL_REF) plus the local build recipe, so cache
+      # the built libs keyed on those. Tag (release) builds skip the cache and
+      # always compile fresh — never ship a crypto library straight from cache.
+      - name: Compute amissl cache key
+        id: amisslkey
+        run: echo "key=amissl-v1-$(cat sdk/SDK_REF amissl/Dockerfile amissl/build.sh | sha256sum | cut -c1-32)" >> "$GITHUB_OUTPUT"
+      - name: Restore cached amissl.library
+        id: amisslcache
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/cache@v5
+        with:
+          path: amissl/out
+          key: ${{ steps.amisslkey.outputs.key }}
       - name: Build amissl.library (adtools toolchain image)
+        if: steps.amisslcache.outputs.cache-hit != 'true'
         run: amissl/build.sh
       - uses: actions/upload-artifact@v7
         with:
