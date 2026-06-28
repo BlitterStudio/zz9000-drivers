@@ -70,7 +70,7 @@ normal AmigaOS file.
 | MHI audio | `mhizz9000.library` | `Libs:MHI/` | Exposes the AX hardware MP3 decoder to MHI-aware players. |
 | USB | `zzusbhw.device` | `Devs:USBHardware/` | Poseidon USB hardware driver. See [usb-poseidon/README.md](usb-poseidon/README.md). |
 | SD boot | `zzsd.device` | Firmware `BOOT.bin` | Size-constrained boot driver for FAT32-hosted HDF boot. See [sd-boot/README.md](sd-boot/README.md). |
-| Configuration | `ZZTop` | `SYS:Tools/` | GUI for resolution, scanlines, hardware toggles, and hardware readback. |
+| Configuration | `ZZTop` | `SYS:Tools/` | GUI for resolution, scanlines, hardware toggles, hardware readback, and firmware update/restore. |
 | Scanlines | `ZZScanlines` | `C:` | CLI for scanline V1/V2 modes. |
 | Firmware update | `ZZFwUpdate` | `C:` | Pushes `BOOT.bin` or another root-level file to the ZZ9000 FAT32 microSD card over Zorro. |
 | AX diagnostics | `axmp3` | `C:` | Direct-register MP3 playback test tool for ZZ9000AX. |

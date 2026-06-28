@@ -44,6 +44,7 @@ jobs:
       - name: Run host-side tests and repository checks
         run: |
           make rtg-tests
+          make -C common/tests test
           python3 -m unittest tools/tests/test_repo_tooling.py
           tools/check-quality.sh
           tools/check-release.sh --quick
@@ -74,7 +75,8 @@ jobs:
       - name: Build ZZTop
         run: |
           docker run --rm -v "$PWD":/src -w /src/ZZTop "$AMIGA_IMAGE" \
-            m68k-amigaos-gcc Sources/ZZTop.c -m68030 -O2 -o ZZTop \
+            m68k-amigaos-gcc Sources/ZZTop.c ../common/fwup_amiga.c ../common/fwup_client.c \
+              -m68030 -O2 -I../common -I../include -o ZZTop \
               -Wall -Wextra -Wno-unused-parameter -lamiga -noixemul -lm
       - uses: actions/upload-artifact@v7
         with:

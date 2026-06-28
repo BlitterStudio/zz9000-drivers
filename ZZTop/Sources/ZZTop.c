@@ -16,6 +16,7 @@
 #include <intuition/intuition.h>
 #include <intuition/gadgetclass.h>
 #include <libraries/gadtools.h>
+#include <libraries/asl.h>
 #include <devices/timer.h>
 
 #include <clib/exec_protos.h>
@@ -25,15 +26,18 @@
 #include <clib/expansion_protos.h>
 
 #include <clib/timer_protos.h>
+#include <clib/asl_protos.h>
+#include <clib/dos_protos.h>
 
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 
 #include "zz9000.h"
+#include "fwup_amiga.h"
 
-#define ZZTOP_RELEASE "2.1"
-#define ZZTOP_DATE    "17.05.2026"
+#define ZZTOP_RELEASE "2.2"
+#define ZZTOP_DATE    "28.06.2026"
 
 static const char version[] __attribute__((used)) =
 	"$VER: ZZTop " ZZTOP_RELEASE " (" ZZTOP_DATE ")\r\n";
@@ -55,7 +59,10 @@ static const char version[] __attribute__((used)) =
 #define MYGAD_BTN_REFRESH  (14)
 #define MYGAD_TEST_RESULT  (15)
 #define MYGAD_VIDEOCAP     (16)
-#define MYGAD_COUNT        (17)
+#define MYGAD_BTN_UPDATE   (17)
+#define MYGAD_BTN_RESTORE  (18)
+#define MYGAD_FW_STATUS    (19)
+#define MYGAD_COUNT        (20)
 
 #define LABEL_ZORROVER     "Zorro Version"
 #define LABEL_FWVER        "Firmware ABI"
@@ -74,6 +81,9 @@ static const char version[] __attribute__((used)) =
 #define LABEL_TEST_RESULT  "Result"
 #define LABEL_BTN_TEST     "Reg Probe"
 #define LABEL_BTN_REFRESH  "Refresh"
+#define LABEL_BTN_UPDATE   "Update Firmware"
+#define LABEL_BTN_RESTORE  "Restore Backup"
+#define LABEL_FW_STATUS    "Firmware Op"
 
 #define SAMPLE_FWVER       "ABI 255.255"
 #define SAMPLE_TEMP        "999.9"
@@ -85,6 +95,7 @@ static const char version[] __attribute__((used)) =
 #define SAMPLE_VIDEOCAP    "Lines:1023  Max:3/3  Min:3/3"
 #define SAMPLE_LPF_LEVEL   "23900 Hz"
 #define SAMPLE_TEST_RESULT "No timer.device"
+#define SAMPLE_FW_STATUS   "Updating... 100% (9999 KB)"
 
 struct Gadget *gads[MYGAD_COUNT];
 
@@ -147,7 +158,10 @@ struct ZZTopLayout {
 	WORD slider_step;
 	WORD control_step;
 	WORD button_width;
+	WORD button_col2;
 	WORD button_top;
+	WORD fw_button_top;
+	WORD fw_status_top;
 	WORD window_width;
 	WORD window_height;
 	UWORD topborder;
@@ -170,6 +184,7 @@ static CONST_STRPTR zztop_label_samples[] = {
 	(CONST_STRPTR)LABEL_PARITY,
 	(CONST_STRPTR)LABEL_REFRESHMODE,
 	(CONST_STRPTR)LABEL_TEST_RESULT,
+	(CONST_STRPTR)LABEL_FW_STATUS,
 	NULL
 };
 
@@ -187,12 +202,15 @@ static CONST_STRPTR zztop_value_samples[] = {
 	(CONST_STRPTR)"Gradient",
 	(CONST_STRPTR)"Even dark",
 	(CONST_STRPTR)"Manual",
+	(CONST_STRPTR)SAMPLE_FW_STATUS,
 	NULL
 };
 
 static CONST_STRPTR zztop_button_samples[] = {
 	(CONST_STRPTR)LABEL_BTN_TEST,
 	(CONST_STRPTR)LABEL_BTN_REFRESH,
+	(CONST_STRPTR)LABEL_BTN_UPDATE,
+	(CONST_STRPTR)LABEL_BTN_RESTORE,
 	NULL
 };
 
@@ -200,6 +218,7 @@ struct Library* IntuitionBase;
 struct Library* GfxBase;
 struct Library* GadToolsBase;
 struct Library* ExpansionBase;
+struct Library* AslBase;
 
 struct ConfigDev* zz_cd;
 volatile UBYTE* zz_regs;
@@ -303,6 +322,9 @@ static void zztop_init_layout(struct ZZTopLayout *layout, struct Screen *screen)
 	layout->button_width = zztop_max_word(110, button_text_width + text_padding);
 
 	button_gap = zztop_max_word(16, font_x * 3);
+	/* Second button column sits one full button + gap right of the first,
+	 * so wider labels never overlap the left column. */
+	layout->button_col2 = layout->margin_x + layout->button_width + button_gap;
 	button_window_width = layout->margin_x + layout->button_width +
 		button_gap + layout->button_width + layout->margin_x;
 	layout->window_width = zztop_max_word(
@@ -318,7 +340,10 @@ static void zztop_init_layout(struct ZZTopLayout *layout, struct Screen *screen)
 	y += layout->row_step;
 	y += layout->section_gap;
 	layout->button_top = y;
-	layout->window_height = layout->button_top + layout->gadget_height + (layout->margin_y / 2);
+	/* Second button row (firmware update/restore) + a status line below it. */
+	layout->fw_button_top = layout->button_top + layout->row_step;
+	layout->fw_status_top = layout->fw_button_top + layout->row_step;
+	layout->window_height = layout->fw_status_top + layout->gadget_height + (layout->margin_y / 2);
 }
 
 void errorMessage(const char* error)
@@ -594,6 +619,121 @@ ULONG zz_perform_register_probe(void)
 	return errors;
 }
 
+static int fw_confirm(const char *text)
+{
+	struct EasyStruct es = {
+		sizeof(struct EasyStruct), 0,
+		(UBYTE *)"ZZTop Firmware",
+		(UBYTE *)text,
+		(UBYTE *)"Proceed|Cancel"
+	};
+	return (int)EasyRequestArgs(NULL, &es, NULL, NULL);
+}
+
+static int fw_pick_file(char *out, int outsz)
+{
+	struct TagItem tags[] = {
+		{ ASLFR_TitleText,      (ULONG)"Select firmware file to upload" },
+		{ ASLFR_DoPatterns,     TRUE },
+		{ ASLFR_InitialPattern, (ULONG)"#?.(bin|rom|img)" },
+		{ TAG_END,              0 }
+	};
+	struct FileRequester *fr;
+	int ok = 0;
+
+	if (!AslBase) {
+		errorMessage("asl.library 37+ is required for the file requester.");
+		return 0;
+	}
+	fr = (struct FileRequester *)AllocAslRequest(ASL_FileRequest, tags);
+	if (!fr) return 0;
+	if (AslRequest(fr, NULL)) {
+		strncpy(out, (const char *)fr->fr_Drawer, outsz - 1);
+		out[outsz - 1] = '\0';
+		AddPart((STRPTR)out, fr->fr_File, (ULONG)outsz);
+		ok = 1;
+	}
+	FreeAslRequest(fr);
+	return ok;
+}
+
+static void fw_progress(void *ctx, ULONG done, LONG total)
+{
+	struct Window *win = (struct Window *)ctx;
+	char buf[48];
+
+	if (total > 0) {
+		ULONG pct = (ULONG)(((ULONG)done * 100UL) / (ULONG)total);
+		if (pct > 100) pct = 100;
+		snprintf(buf, sizeof(buf), "Updating... %lu%% (%lu KB)",
+			(unsigned long)pct, (unsigned long)(done / 1024));
+	} else {
+		snprintf(buf, sizeof(buf), "Updating... %lu KB",
+			(unsigned long)(done / 1024));
+	}
+	zztop_set_text_display(win, MYGAD_FW_STATUS, buf);
+}
+
+static void do_fw_update(struct Window *win)
+{
+	char path[256];
+	char msg[400];
+	UWORD st;
+
+	if (!fwup_probe_board((ULONG)zz_regs)) {
+		errorMessage("This firmware does not support the file-push protocol.\n"
+			"Update BOOT.bin to a firmware build with FWUP support first.");
+		return;
+	}
+	if (!fw_pick_file(path, sizeof(path)))
+		return;
+
+	snprintf(msg, sizeof(msg),
+		"Upload\n  %s\nto the ZZ9000 as BOOT.bin?\n\n"
+		"Power-cycle the Amiga afterwards to boot the new firmware.", path);
+	if (!fw_confirm(msg))
+		return;
+
+	zztop_set_text_display(win, MYGAD_FW_STATUS, "Updating...");
+	st = fwup_send_file((ULONG)zz_regs, path, "BOOT.bin", fw_progress, win);
+	if (st == FWUP_OK) {
+		zztop_set_text_display(win, MYGAD_FW_STATUS, "Updated - power-cycle to boot");
+		errorMessage("Firmware uploaded as BOOT.bin.\nPower-cycle the Amiga to boot it.");
+	} else {
+		snprintf(msg, sizeof(msg), "Firmware update failed:\n%s (0x%04x)",
+			fwup_strerror(st), (unsigned)st);
+		zztop_set_text_display(win, MYGAD_FW_STATUS, "Update failed");
+		errorMessage(msg);
+	}
+}
+
+static void do_fw_restore(struct Window *win)
+{
+	char msg[256];
+	UWORD st;
+
+	if (!fwup_probe_board((ULONG)zz_regs)) {
+		errorMessage("This firmware does not support the file-push protocol.");
+		return;
+	}
+	if (!fw_confirm("Restore the backup firmware (BOOT.bak) as the active BOOT.bin?\n\n"
+			"The current BOOT.bin is discarded and no backup remains.\n"
+			"Power-cycle the Amiga afterwards."))
+		return;
+
+	zztop_set_text_display(win, MYGAD_FW_STATUS, "Restoring...");
+	st = fwup_restore_board((ULONG)zz_regs, "BOOT.bin");
+	if (st == FWUP_OK) {
+		zztop_set_text_display(win, MYGAD_FW_STATUS, "Restored - power-cycle to boot");
+		errorMessage("Backup restored as BOOT.bin.\nPower-cycle the Amiga to boot it.");
+	} else {
+		snprintf(msg, sizeof(msg), "Firmware restore failed:\n%s (0x%04x)",
+			fwup_strerror(st), (unsigned)st);
+		zztop_set_text_display(win, MYGAD_FW_STATUS, "Restore failed");
+		errorMessage(msg);
+	}
+}
+
 VOID handleGadgetEvent(struct Window *win, struct Gadget *gad, ULONG code)
 {
 	if (!gad) return;
@@ -616,6 +756,14 @@ VOID handleGadgetEvent(struct Window *win, struct Gadget *gad, ULONG code)
 				zztop_set_text_display(win, MYGAD_TEST_RESULT, txt_buf);
 			}
 			refresh_zz_info(win);
+			break;
+		}
+		case MYGAD_BTN_UPDATE: {
+			do_fw_update(win);
+			break;
+		}
+		case MYGAD_BTN_RESTORE: {
+			do_fw_restore(win);
 			break;
 		}
 		case MYGAD_LPF: {
@@ -795,12 +943,36 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, const struct
 	gads[MYGAD_BTN_TEST] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
 											TAG_END);
 
-	ng.ng_LeftEdge	= layout->gadget_left;
+	ng.ng_LeftEdge	= layout->button_col2;
 	ng.ng_GadgetID	 = MYGAD_BTN_REFRESH;
 	ng.ng_GadgetText = (STRPTR)LABEL_BTN_REFRESH;
 
 	gads[MYGAD_BTN_REFRESH] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
 											TAG_END);
+
+	/* Firmware update / restore (issue #26): a second button row mirroring
+	 * the Test/Refresh row, plus a status line below it. */
+	ng.ng_LeftEdge	 = layout->margin_x;
+	ng.ng_TopEdge		 = layout->fw_button_top;
+	ng.ng_Width			 = layout->button_width;
+	ng.ng_GadgetText = (STRPTR)LABEL_BTN_UPDATE;
+	ng.ng_GadgetID	 = MYGAD_BTN_UPDATE;
+	ng.ng_Flags			 = PLACETEXT_IN;
+	gads[MYGAD_BTN_UPDATE] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+											TAG_END);
+
+	ng.ng_LeftEdge	 = layout->button_col2;
+	ng.ng_GadgetID	 = MYGAD_BTN_RESTORE;
+	ng.ng_GadgetText = (STRPTR)LABEL_BTN_RESTORE;
+	gads[MYGAD_BTN_RESTORE] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+											TAG_END);
+
+	ng.ng_LeftEdge	 = layout->gadget_left;
+	ng.ng_TopEdge		 = layout->fw_status_top;
+	ng.ng_Width			 = layout->gadget_width;
+	ng.ng_Flags			 = PLACETEXT_LEFT;
+	gads[MYGAD_FW_STATUS] = gad = createTextReadoutGadget(gad, &ng,
+		MYGAD_FW_STATUS, (STRPTR)LABEL_FW_STATUS, "idle");
 
 	for (int i=0; i<MYGAD_COUNT; i++) {
 		if (!gads[i]) return NULL;
@@ -965,7 +1137,12 @@ int main(void) {
 		if (NULL == (GadToolsBase = OpenLibrary((CONST_STRPTR)"gadtools.library", 37)))
 			errorMessage("Requires V37 gadtools.library");
 		else {
+			/* asl.library is optional: only the firmware file requester
+			 * needs it, so a missing one just disables the Update picker
+			 * rather than blocking the tool. */
+			AslBase = OpenLibrary((CONST_STRPTR)"asl.library", 37);
 			gadtoolsWindow();
+			if (AslBase) CloseLibrary(AslBase);
 			CloseLibrary(GadToolsBase);
 		}
 		CloseLibrary(GfxBase);
