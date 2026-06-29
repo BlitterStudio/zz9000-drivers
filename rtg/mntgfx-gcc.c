@@ -1601,6 +1601,19 @@ void DrawLine(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 			b->DrawLineDefault(b, r, l, mask, format);
 		return;
 	}
+
+	/* Clipped lines arrive with Length == 0: P96 leaves Length unset and
+	 * relies on the renderer's cliprect to bound the line. The accelerated
+	 * firmware path has no cliprect, so on Length == 0 it falls back to the
+	 * full extent max(|dX|,|dY|) and overshoots the window. Hand those to
+	 * P96's software DrawLineDefault, which clips correctly. Lines with an
+	 * explicit (non-zero) Length are drawn to that length and stay on the
+	 * hardware path. */
+	if (b->DrawLineDefault && l->Length == 0) {
+		b->DrawLineDefault(b, r, l, mask, format);
+		return;
+	}
+
 	mask = direct_color_mask(colormode, mask);
 	MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
 
@@ -1667,6 +1680,12 @@ void DrawLine(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 		zzwrite16(&registers->blitter_dma_op, OP_DRAWLINE);
 	} else {
 		uint32_t offset = ((uint32_t)r->Memory - (uint32_t)b->MemoryBase);
+		/* Solid lines (LinePtrn 0xFFFF, full mask, JAM1) dispatch to the
+		 * firmware's draw_line_solid, which ignores BgPen and the pattern
+		 * shift. Skip those two slow Z2 register writes for solid lines.
+		 * X3 (LinePtrn) is still written: the firmware selects the solid
+		 * path on rect_x3 == 0xFFFF, and the cache collapses the repeats. */
+		int solid = (l->DrawMode == 0 && l->LinePtrn == 0xFFFF && mask == 0xFF);
 
 		writeBlitterDstOffset(registers, offset);
 		writeBlitterDstPitch(registers, r->BytesPerRow >> 2);
@@ -1675,7 +1694,8 @@ void DrawLine(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 
 		writeBlitterRGB(registers, l->FgPen);
 
-		writeBlitterRGB2(registers, l->BgPen);
+		if (!solid)
+			writeBlitterRGB2(registers, l->BgPen);
 
 		writeBlitterX1(registers, l->X);
 		writeBlitterY1(registers, l->Y);
@@ -1683,7 +1703,8 @@ void DrawLine(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 		writeBlitterY2(registers, l->dY);
 		writeBlitterUser1(registers, l->Length);
 		writeBlitterX3(registers, l->LinePtrn);
-		writeBlitterY3(registers, l->PatternShift | (l->pad << 8));
+		if (!solid)
+			writeBlitterY3(registers, l->PatternShift | (l->pad << 8));
 
 		zzwrite16(&registers->blitter_op_draw_line, mask);
 	}
