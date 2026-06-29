@@ -20,7 +20,9 @@ installer/
     ├── Tools.info                    Sub-drawer icon
     ├── Docs/
     │   ├── ahi-README.md             Audio tunables doc populated by CI
-    │   └── usb-poseidon-README.md    Poseidon setup doc populated by CI
+    │   ├── usb-poseidon-README.md    Poseidon setup doc populated by CI
+    │   ├── sdk-README.md             SDK runtime doc populated by CI
+    │   └── amissl-README.md          Accelerated AmiSSL doc populated by CI
     ├── Devs/
     │   ├── Picasso96Settings         P96 screenmode config  (committed)
     │   ├── USBHardware/              ← zzusbhw.device populated by CI
@@ -29,14 +31,26 @@ installer/
     │   ├── AHI/                      ← zz9000ax.audio populated by CI
     │   ├── AudioModes/               ← ZZ9000AX populated by CI
     │   └── Networks/                 ← ZZ9000Net.device populated by CI
+    ├── Classes/
+    │   └── DataTypes/               ← zz9k-picture.datatype populated by CI
+    ├── Storage/
+    │   └── DataTypes/               ← JPEG/PNG datatype descriptors populated by CI
     ├── Libs/
     │   ├── MHI/                      ← mhizz9000.library populated by CI
-    │   └── Picasso96/                ← ZZ9000.card populated by CI
+    │   ├── Picasso96/                ← ZZ9000.card populated by CI
+    │   ├── zz9k.library             ← populated by CI
+    │   ├── mpega.library            ← populated by CI
+    │   └── AmiSSL/
+    │       ├── 68020-40/            ← amissl_v362.library (68020/030/040) populated by CI
+    │       └── 68060/               ← amissl_v362.library (68060) populated by CI
     └── Tools/
         ├── ZZTop.info                Icon  (committed)
         ├── axmp3.info                Icon  (committed)
         └──                           ← ZZTop, ZZScanlines, ZZFwUpdate,
-                                        ZZNetStats, ZZDiag, axmp3 populated by CI
+                                        ZZNetStats, ZZDiag, axmp3,
+                                        zz9k-info, zz9k-services, zz9k-view,
+                                        zz9k-mp3, zz9k-cryptobench, zz9k-archive
+                                        populated by CI
 ```
 
 Only **icons and configuration templates** are committed. Every binary
@@ -57,6 +71,12 @@ guaranteed to attach to the new driver identity.
 The installer backs up the previous settings file as
 `Devs:Picasso96Settings.pre-ZZ9000-2.4` before installing the migrated
 settings file.
+
+The SDK runtime payloads (`zz9k.library`, the ARM-accelerated
+`mpega.library` drop-in, the `zz9k-picture.datatype` plus its inactive
+JPEG/PNG descriptors under `Storage/DataTypes`, and the `zz9k-#?` CLI
+tools) are built from the pinned zz9000-sdk ref and populated by CI.
+They need the SDK-service ZZ9000 firmware to do anything useful.
 
 When installing the ZZ9000-accelerated `amissl.library`, the installer
 first backs up the stock `LIBS:AmiSSL/amissl_v362.library` to
@@ -91,6 +111,13 @@ install -Dm644 ahi/README.md                   "$INST/Docs/ahi-README.md"
 install -Dm644 usb-poseidon/README.md          "$INST/Docs/usb-poseidon-README.md"
 ```
 
+The SDK runtime payloads and the per-CPU accelerated
+`amissl_v362.library` are not produced by the lines above: they come
+from `sdk/out` and `amissl/out` after their own builds. The easiest way
+to stage everything (drivers, SDK payloads, and both amissl builds) into
+the drawer exactly as CI does is `make package-local`, which runs
+`tools/package-local.sh`.
+
 Then copy the `installer/` tree onto your Amiga and double-click
 `Install ZZ9000`.
 
@@ -115,9 +142,10 @@ root; they live in the exact drawer paths consumed by `Install ZZ9000`.
 
 The release job also copies component docs into `ZZ9000Installer/Docs/`:
 `ahi-README.md` covers the three audio ENV tunables
-(`ZZ9K_MIX_LEVELS`, `ZZ9000AX-NOLPF`, `ZZ9K_INT2`), and
+(`ZZ9K_MIX_LEVELS`, `ZZ9000AX-NOLPF`, `ZZ9K_INT2`),
 `usb-poseidon-README.md` covers Poseidon registration and
-troubleshooting.
+troubleshooting, `sdk-README.md` documents the SDK runtime payloads,
+and `amissl-README.md` documents the accelerated AmiSSL build.
 
 ## What doesn't go through this Installer
 

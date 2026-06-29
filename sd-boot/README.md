@@ -82,9 +82,8 @@ window) per round-trip. The driver loops internally for larger I/O.
     bandwidth is higher — most of the wall-clock time is polling,
   - mouse and other UI elements stutter while sustained I/O runs.
 
-  The planned fix is an FPGA-assisted Zorro interrupt (see
-  `docs/FPGA_PLAN.md`). Until then, single-threaded heavy I/O is going
-  to feel sluggish.
+  The planned fix is an FPGA-assisted Zorro interrupt. Until then,
+  single-threaded heavy I/O is going to feel sluggish.
 
 * **HDF is opened once at firmware boot.** If the card is removed
   afterwards, writes fail mid-stream and subsequent I/O returns errors;
