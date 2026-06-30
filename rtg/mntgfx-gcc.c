@@ -460,6 +460,12 @@ static inline void writeBlitterUser2(MNTZZ9KRegs* registers, UWORD value) {
 	}
 }
 
+/* The line work-variable seed changes almost every line, so caching it would
+ * never hit; write it through directly. */
+static inline void writeBlitterUser3(MNTZZ9KRegs* registers, UWORD value) {
+	zzwrite16(&registers->blitter_user3, value);
+}
+
 static inline void writeBlitterDstPitch(MNTZZ9KRegs* registers, UWORD dstpitch) {
 	static UWORD old = 0;
 	if (dstpitch != old) {
@@ -1602,17 +1608,12 @@ void DrawLine(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 		return;
 	}
 
-	/* Clipped lines arrive with Length == 0: P96 leaves Length unset and
-	 * relies on the renderer's cliprect to bound the line. The accelerated
-	 * firmware path has no cliprect, so on Length == 0 it falls back to the
-	 * full extent max(|dX|,|dY|) and overshoots the window. Hand those to
-	 * P96's software DrawLineDefault, which clips correctly. Lines with an
-	 * explicit (non-zero) Length are drawn to that length and stay on the
-	 * hardware path. */
-	if (b->DrawLineDefault && l->Length == 0) {
-		b->DrawLineDefault(b, r, l, mask, format);
+	/* P96 may hand us a clipped *segment* of a larger line: X,Y is the segment
+	 * start, Length its major-axis pixel extent, dX,dY the FULL line delta, and
+	 * Xorigin,Yorigin the entire line's start (see the iComp P96 Driver
+	 * Development wiki). Length == 0 means the line is fully clipped away. */
+	if (l->Length == 0)
 		return;
-	}
 
 	mask = direct_color_mask(colormode, mask);
 	MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
@@ -1653,6 +1654,45 @@ void DrawLine(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 		return;
 	}
 
+	/* Round-half-up Bresenham accumulator at the segment start, computed from
+	 * geometry in magnitudes so it is octant-independent. P96/DrawLineDefault
+	 * places pixel i at minor offset floor((2*i*S + L) / (2*L)) == round(i*S/L)
+	 * with ties up; the firmware reproduces it with e += S; if (e >= L)
+	 * { e -= L; minor-step; } seeded at the half-pixel bias L/2. The accumulator
+	 * at a segment that starts k major / m minor units from the origin is
+	 * e = S*k - L*m + L/2 == (S*k + L/2) mod L (L/2 for an unclipped segment),
+	 * so a clipped segment resumes P96's staircase exactly. In [0, L), fits
+	 * 16 bits. (Verified on ZZ9000 hardware: truncation, seed 0, was 1px off;
+	 * round-half-up matches DrawLineDefault pixel-for-pixel.) */
+	int line_dxa = l->dX < 0 ? -l->dX : l->dX;
+	int line_dya = l->dY < 0 ? -l->dY : l->dY;
+	int line_major = line_dxa >= line_dya;
+	int line_l = line_major ? line_dxa : line_dya;
+	int line_s = line_major ? line_dya : line_dxa;
+	/* Xorigin/Yorigin are UWORD, but P96 encodes a line clipped at the top/left
+	 * (its start above/left of the RenderInfo) with a negative origin. Cast
+	 * through WORD so it sign-extends to int (e.g. -8 stays -8, not 65528),
+	 * keeping line_k/line_m and err_seed correct for such clipped lines. X, Y,
+	 * dX and dY are already WORD, so they sign-extend on their own. */
+	int line_dmaj = line_major ? ((int)l->X - (int)(WORD)l->Xorigin)
+				   : ((int)l->Y - (int)(WORD)l->Yorigin);
+	int line_dmin = line_major ? ((int)l->Y - (int)(WORD)l->Yorigin)
+				   : ((int)l->X - (int)(WORD)l->Xorigin);
+	int line_k = line_dmaj < 0 ? -line_dmaj : line_dmaj;
+	int line_m = line_dmin < 0 ? -line_dmin : line_dmin;
+	UWORD err_seed = (UWORD)(line_s * line_k - line_l * line_m + line_l / 2);
+
+	/* P96's PatternShift is an LSB-based bit index: DrawLineDefault draws the
+	 * segment's first pixel with pattern bit (0x0001 << PatternShift). The
+	 * firmware uses an MSB-based index, (0x8000 >> offset), so translate here.
+	 * 15 - PatternShift makes (0x8000 >> (15 - shift)) == (0x0001 << shift),
+	 * matching DrawLineDefault pixel-for-pixel. (HW-confirmed via the PatDiff
+	 * readback: the card pattern was 1px off because P96 sends PatternShift=15
+	 * for a fresh line and the firmware mirrored it to bit 0. The wiki's "shifts
+	 * the pattern PatternShift bits to the left" is misleading, like its line
+	 * rounding text.) */
+	UWORD line_pat_off = (UWORD)((15 - (l->PatternShift & 15)) & 15);
+
 	if (b->CardFlags & CARDFLAG_ZORRO_3) {
 		dmy_cache
 		gfxdata->offset[GFXDATA_DST] = (uint32_t)r->Memory - (uint32_t)b->MemoryBase;
@@ -1660,7 +1700,7 @@ void DrawLine(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 
 		gfxdata->u8_user[GFXDATA_U8_COLORMODE] = (uint8_t)colormode;
 		gfxdata->u8_user[GFXDATA_U8_DRAWMODE] = l->DrawMode;
-		gfxdata->u8_user[GFXDATA_U8_LINE_PATTERN_OFFSET] = l->PatternShift;
+		gfxdata->u8_user[GFXDATA_U8_LINE_PATTERN_OFFSET] = line_pat_off;
 		gfxdata->u8_user[GFXDATA_U8_LINE_PADDING] = l->pad;
 
 		gfxdata->rgb[0] = l->FgPen;
@@ -1673,7 +1713,8 @@ void DrawLine(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 
 		gfxdata->user[0] = l->Length;
 		gfxdata->user[1] = l->LinePtrn;
-		gfxdata->user[2] = ((l->PatternShift << 8) | l->pad);
+		gfxdata->user[2] = ((line_pat_off << 8) | l->pad);
+		gfxdata->user[3] = err_seed;
 
 		gfxdata->mask = mask;
 
@@ -1702,9 +1743,10 @@ void DrawLine(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 		writeBlitterX2(registers, l->dX);
 		writeBlitterY2(registers, l->dY);
 		writeBlitterUser1(registers, l->Length);
+		writeBlitterUser3(registers, err_seed);
 		writeBlitterX3(registers, l->LinePtrn);
 		if (!solid)
-			writeBlitterY3(registers, l->PatternShift | (l->pad << 8));
+			writeBlitterY3(registers, line_pat_off | (l->pad << 8));
 
 		zzwrite16(&registers->blitter_op_draw_line, mask);
 	}
