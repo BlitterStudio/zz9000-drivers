@@ -486,7 +486,7 @@
 ; --------------------------------------------------------------------
 
 (if (askbool (prompt "Install the ZZ9000 command-line utilities and ZZTop configuration GUI?")
-             (help "Installs ZZTop (configuration GUI) to SYS:Tools/, and the ZZScanlines, ZZFwUpdate, ZZNetStats, ZZDiag and axmp3 CLI tools to C:."))
+             (help "Installs ZZTop (configuration GUI) to SYS:Tools/, and the ZZScanlines, ZZFwUpdate, ZZNetStats and ZZDiag CLI tools to C:."))
    (
       (copyfiles
          (prompt "Install ZZTop into SYS:Tools/")
@@ -521,14 +521,6 @@
          (prompt "Install ZZDiag into C:")
          (help "Dumps ZZ9000 board, firmware, VideoCap, USB, SD, AX and Ethernet diagnostic registers.")
          (source "Tools/ZZDiag")
-         (dest "C:")
-         (confirm))
-
-      (copyfiles
-         (prompt "Install axmp3 into C:")
-         (help "Direct-register command-line MP3 player for the ZZ9000AX hardware decoder. Bypasses MHI - mostly useful for testing and diagnostics.")
-         (source "Tools/axmp3")
-         (infos)
          (dest "C:")
          (confirm))
    )

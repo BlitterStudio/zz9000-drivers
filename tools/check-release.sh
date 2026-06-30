@@ -46,7 +46,6 @@ if [ "$quick" -eq 0 ]; then
     check_exec ZZFwUpdate/ZZFwUpdate
     check_exec net/ZZNetStats/ZZNetStats
     check_exec ZZDiag/ZZDiag
-    check_exec ax-direct/axmp3
 
     # SDK runtime payloads (sdk/build.sh).
     check_file sdk/out/Libs/zz9k.library
@@ -93,8 +92,6 @@ tracked_artifacts=$(
         ZZTop/ZZTop \
         net/ZZNetStats/ZZNetStats \
         ZZDiag/ZZDiag \
-        ax-direct/axmp3 \
-        ax-direct/axtest \
         ahi/axtest/axtest
     do
         if git ls-files --error-unmatch "$path" >/dev/null 2>&1; then

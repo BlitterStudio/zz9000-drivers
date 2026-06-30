@@ -410,7 +410,7 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 	mp->hw_addr = MHI_LibBase->hw_addr;
 
 	if (MHI_LibBase->zorro_version == 3) {
-		// FIFO offset as in axmp3 (this is still within Zorro3 address range).
+		// ZZ9000AX encoded-audio FIFO offset (this is still within Zorro3 address range).
 		mp->encoded_offset =  0x06000000;
 		// Decoded audio offset right after FIFO with a little padding to be cache line aligned.
 		mp->decode_offset  = (0x06000000 + ZZ_AX_DECODER_FIFO_SIZE + 32) & 0xFFFFFFE0;

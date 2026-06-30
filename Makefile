@@ -3,7 +3,7 @@ AMIGA_DOCKER = ./tools/amiga-docker.sh
 
 .PHONY: all build-all package-local check-release quality rtg-tests \
 	rtg zztop zzscanlines zzfwupdate usb-poseidon sd-boot net ZZNetStats \
-	mhi ahi axmp3 ZZDiag sdk amissl
+	mhi ahi ZZDiag sdk amissl
 
 all: build-all
 
@@ -58,9 +58,6 @@ mhi:
 
 ahi:
 	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) ahi/driver ./build.sh
-
-axmp3:
-	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) ax-direct ./build-gcc.sh
 
 ZZDiag:
 	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) ZZDiag ./build.sh

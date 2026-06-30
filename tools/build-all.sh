@@ -21,7 +21,6 @@ cd "$repo_root"
     -Wno-unused-parameter -I../../include -o ZZNetStats ZZNetStats.c -lamiga
 "$amiga_docker" mhi ./build.sh
 "$amiga_docker" ahi/driver ./build.sh
-"$amiga_docker" ax-direct ./build-gcc.sh
 "$amiga_docker" ZZDiag ./build.sh
 
 # Runs its own Docker invocation (the SDK's build scripts wrap the same
