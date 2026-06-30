@@ -1035,7 +1035,9 @@ SAVEDS void frame_proc() {
         global_stats.BadData++;
         have_baseline = TRUE;
         old_serial    = serial;
-        *rx_accept = 1;
+        /* Ack with the frame's serial so the firmware RX-accept handshake
+         * advances past exactly this (bad) frame and nothing else. */
+        *rx_accept = serial;
         continue;
       }
 
@@ -1102,11 +1104,14 @@ SAVEDS void frame_proc() {
         global_stats.UnknownTypesReceived++;
       }
 
-      /* Release the FPGA RX slot so the next frame can land. We do NOT
-       * re-enable the ethernet IRQ here — staying masked lets us drain
-       * any already-queued frames via the serial recheck on the next
-       * loop iteration without paying for an IRQ we'd ignore anyway. */
-      *rx_accept = 1;
+      /* Release the FPGA RX slot so the next frame can land. We ack with the
+       * frame's own serial so the firmware RX-accept handshake advances past
+       * exactly the frame we just read (a stray ack of an empty/other slot is
+       * rejected firmware-side). We do NOT re-enable the ethernet IRQ here —
+       * staying masked lets us drain any already-queued frames via the serial
+       * recheck on the next loop iteration without paying for an IRQ we'd
+       * ignore anyway. */
+      *rx_accept = serial;
     } else {
       /* Nothing new. Re-enable the ethernet IRQ so the ISR can wake us,
        * then sleep. Enable-before-wait is correct: if a frame raced in
