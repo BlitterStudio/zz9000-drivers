@@ -1669,10 +1669,15 @@ void DrawLine(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 	int line_major = line_dxa >= line_dya;
 	int line_l = line_major ? line_dxa : line_dya;
 	int line_s = line_major ? line_dya : line_dxa;
-	int line_dmaj = line_major ? ((int)l->X - (int)l->Xorigin)
-				   : ((int)l->Y - (int)l->Yorigin);
-	int line_dmin = line_major ? ((int)l->Y - (int)l->Yorigin)
-				   : ((int)l->X - (int)l->Xorigin);
+	/* Xorigin/Yorigin are UWORD, but P96 encodes a line clipped at the top/left
+	 * (its start above/left of the RenderInfo) with a negative origin. Cast
+	 * through WORD so it sign-extends to int (e.g. -8 stays -8, not 65528),
+	 * keeping line_k/line_m and err_seed correct for such clipped lines. X, Y,
+	 * dX and dY are already WORD, so they sign-extend on their own. */
+	int line_dmaj = line_major ? ((int)l->X - (int)(WORD)l->Xorigin)
+				   : ((int)l->Y - (int)(WORD)l->Yorigin);
+	int line_dmin = line_major ? ((int)l->Y - (int)(WORD)l->Yorigin)
+				   : ((int)l->X - (int)(WORD)l->Xorigin);
 	int line_k = line_dmaj < 0 ? -line_dmaj : line_dmaj;
 	int line_m = line_dmin < 0 ? -line_dmin : line_dmin;
 	UWORD err_seed = (UWORD)(line_s * line_k - line_l * line_m + line_l / 2);
