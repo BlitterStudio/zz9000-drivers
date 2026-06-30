@@ -24,7 +24,6 @@ install -Dm755 ZZScanlines/ZZScanlines          "$inst/Tools/ZZScanlines"
 install -Dm755 ZZFwUpdate/ZZFwUpdate            "$inst/Tools/ZZFwUpdate"
 install -Dm755 net/ZZNetStats/ZZNetStats        "$inst/Tools/ZZNetStats"
 install -Dm755 ZZDiag/ZZDiag                    "$inst/Tools/ZZDiag"
-install -Dm755 ax-direct/axmp3                  "$inst/Tools/axmp3"
 install -Dm644 ahi/README.md                    "$inst/Docs/ahi-README.md"
 install -Dm644 usb-poseidon/README.md           "$inst/Docs/usb-poseidon-README.md"
 

@@ -45,9 +45,8 @@ installer/
     │       └── 68060/               ← amissl_v362.library (68060) populated by CI
     └── Tools/
         ├── ZZTop.info                Icon  (committed)
-        ├── axmp3.info                Icon  (committed)
         └──                           ← ZZTop, ZZScanlines, ZZFwUpdate,
-                                        ZZNetStats, ZZDiag, axmp3,
+                                        ZZNetStats, ZZDiag,
                                         zz9k-info, zz9k-services, zz9k-view,
                                         zz9k-mp3, zz9k-cryptobench, zz9k-archive
                                         populated by CI
@@ -106,7 +105,6 @@ install -Dm755 ZZScanlines/ZZScanlines         "$INST/Tools/ZZScanlines"
 install -Dm755 ZZFwUpdate/ZZFwUpdate           "$INST/Tools/ZZFwUpdate"
 install -Dm755 net/ZZNetStats/ZZNetStats       "$INST/Tools/ZZNetStats"
 install -Dm755 ZZDiag/ZZDiag                   "$INST/Tools/ZZDiag"
-install -Dm755 ax-direct/axmp3                 "$INST/Tools/axmp3"
 install -Dm644 ahi/README.md                   "$INST/Docs/ahi-README.md"
 install -Dm644 usb-poseidon/README.md          "$INST/Docs/usb-poseidon-README.md"
 ```

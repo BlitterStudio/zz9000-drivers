@@ -242,22 +242,6 @@ jobs:
           path: ahi/driver/ZZ9000AX
           if-no-files-found: error
 
-  axmp3:
-    name: ax-direct — axmp3
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - name: Build axmp3
-        run: |
-          docker run --rm -v "$PWD":/src -w /src/ax-direct "$AMIGA_IMAGE" \
-            m68k-amigaos-gcc axmp3.c -m68030 -O2 -o axmp3 \
-              -Wall -Wextra -Wno-unused-parameter -lamiga -noixemul
-      - uses: actions/upload-artifact@v7
-        with:
-          name: axmp3
-          path: ax-direct/axmp3
-          if-no-files-found: error
-
   sdk:
     name: sdk — zz9000-sdk runtime payloads
     runs-on: ubuntu-latest
@@ -308,7 +292,7 @@ jobs:
   release:
     name: Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [host-checks, rtg, zztop, zzscanlines, zzfwupdate, usb-poseidon, sd-boot, net, ZZNetStats, ZZDiag, mhi, ahi, axmp3, sdk, amissl]
+    needs: [host-checks, rtg, zztop, zzscanlines, zzfwupdate, usb-poseidon, sd-boot, net, ZZNetStats, ZZDiag, mhi, ahi, sdk, amissl]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -340,7 +324,6 @@ jobs:
           install -Dm755 artifacts/ZZFwUpdate/ZZFwUpdate                "$INST/Tools/ZZFwUpdate"
           install -Dm755 artifacts/ZZNetStats/ZZNetStats               "$INST/Tools/ZZNetStats"
           install -Dm755 artifacts/ZZDiag/ZZDiag                       "$INST/Tools/ZZDiag"
-          install -Dm755 artifacts/axmp3/axmp3                         "$INST/Tools/axmp3"
           install -Dm644 ahi/README.md                                 "$INST/Docs/ahi-README.md"
           install -Dm644 usb-poseidon/README.md                        "$INST/Docs/usb-poseidon-README.md"
 

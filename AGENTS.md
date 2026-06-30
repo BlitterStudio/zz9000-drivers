@@ -52,7 +52,6 @@ Individual component targets: `make rtg`, `make zztop`, `make net`, `make ahi`, 
 | `ZZScanlines/` | `ZZScanlines` (scanline control CLI) | Single gcc invocation |
 | `ZZFwUpdate/` | `ZZFwUpdate` (firmware push CLI) | Single gcc invocation |
 | `ZZDiag/` | `ZZDiag` (board diagnostics CLI) | `./build.sh` |
-| `ax-direct/` | `axmp3`, `axtest` (AX direct-register tools) | `./build-gcc.sh` |
 | `sdk/` | `zz9k.library`, `mpega.library`, `zz9k-picture.datatype`, `zz9k-info`, `zz9k-services` (pulled from the pinned zz9000-sdk ref) | `sdk/build.sh` (host-side; drives the SDK's own Docker build) |
 | `amissl/` | `amissl_v362.library` (ZZ9000-accelerated AmiSSL core) | `amissl/build.sh` (host-side; adtools image, slow — not part of build-all) |
 | `installer/` | Commodore Installer drawer, icons, templates | Populated by CI/release scripts |
@@ -90,7 +89,7 @@ Local packaging alternative: `make package-local` (runs check-release first, the
 
 Components use different m68k CPU targets and optimization levels:
 - RTG (`ZZ9000.card`): `-m68020 -mtune=68020-60 -O2 -fomit-frame-pointer`
-- ZZTop, ZZDiag, axmp3: `-m68030 -O2`
+- ZZTop, ZZDiag: `-m68030 -O2`
 - USB Poseidon: `-m68020 -mtune=68020-60 -msoft-float -Os` (nostdlib)
 - SD Boot: `-m68000 -Os` (nostdlib, size-critical)
 - ZZScanlines, ZZFwUpdate, ZZNetStats: `-O2` (noixemul, standard libs)
