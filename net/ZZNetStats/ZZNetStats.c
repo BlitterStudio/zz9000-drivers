@@ -29,8 +29,8 @@
 
 #include "zz9000_hw.h"
 
-#define ZZNETSTATS_VERSION "2.1"
-#define ZZNETSTATS_DATE    "17.05.2026"
+#define ZZNETSTATS_VERSION "2.2"
+#define ZZNETSTATS_DATE    "30.06.2026"
 
 static const char version[] __attribute__((used)) =
     "$VER: ZZNetStats " ZZNETSTATS_VERSION " (" ZZNETSTATS_DATE ")\r\n";
@@ -133,6 +133,32 @@ int main(int argc, char **argv)
         printf("LastStart.tv_secs    = %lu\n", (unsigned long)stats.LastStart.tv_secs);
         printf("LastStart.tv_micro   = %lu\n", (unsigned long)stats.LastStart.tv_micro);
         print_firmware_rx_stats();
+
+        /* issue #29: device special stats (RxEmptySlot — empty RX slots the
+         * framer skipped instead of acking). Generic printer: shows whatever
+         * records the device supplies, by name. */
+        {
+            UBYTE sbuf[sizeof(struct Sana2SpecialStatHeader) +
+                       8 * sizeof(struct Sana2SpecialStatRecord)];
+            struct Sana2SpecialStatHeader *h = (struct Sana2SpecialStatHeader *)sbuf;
+            struct Sana2SpecialStatRecord *rec =
+                (struct Sana2SpecialStatRecord *)(h + 1);
+            ULONG i;
+
+            memset(sbuf, 0, sizeof(sbuf));
+            h->RecordCountMax        = 8;
+            req->ios2_Req.io_Error   = 0;
+            req->ios2_Req.io_Command = S2_GETSPECIALSTATS;
+            req->ios2_StatData       = h;
+            DoIO((struct IORequest *)req);
+            if (!req->ios2_Req.io_Error) {
+                for (i = 0; i < h->RecordCountSupplied; i++) {
+                    printf("%-20s = %lu\n",
+                           rec[i].String ? (char *)rec[i].String : (char *)"?",
+                           (unsigned long)rec[i].Count);
+                }
+            }
+        }
     }
 
     CloseDevice((struct IORequest *)req);
