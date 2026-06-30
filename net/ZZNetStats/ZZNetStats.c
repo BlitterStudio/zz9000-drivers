@@ -138,8 +138,13 @@ int main(int argc, char **argv)
          * framer skipped instead of acking). Generic printer: shows whatever
          * records the device supplies, by name. */
         {
+            /* Longword-aligned: SANA-II writes ULONG fields through the
+             * header/record pointers, and m68k requires 4-byte alignment
+             * for those accesses. A bare UBYTE[] only guarantees byte
+             * alignment, so force it. */
             UBYTE sbuf[sizeof(struct Sana2SpecialStatHeader) +
-                       8 * sizeof(struct Sana2SpecialStatRecord)];
+                       8 * sizeof(struct Sana2SpecialStatRecord)]
+                __attribute__((aligned(4)));
             struct Sana2SpecialStatHeader *h = (struct Sana2SpecialStatHeader *)sbuf;
             struct Sana2SpecialStatRecord *rec =
                 (struct Sana2SpecialStatRecord *)(h + 1);
