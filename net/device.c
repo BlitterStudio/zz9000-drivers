@@ -993,8 +993,10 @@ SAVEDS void frame_proc() {
 
     /* issue #29: an all-zero header is an EMPTY (firmware-cleared) slot, not
      * a frame. The firmware zeroes a slot when it has no frame for it, and a
-     * real frame always has serial >= 1 (frame_serial is pre-incremented, so
-     * 0 is never assigned) and size >= 14. Reading a 0 header happens
+     * real frame always has serial >= 2 (the firmware's frame_serial counter
+     * skips both 0 and 1 — reserved for the empty-slot sentinel and the
+     * legacy bare-advance ack — so neither is ever assigned to a frame) and
+     * size >= 14. Reading a 0 header happens
      * routinely at the backlog drain boundary.
      *
      * We must NOT ack it (*rx_accept). Doing so races a frame landing in this
@@ -1035,7 +1037,9 @@ SAVEDS void frame_proc() {
         global_stats.BadData++;
         have_baseline = TRUE;
         old_serial    = serial;
-        *rx_accept = 1;
+        /* Ack with the frame's serial so the firmware RX-accept handshake
+         * advances past exactly this (bad) frame and nothing else. */
+        *rx_accept = serial;
         continue;
       }
 
@@ -1054,10 +1058,17 @@ SAVEDS void frame_proc() {
        * genuine miss. Count those separately in BadData so Overruns
        * stays trustworthy.
        *
-       * Unsigned 16-bit subtraction wraps correctly, so delta also
-       * handles the 65535→0 serial rollover. */
+       * Unsigned 16-bit subtraction gives the forward distance directly.
+       * The firmware skips BOTH serial 0 and 1 on its u16 wraparound (0 is
+       * the empty-slot sentinel, 1 the legacy bare-advance ack), so real
+       * serials run 2..0xffff and a clean 0xffff→2 wrap step has a raw delta
+       * of 3, not 1. When the serial wrapped (serial < old_serial), discount
+       * those two skipped sentinels so the wrap itself is not miscounted as
+       * dropped frames. */
       if (have_baseline) {
         USHORT delta = (USHORT)(serial - old_serial);
+        if (serial < old_serial)   /* wrapped past the skipped 0 and 1 sentinels */
+          delta -= 2;
         if (delta > 1 && delta <= 128) {
           global_stats.Overruns += (ULONG)(delta - 1);
         } else if (delta > 128) {
@@ -1102,11 +1113,14 @@ SAVEDS void frame_proc() {
         global_stats.UnknownTypesReceived++;
       }
 
-      /* Release the FPGA RX slot so the next frame can land. We do NOT
-       * re-enable the ethernet IRQ here — staying masked lets us drain
-       * any already-queued frames via the serial recheck on the next
-       * loop iteration without paying for an IRQ we'd ignore anyway. */
-      *rx_accept = 1;
+      /* Release the FPGA RX slot so the next frame can land. We ack with the
+       * frame's own serial so the firmware RX-accept handshake advances past
+       * exactly the frame we just read (a stray ack of an empty/other slot is
+       * rejected firmware-side). We do NOT re-enable the ethernet IRQ here —
+       * staying masked lets us drain any already-queued frames via the serial
+       * recheck on the next loop iteration without paying for an IRQ we'd
+       * ignore anyway. */
+      *rx_accept = serial;
     } else {
       /* Nothing new. Re-enable the ethernet IRQ so the ISR can wake us,
        * then sleep. Enable-before-wait is correct: if a frame raced in
