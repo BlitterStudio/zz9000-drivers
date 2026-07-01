@@ -993,8 +993,9 @@ SAVEDS void frame_proc() {
 
     /* issue #29: an all-zero header is an EMPTY (firmware-cleared) slot, not
      * a frame. The firmware zeroes a slot when it has no frame for it, and a
-     * real frame always has serial >= 1 (the firmware's frame_serial counter
-     * skips 0 on its u16 wraparound, so 0 is never assigned to a frame) and
+     * real frame always has serial >= 2 (the firmware's frame_serial counter
+     * skips both 0 and 1 — reserved for the empty-slot sentinel and the
+     * legacy bare-advance ack — so neither is ever assigned to a frame) and
      * size >= 14. Reading a 0 header happens
      * routinely at the backlog drain boundary.
      *
@@ -1058,15 +1059,16 @@ SAVEDS void frame_proc() {
        * stays trustworthy.
        *
        * Unsigned 16-bit subtraction gives the forward distance directly.
-       * The firmware skips serial 0 on its u16 wraparound (0 is the
-       * empty-slot sentinel), so a clean 0xffff→1 step has a raw delta of
-       * 2, not 1. When the serial wrapped (serial < old_serial), discount
-       * that skipped sentinel so the wrap itself is not miscounted as a
-       * dropped frame. */
+       * The firmware skips BOTH serial 0 and 1 on its u16 wraparound (0 is
+       * the empty-slot sentinel, 1 the legacy bare-advance ack), so real
+       * serials run 2..0xffff and a clean 0xffff→2 wrap step has a raw delta
+       * of 3, not 1. When the serial wrapped (serial < old_serial), discount
+       * those two skipped sentinels so the wrap itself is not miscounted as
+       * dropped frames. */
       if (have_baseline) {
         USHORT delta = (USHORT)(serial - old_serial);
-        if (serial < old_serial)   /* wrapped past the skipped-0 sentinel */
-          delta--;
+        if (serial < old_serial)   /* wrapped past the skipped 0 and 1 sentinels */
+          delta -= 2;
         if (delta > 1 && delta <= 128) {
           global_stats.Overruns += (ULONG)(delta - 1);
         } else if (delta > 128) {
