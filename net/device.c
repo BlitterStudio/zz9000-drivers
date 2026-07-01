@@ -74,6 +74,13 @@ static ULONG ZZ9K_REGS = 0;
 struct Sana2DeviceStats global_stats;
 BOOL is_online;
 
+/* issue #29: count of empty (firmware-cleared) RX slots the framer skipped
+ * instead of acking. Surfaced via S2_GETSPECIALSTATS as "RxEmptySlot".
+ * After this fix it should be large while BadData/Overruns drop to ~0,
+ * confirming the old counts were the empty-slot artifact, not real loss. */
+ULONG rxv_empty_slot = 0;
+#define ZZSS_RX_EMPTY_SLOT 0x5A5A0021UL
+
 /* Staging buffer for RX payload copies.
  *
  * Roadshow's BufferManagement bm_CopyToBuffer is a generic memcpy. When
@@ -302,6 +309,11 @@ SAVEDS LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
       } else {
 
       memset(&global_stats, 0, sizeof(global_stats));
+      /* Reset the file-scope diagnostic counters alongside global_stats so a
+       * close/reopen presents a consistent baseline: S2_GETGLOBALSTATS starts
+       * from zero here, and S2_GETSPECIALSTATS (RxEmptySlot) must too, else it
+       * would report totals accumulated across previous device sessions. */
+      rxv_empty_slot = 0;
 
       NEWLIST(&db->db_ReadList);
       InitSemaphore(&db->db_ReadListSem);
@@ -623,8 +635,17 @@ SAVEDS VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
     break;
   case S2_GETSPECIALSTATS:
     {
+      /* issue #29: expose RxEmptySlot — empty (firmware-cleared) RX slots the
+       * framer skipped instead of acking. ZZNetStats prints it by name. */
       struct Sana2SpecialStatHeader *s2ssh = (struct Sana2SpecialStatHeader *)ioreq->ios2_StatData;
-      if (s2ssh) s2ssh->RecordCountSupplied = 0;
+      if (s2ssh) {
+        struct Sana2SpecialStatRecord *rec =
+            (struct Sana2SpecialStatRecord *)(s2ssh + 1);
+        ULONG max = s2ssh->RecordCountMax;
+        ULONG n = 0;
+        if (n < max) { rec[n].Type = ZZSS_RX_EMPTY_SLOT; rec[n].Count = rxv_empty_slot; rec[n].String = (char*)"RxEmptySlot"; n++; }
+        s2ssh->RecordCountSupplied = n;
+      }
     }
     break;
   default:
@@ -969,6 +990,26 @@ SAVEDS void frame_proc() {
 
     USHORT sz, serial;
     zznet_read_header(frm, &sz, &serial);
+
+    /* issue #29: an all-zero header is an EMPTY (firmware-cleared) slot, not
+     * a frame. The firmware zeroes a slot when it has no frame for it, and a
+     * real frame always has serial >= 1 (frame_serial is pre-incremented, so
+     * 0 is never assigned) and size >= 14. Reading a 0 header happens
+     * routinely at the backlog drain boundary.
+     *
+     * We must NOT ack it (*rx_accept). Doing so races a frame landing in this
+     * same slot between our read and the ack: ethernet_receive_frame would
+     * then consume that real frame (advance + clear the slot) without us ever
+     * reading its payload — a silent inbound loss, invisible to the firmware
+     * (its frames_dropped stays 0). Treat an empty slot exactly like "nothing
+     * new": re-arm the IRQ and wait, leaving old_serial untouched so the next
+     * real frame's gap detection is not poisoned. */
+    if (sz == 0 && serial == 0) {
+      rxv_empty_slot++;
+      *irq_ctrl = 1;
+      recv = Wait(wmask);
+      continue;
+    }
 
     if (serial != old_serial) {
       /* Wire-level sanity check on the HW frame size. Reject frames
