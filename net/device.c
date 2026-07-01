@@ -309,6 +309,11 @@ SAVEDS LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
       } else {
 
       memset(&global_stats, 0, sizeof(global_stats));
+      /* Reset the file-scope diagnostic counters alongside global_stats so a
+       * close/reopen presents a consistent baseline: S2_GETGLOBALSTATS starts
+       * from zero here, and S2_GETSPECIALSTATS (RxEmptySlot) must too, else it
+       * would report totals accumulated across previous device sessions. */
+      rxv_empty_slot = 0;
 
       NEWLIST(&db->db_ReadList);
       InitSemaphore(&db->db_ReadListSem);
