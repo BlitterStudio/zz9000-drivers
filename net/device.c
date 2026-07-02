@@ -81,6 +81,82 @@ BOOL is_online;
 ULONG rxv_empty_slot = 0;
 #define ZZSS_RX_EMPTY_SLOT 0x5A5A0021UL
 
+/* issue #29 residual-stall ACK probe (diagnostic).
+ *
+ * The residual stall is a TCP send-side wedge: the Amiga stops advancing
+ * snd_una on an UPLOAD. The live monitor proved the card keeps delivering
+ * inbound frames with zero loss during the wedge, so the open question is
+ * whether the server's advancing cumulative ACK actually reaches the stack.
+ *
+ * We parse the TCP headers of the SMB (port 445) connection from the exact
+ * bytes on each side of the SANA-II boundary:
+ *   - inbound (server -> Amiga, src port 445): the server's cumulative ACK
+ *     = how far the server has received the Amiga's upload. Parsed from the
+ *     staged copy handed to the stack in read_frame.
+ *   - outbound (Amiga -> server, dst port 445): the Amiga's own send seq,
+ *     parsed from the staged TX-window frame in write_frame.
+ *
+ * DECISIVE read at the stall: if the Amiga keeps (re)transmitting at a seq
+ * BELOW the server's cumulative ACK (rxv_tx_seq < rxv_srv_ack), it is
+ * resending data the server has already acknowledged -> the stack is
+ * ignoring a valid ACK (send-side / stack bug), NOT the card dropping it.
+ * If instead rxv_srv_ack never reaches rxv_tx_seq_max, the server never
+ * confirmed that data -> a genuine delivery gap to chase card-side. */
+volatile ULONG rxv_srv_ack     = 0;   /* last server cumulative ack (in, src 445) */
+volatile ULONG rxv_srv_ack_upd = 0;   /* # times srv ack advanced forward         */
+volatile ULONG rxv_p445_in     = 0;   /* inbound TCP frames parsed (src 445)       */
+volatile ULONG rxv_tx_seq      = 0;   /* last outbound seq (out, dst 445)          */
+volatile ULONG rxv_tx_seq_max  = 0;   /* highest outbound seq+payload (dst 445)    */
+volatile ULONG rxv_p445_out    = 0;   /* outbound TCP frames parsed (dst 445)      */
+#define ZZSS_RX_SRV_ACK      0x5A5A0022UL
+#define ZZSS_RX_SRV_ACK_UPD  0x5A5A0023UL
+#define ZZSS_RX_P445_IN      0x5A5A0024UL
+#define ZZSS_RX_TX_SEQ       0x5A5A0025UL
+#define ZZSS_RX_TX_SEQ_MAX   0x5A5A0026UL
+#define ZZSS_RX_P445_OUT     0x5A5A0027UL
+
+/* Minimal, bounds-checked IPv4/TCP header parse over `ip` (the IP header),
+ * `len` bytes available. Reads byte-wise through a volatile pointer so it is
+ * safe on both RAM (db_RxStage) and MMIO (FPGA TX/RX window) sources and the
+ * compiler cannot coalesce a byte-combine into an unaligned wide load (the
+ * documented Cortex-A9 strongly-ordered fault applies firmware-side; byte
+ * reads are the portable rule for slot memory on both ends). Returns 1 and
+ * fills the requested out-params for an IPv4/TCP packet, else 0. */
+static int zznet_parse_ip_tcp(volatile const UBYTE *ip, ULONG len,
+                              USHORT *sport, USHORT *dport,
+                              ULONG *seq, ULONG *ack, ULONG *paylen)
+{
+	UBYTE  ihl;
+	ULONG  ip_hl, tcp_off, total_len, hdrs;
+	volatile const UBYTE *tcp;
+
+	if (len < 20)              return 0;   /* room for a min IPv4 header  */
+	if ((ip[0] >> 4) != 4)     return 0;   /* IPv4                        */
+	ihl   = ip[0] & 0x0f;
+	ip_hl = (ULONG)ihl * 4;
+	if (ip_hl < 20 || ip_hl > len) return 0;
+	if (ip[9] != 6)            return 0;   /* TCP                         */
+
+	total_len = ((ULONG)ip[2] << 8) | ip[3];
+	if (total_len > len) total_len = len;  /* clamp to what we actually have */
+	if (total_len < ip_hl + 20) return 0;  /* room for a min TCP header   */
+
+	tcp = ip + ip_hl;
+	if (sport) *sport = ((USHORT)tcp[0] << 8) | tcp[1];
+	if (dport) *dport = ((USHORT)tcp[2] << 8) | tcp[3];
+	if (seq)   *seq   = ((ULONG)tcp[4] << 24) | ((ULONG)tcp[5] << 16) |
+	                    ((ULONG)tcp[6] << 8)  |  (ULONG)tcp[7];
+	if (ack)   *ack   = ((ULONG)tcp[8] << 24) | ((ULONG)tcp[9] << 16) |
+	                    ((ULONG)tcp[10] << 8) |  (ULONG)tcp[11];
+	tcp_off = (ULONG)(tcp[12] >> 4) * 4;
+	if (tcp_off < 20) tcp_off = 20;
+	if (paylen) {
+		hdrs = ip_hl + tcp_off;
+		*paylen = (total_len > hdrs) ? (total_len - hdrs) : 0;
+	}
+	return 1;
+}
+
 /* Staging buffer for RX payload copies.
  *
  * Roadshow's BufferManagement bm_CopyToBuffer is a generic memcpy. When
@@ -314,6 +390,8 @@ SAVEDS LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
        * from zero here, and S2_GETSPECIALSTATS (RxEmptySlot) must too, else it
        * would report totals accumulated across previous device sessions. */
       rxv_empty_slot = 0;
+      rxv_srv_ack = rxv_srv_ack_upd = rxv_p445_in = 0;
+      rxv_tx_seq = rxv_tx_seq_max = rxv_p445_out = 0;
 
       NEWLIST(&db->db_ReadList);
       InitSemaphore(&db->db_ReadListSem);
@@ -643,7 +721,14 @@ SAVEDS VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
             (struct Sana2SpecialStatRecord *)(s2ssh + 1);
         ULONG max = s2ssh->RecordCountMax;
         ULONG n = 0;
-        if (n < max) { rec[n].Type = ZZSS_RX_EMPTY_SLOT; rec[n].Count = rxv_empty_slot; rec[n].String = (char*)"RxEmptySlot"; n++; }
+        if (n < max) { rec[n].Type = ZZSS_RX_EMPTY_SLOT; rec[n].Count = rxv_empty_slot;   rec[n].String = (char*)"RxEmptySlot"; n++; }
+        /* issue #29 ACK probe (send-wedge diagnostic) */
+        if (n < max) { rec[n].Type = ZZSS_RX_P445_IN;    rec[n].Count = rxv_p445_in;      rec[n].String = (char*)"P445In";     n++; }
+        if (n < max) { rec[n].Type = ZZSS_RX_SRV_ACK;    rec[n].Count = rxv_srv_ack;      rec[n].String = (char*)"SrvAck";     n++; }
+        if (n < max) { rec[n].Type = ZZSS_RX_SRV_ACK_UPD;rec[n].Count = rxv_srv_ack_upd;  rec[n].String = (char*)"SrvAckUpd";  n++; }
+        if (n < max) { rec[n].Type = ZZSS_RX_P445_OUT;   rec[n].Count = rxv_p445_out;     rec[n].String = (char*)"P445Out";    n++; }
+        if (n < max) { rec[n].Type = ZZSS_RX_TX_SEQ;     rec[n].Count = rxv_tx_seq;       rec[n].String = (char*)"TxSeq";      n++; }
+        if (n < max) { rec[n].Type = ZZSS_RX_TX_SEQ_MAX; rec[n].Count = rxv_tx_seq_max;   rec[n].String = (char*)"TxSeqMax";   n++; }
         s2ssh->RecordCountSupplied = n;
       }
     }
@@ -872,6 +957,25 @@ ULONG read_frame(DEVBASETYPE *db, struct IOSana2Req *req, volatile UBYTE *frame,
 			err = 1;
 		} else {
 			req->ios2_Req.io_Error = req->ios2_WireError = 0;
+
+			/* issue #29 ACK probe: for the SMB (445) connection, record the
+			 * server's cumulative ack from the SAME bytes the stack receives
+			 * (copy_src = the staged IP packet, non-RAW). src port 445 =
+			 * server -> Amiga. */
+			if (tp == 0x0800) {
+				USHORT sp = 0, dp = 0;
+				ULONG  ack = 0;
+				if (zznet_parse_ip_tcp((volatile const UBYTE *)copy_src,
+				                       datasize, &sp, &dp, NULL, &ack, NULL) &&
+				    sp == 445) {
+					rxv_p445_in++;
+					if (ack != rxv_srv_ack) {
+						if ((LONG)(ack - rxv_srv_ack) > 0)
+							rxv_srv_ack_upd++;
+						rxv_srv_ack = ack;
+					}
+				}
+			}
 		}
 	}
 
@@ -933,6 +1037,27 @@ ULONG write_frame(struct IOSana2Req *req, UBYTE *frame)
 	bm = (struct BufferManagement *)req->ios2_BufferManagement;
 	if (!(*bm->bm_CopyFromBuffer)(frame, req->ios2_Data, req->ios2_DataLength)) {
 		return 1;
+	}
+
+	/* issue #29 ACK probe: for the SMB (445) connection, record the Amiga's
+	 * outbound send seq from the staged TX-window frame (non-RAW: `frame` now
+	 * points at the IP packet). dst port 445 = Amiga -> server. Parsed before
+	 * the kick so it never races the FPGA DMA. Compared against rxv_srv_ack at
+	 * the stall: rxv_tx_seq < rxv_srv_ack ⇒ resending already-acked data. */
+	if (!(req->ios2_Req.io_Flags & SANA2IOF_RAW) &&
+	    (USHORT)req->ios2_PacketType == 0x0800) {
+		USHORT sp = 0, dp = 0;
+		ULONG  seq = 0, paylen = 0;
+		if (zznet_parse_ip_tcp((volatile const UBYTE *)frame,
+		                       req->ios2_DataLength, &sp, &dp,
+		                       &seq, NULL, &paylen) &&
+		    dp == 445) {
+			ULONG end = seq + paylen;
+			rxv_p445_out++;
+			rxv_tx_seq = seq;
+			if ((LONG)(end - rxv_tx_seq_max) > 0)
+				rxv_tx_seq_max = end;
+		}
 	}
 
 	{
