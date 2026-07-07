@@ -111,11 +111,21 @@
 
       (complete 40)
 
+      (set #zz-p96-profile
+         (askchoice
+            (prompt "Which ZZ9000 Picasso96Settings profile should be installed?")
+            (help "Use the Zorro II-safe profile unless this machine has a Zorro III ZZ9000. The Zorro III profile enables 1920x1080x32, which needs more framebuffer memory than the Zorro II aperture exposes.")
+            (choices "Zorro II-safe / shared profile" "Zorro III high-memory profile")
+            (default 0)))
+      (set #zz-p96-settings
+         (if (= 1 #zz-p96-profile) "Picasso96Settings-Z3" "Picasso96Settings"))
+
       (copyfiles
          (prompt "Install native ZZ9000 Picasso96Settings")
          (help "Installs the Picasso96 configuration containing ZZ9000-specific screenmodes. ZZ9000.card 2.4 and newer use the native BT_MNT_ZZ9000 board type, so this matching settings file is required when upgrading from older releases.")
-         (source "Devs/Picasso96Settings")
+         (source (tackon "Devs" #zz-p96-settings))
          (dest "Devs:")
+         (newname "Picasso96Settings")
          (confirm))
    )
 )
