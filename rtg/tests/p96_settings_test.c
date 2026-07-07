@@ -113,6 +113,7 @@ static int parse_p96_settings(struct ModeDepths *full_hd, struct ModeDepths *wid
 			if (current_w == 2560 && current_h == 1440)
 				wide_1440->saw_resolution = 1;
 		} else if (memcmp(chunk_hdr, "MIHD", 4) == 0 && size >= 9) {
+			int active = be32(data) != 0;
 			uint16_t mode_w = be16(data + 4);
 			uint16_t mode_h = be16(data + 6);
 			unsigned bit = depth_bit(data[8]);
@@ -123,6 +124,9 @@ static int parse_p96_settings(struct ModeDepths *full_hd, struct ModeDepths *wid
 				fclose(fp);
 				return 0;
 			}
+
+			if (!active)
+				continue;
 
 			if (mode_w == 1920 && mode_h == 1080)
 				full_hd->mask |= bit;
