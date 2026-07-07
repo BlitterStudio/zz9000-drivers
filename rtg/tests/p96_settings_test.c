@@ -11,9 +11,24 @@ enum {
 	DEPTH_32 = 1 << 2,
 };
 
+enum {
+	MIHD_ACTIVE = 2,
+	MIHD_WIDTH = 4,
+	MIHD_HEIGHT = 6,
+	MIHD_DEPTH = 8,
+	MIHD_HOR_TOTAL = 10,
+	MIHD_HOR_SYNC_START = 14,
+	MIHD_HOR_SYNC_SIZE = 16,
+	MIHD_VER_TOTAL = 20,
+	MIHD_VER_SYNC_START = 24,
+	MIHD_VER_SYNC_SIZE = 26,
+	MIHD_MIN_SIZE = 34,
+};
+
 struct ModeDepths {
 	int saw_resolution;
-	unsigned mask;
+	unsigned active_mask;
+	unsigned timing_mask;
 };
 
 static uint16_t be16(const uint8_t *p)
@@ -54,6 +69,25 @@ static int skip_pad_byte(FILE *fp, uint32_t size)
 		return 1;
 
 	return fgetc(fp) != EOF;
+}
+
+static int mode_timings_populated(const uint8_t *data)
+{
+	uint16_t width = be16(data + MIHD_WIDTH);
+	uint16_t height = be16(data + MIHD_HEIGHT);
+	uint16_t hor_total = be16(data + MIHD_HOR_TOTAL);
+	uint16_t hor_sync_start = be16(data + MIHD_HOR_SYNC_START);
+	uint16_t hor_sync_size = be16(data + MIHD_HOR_SYNC_SIZE);
+	uint16_t ver_total = be16(data + MIHD_VER_TOTAL);
+	uint16_t ver_sync_start = be16(data + MIHD_VER_SYNC_START);
+	uint16_t ver_sync_size = be16(data + MIHD_VER_SYNC_SIZE);
+
+	return hor_total != width &&
+		hor_sync_start != 0 &&
+		hor_sync_size != 0 &&
+		ver_total != height &&
+		ver_sync_start != 0 &&
+		ver_sync_size != 0;
 }
 
 static int parse_p96_settings(struct ModeDepths *full_hd, struct ModeDepths *wide_1440)
@@ -112,11 +146,12 @@ static int parse_p96_settings(struct ModeDepths *full_hd, struct ModeDepths *wid
 				full_hd->saw_resolution = 1;
 			if (current_w == 2560 && current_h == 1440)
 				wide_1440->saw_resolution = 1;
-		} else if (memcmp(chunk_hdr, "MIHD", 4) == 0 && size >= 9) {
-			int active = be32(data) != 0;
-			uint16_t mode_w = be16(data + 4);
-			uint16_t mode_h = be16(data + 6);
-			unsigned bit = depth_bit(data[8]);
+		} else if (memcmp(chunk_hdr, "MIHD", 4) == 0 && size >= MIHD_MIN_SIZE) {
+			int active = be16(data + MIHD_ACTIVE) != 0;
+			uint16_t mode_w = be16(data + MIHD_WIDTH);
+			uint16_t mode_h = be16(data + MIHD_HEIGHT);
+			unsigned bit = depth_bit(data[MIHD_DEPTH]);
+			int timings_populated = mode_timings_populated(data);
 
 			if (mode_w != current_w || mode_h != current_h) {
 				fprintf(stderr, "FAIL mode chunk does not match current resolution\n");
@@ -128,10 +163,16 @@ static int parse_p96_settings(struct ModeDepths *full_hd, struct ModeDepths *wid
 			if (!active)
 				continue;
 
-			if (mode_w == 1920 && mode_h == 1080)
-				full_hd->mask |= bit;
-			if (mode_w == 2560 && mode_h == 1440)
-				wide_1440->mask |= bit;
+			if (mode_w == 1920 && mode_h == 1080) {
+				full_hd->active_mask |= bit;
+				if (timings_populated)
+					full_hd->timing_mask |= bit;
+			}
+			if (mode_w == 2560 && mode_h == 1440) {
+				wide_1440->active_mask |= bit;
+				if (timings_populated)
+					wide_1440->timing_mask |= bit;
+			}
 		}
 
 		free(data);
@@ -154,20 +195,33 @@ static int expect_depths(const char *name, const struct ModeDepths *actual,
 		return 0;
 	}
 
-	if ((actual->mask & required) != required) {
+	if ((actual->active_mask & required) != required) {
 		printf("FAIL %-32s depths=0x%x required=0x%x\n",
-			name, actual->mask, required);
+			name, actual->active_mask, required);
 		return 0;
 	}
 
-	printf("ok   %s depths=0x%x\n", name, actual->mask);
+	printf("ok   %s depths=0x%x\n", name, actual->active_mask);
+	return 1;
+}
+
+static int expect_timed_depths(const char *name, const struct ModeDepths *actual,
+	unsigned required)
+{
+	if ((actual->timing_mask & required) != required) {
+		printf("FAIL %-32s timings=0x%x required=0x%x\n",
+			name, actual->timing_mask, required);
+		return 0;
+	}
+
+	printf("ok   %s timings=0x%x\n", name, actual->timing_mask);
 	return 1;
 }
 
 int main(void)
 {
-	struct ModeDepths full_hd = {0, 0};
-	struct ModeDepths wide_1440 = {0, 0};
+	struct ModeDepths full_hd = {0, 0, 0};
+	struct ModeDepths wide_1440 = {0, 0, 0};
 	int ok = 1;
 
 	if (!parse_p96_settings(&full_hd, &wide_1440))
@@ -175,7 +229,11 @@ int main(void)
 
 	ok &= expect_depths("Picasso96 1920x1080 test mode", &full_hd,
 		DEPTH_8 | DEPTH_16 | DEPTH_32);
+	ok &= expect_timed_depths("Picasso96 1920x1080 timings", &full_hd,
+		DEPTH_8 | DEPTH_16 | DEPTH_32);
 	ok &= expect_depths("Picasso96 2560x1440 baseline", &wide_1440,
+		DEPTH_8 | DEPTH_16);
+	ok &= expect_timed_depths("Picasso96 2560x1440 timings", &wide_1440,
 		DEPTH_8 | DEPTH_16);
 
 	if (!ok)
