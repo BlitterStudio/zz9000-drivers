@@ -160,16 +160,15 @@ static int parse_p96_settings(struct ModeDepths *full_hd, struct ModeDepths *wid
 				return 0;
 			}
 
-			if (!active)
-				continue;
-
 			if (mode_w == 1920 && mode_h == 1080) {
-				full_hd->active_mask |= bit;
+				if (active)
+					full_hd->active_mask |= bit;
 				if (timings_populated)
 					full_hd->timing_mask |= bit;
 			}
 			if (mode_w == 2560 && mode_h == 1440) {
-				wide_1440->active_mask |= bit;
+				if (active)
+					wide_1440->active_mask |= bit;
 				if (timings_populated)
 					wide_1440->timing_mask |= bit;
 			}
@@ -195,13 +194,13 @@ static int expect_depths(const char *name, const struct ModeDepths *actual,
 		return 0;
 	}
 
-	if ((actual->active_mask & required) != required) {
-		printf("FAIL %-32s depths=0x%x required=0x%x\n",
+	if (actual->active_mask != required) {
+		printf("FAIL %-32s active=0x%x required=0x%x\n",
 			name, actual->active_mask, required);
 		return 0;
 	}
 
-	printf("ok   %s depths=0x%x\n", name, actual->active_mask);
+	printf("ok   %s active=0x%x\n", name, actual->active_mask);
 	return 1;
 }
 
@@ -228,7 +227,7 @@ int main(void)
 		return 1;
 
 	ok &= expect_depths("Picasso96 1920x1080 test mode", &full_hd,
-		DEPTH_8 | DEPTH_16 | DEPTH_32);
+		DEPTH_8 | DEPTH_16);
 	ok &= expect_timed_depths("Picasso96 1920x1080 timings", &full_hd,
 		DEPTH_8 | DEPTH_16 | DEPTH_32);
 	ok &= expect_depths("Picasso96 2560x1440 baseline", &wide_1440,
