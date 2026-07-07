@@ -63,7 +63,7 @@ normal AmigaOS file.
 | Area | Artifact | Installed to | Notes |
 |------|----------|--------------|-------|
 | RTG graphics | `ZZ9000.card` | `Libs:Picasso96/` | Picasso96 RTG driver using the native `BT_MNT_ZZ9000` board identity in current builds. |
-| P96 settings | `Picasso96Settings` | `Devs:` | Installer backs up an existing file to `Devs:Picasso96Settings.pre-ZZ9000-2.4`. |
+| P96 settings | `Picasso96Settings` / `Picasso96Settings-Z3` | `Devs:Picasso96Settings` | Installer backs up an existing file to `Devs:Picasso96Settings.pre-ZZ9000-2.4` and offers a Zorro III high-memory profile with 1920x1080x32 enabled. |
 | Networking | `ZZ9000Net.device` | `Devs:Networks/` | SANA-II Ethernet driver. |
 | Network template | `ZZ9000Net` | `Devs:NetInterfaces/` | Optional Roadshow DHCP template installed by the installer. |
 | Network diagnostics | `ZZNetStats` | `C:` | Dumps SANA-II counters plus firmware RX backlog/drop registers. |

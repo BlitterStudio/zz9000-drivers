@@ -24,7 +24,8 @@ installer/
     │   ├── sdk-README.md             SDK runtime doc populated by CI
     │   └── amissl-README.md          Accelerated AmiSSL doc populated by CI
     ├── Devs/
-    │   ├── Picasso96Settings         P96 screenmode config  (committed)
+    │   ├── Picasso96Settings         Zorro II-safe P96 screenmode config  (committed)
+    │   ├── Picasso96Settings-Z3      Zorro III high-memory P96 config  (committed)
     │   ├── USBHardware/              ← zzusbhw.device populated by CI
     │   ├── NetInterfaces/
     │   │   └── ZZ9000Net             Roadshow NetInterface template  (committed)
@@ -63,10 +64,13 @@ Installer drawer on its own — CI must have populated it, or you must
 copy the binaries in by hand.
 
 `ZZ9000.card` 2.4 and newer uses the native `BT_MNT_ZZ9000` Picasso96
-board type. Upgrade tests should copy the committed
-`ZZ9000Installer/Devs/Picasso96Settings` file along with the new RTG
+board type. Upgrade tests should copy one of the committed
+`ZZ9000Installer/Devs/Picasso96Settings*` files along with the new RTG
 driver; old settings saved under the legacy `uaegfx` board type are not
-guaranteed to attach to the new driver identity.
+guaranteed to attach to the new driver identity. The default
+`Picasso96Settings` profile is safe for Zorro II and Zorro III. The
+`Picasso96Settings-Z3` profile enables 1920x1080x32 and should only be
+installed on Zorro III systems.
 The installer backs up the previous settings file as
 `Devs:Picasso96Settings.pre-ZZ9000-2.4` before installing the migrated
 settings file.

@@ -4,6 +4,7 @@
 #include <string.h>
 
 #define SETTINGS_PATH "../../installer/ZZ9000Installer/Devs/Picasso96Settings"
+#define SETTINGS_Z3_PATH "../../installer/ZZ9000Installer/Devs/Picasso96Settings-Z3"
 
 enum {
 	DEPTH_8 = 1 << 0,
@@ -90,16 +91,17 @@ static int mode_timings_populated(const uint8_t *data)
 		ver_sync_size != 0;
 }
 
-static int parse_p96_settings(struct ModeDepths *full_hd, struct ModeDepths *wide_1440)
+static int parse_p96_settings(const char *settings_path,
+	struct ModeDepths *full_hd, struct ModeDepths *wide_1440)
 {
 	FILE *fp;
 	uint8_t hdr[12];
 	uint16_t current_w = 0;
 	uint16_t current_h = 0;
 
-	fp = fopen(SETTINGS_PATH, "rb");
+	fp = fopen(settings_path, "rb");
 	if (!fp) {
-		perror(SETTINGS_PATH);
+		perror(settings_path);
 		return 0;
 	}
 
@@ -221,18 +223,30 @@ int main(void)
 {
 	struct ModeDepths full_hd = {0, 0, 0};
 	struct ModeDepths wide_1440 = {0, 0, 0};
+	struct ModeDepths z3_full_hd = {0, 0, 0};
+	struct ModeDepths z3_wide_1440 = {0, 0, 0};
 	int ok = 1;
 
-	if (!parse_p96_settings(&full_hd, &wide_1440))
+	if (!parse_p96_settings(SETTINGS_PATH, &full_hd, &wide_1440))
+		return 1;
+	if (!parse_p96_settings(SETTINGS_Z3_PATH, &z3_full_hd, &z3_wide_1440))
 		return 1;
 
-	ok &= expect_depths("Picasso96 1920x1080 test mode", &full_hd,
+	ok &= expect_depths("Picasso96 shared 1920x1080", &full_hd,
 		DEPTH_8 | DEPTH_16);
-	ok &= expect_timed_depths("Picasso96 1920x1080 timings", &full_hd,
+	ok &= expect_timed_depths("Picasso96 shared 1920x1080 timings", &full_hd,
+		DEPTH_8 | DEPTH_16 | DEPTH_32);
+	ok &= expect_depths("Picasso96 Z3 1920x1080", &z3_full_hd,
+		DEPTH_8 | DEPTH_16 | DEPTH_32);
+	ok &= expect_timed_depths("Picasso96 Z3 1920x1080 timings", &z3_full_hd,
 		DEPTH_8 | DEPTH_16 | DEPTH_32);
 	ok &= expect_depths("Picasso96 2560x1440 baseline", &wide_1440,
 		DEPTH_8 | DEPTH_16);
 	ok &= expect_timed_depths("Picasso96 2560x1440 timings", &wide_1440,
+		DEPTH_8 | DEPTH_16);
+	ok &= expect_depths("Picasso96 Z3 2560x1440 baseline", &z3_wide_1440,
+		DEPTH_8 | DEPTH_16);
+	ok &= expect_timed_depths("Picasso96 Z3 2560x1440 timings", &z3_wide_1440,
 		DEPTH_8 | DEPTH_16);
 
 	if (!ok)
