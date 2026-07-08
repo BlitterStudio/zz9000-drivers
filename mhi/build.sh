@@ -25,6 +25,15 @@ if [ ! -d "$script_dir/zz9k-headers/zz9k" ]; then
   echo "       sibling directory or set ZZ9000_SDK=/path/to/zz9000-sdk." >&2
   exit 1
 fi
+# Fail with a clear message instead of a compile error when the staged SDK
+# predates the audio-playback API this driver is built on.
+if ! grep -q "ZZ9K_LIBRARY_MIN_REVISION_AUDIO_PLAYBACK" \
+    "$script_dir/zz9k-headers/zz9k/library_vectors.h"; then
+  echo "ERROR: the staged zz9000-sdk headers lack audio-playback support" >&2
+  echo "       (ZZ9K_LIBRARY_MIN_REVISION_AUDIO_PLAYBACK). Point ZZ9000_SDK" >&2
+  echo "       at a checkout that includes the audio-playback-op changes." >&2
+  exit 1
+fi
 
 cd "$script_dir"
 
