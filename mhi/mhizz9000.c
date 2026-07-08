@@ -755,8 +755,13 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 		KPrintF("Can't open zz9k.library.\n");
 		return NULL;
 	}
-	if(base->lib_Revision < ZZ9K_LIBRARY_MIN_REVISION_AUDIO_PLAYBACK) {
-		KPrintF("zz9k.library too old for audio playback.\n");
+	// ALLOC_FLAGS (rev 26) rather than AUDIO_PLAYBACK (rev 25): this
+	// driver passes ZZ9K_ALLOC_HOST_WINDOW/CARD_ONLY, and it is the
+	// LIBRARY that strips HOST_WINDOW on Zorro 3. An older library
+	// forwards the bit verbatim and new firmware would then place the
+	// staging buffer inside Z3 P96 VRAM -- refuse the skew instead.
+	if(base->lib_Revision < ZZ9K_LIBRARY_MIN_REVISION_ALLOC_FLAGS) {
+		KPrintF("zz9k.library too old for alloc flags.\n");
 		CloseLibrary(base);
 		return NULL;
 	}
