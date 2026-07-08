@@ -555,15 +555,23 @@ static void mhi_feeder(void) {
 	}
 
 out:
-	if(mp->feeder_state != 1) mp->feeder_state = 2;
-	KPrintF("feeder: exit (state %ld)\n", (LONG)mp->feeder_state);
+	KPrintF("feeder: exit\n");
 	if(dev_open) CloseDevice((struct IORequest *)treq);
 	if(treq) DeleteIORequest((struct IORequest *)treq);
 	if(port) DeleteMsgPort(port);
 	if(sig >= 0) FreeSignal(sig);
-	// Last touch of mp: after this the owner may free it.
+	// Single final mp access: AllocDecoder frees the player the moment
+	// it observes feeder_state == 2, and FreeDecoder the moment it
+	// observes feeder_task == NULL -- so whichever exit this is, its
+	// publication must be the LAST thing that touches mp (publishing
+	// failure before the resource cleanup above was a use-after-free
+	// window on the startup-failure path).
 	Forbid();
-	mp->feeder_task = NULL;
+	if(mp->feeder_state == 1) {
+		mp->feeder_task = NULL;   // normal exit (quit requested)
+	} else {
+		mp->feeder_state = 2;     // startup failure; task was never set
+	}
 	Permit();
 }
 
