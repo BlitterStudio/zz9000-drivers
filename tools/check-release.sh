@@ -86,6 +86,8 @@ tracked_artifacts=$(
         ahi/driver/ZZ9000AX \
         mhi/mhizz9000.library \
         mhi/mhizz9000.library.debug \
+        mhi/mhizz9000.library.trace \
+        mhi/mhizz9000.library.trace.debug \
         sd-boot/zzsd.device \
         sd-boot/boot-rom/boot.bin \
         ZZFwUpdate/ZZFwUpdate \

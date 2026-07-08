@@ -150,7 +150,7 @@ class RepoToolingTests(unittest.TestCase):
             r"ZZDiag/ZZDiag|"
             r"ahi/driver/ZZ9000AX|"
             r"ahi/axtest/axtest|"
-            r"mhi/mhizz9000\.library(\.debug)?|"
+            r"mhi/mhizz9000\.library(\.trace)?(\.debug)?|"
             r"net/ZZNetStats/ZZNetStats|"
             r"sd-boot/zzsd\.device|"
             r"sd-boot/boot-rom/boot\.bin)$"
