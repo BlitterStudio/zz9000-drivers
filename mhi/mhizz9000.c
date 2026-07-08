@@ -371,15 +371,31 @@ static void mhi_stream_close(struct MhiPlayer *mp) {
 /*  END feed engine    */
 /* ******************* */
 
+// Keep-alive throttle: one safety-net signal per this many audio periods
+// (20 ms each) while driver-held data is outstanding.
+#define ZZ_MHI_TICKLE_PERIODS 64
+
 extern ULONG dev_sisr(struct MhiPlayer *mp asm("a1"));
 ULONG cdev_sisr(struct MhiPlayer *mp asm("a1")) {
-	// Pacing only. The card decodes and plays on its own (core-1 decode +
-	// firmware pump); the sole per-period duty left on the 68k is waking
-	// the application when the driver still holds unfed data, so one of
-	// our entry points continues feeding from task context. No register
-	// writes, no mailbox calls (interrupt context).
+	// Signal contract (same as the legacy driver): the application is
+	// signalled when a buffer COMPLETES -- that happens in the feed
+	// engine, in task context, at real playback pace. Signalling every
+	// period whenever data was merely outstanding made AmigaAMP's time
+	// display race ahead of playback (it derives progress from signal
+	// activity). Feed retries are driven by the app's own entry points
+	// (GetStatus/QueueBuffer/GetEmpty all run the feed engine); the soft
+	// IRQ only adds a heavily throttled keep-alive so a purely
+	// signal-driven app cannot stall out with data still queued. No
+	// register writes, no mailbox calls (interrupt context).
 	if(mp->Status != MHIF_PLAYING) return 0;
-	if(mp->have_unfed || mp->backpressure) mhi_signal_app(mp);
+	if(mp->have_unfed || mp->backpressure) {
+		if(++mp->tickle >= ZZ_MHI_TICKLE_PERIODS) {
+			mp->tickle = 0;
+			mhi_signal_app(mp);
+		}
+	} else {
+		mp->tickle = 0;
+	}
 	return 0;
 }
 

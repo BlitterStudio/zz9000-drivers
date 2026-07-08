@@ -68,6 +68,8 @@ struct MhiPlayer {
 	ULONG staged_index;
 	ULONG staged_chunk;
 	ULONG staged_gen;
+
+	ULONG tickle;                /* soft-IRQ keep-alive throttle counter */
 };
 
 struct ListNode {
