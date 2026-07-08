@@ -65,17 +65,14 @@ struct Library *ZZ9KBase;
 // ~250 ms; a 32K quantum bunched completions into multi-second jumps
 // of the player's time display.
 #define ZZ_MHI_STAGING_BYTES   (4UL * 1024UL)
-// Card-side compressed ring. The size is a LIVENESS constraint, not
-// just tuning: a strictly signal-driven app (AmigaAMP) only services
-// the driver when a buffer completes, so (a) the ring plus the PCM
-// ring must absorb the app's ENTIRE first buffer during Play's
-// prebuffer or the first completion signal never fires and playback
-// never starts, and (b) the card-side runway must outlast one full
-// app-buffer period between completion signals or steady-state
-// underruns. AmigaAMP queues 32K buffers; 32K here (+ ~350 ms decoded
-// PCM) satisfies both at any bitrate, matches the legacy driver's
-// 32K FIFO fill target, and keeps the seek/display lead at the legacy
-// ~2 s. Do not shrink it below the largest app buffer size.
+// Card-side compressed ring. Pure tuning, NOT a liveness constraint:
+// the feeder process makes feed progress on its own, so playback works
+// for ANY application buffer size (AmigaAMP offers 16K up to
+// whole-file) and for apps that never poll. The ring only sets the
+// underrun runway (this + ~350 ms decoded PCM) against scheduling
+// hiccups, and how far the time display leads the speakers, since
+// everything in it counts as played (32K is ~2 s at 128 kbit/s --
+// the legacy driver's FIFO fill target).
 #define ZZ_MHI_MP3_RING_BYTES  (32UL * 1024UL)
 // Card-side PCM ring the firmware pump plays from: 16 periods of 3840
 // bytes (~320 ms of 48 kHz stereo).
