@@ -505,6 +505,12 @@ static void mhi_feeder(void) {
 			if(!CheckIO((struct IORequest *)treq))
 				AbortIO((struct IORequest *)treq);
 			WaitIO((struct IORequest *)treq);
+			// WaitIO can reap an already-replied message WITHOUT
+			// consuming the port's signal bit (e.g. after a wake
+			// aborted the timer). A stale bit makes every later
+			// Wait return instantly -- the feeder then spins at
+			// mailbox-op speed and pins the CPU (bench round 8).
+			SetSignal(0, 1UL << port->mp_SigBit);
 		} else {
 			// Idle: sleep until something changes.
 			Wait(mp->feeder_wake_mask);
