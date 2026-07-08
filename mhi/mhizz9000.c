@@ -737,10 +737,13 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 	g_feeder_mp = mp;
 	mp->feeder_state = 0;
 	mp->feeder_quit = FALSE;
+	// Priority 5: the feeder must keep its retry cadence under load
+	// (busy apps, disk activity run at 0); its work per wake is a few
+	// short mailbox ops, so it cannot hog anything.
 	if(!CreateNewProcTags(NP_Entry, (ULONG)mhi_feeder,
 	                      NP_Name, (ULONG)"mhizz9000 feeder",
 	                      NP_StackSize, 16384,
-	                      NP_Priority, 0,
+	                      NP_Priority, 5,
 	                      TAG_DONE)) {
 		mp->feeder_state = 2;
 	}
