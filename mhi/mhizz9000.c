@@ -507,8 +507,16 @@ static void mhi_feeder(void) {
 		ULONG sigs;
 
 		ObtainSemaphore(&mp->io_lock);
+		// Feed ONLY while PLAYING. MHIPause unbinds the AX output but keeps
+		// the session open (Status == MHIF_PAUSED), and mhi_feed_pending()
+		// marks a fully-handed buffer Played and signals the app -- and MHI
+		// apps advance their elapsed-time accounting per completion signal.
+		// Feeding while paused would therefore let the app clock and reclaim
+		// buffers with no audio playing, unlike the legacy interrupt path
+		// which stopped buffer-completion progress at Pause. Resume flips
+		// Status back to MHIF_PLAYING before waking us, so nothing is lost.
 		if(!mp->feeder_quit && mp->session != 0 &&
-		   (mp->Status == MHIF_PLAYING || mp->Status == MHIF_PAUSED)) {
+		   mp->Status == MHIF_PLAYING) {
 			mhi_feed_pending(mp);
 			mhi_try_bind(mp);
 			busy = mp->have_unfed || mp->backpressure ||
