@@ -7,10 +7,8 @@
 // #define MHIF_OUT_OF_DATA    2
 // #define MHIF_PAUSED         3
 
-typedef enum {
-	FIFO_PREFILL,
-	FIFO_OPERATIONAL
-} FIFO_MODE;
+#include "zz9k/audio.h"
+#include "zz9k/host.h"
 
 struct MHI_LibBase {
 	struct Library mhi_Library;
@@ -32,24 +30,32 @@ struct MhiPlayer {
 	struct MinList *BufferList;
 	ULONG Status;
 
-	FIFO_MODE FifoMode;
-	unsigned short FifoWriteIdx;
-
 	struct Interrupt irq;
 	struct Interrupt sirq;
 
 	ULONG hw_addr;
-	ULONG mp3_addr;
-	ULONG encoded_offset;
-	ULONG decode_offset;
-	ULONG decode_chunk_sz;
-	ULONG buf_offset;
-	
+
 	UBYTE flags;
 	UBYTE zorro_version;
 	UBYTE volume;
 	UBYTE panning;
 
+	/*
+	 * SDK audio-stream session state. Decode runs on the card's second
+	 * CPU core; the firmware's AX playback pump feeds the audio DMA
+	 * straight from the session's PCM ring, so PCM never crosses Zorro
+	 * and this driver does no per-period work at all.
+	 */
+	ULONG session;               /* 0 = no session open */
+	ZZ9KSharedBuffer staging;    /* 68k -> card chunk transport */
+	ZZ9KSharedBuffer mp3_ring;   /* card-side compressed ring */
+	ZZ9KSharedBuffer pcm_ring;   /* card-side PCM ring (pump-consumed) */
+	ZZ9KAudioStreamResult result;
+	UBYTE rings_allocated;
+	UBYTE backpressure;          /* card mp3 ring full; retry later */
+	UBYTE have_unfed;            /* queued app data not yet on the card */
+	UBYTE pad0;
+	ULONG list_gen;              /* bumped on drain: aborts in-flight feeds */
 };
 
 struct ListNode {
@@ -61,4 +67,3 @@ struct ListNode {
 };
 
 #endif
-
