@@ -70,6 +70,8 @@ struct MhiPlayer {
 	ULONG staged_gen;
 
 	ULONG tickle;                /* soft-IRQ keep-alive throttle counter */
+	UBYTE play_pending;          /* PLAYING, but AX bind deferred until
+	                                the card has decoded PCM + rate */
 };
 
 struct ListNode {

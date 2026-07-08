@@ -53,11 +53,20 @@
 // allocation (there is at most one decoder).
 struct Library *ZZ9KBase;
 
-// 68k -> card transport chunk (one FEED per chunk).
-#define ZZ_MHI_STAGING_BYTES   (32UL * 1024UL)
-// Card-side compressed ring: generous, so a whole set of queued app
-// buffers usually fits and backpressure stays exceptional.
-#define ZZ_MHI_MP3_RING_BYTES  (128UL * 1024UL)
+// 68k -> card transport chunk (one FEED per chunk). Small on purpose:
+// an app buffer completes (and is signalled/reclaimable) only when its
+// LAST byte is accepted, so the acceptance quantum bounds how far a
+// completion can land from its real-time position. 4K at 128 kbit/s is
+// ~250 ms; a 32K quantum bunched completions into multi-second jumps
+// of the player's time display.
+#define ZZ_MHI_STAGING_BYTES   (4UL * 1024UL)
+// Card-side compressed ring, a deliberate compromise: it is playback
+// runway against a silent application (must comfortably outlast the
+// soft-IRQ keep-alive interval even at 320 kbit/s), but everything in
+// it is data the app already counts as played, so it also bounds how
+// far the time display leads the speakers (64K is ~4 s at 128 kbit/s;
+// the legacy FIFO led by ~2 s).
+#define ZZ_MHI_MP3_RING_BYTES  (64UL * 1024UL)
 // Card-side PCM ring the firmware pump plays from: 16 periods of 3840
 // bytes (~320 ms of 48 kHz stereo).
 #define ZZ_MHI_PCM_RING_BYTES  (61440UL)
@@ -221,6 +230,8 @@ void UserLibCleanup(struct MHI_LibBase *MhiLibBase) {
 /*  BEGIN feed engine    */
 /* ********************* */
 
+static void enable_hw_audio(struct MhiPlayer *mp);
+
 static void mhi_signal_app(struct MhiPlayer *mp) {
 	if(mp->MhiTask && mp->MhiMask) Signal(mp->MhiTask, mp->MhiMask);
 }
@@ -365,6 +376,41 @@ static void mhi_stream_close(struct MhiPlayer *mp) {
 	(void)ZZ9KAudioStreamClose(mp->session, 0, &r);
 	mp->session = 0;
 	mp->staged_valid = FALSE;
+	mp->play_pending = FALSE;
+}
+
+// Complete a deferred Play: bind the session to the AX output once the
+// card has decoded PCM and knows the sample rate. MHIPlay may legally
+// arrive BEFORE any data is queued (the legacy driver allowed it, and
+// seeking apps rely on it: Stop, Play, then requeue from the new file
+// position), so Play sets play_pending and the bind happens here, from
+// whichever entry point feeds the decisive chunk. Task context only.
+static void mhi_try_bind(struct MhiPlayer *mp) {
+	if(!mp->play_pending || mp->session == 0) return;
+	if((mp->result.flags & ZZ9K_AUDIO_STREAM_RESULT_PCM_READY) == 0 ||
+	   mp->result.sample_rate == 0) {
+		return;
+	}
+	if(ZZ9KAudioStreamPlay(mp->session, 0, &mp->result) != ZZ9K_STATUS_OK) {
+		KPrintF("mhi_try_bind: PLAY rejected.\n");
+		return;
+	}
+	// Enable the pacing IRQ only while actually PLAYING; a Stop/Pause
+	// that raced the mailbox call above wins here.
+	Forbid();
+	mp->play_pending = FALSE;
+	if(mp->Status == MHIF_PLAYING) {
+		enable_hw_audio(mp);
+	}
+	Permit();
+	KPrintF("mhi_try_bind: HW audio enabled.\n");
+}
+
+// Standard entry-point service: move queued data to the card, then
+// finish a deferred Play if the decisive data just arrived.
+static void mhi_service(struct MhiPlayer *mp) {
+	mhi_feed_pending(mp);
+	mhi_try_bind(mp);
 }
 
 /* ******************* */
@@ -586,6 +632,7 @@ void i_MHIFreeDecoder(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibB
 	// in-flight MMIO (Codex HIGH finding).
 	Forbid();
 	mp->Status = MHIF_STOPPED;
+	mp->play_pending = FALSE;
 	disable_hw_audio(mp);
 	drain_buffer_list_locked(mp);
 	Permit();
@@ -687,9 +734,10 @@ BOOL i_MHIQueueBuffer(REGA3(APTR mhi_handle), REGA0(APTR mhi_buffer), REGD0(ULON
 	KPrintF("MHIQueueBuffer: Adr=0x%08lX\n", mhi_buffer);
 
 	// Opportunistic feed from task context: while playing (or prebuffered
-	// before Play), push as much of the queue to the card as it accepts.
+	// before Play), push as much of the queue to the card as it accepts,
+	// and complete a deferred Play once the card is ready.
 	if(mp->session != 0) {
-		mhi_feed_pending(mp);
+		mhi_service(mp);
 	}
 
 	return TRUE;
@@ -724,7 +772,7 @@ APTR i_MHIGetEmpty(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase
 
 	// Keep the card fed whenever the app services the driver.
 	if(mp->session != 0 && mp->Status == MHIF_PLAYING) {
-		mhi_feed_pending(mp);
+		mhi_service(mp);
 	}
 	return mhi_buffer;
 }
@@ -740,12 +788,14 @@ UBYTE i_MHIGetStatus(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBa
 
 	if(mp->Status == MHIF_PLAYING && mp->session != 0) {
 		// Service the feed while we're here (task context).
-		mhi_feed_pending(mp);
-		if(!mp->have_unfed) {
+		mhi_service(mp);
+		if(!mp->have_unfed && !mp->play_pending) {
 			// Everything is on the card; probe it. PLAY on the
 			// already-bound session is idempotent and returns fresh
 			// stream state: no PCM left and nothing queued means the
-			// stream has drained.
+			// stream has drained. (Skipped while a deferred Play is
+			// still waiting for data -- an empty new session must not
+			// read as end-of-stream.)
 			ZZ9KAudioStreamResult r;
 			if(ZZ9KAudioStreamPlay(mp->session, 0, &r) == ZZ9K_STATUS_OK &&
 			   (r.flags & ZZ9K_AUDIO_STREAM_RESULT_PCM_READY) == 0) {
@@ -790,22 +840,30 @@ void i_MHIPlay(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 				if(!mp->have_unfed || mp->backpressure) break;
 			}
 
-			if(ZZ9KAudioStreamPlay(mp->session, 0, &mp->result) != ZZ9K_STATUS_OK) {
-				KPrintF("MHIPlay: PLAY rejected.\n");
-				return;
-			}
-
-			// Status must be PLAYING BEFORE enable_hw_audio so
-			// cdev_sisr's Status gate is open when the first hard ISR
-			// fires. Forbid so a racing Stop can't interleave between
-			// the two statements.
+			// Report PLAYING right away and bind when the card is
+			// ready. Play may legally arrive with an empty (or too
+			// short) queue -- notably on a seek, where the app stops,
+			// calls Play, and requeues from the new file position --
+			// so a not-yet-ready card must not fail the call. Status
+			// flips BEFORE the bind so cdev_sisr's gate is open when
+			// the first hard ISR fires; Forbid so a racing Stop can't
+			// interleave.
 			Forbid();
 			mp->Status = MHIF_PLAYING;
-			enable_hw_audio(mp);
+			mp->play_pending = TRUE;
 			Permit();
-			KPrintF("MHIPlay: HW audio enabled.\n");
+			mhi_try_bind(mp);
 		break;
 		case MHIF_PAUSED:
+			if(mp->play_pending) {
+				// Paused before the deferred bind completed: just
+				// rearm; the bind happens when data arrives.
+				Forbid();
+				mp->Status = MHIF_PLAYING;
+				Permit();
+				mhi_try_bind(mp);
+				break;
+			}
 			// Resume: the session (and its PCM ring) survived Pause,
 			// so re-binding continues gaplessly.
 			if(ZZ9KAudioStreamPlay(mp->session, 0, &mp->result) != ZZ9K_STATUS_OK) {
@@ -842,6 +900,7 @@ void i_MHIStop(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 	old = mp->Status;
 	disable_hw_audio(mp);
 	mp->Status = MHIF_STOPPED;
+	mp->play_pending = FALSE;
 	drain_buffer_list_locked(mp);
 	mp->backpressure = FALSE;
 	Permit();
