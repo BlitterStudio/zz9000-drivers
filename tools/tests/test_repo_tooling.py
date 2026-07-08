@@ -66,7 +66,11 @@ class RepoToolingTests(unittest.TestCase):
 
     def test_ci_audio_jobs_use_build_scripts(self):
         ci = self.read(".github/workflows/ci.yml")
-        self.assertIn('-w /src/mhi "$AMIGA_IMAGE" ./build.sh', ci)
+        # mhi/build.sh stages zz9k headers from an SDK checkout on the
+        # host before re-execing into docker itself, so the CI job must
+        # check out the SDK and call the script host-side.
+        self.assertIn("repository: BlitterStudio/zz9000-sdk", ci)
+        self.assertIn('ZZ9000_SDK="$PWD/.zz9000-sdk" mhi/build.sh', ci)
         self.assertIn('-w /src/ahi/driver "$AMIGA_IMAGE" ./build.sh', ci)
 
     def test_release_script_mentions_every_packaged_artifact(self):
