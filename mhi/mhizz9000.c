@@ -428,7 +428,21 @@ static void mhi_try_bind(struct MhiPlayer *mp) {
 	if(mp->Status != MHIF_PLAYING) return;
 	if((mp->result.flags & ZZ9K_AUDIO_STREAM_RESULT_PCM_READY) == 0 ||
 	   mp->result.sample_rate == 0) {
-		return;
+		// The cached FEED result can be stale: once every queued chunk
+		// has been accepted there is no further FEED to refresh
+		// mp->result, so PCM readiness the card reaches after that last
+		// FEED would never be observed and play_pending would stick
+		// forever (MHIF_PLAYING reported, no audio). Probe the live
+		// state with a zero-length READ -- it consumes no PCM and does
+		// not bind, but re-runs the decoder and returns fresh
+		// flags/sample_rate. (A zero-length FEED is not an option: the
+		// SDK builder rejects it unless EOF is set.)
+		if(ZZ9KAudioStreamRead(mp->session, 0, 0, &mp->result)
+		   != ZZ9K_STATUS_OK)
+			return;
+		if((mp->result.flags & ZZ9K_AUDIO_STREAM_RESULT_PCM_READY) == 0 ||
+		   mp->result.sample_rate == 0)
+			return;
 	}
 	if(ZZ9KAudioStreamPlay(mp->session, 0, &mp->result) != ZZ9K_STATUS_OK) {
 		KPrintF("mhi_try_bind: PLAY rejected.\n");
@@ -1101,14 +1115,42 @@ void i_MHIPlay(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 				break;
 			}
 			// Resume: the session (and its PCM ring) survived Pause,
-			// so re-binding continues gaplessly.
+			// so re-binding continues gaplessly. A Stop can race between
+			// the switch reading PAUSED above and this transition: it
+			// flips Status to STOPPED under Forbid, then blocks on
+			// io_lock to close the session. Only Stop moves PAUSED to a
+			// non-PAUSED state, so re-check Status == MHIF_PAUSED under
+			// Forbid both before the blocking rebind (skip a pointless
+			// bind Stop is about to undo) and before publishing PLAYING
+			// (do not overwrite STOPPED and strand the transport with a
+			// closed session under MHIF_PLAYING, which has no MHIPlay
+			// case to reopen). io_lock keeps our rebind ordered ahead of
+			// Stop's close.
 			ObtainSemaphore(&mp->io_lock);
+			Forbid();
+			if(mp->Status != MHIF_PAUSED) {
+				Permit();
+				ReleaseSemaphore(&mp->io_lock);
+				KPrintF("MHIPlay: resume cancelled by racing Stop.\n");
+				break;
+			}
+			Permit();
 			if(ZZ9KAudioStreamPlay(mp->session, 0, &mp->result) != ZZ9K_STATUS_OK) {
 				ReleaseSemaphore(&mp->io_lock);
 				KPrintF("MHIPlay: resume rejected.\n");
 				return;
 			}
+			Forbid();
+			if(mp->Status != MHIF_PAUSED) {
+				// Stop landed during the blocking rebind; it owns the
+				// STOPPED state and will close the session under io_lock.
+				Permit();
+				ReleaseSemaphore(&mp->io_lock);
+				KPrintF("MHIPlay: resume cancelled by racing Stop.\n");
+				break;
+			}
 			mp->Status = MHIF_PLAYING;
+			Permit();
 			ReleaseSemaphore(&mp->io_lock);
 			mhi_wake_feeder(mp);
 		break;
