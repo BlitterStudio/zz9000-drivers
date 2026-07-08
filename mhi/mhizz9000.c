@@ -652,28 +652,38 @@ static void disable_hw_audio(struct MhiPlayer *mp) {
  */
 APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 	struct MhiPlayer *mp = NULL;
+	BOOL opened_base = FALSE;
 
 	// The modern decoder path runs through zz9k.library audio-stream
 	// sessions plus the firmware's AX playback binding; require both.
+	// A non-NULL ZZ9KBase belongs to an ALREADY ACTIVE decoder whose
+	// feeder is using it right now: failure paths below may only close
+	// what THIS call opened, or probing a second decoder would tear the
+	// library out from under live playback.
 	if(!ZZ9KBase) {
 		ZZ9KBase = OpenLibrary((STRPTR)"zz9k.library", 0);
-	}
-	if(!ZZ9KBase) {
-		KPrintF("Can't open zz9k.library.\n");
-		return NULL;
+		if(!ZZ9KBase) {
+			KPrintF("Can't open zz9k.library.\n");
+			return NULL;
+		}
+		opened_base = TRUE;
 	}
 	if(ZZ9KBase->lib_Revision < ZZ9K_LIBRARY_MIN_REVISION_AUDIO_PLAYBACK) {
 		KPrintF("zz9k.library too old for audio playback.\n");
-		CloseLibrary(ZZ9KBase);
-		ZZ9KBase = NULL;
+		if(opened_base) {
+			CloseLibrary(ZZ9KBase);
+			ZZ9KBase = NULL;
+		}
 		return NULL;
 	}
 
 	mp = AllocVec(sizeof(struct MhiPlayer), MEMF_CLEAR);
 	if(!mp) {
 		KPrintF("Can't allocate MhiPlayer.\n");
-		CloseLibrary(ZZ9KBase);
-		ZZ9KBase = NULL;
+		if(opened_base) {
+			CloseLibrary(ZZ9KBase);
+			ZZ9KBase = NULL;
+		}
 		return NULL;
 	}
 
@@ -690,8 +700,10 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 	mp->BufferList = AllocVec(sizeof(struct MinList), MEMF_PUBLIC|MEMF_CLEAR);
 	if(!mp->BufferList) {
 		FreeVec(mp);
-		CloseLibrary(ZZ9KBase);
-		ZZ9KBase = NULL;
+		if(opened_base) {
+			CloseLibrary(ZZ9KBase);
+			ZZ9KBase = NULL;
+		}
 		return NULL;
 	}
 	NewList((struct List *)mp->BufferList);
@@ -714,8 +726,10 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 		KPrintF("Can't allocate! Hardware already used by another MHI instance.\n");
 		FreeVec(mp->BufferList);
 		FreeVec(mp);
-		CloseLibrary(ZZ9KBase);
-		ZZ9KBase = NULL;
+		if(opened_base) {
+			CloseLibrary(ZZ9KBase);
+			ZZ9KBase = NULL;
+		}
 		return NULL;
 	}
 	if(ahi_present_locked(MHI_LibBase)) {
@@ -723,8 +737,10 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 		KPrintF("Can't allocate! Hardware already used by AHI.\n");
 		FreeVec(mp->BufferList);
 		FreeVec(mp);
-		CloseLibrary(ZZ9KBase);
-		ZZ9KBase = NULL;
+		if(opened_base) {
+			CloseLibrary(ZZ9KBase);
+			ZZ9KBase = NULL;
+		}
 		return NULL;
 	}
 	install_irq_server_locked(mp);
@@ -774,8 +790,10 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 		Permit();
 		FreeVec(mp->BufferList);
 		FreeVec(mp);
-		CloseLibrary(ZZ9KBase);
-		ZZ9KBase = NULL;
+		if(opened_base) {
+			CloseLibrary(ZZ9KBase);
+			ZZ9KBase = NULL;
+		}
 		return NULL;
 	}
 
@@ -815,6 +833,7 @@ void i_MHIFreeDecoder(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibB
 	Forbid();
 	mp->Status = MHIF_STOPPED;
 	mp->play_pending = FALSE;
+	mp->transport_gen++;
 	disable_hw_audio(mp);
 	drain_buffer_list_locked(mp);
 	Permit();
@@ -1023,8 +1042,11 @@ void i_MHIPlay(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 
 	switch(mp->Status) {
 		case MHIF_STOPPED:
-		case MHIF_OUT_OF_DATA:
+		case MHIF_OUT_OF_DATA: {
+			ULONG gen;
+
 			ObtainSemaphore(&mp->io_lock);
+			gen = mp->transport_gen;
 			if(!mhi_stream_open(mp)) {
 				ReleaseSemaphore(&mp->io_lock);
 				KPrintF("MHIPlay: session open failed.\n");
@@ -1040,13 +1062,25 @@ void i_MHIPlay(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 			// Play may legally arrive with an empty (or too short)
 			// queue -- notably on a seek, where the app stops, calls
 			// Play, and requeues from the new file position -- so a
-			// not-yet-ready card must not fail the call.
+			// not-yet-ready card must not fail the call. A transport
+			// command from another task that landed while the session
+			// open was blocking wins over this Play: it saw STOPPED
+			// and did nothing, so publishing PLAYING now would revive
+			// a playback the app just cancelled.
 			Forbid();
+			if(mp->transport_gen != gen) {
+				Permit();
+				mhi_stream_close(mp);
+				ReleaseSemaphore(&mp->io_lock);
+				KPrintF("MHIPlay: cancelled by racing Stop.\n");
+				return;
+			}
 			mp->Status = MHIF_PLAYING;
 			mp->play_pending = TRUE;
 			Permit();
 			ReleaseSemaphore(&mp->io_lock);
 			mhi_wake_feeder(mp);
+		}
 		break;
 		case MHIF_PAUSED:
 			if(mp->play_pending) {
@@ -1094,6 +1128,7 @@ void i_MHIStop(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 	disable_hw_audio(mp);
 	mp->Status = MHIF_STOPPED;
 	mp->play_pending = FALSE;
+	mp->transport_gen++;   // a Play blocked in session open must yield
 	drain_buffer_list_locked(mp);
 	mp->backpressure = FALSE;
 	Permit();
