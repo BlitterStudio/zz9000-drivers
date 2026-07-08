@@ -412,6 +412,20 @@ static void mhi_stream_close(struct MhiPlayer *mp) {
 	mp->session = 0;
 	mp->staged_valid = FALSE;
 	mp->play_pending = FALSE;
+	if(tries == 0) {
+		// Never drained (a wedged card): the close did NOT take, so the
+		// card still owns this session and keeps writing its PCM/mp3
+		// rings. Freeing those rings (FreeDecoder) would be a card-side
+		// use-after-free, and rebinding them to a new session
+		// (mhi_stream_open reuses rings while rings_allocated) would
+		// corrupt the in-flight decode. Abandon the rings instead:
+		// clearing rings_allocated makes the next open allocate a fresh
+		// set and makes FreeDecoder leave these alone. Leaking one ring
+		// set on an already-wedged card is the safe failure.
+		KPrintF("stream_close: session still BUSY after retries; "
+		        "abandoning rings\n");
+		mp->rings_allocated = FALSE;
+	}
 }
 
 // Complete a deferred Play: bind the session to the AX output once the
