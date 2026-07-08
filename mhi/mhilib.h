@@ -54,8 +54,20 @@ struct MhiPlayer {
 	UBYTE rings_allocated;
 	UBYTE backpressure;          /* card mp3 ring full; retry later */
 	UBYTE have_unfed;            /* queued app data not yet on the card */
-	UBYTE pad0;
+	UBYTE staged_valid;          /* staging holds the chunk keyed below */
 	ULONG list_gen;              /* bumped on drain: aborts in-flight feeds */
+
+	/*
+	 * Backpressure-retry memo: while the card refuses a chunk, the bytes
+	 * already sit in the staging buffer, so a retry skips the 68k->card
+	 * copy and only repeats the cheap FEED op. Keyed on (gen, node,
+	 * index, chunk); invalidated on every accepted FEED so a recycled
+	 * ListNode allocation can never alias a stale key.
+	 */
+	APTR  staged_node;
+	ULONG staged_index;
+	ULONG staged_chunk;
+	ULONG staged_gen;
 };
 
 struct ListNode {

@@ -238,6 +238,7 @@ static void mhi_feed_pending(struct MhiPlayer *mp) {
 		struct ListNode *node = NULL;
 		struct ListNode *it;
 		UBYTE *src = NULL;
+		ULONG index = 0;
 		ULONG chunk = 0;
 		ULONG gen;
 		ZZ9KAudioStreamFeedDesc feed;
@@ -249,8 +250,9 @@ static void mhi_feed_pending(struct MhiPlayer *mp) {
 		    it = (struct ListNode *)it->Header.mln_Succ) {
 			if(it->Played == FALSE) {
 				node = it;
-				src = node->Buffer + node->Index;
-				chunk = node->Size - node->Index;
+				index = node->Index;
+				src = node->Buffer + index;
+				chunk = node->Size - index;
 				break;
 			}
 		}
@@ -264,7 +266,20 @@ static void mhi_feed_pending(struct MhiPlayer *mp) {
 
 		if(chunk > ZZ_MHI_STAGING_BYTES) chunk = ZZ_MHI_STAGING_BYTES;
 
-		if(!zz9k_shared_copy_to(&mp->staging, 0, src, chunk)) return;
+		// Skip the 68k->card copy when this exact chunk already sits in
+		// the staging buffer from a backpressured attempt: the retry
+		// then costs one mailbox op, not a 32K Zorro copy per pacing
+		// wake-up.
+		if(!(mp->staged_valid && mp->staged_gen == gen &&
+		     mp->staged_node == (APTR)node && mp->staged_index == index &&
+		     mp->staged_chunk == chunk)) {
+			if(!zz9k_shared_copy_to(&mp->staging, 0, src, chunk)) return;
+			mp->staged_node  = (APTR)node;
+			mp->staged_index = index;
+			mp->staged_chunk = chunk;
+			mp->staged_gen   = gen;
+			mp->staged_valid = TRUE;
+		}
 		if(!zz9k_audio_build_stream_feed_desc(&feed, mp->session,
 		                                      mp->staging.handle, 0,
 		                                      chunk, 0)) return;
@@ -274,11 +289,13 @@ static void mhi_feed_pending(struct MhiPlayer *mp) {
 		if(mp->result.flags & ZZ9K_AUDIO_STREAM_RESULT_BACKPRESSURE) {
 			// Card ring full; nothing was consumed. The soft IRQ
 			// keeps signalling the app so one of our entry points
-			// retries from task context soon.
+			// retries from task context soon (the staged memo above
+			// makes that retry cheap).
 			mp->backpressure = TRUE;
 			return;
 		}
 		mp->backpressure = FALSE;
+		mp->staged_valid = FALSE;   // accepted: key must never be reused
 
 		Forbid();
 		if(gen == mp->list_gen) {
@@ -347,6 +364,7 @@ static void mhi_stream_close(struct MhiPlayer *mp) {
 	(void)ZZ9KAudioStreamStop(mp->session, 0, &r);
 	(void)ZZ9KAudioStreamClose(mp->session, 0, &r);
 	mp->session = 0;
+	mp->staged_valid = FALSE;
 }
 
 /* ******************* */
