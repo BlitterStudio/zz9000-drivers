@@ -862,6 +862,7 @@ void i_MHIFreeDecoder(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibB
 	Forbid();
 	mp->Status = MHIF_STOPPED;
 	mp->play_pending = FALSE;
+	mp->pause_pending = FALSE;
 	mp->transport_gen++;
 	disable_hw_audio(mp);
 	drain_buffer_list_locked(mp);
@@ -974,6 +975,13 @@ BOOL i_MHIQueueBuffer(REGA3(APTR mhi_handle), REGA0(APTR mhi_buffer), REGD0(ULON
 	Forbid();
 	AddTail((struct List *)mp->BufferList, (struct Node *)BufferNode);
 	mp->have_unfed = TRUE;
+	// Auto-resume: new data after a drain (GetStatus recorded
+	// MHIF_OUT_OF_DATA) returns the stream to PLAYING so the feeder --
+	// gated on PLAYING -- picks it up and the still-bound pump plays it,
+	// matching the legacy interrupt decoder that resumed on fresh data
+	// without an explicit Play.
+	if(mp->Status == MHIF_OUT_OF_DATA)
+		mp->Status = MHIF_PLAYING;
 	Permit();
 
 	KPrintF("MHIQueueBuffer: Adr=0x%08lX Size=%lu\n", (ULONG)mhi_buffer,
@@ -1057,6 +1065,17 @@ UBYTE i_MHIGetStatus(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBa
 			}
 			ReleaseSemaphore(&mp->io_lock);
 			if(drained) {
+				// Record the drained state, not just report it: leaving
+				// Status at PLAYING makes the MHIF_OUT_OF_DATA case in
+				// MHIPlay unreachable, so a client that restarts from the
+				// reported OUT_OF_DATA (without an explicit Stop) would
+				// hit no case at all. Guard on still-PLAYING so a Stop or
+				// Pause that raced the probe is not clobbered. A later
+				// QueueBuffer flips it back to PLAYING (auto-resume).
+				Forbid();
+				if(mp->Status == MHIF_PLAYING)
+					mp->Status = MHIF_OUT_OF_DATA;
+				Permit();
 				KPrintF("MHIGetStatus: OUT_OF_DATA\n");
 				return MHIF_OUT_OF_DATA;
 			}
@@ -1082,7 +1101,14 @@ void i_MHIPlay(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 			ULONG gen;
 
 			ObtainSemaphore(&mp->io_lock);
+			Forbid();
 			gen = mp->transport_gen;
+			// Scope any pause intent to this open window: a stale
+			// pause_pending from before this Play is cleared, while a
+			// Pause that arrives during the blocking open below is
+			// recorded and honored at the publish step.
+			mp->pause_pending = FALSE;
+			Permit();
 			if(!mhi_stream_open(mp)) {
 				ReleaseSemaphore(&mp->io_lock);
 				KPrintF("MHIPlay: session open failed.\n");
@@ -1109,6 +1135,20 @@ void i_MHIPlay(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 				mhi_stream_close(mp);
 				ReleaseSemaphore(&mp->io_lock);
 				KPrintF("MHIPlay: cancelled by racing Stop.\n");
+				return;
+			}
+			if(mp->pause_pending) {
+				// A Pause raced this Play while it was blocked in
+				// mhi_stream_open (Status was still STOPPED, so Pause
+				// could not act). Come up PAUSED -- armed to resume via
+				// the MHIF_PAUSED play_pending path -- instead of
+				// starting audio behind the user's back.
+				mp->pause_pending = FALSE;
+				mp->Status = MHIF_PAUSED;
+				mp->play_pending = TRUE;
+				Permit();
+				ReleaseSemaphore(&mp->io_lock);
+				KPrintF("MHIPlay: paused by racing Pause.\n");
 				return;
 			}
 			mp->Status = MHIF_PLAYING;
@@ -1192,6 +1232,7 @@ void i_MHIStop(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 	disable_hw_audio(mp);
 	mp->Status = MHIF_STOPPED;
 	mp->play_pending = FALSE;
+	mp->pause_pending = FALSE;
 	mp->transport_gen++;   // a Play blocked in session open must yield
 	drain_buffer_list_locked(mp);
 	mp->backpressure = FALSE;
@@ -1228,6 +1269,13 @@ void i_MHIPause(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) 
 		disable_hw_audio(mp);
 		mp->Status = MHIF_PAUSED;
 		paused = TRUE;
+	} else if(mp->Status == MHIF_STOPPED) {
+		// A Play may be blocked in mhi_stream_open right now: Status is
+		// still STOPPED until it publishes, so nothing to pause yet.
+		// Record the intent so that Play comes up PAUSED instead of
+		// starting audio. A stray pause with no Play in flight is cleared
+		// when the next Play starts (see i_MHIPlay).
+		mp->pause_pending = TRUE;
 	}
 	Permit();
 

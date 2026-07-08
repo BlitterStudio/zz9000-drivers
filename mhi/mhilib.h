@@ -71,6 +71,9 @@ struct MhiPlayer {
 
 	UBYTE play_pending;          /* PLAYING, but AX bind deferred until
 	                                the card has decoded PCM + rate */
+	UBYTE pause_pending;         /* a Pause raced a Play still blocked in
+	                                mhi_stream_open; the Play comes up
+	                                PAUSED instead of starting audio */
 	ULONG transport_gen;         /* bumped by Stop (and teardown) so a
 	                                Play blocked in session open detects
 	                                a transport command that raced it */
