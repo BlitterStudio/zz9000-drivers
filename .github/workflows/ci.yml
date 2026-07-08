@@ -214,9 +214,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      # mhi/build.sh stages the zz9k.library client headers from a
+      # zz9000-sdk checkout on the host, then re-execs itself through
+      # tools/amiga-docker.sh — so it must run on the host, not inside
+      # a bare container that has no SDK checkout.
+      - uses: actions/checkout@v6
+        with:
+          repository: BlitterStudio/zz9000-sdk
+          path: .zz9000-sdk
       - name: Build mhizz9000.library
         run: |
-          docker run --rm -v "$PWD":/src -w /src/mhi "$AMIGA_IMAGE" ./build.sh
+          ZZ9000_SDK="$PWD/.zz9000-sdk" mhi/build.sh
       - uses: actions/upload-artifact@v7
         with:
           name: mhizz9000.library
