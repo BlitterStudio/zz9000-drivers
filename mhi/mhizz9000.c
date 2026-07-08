@@ -652,38 +652,32 @@ static void disable_hw_audio(struct MhiPlayer *mp) {
  */
 APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 	struct MhiPlayer *mp = NULL;
-	BOOL opened_base = FALSE;
+	struct Library *base;
 
 	// The modern decoder path runs through zz9k.library audio-stream
 	// sessions plus the firmware's AX playback binding; require both.
-	// A non-NULL ZZ9KBase belongs to an ALREADY ACTIVE decoder whose
-	// feeder is using it right now: failure paths below may only close
-	// what THIS call opened, or probing a second decoder would tear the
-	// library out from under live playback.
-	if(!ZZ9KBase) {
-		ZZ9KBase = OpenLibrary((STRPTR)"zz9k.library", 0);
-		if(!ZZ9KBase) {
-			KPrintF("Can't open zz9k.library.\n");
-			return NULL;
-		}
-		opened_base = TRUE;
+	// Every attempt takes ITS OWN OpenLibrary reference (library bases
+	// are refcounted; the pointer is identical across opens) and
+	// failure paths close only that reference. The global ZZ9KBase is
+	// written solely by the claim winner inside the claim Forbid and
+	// cleared by FreeDecoder inside the release Forbid, so no
+	// concurrent allocate or teardown can close or NULL it under a
+	// decoder that is using it.
+	base = OpenLibrary((STRPTR)"zz9k.library", 0);
+	if(!base) {
+		KPrintF("Can't open zz9k.library.\n");
+		return NULL;
 	}
-	if(ZZ9KBase->lib_Revision < ZZ9K_LIBRARY_MIN_REVISION_AUDIO_PLAYBACK) {
+	if(base->lib_Revision < ZZ9K_LIBRARY_MIN_REVISION_AUDIO_PLAYBACK) {
 		KPrintF("zz9k.library too old for audio playback.\n");
-		if(opened_base) {
-			CloseLibrary(ZZ9KBase);
-			ZZ9KBase = NULL;
-		}
+		CloseLibrary(base);
 		return NULL;
 	}
 
 	mp = AllocVec(sizeof(struct MhiPlayer), MEMF_CLEAR);
 	if(!mp) {
 		KPrintF("Can't allocate MhiPlayer.\n");
-		if(opened_base) {
-			CloseLibrary(ZZ9KBase);
-			ZZ9KBase = NULL;
-		}
+		CloseLibrary(base);
 		return NULL;
 	}
 
@@ -700,10 +694,7 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 	mp->BufferList = AllocVec(sizeof(struct MinList), MEMF_PUBLIC|MEMF_CLEAR);
 	if(!mp->BufferList) {
 		FreeVec(mp);
-		if(opened_base) {
-			CloseLibrary(ZZ9KBase);
-			ZZ9KBase = NULL;
-		}
+		CloseLibrary(base);
 		return NULL;
 	}
 	NewList((struct List *)mp->BufferList);
@@ -726,10 +717,7 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 		KPrintF("Can't allocate! Hardware already used by another MHI instance.\n");
 		FreeVec(mp->BufferList);
 		FreeVec(mp);
-		if(opened_base) {
-			CloseLibrary(ZZ9KBase);
-			ZZ9KBase = NULL;
-		}
+		CloseLibrary(base);
 		return NULL;
 	}
 	if(ahi_present_locked(MHI_LibBase)) {
@@ -737,14 +725,13 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 		KPrintF("Can't allocate! Hardware already used by AHI.\n");
 		FreeVec(mp->BufferList);
 		FreeVec(mp);
-		if(opened_base) {
-			CloseLibrary(ZZ9KBase);
-			ZZ9KBase = NULL;
-		}
+		CloseLibrary(base);
 		return NULL;
 	}
 	install_irq_server_locked(mp);
 	MHI_LibBase->NumAllocatedDecoders++;
+	// Claim won: publish our library reference for the proto inlines.
+	ZZ9KBase = base;
 	Permit();
 
 	// Set a balanced Paula-vs-ZZ9000AX output mixer default. AP_DSP_SET_VOLUMES
@@ -787,13 +774,11 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 		}
 		if(MHI_LibBase->NumAllocatedDecoders)
 			MHI_LibBase->NumAllocatedDecoders--;
+		ZZ9KBase = NULL;   // unpublish with the ownership release
 		Permit();
 		FreeVec(mp->BufferList);
 		FreeVec(mp);
-		if(opened_base) {
-			CloseLibrary(ZZ9KBase);
-			ZZ9KBase = NULL;
-		}
+		CloseLibrary(base);
 		return NULL;
 	}
 
@@ -884,28 +869,35 @@ void i_MHIFreeDecoder(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibB
 	setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND10,     50);
 
 	// --- Phase 3: atomically release ownership. ---
-	// Only now do we give up the card: remove the IRQ node AND decrement
-	// NumAllocatedDecoders inside a single Forbid window so any racing
-	// AllocDecoder / AHI AllocAudio sees both state changes together.
-	Forbid();
-	if (mp->flags & ZZ_AX_DEVF_INT2MODE) {
-		RemIntServer(INTB_PORTS, &mp->irq);
-	} else {
-		RemIntServer(INTB_EXTER, &mp->irq);
-	}
-	if(MHI_LibBase->NumAllocatedDecoders) MHI_LibBase->NumAllocatedDecoders--;
-	Permit();
+	// Only now do we give up the card: remove the IRQ node, decrement
+	// NumAllocatedDecoders AND unpublish ZZ9KBase inside a single Forbid
+	// window so any racing AllocDecoder / AHI AllocAudio sees all state
+	// changes together. Our library reference is captured and closed
+	// AFTER the release: a racing winner publishes its own reference
+	// (same base pointer, own refcount), so it never dispatches through
+	// a base this close could invalidate.
+	{
+		struct Library *base;
 
-	// --- Phase 4: free memory after ownership is released. ---
-	if(mp->BufferList) {
-		FreeVec(mp->BufferList);
-		mp->BufferList = NULL;
-	}
-	FreeVec(mp);
-
-	if(ZZ9KBase) {
-		CloseLibrary(ZZ9KBase);
+		Forbid();
+		if (mp->flags & ZZ_AX_DEVF_INT2MODE) {
+			RemIntServer(INTB_PORTS, &mp->irq);
+		} else {
+			RemIntServer(INTB_EXTER, &mp->irq);
+		}
+		if(MHI_LibBase->NumAllocatedDecoders) MHI_LibBase->NumAllocatedDecoders--;
+		base = ZZ9KBase;
 		ZZ9KBase = NULL;
+		Permit();
+
+		// --- Phase 4: free memory after ownership is released. ---
+		if(mp->BufferList) {
+			FreeVec(mp->BufferList);
+			mp->BufferList = NULL;
+		}
+		FreeVec(mp);
+
+		if(base) CloseLibrary(base);
 	}
 }
 
