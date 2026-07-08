@@ -275,13 +275,22 @@ static void mhi_feed_pending(struct MhiPlayer *mp) {
 				break;
 			}
 		}
+		// Publish the queued-data flag atomically with the scan, still
+		// under Forbid: MHIQueueBuffer also sets have_unfed = TRUE under
+		// Forbid, so clearing it outside this window would race a
+		// concurrent queue -- the feeder could observe an empty list, drop
+		// Forbid, and then overwrite a just-queued TRUE back to FALSE.
+		// MHIGetStatus would then probe the (still unfed) card, latch
+		// MHIF_OUT_OF_DATA, and -- because the feeder only feeds while
+		// PLAYING -- the buffer would stall until the next queue flipped
+		// the state again. Whoever runs last under Forbid wins, and
+		// QueueBuffer always sets TRUE + wakes us after AddTail, so a node
+		// queued after our Permit is never lost.
+		mp->have_unfed = (node != NULL);
 		Permit();
 
-		if(!node) {
-			mp->have_unfed = FALSE;
+		if(!node)
 			return;
-		}
-		mp->have_unfed = TRUE;
 
 		if(chunk > ZZ_MHI_STAGING_BYTES) chunk = ZZ_MHI_STAGING_BYTES;
 
@@ -696,6 +705,23 @@ static void disable_hw_audio(struct MhiPlayer *mp) {
 	setRegister(mp, ZZ_REG_AUDIO_CONFIG, 0);
 }
 
+// Undo the atomic ownership claim in i_MHIAllocDecoder (the hard-IRQ
+// server, the decoder count, and the published library base) when a later
+// step of the same allocation fails. MUST run under Forbid(), mirroring
+// the claim window. The caller still frees mp/BufferList and closes its
+// own library reference.
+static void unclaim_ownership_locked(struct MhiPlayer *mp,
+                                     struct MHI_LibBase *MHI_LibBase) {
+	if (mp->flags & ZZ_AX_DEVF_INT2MODE) {
+		RemIntServer(INTB_PORTS, &mp->irq);
+	} else {
+		RemIntServer(INTB_EXTER, &mp->irq);
+	}
+	if(MHI_LibBase->NumAllocatedDecoders)
+		MHI_LibBase->NumAllocatedDecoders--;
+	ZZ9KBase = NULL;   // unpublish with the ownership release
+}
+
 /*
  *
  */
@@ -783,6 +809,29 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 	ZZ9KBase = base;
 	Permit();
 
+	// A current zz9k.library (revision-checked above) can still front a
+	// firmware image that predates the AX playback op -- the binding lives
+	// in firmware, not the library. Now that ZZ9KBase is live, ask the
+	// running firmware what it advertises: without AUDIO_PLAYBACK the
+	// MHIPlay stream bind returns UNSUPPORTED while the driver still reports
+	// MHIF_PLAYING with no audio, so refuse the decoder here and let the app
+	// fall back to Paula/AHI. The query blocks on the mailbox completion, so
+	// it must run after the claim Permit, never under Forbid.
+	{
+		ZZ9KCaps caps;
+		if(ZZ9KQueryCaps(&caps) != ZZ9K_STATUS_OK ||
+		   !(caps.capability_bits & ZZ9K_CAP_AUDIO_PLAYBACK)) {
+			KPrintF("Firmware lacks audio-playback capability.\n");
+			Forbid();
+			unclaim_ownership_locked(mp, MHI_LibBase);
+			Permit();
+			FreeVec(mp->BufferList);
+			FreeVec(mp);
+			CloseLibrary(base);
+			return NULL;
+		}
+	}
+
 	// Set a balanced Paula-vs-ZZ9000AX output mixer default. AP_DSP_SET_VOLUMES
 	// (param 10) encodes AHI/MHI output level in the high byte and Paula pass-
 	// through level in the low byte (each 0x00-0xFF). Summing both above
@@ -816,14 +865,7 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 	if(mp->feeder_state != 1) {
 		KPrintF("Can't start the feeder process.\n");
 		Forbid();
-		if (mp->flags & ZZ_AX_DEVF_INT2MODE) {
-			RemIntServer(INTB_PORTS, &mp->irq);
-		} else {
-			RemIntServer(INTB_EXTER, &mp->irq);
-		}
-		if(MHI_LibBase->NumAllocatedDecoders)
-			MHI_LibBase->NumAllocatedDecoders--;
-		ZZ9KBase = NULL;   // unpublish with the ownership release
+		unclaim_ownership_locked(mp, MHI_LibBase);
 		Permit();
 		FreeVec(mp->BufferList);
 		FreeVec(mp);
