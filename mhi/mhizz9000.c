@@ -60,13 +60,15 @@ struct Library *ZZ9KBase;
 // ~250 ms; a 32K quantum bunched completions into multi-second jumps
 // of the player's time display.
 #define ZZ_MHI_STAGING_BYTES   (4UL * 1024UL)
-// Card-side compressed ring, a deliberate compromise: it is playback
-// runway against a silent application (must comfortably outlast the
-// soft-IRQ keep-alive interval even at 320 kbit/s), but everything in
-// it is data the app already counts as played, so it also bounds how
-// far the time display leads the speakers (64K is ~4 s at 128 kbit/s;
-// the legacy FIFO led by ~2 s).
-#define ZZ_MHI_MP3_RING_BYTES  (64UL * 1024UL)
+// Card-side compressed ring, kept deliberately SMALL: everything in it
+// is data the app already counts as played, so it sets both how far
+// the time display leads the speakers AND the seek latency -- on a
+// seek (Stop + requeue + Play) the audible switch waits for this much
+// old audio to drain. 16K is ~1 s at 128 kbit/s; the legacy driver
+// kept its FIFO only half full for exactly this reason ("to leave
+// data for seeking"). Underrun runway is this ring plus the decoded
+// PCM ring (~320 ms), refilled in 4K chunks by the app's own calls.
+#define ZZ_MHI_MP3_RING_BYTES  (16UL * 1024UL)
 // Card-side PCM ring the firmware pump plays from: 16 periods of 3840
 // bytes (~320 ms of 48 kHz stereo).
 #define ZZ_MHI_PCM_RING_BYTES  (61440UL)
@@ -229,8 +231,6 @@ void UserLibCleanup(struct MHI_LibBase *MhiLibBase) {
 /* ********************* */
 /*  BEGIN feed engine    */
 /* ********************* */
-
-static void enable_hw_audio(struct MhiPlayer *mp);
 
 static void mhi_signal_app(struct MhiPlayer *mp) {
 	if(mp->MhiTask && mp->MhiMask) Signal(mp->MhiTask, mp->MhiMask);
@@ -395,15 +395,10 @@ static void mhi_try_bind(struct MhiPlayer *mp) {
 		KPrintF("mhi_try_bind: PLAY rejected.\n");
 		return;
 	}
-	// Enable the pacing IRQ only while actually PLAYING; a Stop/Pause
-	// that raced the mailbox call above wins here.
-	Forbid();
+	// A Stop/Pause that raced the mailbox call above already unbound
+	// the session card-side; nothing to undo here.
 	mp->play_pending = FALSE;
-	if(mp->Status == MHIF_PLAYING) {
-		enable_hw_audio(mp);
-	}
-	Permit();
-	KPrintF("mhi_try_bind: HW audio enabled.\n");
+	KPrintF("mhi_try_bind: session bound to AX output.\n");
 }
 
 // Standard entry-point service: move queued data to the card, then
@@ -417,31 +412,21 @@ static void mhi_service(struct MhiPlayer *mp) {
 /*  END feed engine    */
 /* ******************* */
 
-// Keep-alive throttle: one safety-net signal per this many audio periods
-// (20 ms each) while driver-held data is outstanding.
-#define ZZ_MHI_TICKLE_PERIODS 64
-
 extern ULONG dev_sisr(struct MhiPlayer *mp asm("a1"));
 ULONG cdev_sisr(struct MhiPlayer *mp asm("a1")) {
-	// Signal contract (same as the legacy driver): the application is
-	// signalled when a buffer COMPLETES -- that happens in the feed
-	// engine, in task context, at real playback pace. Signalling every
-	// period whenever data was merely outstanding made AmigaAMP's time
-	// display race ahead of playback (it derives progress from signal
-	// activity). Feed retries are driven by the app's own entry points
-	// (GetStatus/QueueBuffer/GetEmpty all run the feed engine); the soft
-	// IRQ only adds a heavily throttled keep-alive so a purely
-	// signal-driven app cannot stall out with data still queued. No
-	// register writes, no mailbox calls (interrupt context).
-	if(mp->Status != MHIF_PLAYING) return 0;
-	if(mp->have_unfed || mp->backpressure) {
-		if(++mp->tickle >= ZZ_MHI_TICKLE_PERIODS) {
-			mp->tickle = 0;
-			mhi_signal_app(mp);
-		}
-	} else {
-		mp->tickle = 0;
-	}
+	// Deliberately inert. The signal contract is STRICT (same as the
+	// legacy driver): the application is signalled exactly when a
+	// buffer COMPLETES, from the feed engine in task context, at real
+	// playback pace. MHI applications account playback time by those
+	// signals, so ANY extra signal -- a pacing storm or even a
+	// throttled keep-alive -- inflates their elapsed/total time
+	// display (bench: 50 Hz signals made the counter race; a ~1.3 s
+	// keep-alive still overshot a 4:06 track to 4:42). Feeding is
+	// driven entirely by the app's own entry points
+	// (GetStatus/QueueBuffer/GetEmpty all run the feed engine); the
+	// card holds enough audio to bridge normal polling gaps. The
+	// interrupt machinery itself stays installed: the ISR node on the
+	// shared server list is the MHI-vs-AHI ownership token.
 	return 0;
 }
 
@@ -489,12 +474,12 @@ static void install_irq_server_locked(struct MhiPlayer *mp) {
 	}
 }
 
-// Flip the HW-side audio interrupt bit. Enabled only while playing; the
-// interrupt's sole use is the feed-pacing signal in cdev_sisr.
-static void enable_hw_audio(struct MhiPlayer *mp) {
-	setRegister(mp, ZZ_REG_AUDIO_CONFIG, 1);
-}
-
+// Keep the HW-side audio interrupt OFF. This driver never enables it:
+// the signal contract is buffer-completion-only (see cdev_sisr), and
+// on the firmware side flipping this bit also silences/clears the TX
+// ring -- a needless dropout. The disable is kept as hygiene on
+// Stop/Pause/Free so an earlier AHI session can't leave the interrupt
+// armed while MHI owns the card.
 static void disable_hw_audio(struct MhiPlayer *mp) {
 	setRegister(mp, ZZ_REG_AUDIO_CONFIG, 0);
 }
@@ -844,10 +829,7 @@ void i_MHIPlay(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 			// ready. Play may legally arrive with an empty (or too
 			// short) queue -- notably on a seek, where the app stops,
 			// calls Play, and requeues from the new file position --
-			// so a not-yet-ready card must not fail the call. Status
-			// flips BEFORE the bind so cdev_sisr's gate is open when
-			// the first hard ISR fires; Forbid so a racing Stop can't
-			// interleave.
+			// so a not-yet-ready card must not fail the call.
 			Forbid();
 			mp->Status = MHIF_PLAYING;
 			mp->play_pending = TRUE;
@@ -870,12 +852,7 @@ void i_MHIPlay(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 				KPrintF("MHIPlay: resume rejected.\n");
 				return;
 			}
-			Forbid();
-			if(mp->Status == MHIF_PAUSED) {
-				mp->Status = MHIF_PLAYING;
-				enable_hw_audio(mp);
-			}
-			Permit();
+			mp->Status = MHIF_PLAYING;
 		break;
 	}
 }
