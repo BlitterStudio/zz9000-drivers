@@ -7,10 +7,8 @@
 // #define MHIF_OUT_OF_DATA    2
 // #define MHIF_PAUSED         3
 
-typedef enum {
-	FIFO_PREFILL,
-	FIFO_OPERATIONAL
-} FIFO_MODE;
+#include "zz9k/audio.h"
+#include "zz9k/host.h"
 
 struct MHI_LibBase {
 	struct Library mhi_Library;
@@ -32,24 +30,69 @@ struct MhiPlayer {
 	struct MinList *BufferList;
 	ULONG Status;
 
-	FIFO_MODE FifoMode;
-	unsigned short FifoWriteIdx;
-
 	struct Interrupt irq;
 	struct Interrupt sirq;
 
 	ULONG hw_addr;
-	ULONG mp3_addr;
-	ULONG encoded_offset;
-	ULONG decode_offset;
-	ULONG decode_chunk_sz;
-	ULONG buf_offset;
-	
+
 	UBYTE flags;
 	UBYTE zorro_version;
 	UBYTE volume;
 	UBYTE panning;
 
+	/*
+	 * SDK audio-stream session state. Decode runs on the card's second
+	 * CPU core; the firmware's AX playback pump feeds the audio DMA
+	 * straight from the session's PCM ring, so PCM never crosses Zorro
+	 * and this driver does no per-period work at all.
+	 */
+	ULONG session;               /* 0 = no session open */
+	ZZ9KSharedBuffer staging;    /* 68k -> card chunk transport */
+	ZZ9KSharedBuffer mp3_ring;   /* card-side compressed ring */
+	ZZ9KSharedBuffer pcm_ring;   /* card-side PCM ring (pump-consumed) */
+	ZZ9KAudioStreamResult result;
+	UBYTE rings_allocated;
+	UBYTE backpressure;          /* card mp3 ring full; retry later */
+	UBYTE have_unfed;            /* queued app data not yet on the card */
+	UBYTE staged_valid;          /* staging holds the chunk keyed below */
+	ULONG list_gen;              /* bumped on drain: aborts in-flight feeds */
+
+	/*
+	 * Backpressure-retry memo: while the card refuses a chunk, the bytes
+	 * already sit in the staging buffer, so a retry skips the 68k->card
+	 * copy and only repeats the cheap FEED op. Keyed on (gen, node,
+	 * index, chunk); invalidated on every accepted FEED so a recycled
+	 * ListNode allocation can never alias a stale key.
+	 */
+	APTR  staged_node;
+	ULONG staged_index;
+	ULONG staged_chunk;
+	ULONG staged_gen;
+
+	UBYTE play_pending;          /* PLAYING, but AX bind deferred until
+	                                the card has decoded PCM + rate */
+	UBYTE pause_pending;         /* a Pause raced a Play still blocked in
+	                                mhi_stream_open; the Play comes up
+	                                PAUSED instead of starting audio */
+	ULONG transport_gen;         /* bumped by Stop (and teardown) so a
+	                                Play blocked in session open detects
+	                                a transport command that raced it */
+
+	/*
+	 * The feed engine runs in a driver-owned feeder process, NOT in the
+	 * application's context: mailbox calls block, so they can't run
+	 * from interrupts -- and MHI apps (AmigaAMP) sleep until a
+	 * completion signal, so feeding can't ride their entry points
+	 * either (the first buffer would never complete if it exceeds the
+	 * card-side rings). io_lock serializes the feeder against the
+	 * control entry points (Play/Stop/Pause/GetStatus probe).
+	 */
+	struct SignalSemaphore io_lock;
+	struct Task *feeder_task;    /* NULL once the feeder has exited */
+	ULONG feeder_wake_mask;
+	ULONG feeds_accepted;        /* accepted-FEED count (backoff reset) */
+	volatile UBYTE feeder_state; /* 0 starting, 1 running, 2 failed */
+	volatile UBYTE feeder_quit;
 };
 
 struct ListNode {
@@ -61,4 +104,3 @@ struct ListNode {
 };
 
 #endif
-

@@ -9,6 +9,8 @@
 *.audio
 *.library
 *.library.debug
+*.library.trace
+*.library.trace.debug
 PREFSFILE*
 ZZFwUpdate/ZZFwUpdate
 ZZScanlines/ZZScanlines
@@ -36,3 +38,6 @@ attic
 
 .DS_Store
 __pycache__/
+
+# staged zz9k.library client headers (mhi/build.sh syncs from the SDK checkout)
+mhi/zz9k-headers/

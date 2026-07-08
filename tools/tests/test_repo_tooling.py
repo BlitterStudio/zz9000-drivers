@@ -66,7 +66,11 @@ class RepoToolingTests(unittest.TestCase):
 
     def test_ci_audio_jobs_use_build_scripts(self):
         ci = self.read(".github/workflows/ci.yml")
-        self.assertIn('-w /src/mhi "$AMIGA_IMAGE" ./build.sh', ci)
+        # mhi/build.sh stages zz9k headers (cloning the SDK at the
+        # pinned sdk/SDK_REF when no sibling checkout exists) before
+        # re-execing into docker itself, so CI calls it host-side.
+        self.assertIn("mhi/build.sh", ci)
+        self.assertNotIn('-w /src/mhi "$AMIGA_IMAGE" ./build.sh', ci)
         self.assertIn('-w /src/ahi/driver "$AMIGA_IMAGE" ./build.sh', ci)
 
     def test_release_script_mentions_every_packaged_artifact(self):
@@ -146,7 +150,7 @@ class RepoToolingTests(unittest.TestCase):
             r"ZZDiag/ZZDiag|"
             r"ahi/driver/ZZ9000AX|"
             r"ahi/axtest/axtest|"
-            r"mhi/mhizz9000\.library(\.debug)?|"
+            r"mhi/mhizz9000\.library(\.trace)?(\.debug)?|"
             r"net/ZZNetStats/ZZNetStats|"
             r"sd-boot/zzsd\.device|"
             r"sd-boot/boot-rom/boot\.bin)$"

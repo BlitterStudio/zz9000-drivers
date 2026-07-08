@@ -8,6 +8,13 @@
  *
  * Hardened by Dimitris Panokostas <midwan@gmail.com> (2026)
  *
+ * Modernized (2026): MP3 decode now runs through the ZZ9000 SDK
+ * audio-stream sessions (zz9k.library) -- the card decodes on its second
+ * CPU core and the firmware's AX playback pump feeds the audio DMA
+ * straight from the session's PCM ring. The legacy register-driven
+ * decoder (the ZZ_REG_DECODE register family) is gone on both sides; this
+ * driver does no per-period work and PCM never crosses Zorro.
+ *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * GNU General Public License v3.0 or later
  *
@@ -30,14 +37,51 @@
 #include <proto/expansion.h>
 
 #include <hardware/intbits.h>
+#include <devices/timer.h>
 
 #include "zz9000_ax.h"
 #include "mhizz9000.h"
 
-#define OPTIMIZED_TRANSFER
+#include "zz9k/audio.h"
+#include "zz9k/library_vectors.h"
+#include "zz9k/shared.h"
+#include <proto/zz9k.h>
 
-// Comment out to enable debug output:
+// KPrintF tracing is compiled out unless the trace build is selected
+// (build.sh also produces mhizz9000.library.trace with -DZZ_MHI_TRACE).
+// Capture the output on the Amiga with Sashimi.
+#ifndef ZZ_MHI_TRACE
 #define KPrintF(...)
+#endif
+
+// zz9k.library base for the proto inline calls; opened per decoder
+// allocation (there is at most one decoder).
+struct Library *ZZ9KBase;
+
+// 68k -> card transport chunk (one FEED per chunk). Small on purpose:
+// an app buffer completes (and is signalled/reclaimable) only when its
+// LAST byte is accepted, so the acceptance quantum bounds how far a
+// completion can land from its real-time position. 4K at 128 kbit/s is
+// ~250 ms; a 32K quantum bunched completions into multi-second jumps
+// of the player's time display.
+#define ZZ_MHI_STAGING_BYTES   (4UL * 1024UL)
+// Card-side compressed ring. Pure tuning, NOT a liveness constraint:
+// the feeder process makes feed progress on its own, so playback works
+// for ANY application buffer size (AmigaAMP offers 16K up to
+// whole-file) and for apps that never poll. The ring sets (a) how much
+// already-counted audio survives a seek and how far the time display
+// leads the speakers (8K is ~0.5 s at 128 kbit/s, plus the ~350 ms
+// decoded PCM ring), and (b) the underrun runway against scheduling
+// hiccups: worst case 320 kbit/s drains 8K in ~200 ms while the feeder
+// refills 4K per 50 ms retry, with the PCM ring as further cushion.
+// Must stay comfortably above both the 4K feed chunk and the
+// decoder's 4K minimum-input gate (see the firmware side).
+#define ZZ_MHI_MP3_RING_BYTES  (8UL * 1024UL)
+// Card-side PCM ring the firmware pump plays from: 16 periods of 3840
+// bytes (~320 ms of 48 kHz stereo).
+#define ZZ_MHI_PCM_RING_BYTES  (61440UL)
+// Pump refill threshold: half the PCM ring.
+#define ZZ_MHI_PCM_LOW_WATER   (ZZ_MHI_PCM_RING_BYTES / 2UL)
 
 /* ******************************** */
 /*  BEGIN ZZ9000AX parameter access */
@@ -48,19 +92,10 @@ static void setRegister(struct MhiPlayer *mp, ULONG Register, UWORD Value) {
 	*((volatile UWORD*)(mp->hw_addr+Register)) = Value;
 }
 
-static UWORD getRegister(struct MhiPlayer *mp, ULONG Register) {
-	return *((volatile UWORD*)(mp->hw_addr+Register));
-}
-
 static void setAudioParam(struct MhiPlayer *mp, ULONG Param, UWORD Value) {
 	*((volatile UWORD*)(mp->hw_addr+ZZ_REG_AUDIO_PARAM)) = Param;
 	*((volatile UWORD*)(mp->hw_addr+ZZ_REG_AUDIO_VAL))	 = Value;
 	*((volatile UWORD*)(mp->hw_addr+ZZ_REG_AUDIO_PARAM)) = 0;
-}
-
-static void setDecoderParam(struct MhiPlayer *mp, ULONG Param, UWORD Value) {
-	*((volatile UWORD*)(mp->hw_addr+ZZ_REG_DECODER_PARAM)) = Param;
-	*((volatile UWORD*)(mp->hw_addr+ZZ_REG_DECODER_VAL))   = Value;
 }
 
 // Read an optional user override for AP_DSP_SET_VOLUMES from
@@ -110,111 +145,6 @@ static UWORD read_mix_levels_env(UWORD default_value) {
 /* ****************************** */
 /*  END ZZ9000AX parameter access */
 /* ****************************** */
-
-/* ************ */
-/*  BEGIN FIFO  */
-/* ************ */
-// Clear FIFO on both sides.
-static void clearFifo(struct MhiPlayer *mp) {
-	mp->FifoMode = FIFO_PREFILL;
-	mp->FifoWriteIdx = 0;
-	// ZZ_DECODE (clear)
-	setRegister(mp, ZZ_REG_DECODE, ZZ_AX_DECODE_CLEAR);
-}
-
-static void fillFifo(struct MhiPlayer *mp) {
-	UBYTE *Buffer = (UBYTE *)mp->mp3_addr;
-	LONG Space = 0;
-	UWORD FifoReadIdx;
-	struct ListNode *BufferNode;
-	LONG i;
-
-	// 1. Get FIFO Read Index from ZZ9k (we are the slave).
-	FifoReadIdx = getRegister(mp, ZZ_REG_DECODER_FIFO);
-	if(mp->FifoWriteIdx >= FifoReadIdx) {
-		Space = ZZ_AX_DECODER_FIFO_SIZE-(mp->FifoWriteIdx-FifoReadIdx);
-	}
-	else {
-		Space = FifoReadIdx-mp->FifoWriteIdx;
-	}
-
-	// 2. Calculate space left in FIFO.
-	// In prefill mode fill the FIFO completely.
-	if(mp->FifoMode == FIFO_PREFILL) {
-		Space -= 1; // Note: Fill level limited for technical rasons.
-	}
-	// In operational mode fill it only half way to leave data for seeking back.
-	else {
-		Space -= ZZ_AX_DECODER_FIFO_SIZE/2;
-	}
-	if(Space <= 0) return;
-
-	// 3. Fill the FIFO
-	// Find first node in list that has not been completely played.
-	for(BufferNode = (struct ListNode *)mp->BufferList->mlh_Head; BufferNode->Header.mln_Succ; BufferNode = (struct ListNode *)BufferNode->Header.mln_Succ) {
-		if(BufferNode->Played == FALSE) {
-			LONG BytesToCopy = BufferNode->Size - BufferNode->Index;
-			if(BytesToCopy > Space) BytesToCopy = Space;
-
-			#ifdef OPTIMIZED_TRANSFER
-			// 3.1 Copy single bytes until we reach a 32-bit aligned destination address.
-			if(BytesToCopy >= 3) {
-				for(i=0; i<3; i++) {
-					if((mp->FifoWriteIdx & 3) == 0) break;
-					if(Space) {
-						Buffer[mp->FifoWriteIdx++] = BufferNode->Buffer[BufferNode->Index++];
-						if(mp->FifoWriteIdx >= ZZ_AX_DECODER_FIFO_SIZE) mp->FifoWriteIdx = 0;
-						Space--;
-						BytesToCopy--;
-					}
-				}
-			}
-
-			// 3.2 Optimized longword copy routine.
-			LONG LongsToCopy = BytesToCopy/4;
-			ULONG *src = (ULONG*)&BufferNode->Buffer[BufferNode->Index];
-			ULONG *dst = (ULONG*)&Buffer[mp->FifoWriteIdx];
-			for(i=0; i<LongsToCopy; i++) {
-				*dst++ = *src++;
-				mp->FifoWriteIdx  += 4;
-				if(mp->FifoWriteIdx >= ZZ_AX_DECODER_FIFO_SIZE) {
-					mp->FifoWriteIdx = 0;
-					dst = (ULONG*)Buffer;
-				}
-			}
-			Space             -= 4*LongsToCopy;
-			BytesToCopy       -= 4*LongsToCopy;
-			BufferNode->Index += 4*LongsToCopy;
-
-			// 3.3 Copy remainder.
-			#endif
-			for(i=0; i<BytesToCopy; i++) {
-				if(Space) {
-					Buffer[mp->FifoWriteIdx++] = BufferNode->Buffer[BufferNode->Index++];
-					if(mp->FifoWriteIdx >= ZZ_AX_DECODER_FIFO_SIZE) mp->FifoWriteIdx = 0;
-					Space--;
-				}
-			}
-
-			// If we have reached the end of the current buffer then...
-			if(BufferNode->Index >= BufferNode->Size) {
-				// ... mark this buffer as 'played'.
-				BufferNode->Played = TRUE;	
-				// ... signal the calling task that a buffer has been played.
-				Signal(mp->MhiTask, mp->MhiMask);
-			}
-			break;
-		}
-	}
-
-	mp->FifoMode = FIFO_OPERATIONAL;
-
-	// 4. Set FIFO Write Index in ZZ9k (we are the master).
-	setRegister(mp, ZZ_REG_DECODER_FIFO, mp->FifoWriteIdx);
-}
-/* ********** */
-/*  END FIFO  */
-/* ********** */
 
 // Check whether AHI has its ISR installed on our shared interrupt level.
 // MUST be called with Forbid() already active so the caller can combine
@@ -306,37 +236,418 @@ void UserLibCleanup(struct MHI_LibBase *MhiLibBase) {
 	// Nothing to clean up here because UserLibInit() didn't leave anything open.
 }
 
+/* ********************* */
+/*  BEGIN feed engine    */
+/* ********************* */
+
+static void mhi_signal_app(struct MhiPlayer *mp) {
+	if(mp->MhiTask && mp->MhiMask) Signal(mp->MhiTask, mp->MhiMask);
+}
+
+// Feed queued application data to the card's compressed ring. TASK
+// CONTEXT ONLY: ZZ9KAudioStreamFeed blocks on the mailbox completion, so
+// this must never run under Forbid() or from an interrupt. The buffer
+// list is only snapshotted/updated inside short Forbid windows;
+// mp->list_gen invalidates the in-flight chunk if a concurrent
+// Stop/Free drained the list while the mailbox call was blocking.
+static void mhi_feed_pending(struct MhiPlayer *mp) {
+	if(mp->session == 0) return;
+
+	for(;;) {
+		struct ListNode *node = NULL;
+		struct ListNode *it;
+		UBYTE *src = NULL;
+		ULONG index = 0;
+		ULONG chunk = 0;
+		ULONG gen;
+		ZZ9KAudioStreamFeedDesc feed;
+
+		Forbid();
+		gen = mp->list_gen;
+		for(it = (struct ListNode *)mp->BufferList->mlh_Head;
+		    it->Header.mln_Succ;
+		    it = (struct ListNode *)it->Header.mln_Succ) {
+			if(it->Played == FALSE) {
+				node = it;
+				index = node->Index;
+				src = node->Buffer + index;
+				chunk = node->Size - index;
+				break;
+			}
+		}
+		// Publish the queued-data flag atomically with the scan, still
+		// under Forbid: MHIQueueBuffer also sets have_unfed = TRUE under
+		// Forbid, so clearing it outside this window would race a
+		// concurrent queue -- the feeder could observe an empty list, drop
+		// Forbid, and then overwrite a just-queued TRUE back to FALSE.
+		// MHIGetStatus would then probe the (still unfed) card, latch
+		// MHIF_OUT_OF_DATA, and -- because the feeder only feeds while
+		// PLAYING -- the buffer would stall until the next queue flipped
+		// the state again. Whoever runs last under Forbid wins, and
+		// QueueBuffer always sets TRUE + wakes us after AddTail, so a node
+		// queued after our Permit is never lost.
+		mp->have_unfed = (node != NULL);
+		Permit();
+
+		if(!node)
+			return;
+
+		if(chunk > ZZ_MHI_STAGING_BYTES) chunk = ZZ_MHI_STAGING_BYTES;
+
+		KPrintF("feed: node=0x%08lX idx=%lu chunk=%lu\n",
+		        (ULONG)node, (ULONG)index, (ULONG)chunk);
+
+		// Skip the 68k->card copy when this exact chunk already sits in
+		// the staging buffer from a backpressured attempt: the retry
+		// then costs one mailbox op, not a 32K Zorro copy per pacing
+		// wake-up.
+		if(!(mp->staged_valid && mp->staged_gen == gen &&
+		     mp->staged_node == (APTR)node && mp->staged_index == index &&
+		     mp->staged_chunk == chunk)) {
+			if(!zz9k_shared_copy_to(&mp->staging, 0, src, chunk)) return;
+			mp->staged_node  = (APTR)node;
+			mp->staged_index = index;
+			mp->staged_chunk = chunk;
+			mp->staged_gen   = gen;
+			mp->staged_valid = TRUE;
+		}
+		if(!zz9k_audio_build_stream_feed_desc(&feed, mp->session,
+		                                      mp->staging.handle, 0,
+		                                      chunk, 0)) return;
+		if(ZZ9KAudioStreamFeed(&feed, &mp->result) != ZZ9K_STATUS_OK)
+			return;
+
+		if(mp->result.flags & ZZ9K_AUDIO_STREAM_RESULT_BACKPRESSURE) {
+			// Card ring full; nothing was consumed. A later entry
+			// point retries from task context (the staged memo above
+			// makes that retry cheap).
+			if(!mp->backpressure) {
+				KPrintF("feed: backpressure (flags=0x%08lX)\n",
+				        (ULONG)mp->result.flags);
+			}
+			mp->backpressure = TRUE;
+			return;
+		}
+		if(mp->backpressure) {
+			KPrintF("feed: backpressure cleared\n");
+		}
+		mp->backpressure = FALSE;
+		mp->staged_valid = FALSE;   // accepted: key must never be reused
+		mp->feeds_accepted++;       // resets the feeder's retry backoff
+
+		Forbid();
+		if(gen == mp->list_gen) {
+			node->Index += chunk;
+			if(node->Index >= node->Size) {
+				// Fully handed to the card: the app may reclaim it
+				// via MHIGetEmpty (same semantics as the legacy
+				// FIFO copy completion).
+				node->Played = TRUE;
+				mhi_signal_app(mp);
+			}
+		}
+		Permit();
+		if(gen != mp->list_gen) return;   // drained under us: stop
+	}
+}
+
+// Open the SDK session (and, once, the shared buffers backing it).
+static BOOL mhi_stream_open(struct MhiPlayer *mp) {
+	ZZ9KAudioStreamBeginDesc begin;
+
+	if(mp->session != 0) return TRUE;
+
+	if(!mp->rings_allocated) {
+		if(ZZ9KAllocShared(ZZ_MHI_STAGING_BYTES, 16, 0,
+		                   &mp->staging) != ZZ9K_STATUS_OK) {
+			KPrintF("stream_open: staging alloc failed\n");
+			return FALSE;
+		}
+		if(ZZ9KAllocShared(ZZ_MHI_MP3_RING_BYTES, 16, 0,
+		                   &mp->mp3_ring) != ZZ9K_STATUS_OK) {
+			KPrintF("stream_open: mp3 ring alloc failed\n");
+			ZZ9KFreeShared(mp->staging.handle);
+			return FALSE;
+		}
+		if(ZZ9KAllocShared(ZZ_MHI_PCM_RING_BYTES, 16, 0,
+		                   &mp->pcm_ring) != ZZ9K_STATUS_OK) {
+			KPrintF("stream_open: pcm ring alloc failed\n");
+			ZZ9KFreeShared(mp->mp3_ring.handle);
+			ZZ9KFreeShared(mp->staging.handle);
+			return FALSE;
+		}
+		mp->rings_allocated = TRUE;
+	}
+
+	// S16LE: the AX audio DMA consumes little-endian samples (the legacy
+	// on-card decoder produced exactly that). low_water is the firmware
+	// pump's PCM refill threshold.
+	if(!zz9k_audio_build_stream_begin_desc(
+	        &begin, mp->mp3_ring.handle, mp->mp3_ring.length,
+	        mp->pcm_ring.handle, mp->pcm_ring.length, 0, 0,
+	        ZZ9K_AUDIO_SAMPLE_FORMAT_S16LE,
+	        ZZ_MHI_PCM_LOW_WATER, 0, 0)) {
+		KPrintF("stream_open: begin desc rejected (client side)\n");
+		return FALSE;
+	}
+	if(ZZ9KAudioStreamBegin(&begin, &mp->result) != ZZ9K_STATUS_OK) {
+		KPrintF("stream_open: BEGIN rejected\n");
+		return FALSE;
+	}
+
+	mp->session = mp->result.session;
+	mp->backpressure = FALSE;
+	KPrintF("stream_open: session=%lu\n", (ULONG)mp->session);
+	return TRUE;
+}
+
+// Stop AX playback and close the session (Stop/Free semantics; Pause
+// keeps the session so PLAY resumes gaplessly). Task context only.
+static void mhi_stream_close(struct MhiPlayer *mp) {
+	ZZ9KAudioStreamResult r;
+	int tries;
+	int rc = ZZ9K_STATUS_BUSY;
+
+	if(mp->session == 0) return;
+	(void)ZZ9KAudioStreamStop(mp->session, 0, &r);
+	// The firmware answers BUSY while an internal PCM-refill for this
+	// session is still in flight on the card's second core (freeing
+	// the session under it would corrupt decoder state); it drains
+	// within milliseconds, so retry rather than leak the session.
+	for(tries = 25; tries > 0; tries--) {
+		rc = ZZ9KAudioStreamClose(mp->session, 0, &r);
+		if(rc != ZZ9K_STATUS_BUSY)
+			break;
+		Delay(1);
+	}
+	mp->session = 0;
+	mp->staged_valid = FALSE;
+	mp->play_pending = FALSE;
+	if(rc != ZZ9K_STATUS_OK && rc != ZZ9K_STATUS_BAD_HANDLE) {
+		// The close was NOT confirmed: either BUSY never drained (a
+		// wedged card) or the transport failed (TIMEOUT/IO_ERROR/...).
+		// Only OK means the card released the session, and BAD_HANDLE
+		// means it is already gone; any other result leaves the card
+		// potentially still owning this session and writing its PCM/mp3
+		// rings. Freeing those rings (FreeDecoder) would be a card-side
+		// use-after-free, and rebinding them to a new session
+		// (mhi_stream_open reuses rings while rings_allocated) would
+		// corrupt the in-flight decode. Abandon the rings instead:
+		// clearing rings_allocated makes the next open allocate a fresh
+		// set and makes FreeDecoder leave these alone. Leaking one ring
+		// set on an already-wedged card is the safe failure.
+		KPrintF("stream_close: close not confirmed (rc=%ld); "
+		        "abandoning rings\n", (LONG)rc);
+		mp->rings_allocated = FALSE;
+	}
+}
+
+// Complete a deferred Play: bind the session to the AX output once the
+// card has decoded PCM and knows the sample rate. MHIPlay may legally
+// arrive BEFORE any data is queued (the legacy driver allowed it, and
+// seeking apps rely on it: Stop, Play, then requeue from the new file
+// position), so Play sets play_pending and the bind happens here, from
+// whichever entry point feeds the decisive chunk. Task context only.
+static void mhi_try_bind(struct MhiPlayer *mp) {
+	if(!mp->play_pending || mp->session == 0) return;
+	// A pause can land between Play and the card reporting decoded
+	// PCM; play_pending stays armed for the resume, but audio must
+	// not start while the public state is PAUSED.
+	if(mp->Status != MHIF_PLAYING) return;
+	if((mp->result.flags & ZZ9K_AUDIO_STREAM_RESULT_PCM_READY) == 0 ||
+	   mp->result.sample_rate == 0) {
+		// The cached FEED result can be stale: once every queued chunk
+		// has been accepted there is no further FEED to refresh
+		// mp->result, so PCM readiness the card reaches after that last
+		// FEED would never be observed and play_pending would stick
+		// forever (MHIF_PLAYING reported, no audio). Probe the live
+		// state with a zero-length READ -- it consumes no PCM and does
+		// not bind, but re-runs the decoder and returns fresh
+		// flags/sample_rate. (A zero-length FEED is not an option: the
+		// SDK builder rejects it unless EOF is set.)
+		if(ZZ9KAudioStreamRead(mp->session, 0, 0, &mp->result)
+		   != ZZ9K_STATUS_OK)
+			return;
+		if((mp->result.flags & ZZ9K_AUDIO_STREAM_RESULT_PCM_READY) == 0 ||
+		   mp->result.sample_rate == 0)
+			return;
+	}
+	if(ZZ9KAudioStreamPlay(mp->session, 0, &mp->result) != ZZ9K_STATUS_OK) {
+		KPrintF("mhi_try_bind: PLAY rejected.\n");
+		return;
+	}
+	// A Stop/Pause that raced the mailbox call above already unbound
+	// the session card-side; nothing to undo here.
+	mp->play_pending = FALSE;
+	KPrintF("mhi_try_bind: session bound to AX output.\n");
+}
+
+/* ********************* */
+/*  BEGIN feeder process */
+/* ********************* */
+
+// Retry cadence while the card is backpressured or a deferred Play is
+// waiting. Base 50 ms, doubling per fruitless retry up to the cap and
+// resetting whenever a FEED is accepted (or a wake arrives): the card
+// only frees chunk-sized space every couple hundred ms, so most fixed
+// 50 ms retries were wasted mailbox ops. The decoded PCM ring holds
+// ~350 ms, which cushions even a capped sleep; with the staging memo
+// a retry is one mailbox op.
+#define ZZ_MHI_FEEDER_RETRY_MICROS     50000UL
+#define ZZ_MHI_FEEDER_RETRY_MAX_MICROS 200000UL
+
+// Single decoder (enforced by NumAllocatedDecoders), so the feeder
+// entry point can pick up its MhiPlayer through a static.
+static struct MhiPlayer *g_feeder_mp;
+
+// Wake the feeder (new data queued, Play issued, teardown). Forbid
+// pins the task pointer against feeder exit.
+static void mhi_wake_feeder(struct MhiPlayer *mp) {
+	Forbid();
+	if(mp->feeder_task) Signal(mp->feeder_task, mp->feeder_wake_mask);
+	Permit();
+}
+
+// The driver's own feed engine context. MHI applications are allowed
+// to sleep until a buffer-completion signal, so the driver must make
+// feed progress on its own: the legacy driver did it from the
+// per-period interrupt; our mailbox calls block, so it happens here,
+// in a dedicated process. All feed-engine and session mailbox activity
+// is serialized with the control entry points through mp->io_lock.
+static void mhi_feeder(void) {
+	struct MhiPlayer *mp = g_feeder_mp;
+	struct MsgPort *port = NULL;
+	struct timerequest *treq = NULL;
+	BYTE sig = -1;
+	int dev_open = 0;
+
+	if(!mp) return;
+
+	sig = AllocSignal(-1);
+	port = CreateMsgPort();
+	if(sig < 0 || !port) goto out;
+	treq = (struct timerequest *)CreateIORequest(port,
+	                                             sizeof(struct timerequest));
+	if(!treq) goto out;
+	if(OpenDevice((STRPTR)"timer.device", UNIT_VBLANK,
+	              (struct IORequest *)treq, 0) != 0) goto out;
+	dev_open = 1;
+
+	mp->feeder_wake_mask = 1UL << sig;
+	Forbid();
+	mp->feeder_task = FindTask(NULL);
+	mp->feeder_state = 1;
+	Permit();
+	KPrintF("feeder: running\n");
+
+	{
+	ULONG retry_micros = ZZ_MHI_FEEDER_RETRY_MICROS;
+
+	for(;;) {
+		BOOL busy = FALSE;
+		ULONG accepted_before = mp->feeds_accepted;
+		ULONG sigs;
+
+		ObtainSemaphore(&mp->io_lock);
+		// Feed ONLY while PLAYING. MHIPause unbinds the AX output but keeps
+		// the session open (Status == MHIF_PAUSED), and mhi_feed_pending()
+		// marks a fully-handed buffer Played and signals the app -- and MHI
+		// apps advance their elapsed-time accounting per completion signal.
+		// Feeding while paused would therefore let the app clock and reclaim
+		// buffers with no audio playing, unlike the legacy interrupt path
+		// which stopped buffer-completion progress at Pause. Resume flips
+		// Status back to MHIF_PLAYING before waking us, so nothing is lost.
+		if(!mp->feeder_quit && mp->session != 0 &&
+		   mp->Status == MHIF_PLAYING) {
+			mhi_feed_pending(mp);
+			mhi_try_bind(mp);
+			busy = mp->have_unfed || mp->backpressure ||
+			       mp->play_pending;
+		}
+		ReleaseSemaphore(&mp->io_lock);
+
+		if(mp->feeder_quit) break;
+
+		if(busy) {
+			// Adaptive pacing: back off while the card refuses,
+			// snap back on progress.
+			if(mp->feeds_accepted != accepted_before) {
+				retry_micros = ZZ_MHI_FEEDER_RETRY_MICROS;
+			} else {
+				retry_micros <<= 1;
+				if(retry_micros > ZZ_MHI_FEEDER_RETRY_MAX_MICROS)
+					retry_micros = ZZ_MHI_FEEDER_RETRY_MAX_MICROS;
+			}
+			// Timed wait: retry even without a wake signal.
+			treq->tr_node.io_Command = TR_ADDREQUEST;
+			treq->tr_time.tv_secs = 0;
+			treq->tr_time.tv_micro = retry_micros;
+			SendIO((struct IORequest *)treq);
+			sigs = Wait(mp->feeder_wake_mask |
+			            (1UL << port->mp_SigBit));
+			if(!CheckIO((struct IORequest *)treq))
+				AbortIO((struct IORequest *)treq);
+			WaitIO((struct IORequest *)treq);
+			// WaitIO can reap an already-replied message WITHOUT
+			// consuming the port's signal bit (e.g. after a wake
+			// aborted the timer). A stale bit makes every later
+			// Wait return instantly -- the feeder then spins at
+			// mailbox-op speed and pins the CPU (bench round 8).
+			SetSignal(0, 1UL << port->mp_SigBit);
+			if(sigs & mp->feeder_wake_mask)
+				retry_micros = ZZ_MHI_FEEDER_RETRY_MICROS;
+		} else {
+			// Idle: sleep until something changes.
+			retry_micros = ZZ_MHI_FEEDER_RETRY_MICROS;
+			Wait(mp->feeder_wake_mask);
+		}
+	}
+	}
+
+out:
+	KPrintF("feeder: exit\n");
+	if(dev_open) CloseDevice((struct IORequest *)treq);
+	if(treq) DeleteIORequest((struct IORequest *)treq);
+	if(port) DeleteMsgPort(port);
+	if(sig >= 0) FreeSignal(sig);
+	// Single final mp access: AllocDecoder frees the player the moment
+	// it observes feeder_state == 2, and FreeDecoder the moment it
+	// observes feeder_task == NULL -- so whichever exit this is, its
+	// publication must be the LAST thing that touches mp (publishing
+	// failure before the resource cleanup above was a use-after-free
+	// window on the startup-failure path).
+	Forbid();
+	if(mp->feeder_state == 1) {
+		mp->feeder_task = NULL;   // normal exit (quit requested)
+	} else {
+		mp->feeder_state = 2;     // startup failure; task was never set
+	}
+	Permit();
+}
+
+/* ******************* */
+/*  END feeder process */
+/* ******************* */
+
+/* ******************* */
+/*  END feed engine    */
+/* ******************* */
+
 extern ULONG dev_sisr(struct MhiPlayer *mp asm("a1"));
 ULONG cdev_sisr(struct MhiPlayer *mp asm("a1")) {
-	ULONG buf_samples = ZZ_AX_BOUNCE_MAX_FRAMES;
-	// Bail if the decoder is no longer playing. A hard ISR that fired
-	// between disable_hw_audio() and RemIntServer() can leave a soft IRQ
-	// queued on Exec's SoftInts list; when Stop/Free subsequently set
-	// Status != PLAYING under Forbid, the dispatched soft IRQ must be a
-	// no-op so it cannot clobber buf_offset/FifoWriteIdx/FifoMode or
-	// walk a freed BufferList.
-	if(mp->Status != MHIF_PLAYING) return 0;
-	fillFifo(mp);
-
-	setRegister(mp, ZZ_REG_AUDIO_SCALE, buf_samples);
-
-	setDecoderParam(mp, 4, (mp->decode_offset+mp->buf_offset)>>16);
-	setDecoderParam(mp, 5, (mp->decode_offset+mp->buf_offset)&0xffff);
-	setRegister(mp, ZZ_REG_DECODE, ZZ_AX_DECODE_RUN);
-	
-	// play buffer
-	setRegister(mp, ZZ_REG_AUDIO_SWAB, (1<<15) | (mp->buf_offset >> 8)); // no byteswap, offset/256
-	int overrun = getRegister(mp, ZZ_REG_AUDIO_SWAB);
-	
-	if (overrun == 1) {
-	  mp->buf_offset = 0;
-	} else {
-	  mp->buf_offset += ZZ_AX_BYTES_PER_PERIOD;
-	}
-	
-	if (mp->buf_offset >= ZZ_AX_AUDIO_BUFSZ) {
-	  mp->buf_offset = 0;
-	}
+	// Deliberately inert. The signal contract is STRICT (same as the
+	// legacy driver): the application is signalled exactly when a
+	// buffer COMPLETES, from the feed engine in task context, at real
+	// playback pace. MHI applications account playback time by those
+	// signals, so ANY extra signal -- a pacing storm or even a
+	// throttled keep-alive -- inflates their elapsed/total time
+	// display (bench: 50 Hz signals made the counter race; a ~1.3 s
+	// keep-alive still overshot a 4:06 track to 4:42). Feeding is
+	// driven entirely by the app's own entry points
+	// (GetStatus/QueueBuffer/GetEmpty all run the feed engine); the
+	// card holds enough audio to bridge normal polling gaps. The
+	// interrupt machinery itself stays installed: the ISR node on the
+	// shared server list is the MHI-vs-AHI ownership token.
 	return 0;
 }
 
@@ -384,15 +695,31 @@ static void install_irq_server_locked(struct MhiPlayer *mp) {
 	}
 }
 
-// Flip the HW-side audio interrupt bit. Called only when the decoder is
-// actually playing; the ISR is otherwise a no-op because dev_isr gates on
-// ZZ_REG_CONFIG bit 1 (mask 0x02) which the hardware only sets while running.
-static void enable_hw_audio(struct MhiPlayer *mp) {
-	setRegister(mp, ZZ_REG_AUDIO_CONFIG, 1);
-}
-
+// Keep the HW-side audio interrupt OFF. This driver never enables it:
+// the signal contract is buffer-completion-only (see cdev_sisr), and
+// on the firmware side flipping this bit also silences/clears the TX
+// ring -- a needless dropout. The disable is kept as hygiene on
+// Stop/Pause/Free so an earlier AHI session can't leave the interrupt
+// armed while MHI owns the card.
 static void disable_hw_audio(struct MhiPlayer *mp) {
 	setRegister(mp, ZZ_REG_AUDIO_CONFIG, 0);
+}
+
+// Undo the atomic ownership claim in i_MHIAllocDecoder (the hard-IRQ
+// server, the decoder count, and the published library base) when a later
+// step of the same allocation fails. MUST run under Forbid(), mirroring
+// the claim window. The caller still frees mp/BufferList and closes its
+// own library reference.
+static void unclaim_ownership_locked(struct MhiPlayer *mp,
+                                     struct MHI_LibBase *MHI_LibBase) {
+	if (mp->flags & ZZ_AX_DEVF_INT2MODE) {
+		RemIntServer(INTB_PORTS, &mp->irq);
+	} else {
+		RemIntServer(INTB_EXTER, &mp->irq);
+	}
+	if(MHI_LibBase->NumAllocatedDecoders)
+		MHI_LibBase->NumAllocatedDecoders--;
+	ZZ9KBase = NULL;   // unpublish with the ownership release
 }
 
 /*
@@ -400,50 +727,53 @@ static void disable_hw_audio(struct MhiPlayer *mp) {
  */
 APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 	struct MhiPlayer *mp = NULL;
+	struct Library *base;
+
+	// The modern decoder path runs through zz9k.library audio-stream
+	// sessions plus the firmware's AX playback binding; require both.
+	// Every attempt takes ITS OWN OpenLibrary reference (library bases
+	// are refcounted; the pointer is identical across opens) and
+	// failure paths close only that reference. The global ZZ9KBase is
+	// written solely by the claim winner inside the claim Forbid and
+	// cleared by FreeDecoder inside the release Forbid, so no
+	// concurrent allocate or teardown can close or NULL it under a
+	// decoder that is using it.
+	base = OpenLibrary((STRPTR)"zz9k.library", 0);
+	if(!base) {
+		KPrintF("Can't open zz9k.library.\n");
+		return NULL;
+	}
+	if(base->lib_Revision < ZZ9K_LIBRARY_MIN_REVISION_AUDIO_PLAYBACK) {
+		KPrintF("zz9k.library too old for audio playback.\n");
+		CloseLibrary(base);
+		return NULL;
+	}
 
 	mp = AllocVec(sizeof(struct MhiPlayer), MEMF_CLEAR);
 	if(!mp) {
 		KPrintF("Can't allocate MhiPlayer.\n");
+		CloseLibrary(base);
 		return NULL;
 	}
 
 	mp->hw_addr = MHI_LibBase->hw_addr;
+	mp->flags   = MHI_LibBase->flags;
 
-	if (MHI_LibBase->zorro_version == 3) {
-		// ZZ9000AX encoded-audio FIFO offset (this is still within Zorro3 address range).
-		mp->encoded_offset =  0x06000000;
-		// Decoded audio offset right after FIFO with a little padding to be cache line aligned.
-		mp->decode_offset  = (0x06000000 + ZZ_AX_DECODER_FIFO_SIZE + 32) & 0xFFFFFFE0;
-	} else {
-		// FIFO offset like offset_tx in AHI driver (this is still within Zorro2 address range).
-		mp->encoded_offset = MHI_LibBase->hw_size - 0x20000;
-		// Decoded audio offset at 96MB.
-		mp->decode_offset  = 0x06000000;
-	}
-	KPrintF("encoded_offset = 0x%08lX\n", mp->encoded_offset);
-	KPrintF("decode_offset  = 0x%08lX\n", mp->decode_offset);
+	mp->MhiTask = mhi_task;
+	mp->MhiMask = mhi_sigmask;
+	mp->Status  = MHIF_STOPPED;
 
-	mp->mp3_addr     = MHI_LibBase->hw_addr + 0x10000 + mp->encoded_offset;
-	mp->flags        = MHI_LibBase->flags;
-
-	mp->decode_chunk_sz = 1920; // 16 bit sample pairs
-
-	mp->MhiTask      = mhi_task;
-	mp->MhiMask      = mhi_sigmask;
-	mp->Status       = MHIF_STOPPED;
-
-	mp->FifoMode     = FIFO_PREFILL;
-	mp->FifoWriteIdx = 0;
-	mp->buf_offset   = 0;
-	mp->volume       = 100;
-	mp->panning      = 50;
+	mp->volume  = 100;
+	mp->panning = 50;
 
 	mp->BufferList = AllocVec(sizeof(struct MinList), MEMF_PUBLIC|MEMF_CLEAR);
 	if(!mp->BufferList) {
 		FreeVec(mp);
+		CloseLibrary(base);
 		return NULL;
 	}
 	NewList((struct List *)mp->BufferList);
+	InitSemaphore(&mp->io_lock);
 
 	// Populate the Interrupt nodes so the atomic-claim step below can
 	// AddIntServer our hard ISR directly.
@@ -462,6 +792,7 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 		KPrintF("Can't allocate! Hardware already used by another MHI instance.\n");
 		FreeVec(mp->BufferList);
 		FreeVec(mp);
+		CloseLibrary(base);
 		return NULL;
 	}
 	if(ahi_present_locked(MHI_LibBase)) {
@@ -469,11 +800,37 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 		KPrintF("Can't allocate! Hardware already used by AHI.\n");
 		FreeVec(mp->BufferList);
 		FreeVec(mp);
+		CloseLibrary(base);
 		return NULL;
 	}
 	install_irq_server_locked(mp);
 	MHI_LibBase->NumAllocatedDecoders++;
+	// Claim won: publish our library reference for the proto inlines.
+	ZZ9KBase = base;
 	Permit();
+
+	// A current zz9k.library (revision-checked above) can still front a
+	// firmware image that predates the AX playback op -- the binding lives
+	// in firmware, not the library. Now that ZZ9KBase is live, ask the
+	// running firmware what it advertises: without AUDIO_PLAYBACK the
+	// MHIPlay stream bind returns UNSUPPORTED while the driver still reports
+	// MHIF_PLAYING with no audio, so refuse the decoder here and let the app
+	// fall back to Paula/AHI. The query blocks on the mailbox completion, so
+	// it must run after the claim Permit, never under Forbid.
+	{
+		ZZ9KCaps caps;
+		if(ZZ9KQueryCaps(&caps) != ZZ9K_STATUS_OK ||
+		   !(caps.capability_bits & ZZ9K_CAP_AUDIO_PLAYBACK)) {
+			KPrintF("Firmware lacks audio-playback capability.\n");
+			Forbid();
+			unclaim_ownership_locked(mp, MHI_LibBase);
+			Permit();
+			FreeVec(mp->BufferList);
+			FreeVec(mp);
+			CloseLibrary(base);
+			return NULL;
+		}
+	}
 
 	// Set a balanced Paula-vs-ZZ9000AX output mixer default. AP_DSP_SET_VOLUMES
 	// (param 10) encodes AHI/MHI output level in the high byte and Paula pass-
@@ -490,6 +847,32 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 	setAudioParam(mp, ZZ_AX_AP_DSP_SET_VOLUMES,
 	              read_mix_levels_env(ZZ_AX_DEFAULT_MIX_LEVELS));
 
+	// Spawn the feeder process; it idles until Play opens a session.
+	g_feeder_mp = mp;
+	mp->feeder_state = 0;
+	mp->feeder_quit = FALSE;
+	// Priority 5: the feeder must keep its retry cadence under load
+	// (busy apps, disk activity run at 0); its work per wake is a few
+	// short mailbox ops, so it cannot hog anything.
+	if(!CreateNewProcTags(NP_Entry, (ULONG)mhi_feeder,
+	                      NP_Name, (ULONG)"mhizz9000 feeder",
+	                      NP_StackSize, 16384,
+	                      NP_Priority, 5,
+	                      TAG_DONE)) {
+		mp->feeder_state = 2;
+	}
+	while(mp->feeder_state == 0) Delay(1);
+	if(mp->feeder_state != 1) {
+		KPrintF("Can't start the feeder process.\n");
+		Forbid();
+		unclaim_ownership_locked(mp, MHI_LibBase);
+		Permit();
+		FreeVec(mp->BufferList);
+		FreeVec(mp);
+		CloseLibrary(base);
+		return NULL;
+	}
+
 	return mp;
 }
 
@@ -498,14 +881,17 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
  *
  */
 // Drain and free every ListNode in the BufferList. Must be called under
-// Forbid() because fillFifo() runs from a software interrupt and walks the
-// same list -- Forbid prevents the soft IRQ from preempting mid-unlink.
+// Forbid() so a feed snapshot in another task never observes a
+// half-unlinked list; list_gen invalidates any feed already blocking on
+// the mailbox.
 static void drain_buffer_list_locked(struct MhiPlayer *mp) {
 	APTR node;
 	if(!mp->BufferList) return;
 	while((node = RemHead((struct List *)mp->BufferList)) != NULL) {
 		FreeVec(node);
 	}
+	mp->list_gen++;
+	mp->have_unfed = FALSE;
 }
 
 void i_MHIFreeDecoder(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
@@ -515,37 +901,51 @@ void i_MHIFreeDecoder(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibB
 	// --- Phase 1: quiesce the hardware and the driver state machine. ---
 	// Set Status first so any soft IRQ Cause()d by an in-flight hard ISR
 	// (or already queued on Exec's SoftInts list) becomes a no-op when it
-	// eventually dispatches -- cdev_sisr early-returns on Status!=PLAYING.
+	// eventually dispatches -- cdev_sisr early-returns on Status!=MHIF_PLAYING.
 	// Keep the hard ISR INSTALLED here: it is the MHI ownership token on
-	// the shared interrupt list, and releasing it before the DSP reset
+	// the shared interrupt list, and releasing it before the teardown
 	// writes finish would let AHI allocate the card and race our own
 	// in-flight MMIO (Codex HIGH finding).
 	Forbid();
 	mp->Status = MHIF_STOPPED;
+	mp->play_pending = FALSE;
+	mp->pause_pending = FALSE;
+	mp->transport_gen++;
 	disable_hw_audio(mp);
 	drain_buffer_list_locked(mp);
 	Permit();
+
+	// Retire the feeder before touching the session: after this no
+	// other context issues mailbox calls on mp.
+	if(mp->feeder_task) {
+		mp->feeder_quit = TRUE;
+		mhi_wake_feeder(mp);
+		while(mp->feeder_task) Delay(1);
+	}
 	// Permit-to-0 dispatches any soft IRQ still queued on the SoftInts
 	// list; it runs cdev_sisr on still-valid mp, sees Status==STOPPED, and
 	// returns without touching the list or mp fields. No new soft IRQs can
 	// be Cause()d because the hard ISR is disarmed by disable_hw_audio --
 	// even though the ISR node is still installed, the HW won't fire it.
 
-	// --- Phase 2: DSP reset while MHI still owns the card. ---
+	// --- Phase 2: decoder teardown while MHI still owns the card. ---
 	// The ISR node is still on the interrupt-server list, so ahi_present/
 	// FindName(..., "mhizz9000") in a concurrent AHI AllocAudio will still
 	// see MHI as the owner and refuse to claim the card during these
-	// writes.
+	// steps.
 	//
-	// Quiesce the MP3 decoder before AHI (or a second MHI session) takes
-	// the card. i_MHIPlay leaves REG_ZZ_DECODE in DECODE_RUN so the FPGA
-	// decoder keeps trying to consume the FIFO and write PCM into our
-	// decode_offset region. If we don't flip it back to DECODE_CLEAR
-	// here, a subsequent AHI AllocAudio inherits a "running" decoder and
-	// can crash on warm boot with ahi.device trap 0x80000006 (mixer
-	// reads garbage / overflow trap) -- the user reproduced this on PR
-	// #3 after an MP3 -> MOD session.
-	setRegister(mp, ZZ_REG_DECODE, ZZ_AX_DECODE_CLEAR);
+	// Quiesce the decoder before AHI (or a second MHI session) takes the
+	// card: stop the firmware's AX playback binding and close the SDK
+	// session (this replaces the legacy DECODE_CLEAR -- same reason: an
+	// inherited "running" decoder crashed ahi.device with trap 0x80000006
+	// on warm boot after an MP3 -> MOD session, reproduced on PR #3).
+	mhi_stream_close(mp);
+	if(mp->rings_allocated) {
+		ZZ9KFreeShared(mp->pcm_ring.handle);
+		ZZ9KFreeShared(mp->mp3_ring.handle);
+		ZZ9KFreeShared(mp->staging.handle);
+		mp->rings_allocated = FALSE;
+	}
 
 	setAudioParam(mp, ZZ_AX_AP_DSP_SET_STEREO_VOLUME, 100 | (50<<8));
 	setAudioParam(mp, ZZ_AX_AP_DSP_SET_PREFACTOR,     50);
@@ -561,24 +961,36 @@ void i_MHIFreeDecoder(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibB
 	setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND10,     50);
 
 	// --- Phase 3: atomically release ownership. ---
-	// Only now do we give up the card: remove the IRQ node AND decrement
-	// NumAllocatedDecoders inside a single Forbid window so any racing
-	// AllocDecoder / AHI AllocAudio sees both state changes together.
-	Forbid();
-	if (mp->flags & ZZ_AX_DEVF_INT2MODE) {
-		RemIntServer(INTB_PORTS, &mp->irq);
-	} else {
-		RemIntServer(INTB_EXTER, &mp->irq);
-	}
-	if(MHI_LibBase->NumAllocatedDecoders) MHI_LibBase->NumAllocatedDecoders--;
-	Permit();
+	// Only now do we give up the card: remove the IRQ node, decrement
+	// NumAllocatedDecoders AND unpublish ZZ9KBase inside a single Forbid
+	// window so any racing AllocDecoder / AHI AllocAudio sees all state
+	// changes together. Our library reference is captured and closed
+	// AFTER the release: a racing winner publishes its own reference
+	// (same base pointer, own refcount), so it never dispatches through
+	// a base this close could invalidate.
+	{
+		struct Library *base;
 
-	// --- Phase 4: free memory after ownership is released. ---
-	if(mp->BufferList) {
-		FreeVec(mp->BufferList);
-		mp->BufferList = NULL;
+		Forbid();
+		if (mp->flags & ZZ_AX_DEVF_INT2MODE) {
+			RemIntServer(INTB_PORTS, &mp->irq);
+		} else {
+			RemIntServer(INTB_EXTER, &mp->irq);
+		}
+		if(MHI_LibBase->NumAllocatedDecoders) MHI_LibBase->NumAllocatedDecoders--;
+		base = ZZ9KBase;
+		ZZ9KBase = NULL;
+		Permit();
+
+		// --- Phase 4: free memory after ownership is released. ---
+		if(mp->BufferList) {
+			FreeVec(mp->BufferList);
+			mp->BufferList = NULL;
+		}
+		FreeVec(mp);
+
+		if(base) CloseLibrary(base);
 	}
-	FreeVec(mp);
 }
 
 
@@ -605,13 +1017,27 @@ BOOL i_MHIQueueBuffer(REGA3(APTR mhi_handle), REGA0(APTR mhi_buffer), REGD0(ULON
 	BufferNode->Index  = 0;
 	BufferNode->Played = FALSE;
 
-	// Forbid() while linking: fillFifo() walks this list from a software
-	// interrupt and must not observe a half-linked tail.
+	// Forbid() while linking: a feed snapshot in another task must not
+	// observe a half-linked tail.
 	Forbid();
 	AddTail((struct List *)mp->BufferList, (struct Node *)BufferNode);
+	mp->have_unfed = TRUE;
+	// Auto-resume: new data after a drain (GetStatus recorded
+	// MHIF_OUT_OF_DATA) returns the stream to PLAYING so the feeder --
+	// gated on PLAYING -- picks it up and the still-bound pump plays it,
+	// matching the legacy interrupt decoder that resumed on fresh data
+	// without an explicit Play.
+	if(mp->Status == MHIF_OUT_OF_DATA)
+		mp->Status = MHIF_PLAYING;
 	Permit();
 
-	KPrintF("MHIQueueBuffer: Adr=0x%08lX\n", mhi_buffer);
+	KPrintF("MHIQueueBuffer: Adr=0x%08lX Size=%lu\n", (ULONG)mhi_buffer,
+	        (ULONG)mhi_size);
+
+	// The feeder process moves the data; just wake it.
+	if(mp->session != 0) {
+		mhi_wake_feeder(mp);
+	}
 
 	return TRUE;
 }
@@ -627,10 +1053,11 @@ APTR i_MHIGetEmpty(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase
 
 	if(!mp || !mp->BufferList) return NULL;
 
-	// Walk + RemHead must be protected against the soft-IRQ fillFifo()
-	// that reads from the same list head. Return one completed buffer per
-	// call: callers use repeated GetEmpty calls to reclaim every buffer,
-	// and draining multiple nodes here would lose all but the last pointer.
+	// Walk + RemHead must be protected against a feed snapshot in another
+	// task that reads from the same list head. Return one completed buffer
+	// per call: callers use repeated GetEmpty calls to reclaim every
+	// buffer, and draining multiple nodes here would lose all but the last
+	// pointer.
 	Forbid();
 	BufferNode = (struct ListNode *)mp->BufferList->mlh_Head;
 	if(BufferNode != NULL &&
@@ -641,6 +1068,11 @@ APTR i_MHIGetEmpty(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase
 		FreeVec(BufferNode);
 	}
 	Permit();
+
+	if(mhi_buffer) {
+		KPrintF("MHIGetEmpty: Adr=0x%08lX\n", (ULONG)mhi_buffer);
+	}
+
 	return mhi_buffer;
 }
 
@@ -651,10 +1083,52 @@ APTR i_MHIGetEmpty(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase
 UBYTE i_MHIGetStatus(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 	struct MhiPlayer *mp = (struct MhiPlayer *)mhi_handle;
 
-	if(mp) {
-		return mp->Status;
+	if(!mp) return MHIF_STOPPED;
+
+	if(mp->Status == MHIF_PLAYING && mp->session != 0) {
+#ifdef ZZ_MHI_TRACE
+		static ULONG status_calls;
+		if((++status_calls & 63) == 0)
+			KPrintF("MHIGetStatus: #%lu unfed=%ld bp=%ld pend=%ld\n",
+			        status_calls, (LONG)mp->have_unfed,
+			        (LONG)mp->backpressure, (LONG)mp->play_pending);
+#endif
+		if(!mp->have_unfed && !mp->play_pending) {
+			// Everything is on the card; probe it. PLAY on the
+			// already-bound session is idempotent and returns fresh
+			// stream state: no PCM left and nothing queued means the
+			// stream has drained. (Skipped while a deferred Play is
+			// still waiting for data -- an empty new session must not
+			// read as end-of-stream.) io_lock serializes the probe
+			// with the feeder.
+			ZZ9KAudioStreamResult r;
+			UBYTE drained = FALSE;
+			ObtainSemaphore(&mp->io_lock);
+			if(mp->session != 0 && !mp->play_pending &&
+			   !mp->have_unfed &&
+			   ZZ9KAudioStreamPlay(mp->session, 0, &r) == ZZ9K_STATUS_OK &&
+			   (r.flags & ZZ9K_AUDIO_STREAM_RESULT_PCM_READY) == 0) {
+				drained = TRUE;
+			}
+			ReleaseSemaphore(&mp->io_lock);
+			if(drained) {
+				// Record the drained state, not just report it: leaving
+				// Status at PLAYING makes the MHIF_OUT_OF_DATA case in
+				// MHIPlay unreachable, so a client that restarts from the
+				// reported OUT_OF_DATA (without an explicit Stop) would
+				// hit no case at all. Guard on still-PLAYING so a Stop or
+				// Pause that raced the probe is not clobbered. A later
+				// QueueBuffer flips it back to PLAYING (auto-resume).
+				Forbid();
+				if(mp->Status == MHIF_PLAYING)
+					mp->Status = MHIF_OUT_OF_DATA;
+				Permit();
+				KPrintF("MHIGetStatus: OUT_OF_DATA\n");
+				return MHIF_OUT_OF_DATA;
+			}
+		}
 	}
-	return MHIF_STOPPED;
+	return mp->Status;
 }
 
 
@@ -668,57 +1142,120 @@ void i_MHIPlay(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 
 	if(!mp) return;
 
-	// Hold Forbid across the entire state transition so Play / Stop / Pause
-	// can't interleave. Without this, the "mp->Status = PLAYING; then
-	// enable_hw_audio()" ordering (required so cdev_sisr's Status gate is
-	// already open for the first soft IRQ) opens a window where a racing
-	// Stop could set Status=STOPPED + disable_hw_audio BETWEEN those two
-	// statements -- Play would then re-enable the HW with Status=STOPPED,
-	// leaving the card interrupting while cdev_sisr silently drops every
-	// soft IRQ. All ops inside this Forbid are MMIO writes or static helper
-	// logic (no Wait / no blocking I/O), so task preemption blocking is
-	// bounded and short.
-	Forbid();
 	switch(mp->Status) {
 		case MHIF_STOPPED:
-			KPrintF("MHIPlay: Clearing FIFO.\n");
-			clearFifo(mp);
-			KPrintF("MHIPlay: Filling FIFO.\n");
-			fillFifo(mp);
+		case MHIF_OUT_OF_DATA: {
+			ULONG gen;
 
-			// set tx buffer address to 127 MB offset
-			setAudioParam(mp, ZZ_AX_AP_TX_BUF_OFFS_HI, mp->decode_offset>>16);
-			setAudioParam(mp, ZZ_AX_AP_TX_BUF_OFFS_LO, mp->decode_offset&0xffff);
+			ObtainSemaphore(&mp->io_lock);
+			Forbid();
+			gen = mp->transport_gen;
+			// Scope any pause intent to this open window: a stale
+			// pause_pending from before this Play is cleared, while a
+			// Pause that arrives during the blocking open below is
+			// recorded and honored at the publish step.
+			mp->pause_pending = FALSE;
+			Permit();
+			if(!mhi_stream_open(mp)) {
+				ReleaseSemaphore(&mp->io_lock);
+				KPrintF("MHIPlay: session open failed.\n");
+				return;
+			}
 
 			// set LPF to 20KHz
 			setAudioParam(mp, ZZ_AX_AP_DSP_SET_LOWPASS, 20000);
 
-			// set decoder params
-			setDecoderParam(mp, 0, mp->encoded_offset>>16);
-			setDecoderParam(mp, 1, mp->encoded_offset&0xffff);
-			setDecoderParam(mp, 2, ZZ_AX_DECODER_FIFO_SIZE>>16);
-			setDecoderParam(mp, 3, ZZ_AX_DECODER_FIFO_SIZE&0xffff);
-			setDecoderParam(mp, 4, mp->decode_offset>>16);
-			setDecoderParam(mp, 5, mp->decode_offset&0xffff);
-			setDecoderParam(mp, 6, mp->decode_chunk_sz>>16);
-			setDecoderParam(mp, 7, mp->decode_chunk_sz&0xffff);
-
-			// ZZ_DECODE (init)
-			setRegister(mp, ZZ_REG_DECODE, ZZ_AX_DECODE_INIT);
-
-			// Status must be PLAYING BEFORE enable_hw_audio so cdev_sisr's
-			// Status gate is open when the first hard ISR fires.
+			// Report PLAYING right away; the feeder process pushes
+			// queued data and binds the session to the AX output as
+			// soon as the card has decoded PCM and a sample rate.
+			// Play may legally arrive with an empty (or too short)
+			// queue -- notably on a seek, where the app stops, calls
+			// Play, and requeues from the new file position -- so a
+			// not-yet-ready card must not fail the call. A transport
+			// command from another task that landed while the session
+			// open was blocking wins over this Play: it saw STOPPED
+			// and did nothing, so publishing PLAYING now would revive
+			// a playback the app just cancelled.
+			Forbid();
+			if(mp->transport_gen != gen) {
+				Permit();
+				mhi_stream_close(mp);
+				ReleaseSemaphore(&mp->io_lock);
+				KPrintF("MHIPlay: cancelled by racing Stop.\n");
+				return;
+			}
+			if(mp->pause_pending) {
+				// A Pause raced this Play while it was blocked in
+				// mhi_stream_open (Status was still STOPPED, so Pause
+				// could not act). Come up PAUSED -- armed to resume via
+				// the MHIF_PAUSED play_pending path -- instead of
+				// starting audio behind the user's back.
+				mp->pause_pending = FALSE;
+				mp->Status = MHIF_PAUSED;
+				mp->play_pending = TRUE;
+				Permit();
+				ReleaseSemaphore(&mp->io_lock);
+				KPrintF("MHIPlay: paused by racing Pause.\n");
+				return;
+			}
 			mp->Status = MHIF_PLAYING;
-			enable_hw_audio(mp);
-			KPrintF("MHIPlay: HW audio enabled.\n");
+			mp->play_pending = TRUE;
+			Permit();
+			ReleaseSemaphore(&mp->io_lock);
+			mhi_wake_feeder(mp);
+		}
 		break;
 		case MHIF_PAUSED:
-			// Same ordering requirement as the STOPPED case above.
+			if(mp->play_pending) {
+				// Paused before the deferred bind completed: just
+				// rearm; the feeder binds when data arrives.
+				Forbid();
+				mp->Status = MHIF_PLAYING;
+				Permit();
+				mhi_wake_feeder(mp);
+				break;
+			}
+			// Resume: the session (and its PCM ring) survived Pause,
+			// so re-binding continues gaplessly. A Stop can race between
+			// the switch reading PAUSED above and this transition: it
+			// flips Status to STOPPED under Forbid, then blocks on
+			// io_lock to close the session. Only Stop moves PAUSED to a
+			// non-PAUSED state, so re-check Status == MHIF_PAUSED under
+			// Forbid both before the blocking rebind (skip a pointless
+			// bind Stop is about to undo) and before publishing PLAYING
+			// (do not overwrite STOPPED and strand the transport with a
+			// closed session under MHIF_PLAYING, which has no MHIPlay
+			// case to reopen). io_lock keeps our rebind ordered ahead of
+			// Stop's close.
+			ObtainSemaphore(&mp->io_lock);
+			Forbid();
+			if(mp->Status != MHIF_PAUSED) {
+				Permit();
+				ReleaseSemaphore(&mp->io_lock);
+				KPrintF("MHIPlay: resume cancelled by racing Stop.\n");
+				break;
+			}
+			Permit();
+			if(ZZ9KAudioStreamPlay(mp->session, 0, &mp->result) != ZZ9K_STATUS_OK) {
+				ReleaseSemaphore(&mp->io_lock);
+				KPrintF("MHIPlay: resume rejected.\n");
+				return;
+			}
+			Forbid();
+			if(mp->Status != MHIF_PAUSED) {
+				// Stop landed during the blocking rebind; it owns the
+				// STOPPED state and will close the session under io_lock.
+				Permit();
+				ReleaseSemaphore(&mp->io_lock);
+				KPrintF("MHIPlay: resume cancelled by racing Stop.\n");
+				break;
+			}
 			mp->Status = MHIF_PLAYING;
-			enable_hw_audio(mp);
+			Permit();
+			ReleaseSemaphore(&mp->io_lock);
+			mhi_wake_feeder(mp);
 		break;
 	}
-	Permit();
 }
 
 
@@ -727,38 +1264,35 @@ void i_MHIPlay(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
  */
 void i_MHIStop(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 	struct MhiPlayer *mp = (struct MhiPlayer *)mhi_handle;
+	ULONG old;
 
 	KPrintF("MHIStop called\n");
 
 	if(!mp) return;
 
-	// Hold Forbid across the whole dispatch so Stop serializes against a
-	// concurrent Play / Pause; the Status check and the disable_hw_audio
-	// must be atomic relative to Play's Status=PLAYING + enable_hw_audio.
+	// Serialize the state flip against Play / Pause and any latent soft
+	// IRQ: disable the HW interrupt and flip Status inside one Forbid
+	// window (cdev_sisr early-returns on Status!=PLAYING), then do the
+	// blocking mailbox teardown OUTSIDE Forbid.
 	Forbid();
-	switch(mp->Status) {
-		case MHIF_PLAYING:
-		case MHIF_PAUSED:
-		case MHIF_OUT_OF_DATA:
-			// Stop the hardware first so it can't fire a new audio IRQ
-			// while we drain. The hard-IRQ server stays installed --
-			// it is the ownership claim and is only torn down at
-			// FreeDecoder time.
-			disable_hw_audio(mp);
-			// Flip Status under Forbid so a latent soft IRQ (Cause()d
-			// before disable_hw_audio took effect) dispatches into
-			// cdev_sisr and early-returns on Status!=PLAYING, leaving
-			// buf_offset/FifoWriteIdx/FifoMode alone. Resets live in
-			// the same Forbid window so the whole transition is atomic
-			// relative to any late soft-IRQ dispatch at Permit-to-0.
-			mp->Status = MHIF_STOPPED;
-			drain_buffer_list_locked(mp);
-			mp->buf_offset = 0;
-			mp->FifoWriteIdx = 0;
-			mp->FifoMode = FIFO_PREFILL;
-		break;
-	}
+	old = mp->Status;
+	disable_hw_audio(mp);
+	mp->Status = MHIF_STOPPED;
+	mp->play_pending = FALSE;
+	mp->pause_pending = FALSE;
+	mp->transport_gen++;   // a Play blocked in session open must yield
+	drain_buffer_list_locked(mp);
+	mp->backpressure = FALSE;
 	Permit();
+
+	if(old != MHIF_STOPPED) {
+		// Stop resets the position: close the session entirely; the
+		// next Play begins a fresh one (rings are reused). io_lock
+		// waits out a feeder iteration that is mid-mailbox-call.
+		ObtainSemaphore(&mp->io_lock);
+		mhi_stream_close(mp);
+		ReleaseSemaphore(&mp->io_lock);
+	}
 }
 
 
@@ -767,19 +1301,39 @@ void i_MHIStop(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
  */
 void i_MHIPause(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 	struct MhiPlayer *mp = (struct MhiPlayer *)mhi_handle;
+	BOOL paused = FALSE;
+	ZZ9KAudioStreamResult r;
 
 	KPrintF("MHIPause called\n");
 
 	if(!mp) return;
 
 	// Same serialization requirement as Play / Stop: check + disable +
-	// status flip must be atomic relative to a racing Play.
+	// status flip must be atomic relative to a racing Play. The mailbox
+	// call happens after, outside Forbid.
 	Forbid();
 	if(mp->Status == MHIF_PLAYING) {
 		disable_hw_audio(mp);
 		mp->Status = MHIF_PAUSED;
+		paused = TRUE;
+	} else if(mp->Status == MHIF_STOPPED) {
+		// A Play may be blocked in mhi_stream_open right now: Status is
+		// still STOPPED until it publishes, so nothing to pause yet.
+		// Record the intent so that Play comes up PAUSED instead of
+		// starting audio. A stray pause with no Play in flight is cleared
+		// when the next Play starts (see i_MHIPlay).
+		mp->pause_pending = TRUE;
 	}
 	Permit();
+
+	if(paused && mp->session != 0) {
+		// Unbind from the AX output; the session and its decoded PCM
+		// survive, so Play resumes exactly where we stopped.
+		ObtainSemaphore(&mp->io_lock);
+		if(mp->session != 0)
+			(void)ZZ9KAudioStreamStop(mp->session, 0, &r);
+		ReleaseSemaphore(&mp->io_lock);
+	}
 }
 
 
@@ -794,7 +1348,7 @@ ULONG i_MHIQuery(REGD1( ULONG mhi_query), REGA6(struct MHI_LibBase *MHI_LibBase)
 			return (ULONG)"audio/mpeg{audio/mp3}"; // We currently only support mp3 contained in a raw MPEG stream.
 
 		case MHIQ_DECODER_NAME:
-			return (ULONG)"ZZ9000AX";
+			return (ULONG)"ZZ9000AX (SDK core-1)";
 
 		case MHIQ_DECODER_VERSION:
 			return (ULONG)IDSTRING;

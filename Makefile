@@ -53,8 +53,10 @@ ZZNetStats:
 		-Wno-unused-parameter -I../../include \
 		-o ZZNetStats ZZNetStats.c -lamiga
 
+# mhi/build.sh stages zz9k headers from the sibling zz9000-sdk checkout on
+# the host, then re-execs itself through amiga-docker.sh.
 mhi:
-	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) mhi ./build.sh
+	AMIGA_IMAGE="$(AMIGA_IMAGE)" mhi/build.sh
 
 ahi:
 	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) ahi/driver ./build.sh
