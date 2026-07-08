@@ -396,10 +396,19 @@ static BOOL mhi_stream_open(struct MhiPlayer *mp) {
 // keeps the session so PLAY resumes gaplessly). Task context only.
 static void mhi_stream_close(struct MhiPlayer *mp) {
 	ZZ9KAudioStreamResult r;
+	int tries;
 
 	if(mp->session == 0) return;
 	(void)ZZ9KAudioStreamStop(mp->session, 0, &r);
-	(void)ZZ9KAudioStreamClose(mp->session, 0, &r);
+	// The firmware answers BUSY while an internal PCM-refill for this
+	// session is still in flight on the card's second core (freeing
+	// the session under it would corrupt decoder state); it drains
+	// within milliseconds, so retry rather than leak the session.
+	for(tries = 25; tries > 0; tries--) {
+		if(ZZ9KAudioStreamClose(mp->session, 0, &r) != ZZ9K_STATUS_BUSY)
+			break;
+		Delay(1);
+	}
 	mp->session = 0;
 	mp->staged_valid = FALSE;
 	mp->play_pending = FALSE;
