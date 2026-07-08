@@ -397,6 +397,7 @@ static BOOL mhi_stream_open(struct MhiPlayer *mp) {
 static void mhi_stream_close(struct MhiPlayer *mp) {
 	ZZ9KAudioStreamResult r;
 	int tries;
+	int rc = ZZ9K_STATUS_BUSY;
 
 	if(mp->session == 0) return;
 	(void)ZZ9KAudioStreamStop(mp->session, 0, &r);
@@ -405,16 +406,20 @@ static void mhi_stream_close(struct MhiPlayer *mp) {
 	// the session under it would corrupt decoder state); it drains
 	// within milliseconds, so retry rather than leak the session.
 	for(tries = 25; tries > 0; tries--) {
-		if(ZZ9KAudioStreamClose(mp->session, 0, &r) != ZZ9K_STATUS_BUSY)
+		rc = ZZ9KAudioStreamClose(mp->session, 0, &r);
+		if(rc != ZZ9K_STATUS_BUSY)
 			break;
 		Delay(1);
 	}
 	mp->session = 0;
 	mp->staged_valid = FALSE;
 	mp->play_pending = FALSE;
-	if(tries == 0) {
-		// Never drained (a wedged card): the close did NOT take, so the
-		// card still owns this session and keeps writing its PCM/mp3
+	if(rc != ZZ9K_STATUS_OK && rc != ZZ9K_STATUS_BAD_HANDLE) {
+		// The close was NOT confirmed: either BUSY never drained (a
+		// wedged card) or the transport failed (TIMEOUT/IO_ERROR/...).
+		// Only OK means the card released the session, and BAD_HANDLE
+		// means it is already gone; any other result leaves the card
+		// potentially still owning this session and writing its PCM/mp3
 		// rings. Freeing those rings (FreeDecoder) would be a card-side
 		// use-after-free, and rebinding them to a new session
 		// (mhi_stream_open reuses rings while rings_allocated) would
@@ -422,8 +427,8 @@ static void mhi_stream_close(struct MhiPlayer *mp) {
 		// clearing rings_allocated makes the next open allocate a fresh
 		// set and makes FreeDecoder leave these alone. Leaking one ring
 		// set on an already-wedged card is the safe failure.
-		KPrintF("stream_close: session still BUSY after retries; "
-		        "abandoning rings\n");
+		KPrintF("stream_close: close not confirmed (rc=%ld); "
+		        "abandoning rings\n", (LONG)rc);
 		mp->rings_allocated = FALSE;
 	}
 }

@@ -3,6 +3,21 @@ set -eu
 
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 
+# When the m68k toolchain isn't on PATH this script re-execs itself inside
+# the amiga-compiler container (see the docker re-exec below) and passes this
+# sentinel to mark that second stage. The host leg has already staged the
+# zz9k headers into mhi/zz9k-headers (mounted into the container), so the
+# second stage must NOT stage again -- inside that container only this repo
+# is mounted, so the sibling checkout / SDK-clone sources are unreachable.
+# We key off the sentinel rather than /.dockerenv because a dev container (or
+# a direct `docker run ... ./build.sh`) is a first-stage host that still has
+# to stage: /.dockerenv would wrongly suppress staging there.
+staged=0
+if [ "${1:-}" = "--zz9k-staged" ]; then
+  staged=1
+  shift
+fi
+
 # Stage the zz9k.library client headers from a zz9000-sdk checkout so the
 # docker build (which mounts only this repo) can include them. Same source
 # conventions as sdk/build.sh: ZZ9000_SDK override, else a sibling checkout
@@ -12,8 +27,8 @@ script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 # before the docker re-exec below; inside the container the staged copy is
 # already present.
 sdk_src=${ZZ9000_SDK:-}
-if [ -f /.dockerenv ]; then
-  # Inside the re-exec'd container: the host leg already staged the
+if [ "$staged" -eq 1 ]; then
+  # Second-stage (re-exec'd) invocation: the host leg already staged the
   # headers into mhi/zz9k-headers (validated below); never clone here.
   sdk_src=
 else
@@ -62,7 +77,7 @@ fi
 cd "$script_dir"
 
 if ! command -v m68k-amigaos-gcc >/dev/null 2>&1; then
-  exec "$script_dir/../tools/amiga-docker.sh" mhi ./build.sh "$@"
+  exec "$script_dir/../tools/amiga-docker.sh" mhi ./build.sh --zz9k-staged "$@"
 fi
 
 export PATH=/opt/amiga/bin:"$PATH"
