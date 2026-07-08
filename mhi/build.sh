@@ -36,3 +36,9 @@ export PATH=/opt/amiga/bin:"$PATH"
 
 m68k-amigaos-gcc StartUp.c LibInit.c mhizz9000.c asmfuncs.s -m68020 -O3 -I../include -Izz9k-headers -o mhizz9000.library.debug -g -ggdb -Wall -Wextra -Wno-unused-parameter -Wno-pointer-to-int-cast -Wno-pointer-sign -nostartfiles -ldebug
 m68k-amigaos-strip -s -o mhizz9000.library mhizz9000.library.debug
+
+# Trace variant: same driver with KPrintF tracing compiled in; capture
+# the output on the Amiga with Sashimi. Swap it in for mhizz9000.library
+# when diagnosing player behaviour.
+m68k-amigaos-gcc StartUp.c LibInit.c mhizz9000.c asmfuncs.s -m68020 -O3 -DZZ_MHI_TRACE=1 -I../include -Izz9k-headers -o mhizz9000.library.trace.debug -g -ggdb -Wall -Wextra -Wno-unused-parameter -Wno-pointer-to-int-cast -Wno-pointer-sign -nostartfiles -ldebug
+m68k-amigaos-strip -s -o mhizz9000.library.trace mhizz9000.library.trace.debug

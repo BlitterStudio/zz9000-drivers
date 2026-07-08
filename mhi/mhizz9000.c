@@ -46,8 +46,12 @@
 #include "zz9k/shared.h"
 #include <proto/zz9k.h>
 
-// Comment out to enable debug output:
+// KPrintF tracing is compiled out unless the trace build is selected
+// (build.sh also produces mhizz9000.library.trace with -DZZ_MHI_TRACE).
+// Capture the output on the Amiga with Sashimi.
+#ifndef ZZ_MHI_TRACE
 #define KPrintF(...)
+#endif
 
 // zz9k.library base for the proto inline calls; opened per decoder
 // allocation (there is at most one decoder).
@@ -60,15 +64,18 @@ struct Library *ZZ9KBase;
 // ~250 ms; a 32K quantum bunched completions into multi-second jumps
 // of the player's time display.
 #define ZZ_MHI_STAGING_BYTES   (4UL * 1024UL)
-// Card-side compressed ring, kept deliberately SMALL: everything in it
-// is data the app already counts as played, so it sets both how far
-// the time display leads the speakers AND the seek latency -- on a
-// seek (Stop + requeue + Play) the audible switch waits for this much
-// old audio to drain. 16K is ~1 s at 128 kbit/s; the legacy driver
-// kept its FIFO only half full for exactly this reason ("to leave
-// data for seeking"). Underrun runway is this ring plus the decoded
-// PCM ring (~320 ms), refilled in 4K chunks by the app's own calls.
-#define ZZ_MHI_MP3_RING_BYTES  (16UL * 1024UL)
+// Card-side compressed ring. The size is a LIVENESS constraint, not
+// just tuning: a strictly signal-driven app (AmigaAMP) only services
+// the driver when a buffer completes, so (a) the ring plus the PCM
+// ring must absorb the app's ENTIRE first buffer during Play's
+// prebuffer or the first completion signal never fires and playback
+// never starts, and (b) the card-side runway must outlast one full
+// app-buffer period between completion signals or steady-state
+// underruns. AmigaAMP queues 32K buffers; 32K here (+ ~350 ms decoded
+// PCM) satisfies both at any bitrate, matches the legacy driver's
+// 32K FIFO fill target, and keeps the seek/display lead at the legacy
+// ~2 s. Do not shrink it below the largest app buffer size.
+#define ZZ_MHI_MP3_RING_BYTES  (32UL * 1024UL)
 // Card-side PCM ring the firmware pump plays from: 16 periods of 3840
 // bytes (~320 ms of 48 kHz stereo).
 #define ZZ_MHI_PCM_RING_BYTES  (61440UL)
@@ -277,6 +284,9 @@ static void mhi_feed_pending(struct MhiPlayer *mp) {
 
 		if(chunk > ZZ_MHI_STAGING_BYTES) chunk = ZZ_MHI_STAGING_BYTES;
 
+		KPrintF("feed: node=0x%08lX idx=%lu chunk=%lu\n",
+		        (ULONG)node, (ULONG)index, (ULONG)chunk);
+
 		// Skip the 68k->card copy when this exact chunk already sits in
 		// the staging buffer from a backpressured attempt: the retry
 		// then costs one mailbox op, not a 32K Zorro copy per pacing
@@ -298,13 +308,17 @@ static void mhi_feed_pending(struct MhiPlayer *mp) {
 			return;
 
 		if(mp->result.flags & ZZ9K_AUDIO_STREAM_RESULT_BACKPRESSURE) {
-			// Card ring full; nothing was consumed. The soft IRQ
-			// keeps signalling the app so one of our entry points
-			// retries from task context soon (the staged memo above
+			// Card ring full; nothing was consumed. A later entry
+			// point retries from task context (the staged memo above
 			// makes that retry cheap).
+			if(!mp->backpressure)
+				KPrintF("feed: backpressure (flags=0x%08lX)\n",
+				        (ULONG)mp->result.flags);
 			mp->backpressure = TRUE;
 			return;
 		}
+		if(mp->backpressure)
+			KPrintF("feed: backpressure cleared\n");
 		mp->backpressure = FALSE;
 		mp->staged_valid = FALSE;   // accepted: key must never be reused
 
@@ -332,15 +346,19 @@ static BOOL mhi_stream_open(struct MhiPlayer *mp) {
 
 	if(!mp->rings_allocated) {
 		if(ZZ9KAllocShared(ZZ_MHI_STAGING_BYTES, 16, 0,
-		                   &mp->staging) != ZZ9K_STATUS_OK)
+		                   &mp->staging) != ZZ9K_STATUS_OK) {
+			KPrintF("stream_open: staging alloc failed\n");
 			return FALSE;
+		}
 		if(ZZ9KAllocShared(ZZ_MHI_MP3_RING_BYTES, 16, 0,
 		                   &mp->mp3_ring) != ZZ9K_STATUS_OK) {
+			KPrintF("stream_open: mp3 ring alloc failed\n");
 			ZZ9KFreeShared(mp->staging.handle);
 			return FALSE;
 		}
 		if(ZZ9KAllocShared(ZZ_MHI_PCM_RING_BYTES, 16, 0,
 		                   &mp->pcm_ring) != ZZ9K_STATUS_OK) {
+			KPrintF("stream_open: pcm ring alloc failed\n");
 			ZZ9KFreeShared(mp->mp3_ring.handle);
 			ZZ9KFreeShared(mp->staging.handle);
 			return FALSE;
@@ -356,13 +374,17 @@ static BOOL mhi_stream_open(struct MhiPlayer *mp) {
 	        mp->pcm_ring.handle, mp->pcm_ring.length, 0, 0,
 	        ZZ9K_AUDIO_SAMPLE_FORMAT_S16LE,
 	        ZZ_MHI_PCM_LOW_WATER, 0, 0)) {
+		KPrintF("stream_open: begin desc rejected (client side)\n");
 		return FALSE;
 	}
-	if(ZZ9KAudioStreamBegin(&begin, &mp->result) != ZZ9K_STATUS_OK)
+	if(ZZ9KAudioStreamBegin(&begin, &mp->result) != ZZ9K_STATUS_OK) {
+		KPrintF("stream_open: BEGIN rejected\n");
 		return FALSE;
+	}
 
 	mp->session = mp->result.session;
 	mp->backpressure = FALSE;
+	KPrintF("stream_open: session=%lu\n", (ULONG)mp->session);
 	return TRUE;
 }
 
@@ -716,7 +738,8 @@ BOOL i_MHIQueueBuffer(REGA3(APTR mhi_handle), REGA0(APTR mhi_buffer), REGD0(ULON
 	mp->have_unfed = TRUE;
 	Permit();
 
-	KPrintF("MHIQueueBuffer: Adr=0x%08lX\n", mhi_buffer);
+	KPrintF("MHIQueueBuffer: Adr=0x%08lX Size=%lu\n", (ULONG)mhi_buffer,
+	        (ULONG)mhi_size);
 
 	// Opportunistic feed from task context: while playing (or prebuffered
 	// before Play), push as much of the queue to the card as it accepts,
@@ -755,6 +778,9 @@ APTR i_MHIGetEmpty(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase
 	}
 	Permit();
 
+	if(mhi_buffer)
+		KPrintF("MHIGetEmpty: Adr=0x%08lX\n", (ULONG)mhi_buffer);
+
 	// Keep the card fed whenever the app services the driver.
 	if(mp->session != 0 && mp->Status == MHIF_PLAYING) {
 		mhi_service(mp);
@@ -772,6 +798,13 @@ UBYTE i_MHIGetStatus(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBa
 	if(!mp) return MHIF_STOPPED;
 
 	if(mp->Status == MHIF_PLAYING && mp->session != 0) {
+#ifdef ZZ_MHI_TRACE
+		static ULONG status_calls;
+		if((++status_calls & 63) == 0)
+			KPrintF("MHIGetStatus: #%lu unfed=%ld bp=%ld pend=%ld\n",
+			        status_calls, (LONG)mp->have_unfed,
+			        (LONG)mp->backpressure, (LONG)mp->play_pending);
+#endif
 		// Service the feed while we're here (task context).
 		mhi_service(mp);
 		if(!mp->have_unfed && !mp->play_pending) {
@@ -784,6 +817,7 @@ UBYTE i_MHIGetStatus(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBa
 			ZZ9KAudioStreamResult r;
 			if(ZZ9KAudioStreamPlay(mp->session, 0, &r) == ZZ9K_STATUS_OK &&
 			   (r.flags & ZZ9K_AUDIO_STREAM_RESULT_PCM_READY) == 0) {
+				KPrintF("MHIGetStatus: OUT_OF_DATA\n");
 				return MHIF_OUT_OF_DATA;
 			}
 		}
@@ -824,6 +858,10 @@ void i_MHIPlay(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 				   mp->result.sample_rate != 0) break;
 				if(!mp->have_unfed || mp->backpressure) break;
 			}
+			KPrintF("MHIPlay: prebuffer flags=0x%08lX rate=%lu unfed=%ld\n",
+			        (ULONG)mp->result.flags,
+			        (ULONG)mp->result.sample_rate,
+			        (LONG)mp->have_unfed);
 
 			// Report PLAYING right away and bind when the card is
 			// ready. Play may legally arrive with an empty (or too

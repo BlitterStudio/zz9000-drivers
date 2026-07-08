@@ -9,6 +9,8 @@
 *.audio
 *.library
 *.library.debug
+*.library.trace
+*.library.trace.debug
 PREFSFILE*
 ZZFwUpdate/ZZFwUpdate
 ZZScanlines/ZZScanlines
