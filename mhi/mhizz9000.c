@@ -68,12 +68,15 @@ struct Library *ZZ9KBase;
 // Card-side compressed ring. Pure tuning, NOT a liveness constraint:
 // the feeder process makes feed progress on its own, so playback works
 // for ANY application buffer size (AmigaAMP offers 16K up to
-// whole-file) and for apps that never poll. The ring only sets the
-// underrun runway (this + ~350 ms decoded PCM) against scheduling
-// hiccups, and how far the time display leads the speakers, since
-// everything in it counts as played (32K is ~2 s at 128 kbit/s --
-// the legacy driver's FIFO fill target).
-#define ZZ_MHI_MP3_RING_BYTES  (32UL * 1024UL)
+// whole-file) and for apps that never poll. The ring sets (a) how much
+// already-counted audio survives a seek and how far the time display
+// leads the speakers (8K is ~0.5 s at 128 kbit/s, plus the ~350 ms
+// decoded PCM ring), and (b) the underrun runway against scheduling
+// hiccups: worst case 320 kbit/s drains 8K in ~200 ms while the feeder
+// refills 4K per 50 ms retry, with the PCM ring as further cushion.
+// Must stay comfortably above both the 4K feed chunk and the
+// decoder's 4K minimum-input gate (see the firmware side).
+#define ZZ_MHI_MP3_RING_BYTES  (8UL * 1024UL)
 // Card-side PCM ring the firmware pump plays from: 16 periods of 3840
 // bytes (~320 ms of 48 kHz stereo).
 #define ZZ_MHI_PCM_RING_BYTES  (61440UL)
