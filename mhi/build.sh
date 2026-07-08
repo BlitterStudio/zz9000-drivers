@@ -3,13 +3,37 @@ set -eu
 
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 
-# Stage the zz9k.library client headers from the zz9000-sdk checkout so the
-# docker build (which mounts only this repo) can include them. Same sibling
-# convention as sdk/build.sh; override with ZZ9000_SDK. Runs on the host
+# Stage the zz9k.library client headers from a zz9000-sdk checkout so the
+# docker build (which mounts only this repo) can include them. Same source
+# conventions as sdk/build.sh: ZZ9000_SDK override, else a sibling checkout
+# as-is, else clone/reuse the SDK at the pinned sdk/SDK_REF into
+# sdk/work/zz9000-sdk (shared with sdk/build.sh, so releases compile this
+# driver against exactly the zz9k.library they package). Runs on the host
 # before the docker re-exec below; inside the container the staged copy is
 # already present.
-sdk_src=${ZZ9000_SDK:-$script_dir/../../zz9000-sdk}
-if [ -d "$sdk_src/include/zz9k" ]; then
+sdk_src=${ZZ9000_SDK:-}
+if [ -f /.dockerenv ]; then
+  # Inside the re-exec'd container: the host leg already staged the
+  # headers into mhi/zz9k-headers (validated below); never clone here.
+  sdk_src=
+else
+  if [ -z "$sdk_src" ] && [ -d "$script_dir/../../zz9000-sdk/include/zz9k" ]; then
+    sdk_src="$script_dir/../../zz9000-sdk"
+  fi
+  if [ -z "$sdk_src" ] && command -v git >/dev/null 2>&1; then
+    SDK_REF=$(cat "$script_dir/../sdk/SDK_REF")
+    SDK_REPO=${SDK_REPO:-https://github.com/BlitterStudio/zz9000-sdk.git}
+    sdk_src="$script_dir/../sdk/work/zz9000-sdk"
+    if [ ! -d "$sdk_src/.git" ]; then
+      echo ">> Cloning zz9000-sdk into $sdk_src"
+      git clone "$SDK_REPO" "$sdk_src"
+    fi
+    echo ">> Checking out pinned ref $SDK_REF"
+    git -C "$sdk_src" fetch origin 2>/dev/null || true
+    git -C "$sdk_src" checkout -f "$SDK_REF"
+  fi
+fi
+if [ -n "$sdk_src" ] && [ -d "$sdk_src/include/zz9k" ]; then
   rm -rf "$script_dir/zz9k-headers"
   mkdir -p "$script_dir/zz9k-headers/zz9k" \
            "$script_dir/zz9k-headers/proto" \

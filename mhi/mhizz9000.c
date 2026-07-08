@@ -422,6 +422,10 @@ static void mhi_stream_close(struct MhiPlayer *mp) {
 // whichever entry point feeds the decisive chunk. Task context only.
 static void mhi_try_bind(struct MhiPlayer *mp) {
 	if(!mp->play_pending || mp->session == 0) return;
+	// A pause can land between Play and the card reporting decoded
+	// PCM; play_pending stays armed for the resume, but audio must
+	// not start while the public state is PAUSED.
+	if(mp->Status != MHIF_PLAYING) return;
 	if((mp->result.flags & ZZ9K_AUDIO_STREAM_RESULT_PCM_READY) == 0 ||
 	   mp->result.sample_rate == 0) {
 		return;
