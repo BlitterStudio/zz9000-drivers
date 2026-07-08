@@ -71,6 +71,21 @@ struct MhiPlayer {
 
 	UBYTE play_pending;          /* PLAYING, but AX bind deferred until
 	                                the card has decoded PCM + rate */
+
+	/*
+	 * The feed engine runs in a driver-owned feeder process, NOT in the
+	 * application's context: mailbox calls block, so they can't run
+	 * from interrupts -- and MHI apps (AmigaAMP) sleep until a
+	 * completion signal, so feeding can't ride their entry points
+	 * either (the first buffer would never complete if it exceeds the
+	 * card-side rings). io_lock serializes the feeder against the
+	 * control entry points (Play/Stop/Pause/GetStatus probe).
+	 */
+	struct SignalSemaphore io_lock;
+	struct Task *feeder_task;    /* NULL once the feeder has exited */
+	ULONG feeder_wake_mask;
+	volatile UBYTE feeder_state; /* 0 starting, 1 running, 2 failed */
+	volatile UBYTE feeder_quit;
 };
 
 struct ListNode {

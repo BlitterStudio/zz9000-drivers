@@ -37,6 +37,7 @@
 #include <proto/expansion.h>
 
 #include <hardware/intbits.h>
+#include <devices/timer.h>
 
 #include "zz9000_ax.h"
 #include "mhizz9000.h"
@@ -311,14 +312,16 @@ static void mhi_feed_pending(struct MhiPlayer *mp) {
 			// Card ring full; nothing was consumed. A later entry
 			// point retries from task context (the staged memo above
 			// makes that retry cheap).
-			if(!mp->backpressure)
+			if(!mp->backpressure) {
 				KPrintF("feed: backpressure (flags=0x%08lX)\n",
 				        (ULONG)mp->result.flags);
+			}
 			mp->backpressure = TRUE;
 			return;
 		}
-		if(mp->backpressure)
+		if(mp->backpressure) {
 			KPrintF("feed: backpressure cleared\n");
+		}
 		mp->backpressure = FALSE;
 		mp->staged_valid = FALSE;   // accepted: key must never be reused
 
@@ -423,12 +426,107 @@ static void mhi_try_bind(struct MhiPlayer *mp) {
 	KPrintF("mhi_try_bind: session bound to AX output.\n");
 }
 
-// Standard entry-point service: move queued data to the card, then
-// finish a deferred Play if the decisive data just arrived.
-static void mhi_service(struct MhiPlayer *mp) {
-	mhi_feed_pending(mp);
-	mhi_try_bind(mp);
+/* ********************* */
+/*  BEGIN feeder process */
+/* ********************* */
+
+// Retry cadence while the card is backpressured or a deferred Play is
+// waiting. The decoded PCM ring holds ~350 ms, so 50 ms leaves a wide
+// underrun margin; with the staging memo a retry is one mailbox op.
+#define ZZ_MHI_FEEDER_RETRY_MICROS 50000UL
+
+// Single decoder (enforced by NumAllocatedDecoders), so the feeder
+// entry point can pick up its MhiPlayer through a static.
+static struct MhiPlayer *g_feeder_mp;
+
+// Wake the feeder (new data queued, Play issued, teardown). Forbid
+// pins the task pointer against feeder exit.
+static void mhi_wake_feeder(struct MhiPlayer *mp) {
+	Forbid();
+	if(mp->feeder_task) Signal(mp->feeder_task, mp->feeder_wake_mask);
+	Permit();
 }
+
+// The driver's own feed engine context. MHI applications are allowed
+// to sleep until a buffer-completion signal, so the driver must make
+// feed progress on its own: the legacy driver did it from the
+// per-period interrupt; our mailbox calls block, so it happens here,
+// in a dedicated process. All feed-engine and session mailbox activity
+// is serialized with the control entry points through mp->io_lock.
+static void mhi_feeder(void) {
+	struct MhiPlayer *mp = g_feeder_mp;
+	struct MsgPort *port = NULL;
+	struct timerequest *treq = NULL;
+	BYTE sig = -1;
+	int dev_open = 0;
+
+	if(!mp) return;
+
+	sig = AllocSignal(-1);
+	port = CreateMsgPort();
+	if(sig < 0 || !port) goto out;
+	treq = (struct timerequest *)CreateIORequest(port,
+	                                             sizeof(struct timerequest));
+	if(!treq) goto out;
+	if(OpenDevice((STRPTR)"timer.device", UNIT_VBLANK,
+	              (struct IORequest *)treq, 0) != 0) goto out;
+	dev_open = 1;
+
+	mp->feeder_wake_mask = 1UL << sig;
+	Forbid();
+	mp->feeder_task = FindTask(NULL);
+	mp->feeder_state = 1;
+	Permit();
+	KPrintF("feeder: running\n");
+
+	for(;;) {
+		BOOL busy = FALSE;
+
+		ObtainSemaphore(&mp->io_lock);
+		if(!mp->feeder_quit && mp->session != 0 &&
+		   (mp->Status == MHIF_PLAYING || mp->Status == MHIF_PAUSED)) {
+			mhi_feed_pending(mp);
+			mhi_try_bind(mp);
+			busy = mp->have_unfed || mp->backpressure ||
+			       mp->play_pending;
+		}
+		ReleaseSemaphore(&mp->io_lock);
+
+		if(mp->feeder_quit) break;
+
+		if(busy) {
+			// Timed wait: retry soon even without a wake signal.
+			treq->tr_node.io_Command = TR_ADDREQUEST;
+			treq->tr_time.tv_secs = 0;
+			treq->tr_time.tv_micro = ZZ_MHI_FEEDER_RETRY_MICROS;
+			SendIO((struct IORequest *)treq);
+			Wait(mp->feeder_wake_mask |
+			     (1UL << port->mp_SigBit));
+			if(!CheckIO((struct IORequest *)treq))
+				AbortIO((struct IORequest *)treq);
+			WaitIO((struct IORequest *)treq);
+		} else {
+			// Idle: sleep until something changes.
+			Wait(mp->feeder_wake_mask);
+		}
+	}
+
+out:
+	if(mp->feeder_state != 1) mp->feeder_state = 2;
+	KPrintF("feeder: exit (state %ld)\n", (LONG)mp->feeder_state);
+	if(dev_open) CloseDevice((struct IORequest *)treq);
+	if(treq) DeleteIORequest((struct IORequest *)treq);
+	if(port) DeleteMsgPort(port);
+	if(sig >= 0) FreeSignal(sig);
+	// Last touch of mp: after this the owner may free it.
+	Forbid();
+	mp->feeder_task = NULL;
+	Permit();
+}
+
+/* ******************* */
+/*  END feeder process */
+/* ******************* */
 
 /* ******************* */
 /*  END feed engine    */
@@ -554,6 +652,7 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 		return NULL;
 	}
 	NewList((struct List *)mp->BufferList);
+	InitSemaphore(&mp->io_lock);
 
 	// Populate the Interrupt nodes so the atomic-claim step below can
 	// AddIntServer our hard ISR directly.
@@ -604,6 +703,36 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 	setAudioParam(mp, ZZ_AX_AP_DSP_SET_VOLUMES,
 	              read_mix_levels_env(ZZ_AX_DEFAULT_MIX_LEVELS));
 
+	// Spawn the feeder process; it idles until Play opens a session.
+	g_feeder_mp = mp;
+	mp->feeder_state = 0;
+	mp->feeder_quit = FALSE;
+	if(!CreateNewProcTags(NP_Entry, (ULONG)mhi_feeder,
+	                      NP_Name, (ULONG)"mhizz9000 feeder",
+	                      NP_StackSize, 16384,
+	                      NP_Priority, 0,
+	                      TAG_DONE)) {
+		mp->feeder_state = 2;
+	}
+	while(mp->feeder_state == 0) Delay(1);
+	if(mp->feeder_state != 1) {
+		KPrintF("Can't start the feeder process.\n");
+		Forbid();
+		if (mp->flags & ZZ_AX_DEVF_INT2MODE) {
+			RemIntServer(INTB_PORTS, &mp->irq);
+		} else {
+			RemIntServer(INTB_EXTER, &mp->irq);
+		}
+		if(MHI_LibBase->NumAllocatedDecoders)
+			MHI_LibBase->NumAllocatedDecoders--;
+		Permit();
+		FreeVec(mp->BufferList);
+		FreeVec(mp);
+		CloseLibrary(ZZ9KBase);
+		ZZ9KBase = NULL;
+		return NULL;
+	}
+
 	return mp;
 }
 
@@ -643,6 +772,14 @@ void i_MHIFreeDecoder(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibB
 	disable_hw_audio(mp);
 	drain_buffer_list_locked(mp);
 	Permit();
+
+	// Retire the feeder before touching the session: after this no
+	// other context issues mailbox calls on mp.
+	if(mp->feeder_task) {
+		mp->feeder_quit = TRUE;
+		mhi_wake_feeder(mp);
+		while(mp->feeder_task) Delay(1);
+	}
 	// Permit-to-0 dispatches any soft IRQ still queued on the SoftInts
 	// list; it runs cdev_sisr on still-valid mp, sees Status==STOPPED, and
 	// returns without touching the list or mp fields. No new soft IRQs can
@@ -741,11 +878,9 @@ BOOL i_MHIQueueBuffer(REGA3(APTR mhi_handle), REGA0(APTR mhi_buffer), REGD0(ULON
 	KPrintF("MHIQueueBuffer: Adr=0x%08lX Size=%lu\n", (ULONG)mhi_buffer,
 	        (ULONG)mhi_size);
 
-	// Opportunistic feed from task context: while playing (or prebuffered
-	// before Play), push as much of the queue to the card as it accepts,
-	// and complete a deferred Play once the card is ready.
+	// The feeder process moves the data; just wake it.
 	if(mp->session != 0) {
-		mhi_service(mp);
+		mhi_wake_feeder(mp);
 	}
 
 	return TRUE;
@@ -778,13 +913,10 @@ APTR i_MHIGetEmpty(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase
 	}
 	Permit();
 
-	if(mhi_buffer)
+	if(mhi_buffer) {
 		KPrintF("MHIGetEmpty: Adr=0x%08lX\n", (ULONG)mhi_buffer);
-
-	// Keep the card fed whenever the app services the driver.
-	if(mp->session != 0 && mp->Status == MHIF_PLAYING) {
-		mhi_service(mp);
 	}
+
 	return mhi_buffer;
 }
 
@@ -805,18 +937,25 @@ UBYTE i_MHIGetStatus(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBa
 			        status_calls, (LONG)mp->have_unfed,
 			        (LONG)mp->backpressure, (LONG)mp->play_pending);
 #endif
-		// Service the feed while we're here (task context).
-		mhi_service(mp);
 		if(!mp->have_unfed && !mp->play_pending) {
 			// Everything is on the card; probe it. PLAY on the
 			// already-bound session is idempotent and returns fresh
 			// stream state: no PCM left and nothing queued means the
 			// stream has drained. (Skipped while a deferred Play is
 			// still waiting for data -- an empty new session must not
-			// read as end-of-stream.)
+			// read as end-of-stream.) io_lock serializes the probe
+			// with the feeder.
 			ZZ9KAudioStreamResult r;
-			if(ZZ9KAudioStreamPlay(mp->session, 0, &r) == ZZ9K_STATUS_OK &&
+			UBYTE drained = FALSE;
+			ObtainSemaphore(&mp->io_lock);
+			if(mp->session != 0 && !mp->play_pending &&
+			   !mp->have_unfed &&
+			   ZZ9KAudioStreamPlay(mp->session, 0, &r) == ZZ9K_STATUS_OK &&
 			   (r.flags & ZZ9K_AUDIO_STREAM_RESULT_PCM_READY) == 0) {
+				drained = TRUE;
+			}
+			ReleaseSemaphore(&mp->io_lock);
+			if(drained) {
 				KPrintF("MHIGetStatus: OUT_OF_DATA\n");
 				return MHIF_OUT_OF_DATA;
 			}
@@ -831,7 +970,6 @@ UBYTE i_MHIGetStatus(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBa
  */
 void i_MHIPlay(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 	struct MhiPlayer *mp = (struct MhiPlayer *)mhi_handle;
-	int tries;
 
 	KPrintF("MHIPlay called\n");
 
@@ -840,7 +978,9 @@ void i_MHIPlay(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 	switch(mp->Status) {
 		case MHIF_STOPPED:
 		case MHIF_OUT_OF_DATA:
+			ObtainSemaphore(&mp->io_lock);
 			if(!mhi_stream_open(mp)) {
+				ReleaseSemaphore(&mp->io_lock);
 				KPrintF("MHIPlay: session open failed.\n");
 				return;
 			}
@@ -848,49 +988,41 @@ void i_MHIPlay(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 			// set LPF to 20KHz
 			setAudioParam(mp, ZZ_AX_AP_DSP_SET_LOWPASS, 20000);
 
-			// Prebuffer: push queued data until the card has decoded
-			// PCM and knows the stream's sample rate (the firmware
-			// requires that before binding the session to the AX
-			// output). Bounded: each pass feeds up to the whole queue.
-			for(tries = 8; tries > 0; tries--) {
-				mhi_feed_pending(mp);
-				if((mp->result.flags & ZZ9K_AUDIO_STREAM_RESULT_PCM_READY) &&
-				   mp->result.sample_rate != 0) break;
-				if(!mp->have_unfed || mp->backpressure) break;
-			}
-			KPrintF("MHIPlay: prebuffer flags=0x%08lX rate=%lu unfed=%ld\n",
-			        (ULONG)mp->result.flags,
-			        (ULONG)mp->result.sample_rate,
-			        (LONG)mp->have_unfed);
-
-			// Report PLAYING right away and bind when the card is
-			// ready. Play may legally arrive with an empty (or too
-			// short) queue -- notably on a seek, where the app stops,
-			// calls Play, and requeues from the new file position --
-			// so a not-yet-ready card must not fail the call.
+			// Report PLAYING right away; the feeder process pushes
+			// queued data and binds the session to the AX output as
+			// soon as the card has decoded PCM and a sample rate.
+			// Play may legally arrive with an empty (or too short)
+			// queue -- notably on a seek, where the app stops, calls
+			// Play, and requeues from the new file position -- so a
+			// not-yet-ready card must not fail the call.
 			Forbid();
 			mp->Status = MHIF_PLAYING;
 			mp->play_pending = TRUE;
 			Permit();
-			mhi_try_bind(mp);
+			ReleaseSemaphore(&mp->io_lock);
+			mhi_wake_feeder(mp);
 		break;
 		case MHIF_PAUSED:
 			if(mp->play_pending) {
 				// Paused before the deferred bind completed: just
-				// rearm; the bind happens when data arrives.
+				// rearm; the feeder binds when data arrives.
 				Forbid();
 				mp->Status = MHIF_PLAYING;
 				Permit();
-				mhi_try_bind(mp);
+				mhi_wake_feeder(mp);
 				break;
 			}
 			// Resume: the session (and its PCM ring) survived Pause,
 			// so re-binding continues gaplessly.
+			ObtainSemaphore(&mp->io_lock);
 			if(ZZ9KAudioStreamPlay(mp->session, 0, &mp->result) != ZZ9K_STATUS_OK) {
+				ReleaseSemaphore(&mp->io_lock);
 				KPrintF("MHIPlay: resume rejected.\n");
 				return;
 			}
 			mp->Status = MHIF_PLAYING;
+			ReleaseSemaphore(&mp->io_lock);
+			mhi_wake_feeder(mp);
 		break;
 	}
 }
@@ -922,8 +1054,11 @@ void i_MHIStop(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 
 	if(old != MHIF_STOPPED) {
 		// Stop resets the position: close the session entirely; the
-		// next Play begins a fresh one (rings are reused).
+		// next Play begins a fresh one (rings are reused). io_lock
+		// waits out a feeder iteration that is mid-mailbox-call.
+		ObtainSemaphore(&mp->io_lock);
 		mhi_stream_close(mp);
+		ReleaseSemaphore(&mp->io_lock);
 	}
 }
 
@@ -954,7 +1089,10 @@ void i_MHIPause(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) 
 	if(paused && mp->session != 0) {
 		// Unbind from the AX output; the session and its decoded PCM
 		// survive, so Play resumes exactly where we stopped.
-		(void)ZZ9KAudioStreamStop(mp->session, 0, &r);
+		ObtainSemaphore(&mp->io_lock);
+		if(mp->session != 0)
+			(void)ZZ9KAudioStreamStop(mp->session, 0, &r);
+		ReleaseSemaphore(&mp->io_lock);
 	}
 }
 
