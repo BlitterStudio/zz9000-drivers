@@ -84,6 +84,7 @@ struct MhiPlayer {
 	struct SignalSemaphore io_lock;
 	struct Task *feeder_task;    /* NULL once the feeder has exited */
 	ULONG feeder_wake_mask;
+	ULONG feeds_accepted;        /* accepted-FEED count (backoff reset) */
 	volatile UBYTE feeder_state; /* 0 starting, 1 running, 2 failed */
 	volatile UBYTE feeder_quit;
 };

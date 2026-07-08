@@ -324,6 +324,7 @@ static void mhi_feed_pending(struct MhiPlayer *mp) {
 		}
 		mp->backpressure = FALSE;
 		mp->staged_valid = FALSE;   // accepted: key must never be reused
+		mp->feeds_accepted++;       // resets the feeder's retry backoff
 
 		Forbid();
 		if(gen == mp->list_gen) {
@@ -431,9 +432,14 @@ static void mhi_try_bind(struct MhiPlayer *mp) {
 /* ********************* */
 
 // Retry cadence while the card is backpressured or a deferred Play is
-// waiting. The decoded PCM ring holds ~350 ms, so 50 ms leaves a wide
-// underrun margin; with the staging memo a retry is one mailbox op.
-#define ZZ_MHI_FEEDER_RETRY_MICROS 50000UL
+// waiting. Base 50 ms, doubling per fruitless retry up to the cap and
+// resetting whenever a FEED is accepted (or a wake arrives): the card
+// only frees chunk-sized space every couple hundred ms, so most fixed
+// 50 ms retries were wasted mailbox ops. The decoded PCM ring holds
+// ~350 ms, which cushions even a capped sleep; with the staging memo
+// a retry is one mailbox op.
+#define ZZ_MHI_FEEDER_RETRY_MICROS     50000UL
+#define ZZ_MHI_FEEDER_RETRY_MAX_MICROS 200000UL
 
 // Single decoder (enforced by NumAllocatedDecoders), so the feeder
 // entry point can pick up its MhiPlayer through a static.
@@ -479,8 +485,13 @@ static void mhi_feeder(void) {
 	Permit();
 	KPrintF("feeder: running\n");
 
+	{
+	ULONG retry_micros = ZZ_MHI_FEEDER_RETRY_MICROS;
+
 	for(;;) {
 		BOOL busy = FALSE;
+		ULONG accepted_before = mp->feeds_accepted;
+		ULONG sigs;
 
 		ObtainSemaphore(&mp->io_lock);
 		if(!mp->feeder_quit && mp->session != 0 &&
@@ -495,13 +506,22 @@ static void mhi_feeder(void) {
 		if(mp->feeder_quit) break;
 
 		if(busy) {
-			// Timed wait: retry soon even without a wake signal.
+			// Adaptive pacing: back off while the card refuses,
+			// snap back on progress.
+			if(mp->feeds_accepted != accepted_before) {
+				retry_micros = ZZ_MHI_FEEDER_RETRY_MICROS;
+			} else {
+				retry_micros <<= 1;
+				if(retry_micros > ZZ_MHI_FEEDER_RETRY_MAX_MICROS)
+					retry_micros = ZZ_MHI_FEEDER_RETRY_MAX_MICROS;
+			}
+			// Timed wait: retry even without a wake signal.
 			treq->tr_node.io_Command = TR_ADDREQUEST;
 			treq->tr_time.tv_secs = 0;
-			treq->tr_time.tv_micro = ZZ_MHI_FEEDER_RETRY_MICROS;
+			treq->tr_time.tv_micro = retry_micros;
 			SendIO((struct IORequest *)treq);
-			Wait(mp->feeder_wake_mask |
-			     (1UL << port->mp_SigBit));
+			sigs = Wait(mp->feeder_wake_mask |
+			            (1UL << port->mp_SigBit));
 			if(!CheckIO((struct IORequest *)treq))
 				AbortIO((struct IORequest *)treq);
 			WaitIO((struct IORequest *)treq);
@@ -511,10 +531,14 @@ static void mhi_feeder(void) {
 			// Wait return instantly -- the feeder then spins at
 			// mailbox-op speed and pins the CPU (bench round 8).
 			SetSignal(0, 1UL << port->mp_SigBit);
+			if(sigs & mp->feeder_wake_mask)
+				retry_micros = ZZ_MHI_FEEDER_RETRY_MICROS;
 		} else {
 			// Idle: sleep until something changes.
+			retry_micros = ZZ_MHI_FEEDER_RETRY_MICROS;
 			Wait(mp->feeder_wake_mask);
 		}
+	}
 	}
 
 out:
