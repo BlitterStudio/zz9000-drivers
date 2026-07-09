@@ -1863,8 +1863,9 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 
 	MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
 	ULONG rgbformat = RGBFB_CLUT;
-	ULONG bytesperrow_override = 0;
+	ULONG mode_width = 0;
 	ULONG alignment = 0;
+	BOOL constant_pitch = FALSE;
 
 	struct TagItem *tag = tags;
 	while (tag && tag->ti_Tag != TAG_DONE) {
@@ -1874,7 +1875,10 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 			case TAG_MORE: tag = (struct TagItem *)tag->ti_Data; continue;
 			case ABMA_RGBFormat: rgbformat = tag->ti_Data; break;
 			case ABMA_NoMemory: return NULL;
-			case ABMA_ConstantBytesPerRow: bytesperrow_override = tag->ti_Data; break;
+			/* a flag, not a pitch: the stride must not depend on the
+			 * bitmap width (ABMA_ModeWidth carries the mode's width) */
+			case ABMA_ConstantBytesPerRow: constant_pitch = tag->ti_Data != 0; break;
+			case ABMA_ModeWidth: mode_width = tag->ti_Data; break;
 			case ABMA_Alignment: alignment = tag->ti_Data; break;
 			/* requests we cannot honor in card VRAM: CPU-owned
 			 * fast-mem bitmaps, explicit system-memory bitmaps,
@@ -1903,19 +1907,16 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 	uint32_t pitch_align = (alignment > ZZ_OFFSCREEN_PITCH_ALIGN) ?
 		alignment : ZZ_OFFSCREEN_PITCH_ALIGN;
 
-	uint16_t bytesperrow;
-	if (bytesperrow_override) {
-		/* P96 demands this exact stride; refuse what the blitter
-		 * cannot step (pitches are programmed as BytesPerRow >> 2)
-		 * or what breaks the requested row alignment */
-		if (bytesperrow_override & (pitch_align - 1))
-			return NULL;
-		bytesperrow = bytesperrow_override;
-	} else {
-		bytesperrow = zz_offscreen_pad_pitch_to(
-			CalculateBytesPerRow(b, NULL, width, height, rgbformat),
-			pitch_align);
-	}
+	/* constant pitch: derive the stride from the display mode's width
+	 * so every bitmap of that mode/format shares it; the padding is
+	 * deterministic, which keeps it constant */
+	ULONG pitch_width = width;
+	if (constant_pitch && mode_width > pitch_width)
+		pitch_width = mode_width;
+
+	uint16_t bytesperrow = zz_offscreen_pad_pitch_to(
+		CalculateBytesPerRow(b, NULL, pitch_width, height, rgbformat),
+		pitch_align);
 	uint32_t size = (uint32_t)bytesperrow * height;
 	if (!size) return NULL;
 
