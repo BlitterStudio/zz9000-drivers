@@ -35,6 +35,7 @@
 #include "zz9000.h"
 #include "zzcfg_query.h"
 #include "blitter_cache.h"
+#include "offscreen_bitmap.h"
 
 #define STR(s) #s
 #define XSTR(s) STR(s)
@@ -118,6 +119,7 @@ char dummies[128];
 #define ZZ_CARD_DATA_MONITOR_SWITCH 3
 #define ZZ_CARD_DATA_DISPLAY_ENABLED 4
 #define ZZ_CARD_DATA_SECONDARY_PALETTE 5
+#define ZZ_CARD_DATA_OFFSCREEN_BITMAPS 6
 #define MNT_MANUFACTURER 0x6d6e
 #define ZZ9000_PRODUCT_Z2 0x3
 #define ZZ9000_PRODUCT_Z3 0x4
@@ -647,6 +649,7 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 	b->CardData[ZZ_CARD_DATA_MONITOR_SWITCH] = 1;
 	b->CardData[ZZ_CARD_DATA_DISPLAY_ENABLED] = 1;
 	b->CardData[ZZ_CARD_DATA_SECONDARY_PALETTE] = 0;
+	b->CardData[ZZ_CARD_DATA_OFFSCREEN_BITMAPS] = 1;
 	if ((cd = find_unconfigured_configdev(ExpansionBase, MNT_MANUFACTURER, ZZ9000_PRODUCT_Z3))) zorro_version = 3;
 	else if ((cd = find_unconfigured_configdev(ExpansionBase, MNT_MANUFACTURER, ZZ9000_PRODUCT_Z2))) zorro_version = 2;
 
@@ -731,6 +734,15 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 				ZZ_CFG_KEY_NS_VSYNC, &cfg_present);
 			if (cfg_present && cfg_value <= 2)
 				b->CardData[ZZ_CARD_DATA_NSVSYNC] = cfg_value;
+		}
+
+		if (env_flag_exists(DOSBase, "ENV:ZZ9000-NO-OFFSCREEN")) {
+			b->CardData[ZZ_CARD_DATA_OFFSCREEN_BITMAPS] = 0;
+		} else {
+			cfg_value = zzcfg_query((ULONG)b->RegisterBase,
+				ZZ_CFG_KEY_OFFSCREEN_BITMAPS, &cfg_present);
+			if (cfg_present)
+				b->CardData[ZZ_CARD_DATA_OFFSCREEN_BITMAPS] = (cfg_value != 0);
 		}
 
 		apply_vcap_settings(registers, (LONG)b->CardData[ZZ_CARD_DATA_SCANDBL_800X600]);
@@ -833,9 +845,21 @@ int __attribute__((used)) InitCard(__REGA0(struct BoardInfo* b), __REGA1(char **
 	//b->SetDPMSLevel = (void *)NULL;
 	//b->ResetChip = (void *)NULL;
 	//b->GetFeatureAttrs = (void *)NULL;
-	//b->AllocBitMap = (void *)ZZ_AllocBitMap;
-	//b->FreeBitMap = (void *)ZZ_FreeBitMap;
-	//b->GetBitMapAttr = (void *)NULL;
+	/* Off-screen bitmaps in card VRAM (Z3 only; ZZ_AllocBitMap refuses
+	 * on Z2). Kill switch: ENV:ZZ9000-NO-OFFSCREEN, the ZZ9000.CFG
+	 * offscreen_bitmaps key (both read in FindCard), or the
+	 * OFFSCREENBITMAPS tooltype, which wins over both. */
+	{
+		BOOL offscreen = (BOOL)b->CardData[ZZ_CARD_DATA_OFFSCREEN_BITMAPS];
+		const char *value = tooltype_value(tool_types, "OFFSCREENBITMAPS");
+		if (value)
+			offscreen = !value_is_false(value);
+		if (offscreen && (b->CardFlags & CARDFLAG_ZORRO_3)) {
+			b->AllocBitMap = (void *)ZZ_AllocBitMap;
+			b->FreeBitMap = (void *)ZZ_FreeBitMap;
+			b->GetBitMapAttr = (void *)ZZ_GetBitMapAttr;
+		}
+	}
 
 	b->SetSprite = (void *)SetSprite;
 	b->SetSpritePosition = (void *)SetSpritePosition;
@@ -1789,6 +1813,28 @@ void DrawLine(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 	}
 }
 
+/* Off-screen bitmaps we place in card VRAM. `bm` must stay the first
+ * member so the struct BitMap* P96 hands back is also a ZZBitMap*;
+ * magic + the Planes[0] range check tell ours apart from foreign
+ * (system RAM / planar) bitmaps. */
+struct ZZBitMap {
+	struct BitMap bm;
+	ULONG magic;
+	ULONG card_offset;
+	ULONG rgbformat;
+	UWORD width, height;
+};
+
+static struct ZZBitMap *zz_bitmap_ours(struct BoardInfo *b, struct BitMap *bm) {
+	struct ZZBitMap *zbm = (struct ZZBitMap *)bm;
+
+	if (!bm || !zz_offscreen_is_ours(zbm->magic, (uint32_t)bm->Planes[0],
+			(uint32_t)b->MemoryBase, (uint32_t)b->MemorySize))
+		return NULL;
+
+	return zbm;
+}
+
 struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width), __REGD1(ULONG height), __REGA1(struct TagItem *tags)) {
 	if (!(b->CardFlags & CARDFLAG_ZORRO_3))
 		return NULL;
@@ -1811,6 +1857,9 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 		tag++;
 	}
 
+	if (!zz_rgbformat_bytes_per_pixel(rgbformat))
+		return NULL;
+
 	uint16_t bytesperrow = bytesperrow_override ? bytesperrow_override :
 		CalculateBytesPerRow(b, NULL, width, height, rgbformat);
 	uint32_t size = (uint32_t)bytesperrow * height;
@@ -1824,36 +1873,74 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 	uint32_t card_offset = gfxdata->offset[0];
 	if (!card_offset) return NULL;
 
-	struct BitMap *bm = (struct BitMap *)AllocMem(sizeof(struct BitMap), MEMF_PUBLIC | MEMF_CLEAR);
-	if (!bm) {
+	struct ZZBitMap *zbm = (struct ZZBitMap *)AllocMem(sizeof(struct ZZBitMap), MEMF_PUBLIC | MEMF_CLEAR);
+	if (!zbm) {
 		gfxdata->offset[0] = card_offset;
 		gfxdata->u8_user[0] = 0;
 		zzwrite16(&registers->blitter_acc_op, ACC_OP_FREE_SURFACE);
 		return NULL;
 	}
 
-	bm->BytesPerRow = bytesperrow;
-	bm->Rows = height;
-	bm->Depth = 1;
-	bm->Planes[0] = (PLANEPTR)((uint32_t)b->MemoryBase + card_offset);
+	zbm->bm.BytesPerRow = bytesperrow;
+	zbm->bm.Rows = height;
+	zbm->bm.Depth = (UBYTE)zz_rgbformat_bits_per_pixel(rgbformat);
+	zbm->bm.Planes[0] = (PLANEPTR)((uint32_t)b->MemoryBase + card_offset);
+	zbm->magic = ZZ_OFFSCREEN_MAGIC;
+	zbm->card_offset = card_offset;
+	zbm->rgbformat = rgbformat;
+	zbm->width = width;
+	zbm->height = height;
 
-	return bm;
+	return &zbm->bm;
 }
 
 BOOL ZZ_FreeBitMap(__REGA0(struct BoardInfo *b), __REGA1(struct BitMap *bm), __REGA2(struct TagItem *tags)) {
-	if (!bm) return FALSE;
+	struct ZZBitMap *zbm = zz_bitmap_ours(b, bm);
+	if (!zbm) return FALSE;
 
 	if (b->CardFlags & CARDFLAG_ZORRO_3) {
 		MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
-		uint32_t card_offset = (uint32_t)bm->Planes[0] - (uint32_t)b->MemoryBase;
 		dmy_cache
-		gfxdata->offset[0] = card_offset;
+		gfxdata->offset[0] = zbm->card_offset;
 		gfxdata->u8_user[0] = 0;
 		zzwrite16(&registers->blitter_acc_op, ACC_OP_FREE_SURFACE);
 	}
 
-	FreeMem(bm, sizeof(struct BitMap));
+	FreeMem(zbm, sizeof(struct ZZBitMap));
 	return TRUE;
+}
+
+ULONG ZZ_GetBitMapAttr(__REGA0(struct BoardInfo *b), __REGA1(struct BitMap *bm), __REGD0(ULONG attr)) {
+	struct ZZBitMapAttrs attrs;
+	struct ZZBitMap *zbm;
+
+	if (!bm) return 0;
+
+	if ((zbm = zz_bitmap_ours(b, bm))) {
+		attrs.memory = (uint32_t)bm->Planes[0];
+		attrs.basememory = (uint32_t)b->MemoryBase;
+		attrs.bytesperrow = bm->BytesPerRow;
+		attrs.bytesperpixel = zz_rgbformat_bytes_per_pixel(zbm->rgbformat);
+		attrs.bitsperpixel = zz_rgbformat_bits_per_pixel(zbm->rgbformat);
+		attrs.rgbformat = zbm->rgbformat;
+		attrs.width = zbm->width;
+		attrs.height = zbm->height;
+		attrs.depth = attrs.bitsperpixel;
+	} else {
+		/* foreign bitmap (system RAM, planar): answer from the plain
+		 * struct BitMap fields */
+		attrs.memory = (uint32_t)bm->Planes[0];
+		attrs.basememory = (uint32_t)b->MemoryBase;
+		attrs.bytesperrow = bm->BytesPerRow;
+		attrs.bytesperpixel = 1;
+		attrs.bitsperpixel = bm->Depth;
+		attrs.rgbformat = RGBFB_PLANAR;
+		attrs.width = (uint32_t)bm->BytesPerRow * 8;
+		attrs.height = bm->Rows;
+		attrs.depth = bm->Depth;
+	}
+
+	return zz_offscreen_attr(&attrs, attr);
 }
 
 // This function shall blit a planar bitmap anywhere in the 68K address space into a chunky bitmap in video RAM.
