@@ -80,6 +80,7 @@ void BlitPlanar2Direct (__REGA0(struct BoardInfo *b), __REGA1(struct BitMap *bmp
 struct BitMap * ZZ_AllocBitMap (__REGA0(struct BoardInfo *b), __REGD0(ULONG width), __REGD1(ULONG height), __REGA1(struct TagItem *tags));
 BOOL ZZ_FreeBitMap (__REGA0(struct BoardInfo *b), __REGA1(struct BitMap *bm), __REGA2(struct TagItem *tags));
 ULONG ZZ_GetBitMapAttr (__REGA0(struct BoardInfo *b), __REGA1(struct BitMap *bm), __REGD0(ULONG attr));
+int ZZ_WriteYUVRect (__REGA0(struct BoardInfo *b), __REGA1(APTR src), __REGD0(SHORT srcx), __REGD1(SHORT srcy), __REGA2(struct RenderInfo *r), __REGD2(SHORT dstx), __REGD3(SHORT dsty), __REGD4(SHORT w), __REGD5(SHORT h), __REGA3(struct TagItem *tags));
 
 BOOL SetSprite (__REGA0(struct BoardInfo *b), __REGD0(BOOL what), __REGD7(RGBFTYPE format));
 void SetSpritePosition (__REGA0(struct BoardInfo *b), __REGD0(WORD x), __REGD1(WORD y), __REGD7(RGBFTYPE format));

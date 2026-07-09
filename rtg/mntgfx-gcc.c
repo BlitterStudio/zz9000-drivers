@@ -841,7 +841,9 @@ int __attribute__((used)) InitCard(__REGA0(struct BoardInfo* b), __REGA1(char **
 	//b->AllocCardMemAbs = (void *)NULL;
 	b->SetSplitPosition = (void *)SetSplitPosition;
 	//b->ReInitMemory = (void *)NULL;
-	//b->WriteYUVRect = (void *)NULL;
+	/* Stage A contract probe: logs + delegates to WriteYUVRectDefault
+	 * (pure pass-through in release builds). See ZZ_WriteYUVRect. */
+	b->WriteYUVRect = (void *)ZZ_WriteYUVRect;
 	b->GetVSyncState = (void *)GetVSyncState;
 	//b->GetVBeamPos = (void *)NULL;
 	//b->SetDPMSLevel = (void *)NULL;
@@ -2005,6 +2007,69 @@ ULONG ZZ_GetBitMapAttr(__REGA0(struct BoardInfo *b), __REGA1(struct BitMap *bm),
 	}
 
 	return zz_offscreen_attr(&attrs, attr);
+}
+
+/* WriteYUVRect contract probe (Stage A). P96 calls this hook from its
+ * software picture-in-picture path (p96PIP with a YUV source), but the
+ * TagItem contract - how the source stride and format arrive - is
+ * undocumented and P96's source is closed. This probe logs every
+ * argument, the full tag list and the head of the source data, then
+ * delegates to P96's own converter, so a Sashimi capture from a real
+ * PIP session defines the contract the accelerated implementation will
+ * code against. Build with -DDEBUG (and -ldebug) to enable the
+ * logging; a release build is a pure pass-through. */
+int ZZ_WriteYUVRect(__REGA0(struct BoardInfo *b), __REGA1(APTR src), __REGD0(SHORT srcx), __REGD1(SHORT srcy), __REGA2(struct RenderInfo *r), __REGD2(SHORT dstx), __REGD3(SHORT dsty), __REGD4(SHORT w), __REGD5(SHORT h), __REGA3(struct TagItem *tags)) {
+	int result;
+#ifdef DEBUG
+	static ULONG yuv_calls = 0;
+	ULONG n = yuv_calls++;
+	int do_log = (n < 8) || ((n & 0xFF) == 0);
+
+	if (do_log) {
+		KPrintF("ZZ9000: WriteYUVRect #%ld src=%lx sx=%ld sy=%ld dst=%lx bpr=%ld fmt=%ld dx=%ld dy=%ld w=%ld h=%ld tags=%lx\n",
+			n, (ULONG)src, (LONG)srcx, (LONG)srcy,
+			(ULONG)(r ? (ULONG)r->Memory : 0),
+			(LONG)(r ? r->BytesPerRow : 0),
+			(LONG)(r ? (LONG)r->RGBFormat : -1),
+			(LONG)dstx, (LONG)dsty, (LONG)w, (LONG)h, (ULONG)tags);
+
+		struct TagItem *tag = tags;
+		int guard = 32;
+		while (tag && tag->ti_Tag != TAG_DONE && guard--) {
+			switch (tag->ti_Tag) {
+				case TAG_IGNORE: break;
+				case TAG_SKIP: tag += tag->ti_Data; break;
+				case TAG_MORE: tag = (struct TagItem *)tag->ti_Data; continue;
+				default:
+					KPrintF("ZZ9000:   tag=%08lx data=%08lx\n",
+						tag->ti_Tag, tag->ti_Data);
+					break;
+			}
+			tag++;
+		}
+
+		if (src) {
+			const UBYTE *p = (const UBYTE *)src;
+			KPrintF("ZZ9000:   src[0..7]=%02lx %02lx %02lx %02lx %02lx %02lx %02lx %02lx\n",
+				(ULONG)p[0], (ULONG)p[1], (ULONG)p[2], (ULONG)p[3],
+				(ULONG)p[4], (ULONG)p[5], (ULONG)p[6], (ULONG)p[7]);
+			KPrintF("ZZ9000:   src[8..15]=%02lx %02lx %02lx %02lx %02lx %02lx %02lx %02lx\n",
+				(ULONG)p[8], (ULONG)p[9], (ULONG)p[10], (ULONG)p[11],
+				(ULONG)p[12], (ULONG)p[13], (ULONG)p[14], (ULONG)p[15]);
+		}
+	}
+#endif
+
+	if (!b->WriteYUVRectDefault)
+		return 0;
+	result = b->WriteYUVRectDefault(b, src, srcx, srcy, r, dstx, dsty, w, h, tags);
+
+#ifdef DEBUG
+	if (do_log)
+		KPrintF("ZZ9000:   WriteYUVRectDefault returned %ld\n", (LONG)result);
+#endif
+
+	return result;
 }
 
 // This function shall blit a planar bitmap anywhere in the 68K address space into a chunky bitmap in video RAM.
