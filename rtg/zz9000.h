@@ -273,6 +273,7 @@ enum zz9k_card_features {
   CARD_FEATURE_NONE,
   CARD_FEATURE_SECONDARY_PALETTE,
   CARD_FEATURE_NONSTANDARD_VSYNC,
+  CARD_FEATURE_VIDEO_OVERLAY,
   CARD_FEATURE_NUM,
 };
 
@@ -295,6 +296,8 @@ enum gfx_dma_op {
   OP_ETH_USB_OFFSETS,
   OP_SET_SPLIT_POS,
   OP_SET_PALETTE,
+  OP_WRITE_YUV,
+  OP_VIDEO_OVERLAY,
   OP_NUM,
 };
 
@@ -321,6 +324,24 @@ enum gfxdata_u8_types {
   GFXDATA_U8_DRAWMODE,
   GFXDATA_U8_LINE_PATTERN_OFFSET,
   GFXDATA_U8_LINE_PADDING,
+  GFXDATA_U8_YUV_VARIANT,
+  GFXDATA_U8_OVERLAY_SUBCMD,
+};
+
+enum overlay_subcmd {
+  OVERLAY_SUBCMD_SET,
+  OVERLAY_SUBCMD_OFF,
+};
+
+/* Packed 4:2:2 macropixel byte orders (mirror firmware gfx.h; the old
+ * Picasso96.h comments have U and V interchanged, fixed in P96 3.6.3). */
+enum yuv422_variant {
+  YUV422_VARIANT_CGX,   /* RGBFB_YUV422CGX: Y0 U Y1 V (YUY2) */
+  YUV422_VARIANT_STD,   /* RGBFB_YUV422:    Y1 V Y0 U */
+  YUV422_VARIANT_PC,    /* RGBFB_YUV422PC:  U Y0 V Y1 (UYVY) */
+  YUV422_VARIANT_PA,    /* RGBFB_YUV422PA:  Y0 Y1 U V */
+  YUV422_VARIANT_PAPC,  /* RGBFB_YUV422PAPC: V U Y1 Y0 */
+  YUV422_VARIANT_NUM,
 };
 
 #pragma pack(4)

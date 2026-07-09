@@ -36,6 +36,7 @@
 #include "zzcfg_query.h"
 #include "blitter_cache.h"
 #include "offscreen_bitmap.h"
+#include "overlay_feature.h"
 
 #define STR(s) #s
 #define XSTR(s) STR(s)
@@ -120,8 +121,11 @@ char dummies[128];
 #define ZZ_CARD_DATA_DISPLAY_ENABLED 4
 #define ZZ_CARD_DATA_SECONDARY_PALETTE 5
 #define ZZ_CARD_DATA_OFFSCREEN_BITMAPS 6
+#define ZZ_CARD_DATA_VIDEO_OVERLAY 7
 /* first firmware whose surface allocator really frees (major<<8|minor) */
 #define OFFSCREEN_BITMAPS_MIN_FWREV 0x0204
+/* first firmware with OP_VIDEO_OVERLAY + the shadow-scanout compositor */
+#define VIDEO_OVERLAY_MIN_FWREV 0x0206
 #define MNT_MANUFACTURER 0x6d6e
 #define ZZ9000_PRODUCT_Z2 0x3
 #define ZZ9000_PRODUCT_Z3 0x4
@@ -151,6 +155,7 @@ char dummies[128];
 struct ExecBase *SysBase;
 static struct ConfigDev *reserved_cd = NULL;
 static struct BlitterRegisterCache blitter_register_cache;
+static BOOL zz_overlay_hooks_enabled = FALSE;
 
 static inline volatile struct GFXData *zz_gfxdata(struct BoardInfo *b) {
 	return (volatile struct GFXData *)b->CardData[ZZ_CARD_DATA_GFXDATA];
@@ -652,6 +657,7 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 	b->CardData[ZZ_CARD_DATA_DISPLAY_ENABLED] = 1;
 	b->CardData[ZZ_CARD_DATA_SECONDARY_PALETTE] = 0;
 	b->CardData[ZZ_CARD_DATA_OFFSCREEN_BITMAPS] = 1;
+	b->CardData[ZZ_CARD_DATA_VIDEO_OVERLAY] = 1;
 	if ((cd = find_unconfigured_configdev(ExpansionBase, MNT_MANUFACTURER, ZZ9000_PRODUCT_Z3))) zorro_version = 3;
 	else if ((cd = find_unconfigured_configdev(ExpansionBase, MNT_MANUFACTURER, ZZ9000_PRODUCT_Z2))) zorro_version = 2;
 
@@ -745,6 +751,15 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 				ZZ_CFG_KEY_OFFSCREEN_BITMAPS, &cfg_present);
 			if (cfg_present)
 				b->CardData[ZZ_CARD_DATA_OFFSCREEN_BITMAPS] = (cfg_value != 0);
+		}
+
+		if (env_flag_exists(DOSBase, "ENV:ZZ9000-NO-PIP")) {
+			b->CardData[ZZ_CARD_DATA_VIDEO_OVERLAY] = 0;
+		} else {
+			cfg_value = zzcfg_query((ULONG)b->RegisterBase,
+				ZZ_CFG_KEY_VIDEO_OVERLAY, &cfg_present);
+			if (cfg_present)
+				b->CardData[ZZ_CARD_DATA_VIDEO_OVERLAY] = (cfg_value != 0);
 		}
 
 		apply_vcap_settings(registers, (LONG)b->CardData[ZZ_CARD_DATA_SCANDBL_800X600]);
@@ -848,7 +863,6 @@ int __attribute__((used)) InitCard(__REGA0(struct BoardInfo* b), __REGA1(char **
 	//b->GetVBeamPos = (void *)NULL;
 	//b->SetDPMSLevel = (void *)NULL;
 	//b->ResetChip = (void *)NULL;
-	//b->GetFeatureAttrs = (void *)NULL;
 	/* Off-screen bitmaps in card VRAM (Z3 only; ZZ_AllocBitMap refuses
 	 * on Z2). Requires firmware 2.4+: its surface allocator actually
 	 * frees, while older firmware bump-allocates with a no-op free and
@@ -875,9 +889,28 @@ int __attribute__((used)) InitCard(__REGA0(struct BoardInfo* b), __REGA1(char **
 	b->SetSpriteImage = (void *)SetSpriteImage;
 	b->SetSpriteColor = (void *)SetSpriteColor;
 
-	//b->CreateFeature = (void *)NULL;
-	//b->SetFeatureAttrs = (void *)NULL;
-	//b->DeleteFeature = (void *)NULL;
+	/* P96 video window (PIP): Features API + BIF_VIDEOWINDOW. Requires
+	 * firmware 2.6+ (OP_VIDEO_OVERLAY compositor) and the off-screen
+	 * bitmap hooks (CreateFeature allocates the YUV source through
+	 * AllocBitMap). Kill switch: ENV:ZZ9000-NO-PIP, the ZZ9000.CFG
+	 * video_overlay key (both read in FindCard), or the VIDEOPIP
+	 * tooltype, which wins over both. */
+	{
+		UWORD fwrev = ((volatile uint16_t*)b->RegisterBase)[0xC0/2];
+		BOOL pip = (BOOL)b->CardData[ZZ_CARD_DATA_VIDEO_OVERLAY];
+		const char *value = tooltype_value(tool_types, "VIDEOPIP");
+		if (value)
+			pip = !value_is_false(value);
+		if (pip && fwrev >= VIDEO_OVERLAY_MIN_FWREV &&
+				(b->CardFlags & CARDFLAG_ZORRO_3) && b->AllocBitMap) {
+			b->Flags |= BIF_VIDEOWINDOW;
+			b->GetFeatureAttrs = (void *)ZZ_GetFeatureAttrs;
+			b->CreateFeature = (void *)ZZ_CreateFeature;
+			b->SetFeatureAttrs = (void *)ZZ_SetFeatureAttrs;
+			b->DeleteFeature = (void *)ZZ_DeleteFeature;
+			zz_overlay_hooks_enabled = TRUE;
+		}
+	}
 
 	apply_card_settings(b, tool_types);
 	blitter_cache_reset(&blitter_register_cache);
@@ -1155,10 +1188,17 @@ APTR CalculateMemory(__REGA0(struct BoardInfo *b), __REGA1(APTR addr), __REGD0(s
 }
 
 ULONG GetCompatibleFormats(__REGA0(struct BoardInfo *b), __REGD7(RGBFTYPE format)) {
-	if (!supported_rgb_format(format))
+	ULONG mask = b ? b->RGBFormats : ZZ_SUPPORTED_RGB_FORMATS;
+
+	/* the packed YUV formats are valid PIP overlay SOURCES (never
+	 * framebuffer formats; b->RGBFormats stays untouched) */
+	if (zz_overlay_hooks_enabled)
+		mask |= ZZ_OVERLAY_SOURCE_FORMATS;
+
+	if (format >= 32 || !(mask & (1UL << format)))
 		return 0;
 
-	return b ? b->RGBFormats : ZZ_SUPPORTED_RGB_FORMATS;
+	return mask;
 }
 
 UWORD SetDisplay(__REGA0(struct BoardInfo *b), __REGD0(UWORD enabled)) {
@@ -1916,8 +1956,11 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 	if (constant_pitch && mode_width > pitch_width)
 		pitch_width = mode_width;
 
+	/* pitch computed locally rather than via CalculateBytesPerRow: the
+	 * P96-facing callback sizes display modes and stays YUV-blind,
+	 * while this path also allocates YUV overlay source bitmaps */
 	uint16_t bytesperrow = zz_offscreen_pad_pitch_to(
-		CalculateBytesPerRow(b, NULL, pitch_width, height, rgbformat),
+		zz_offscreen_bytes_per_row(rgbformat, pitch_width),
 		pitch_align);
 	uint32_t size = (uint32_t)bytesperrow * height;
 	if (!size) return NULL;
@@ -2070,6 +2113,209 @@ int ZZ_WriteYUVRect(__REGA0(struct BoardInfo *b), __REGA1(APTR src), __REGD0(SHO
 #endif
 
 	return result;
+}
+
+
+/* --- P96 video window (PIP) Features API -----------------------------
+ * Contract modeled on WinUAE's uaegfx overlay (the only public
+ * reference): P96 creates the PIP as an SFT_MEMORYWINDOW feature, the
+ * driver allocates the YUV source bitmap through its own AllocBitMap
+ * and the firmware composites it into the display (OP_VIDEO_OVERLAY +
+ * shadow scanout). One overlay at a time. */
+
+static struct ZZOverlayState zz_overlay;
+static struct BitMap *zz_overlay_bitmap = NULL;
+
+/* Push the full overlay state (or OFF) to the firmware; returns the
+ * firmware status word (0 = OK). */
+static ULONG zz_overlay_push(struct BoardInfo *b, int off) {
+	MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
+
+	dmy_cache
+	if (off) {
+		gfxdata->u8_user[GFXDATA_U8_OVERLAY_SUBCMD] = OVERLAY_SUBCMD_OFF;
+	} else {
+		gfxdata->u8_user[GFXDATA_U8_OVERLAY_SUBCMD] = OVERLAY_SUBCMD_SET;
+		gfxdata->u8_user[GFXDATA_U8_YUV_VARIANT] =
+			(uint8_t)zz_overlay_variant(zz_overlay.rgbformat);
+		gfxdata->offset[1] = (uint32_t)zz_overlay_bitmap->Planes[0] -
+			(uint32_t)b->MemoryBase;
+		gfxdata->pitch[1] = zz_overlay_bitmap->BytesPerRow;
+		gfxdata->x[0] = (UWORD)zz_overlay.dst_x;
+		gfxdata->y[0] = (UWORD)zz_overlay.dst_y;
+		gfxdata->x[1] = (UWORD)zz_overlay.dst_w;
+		gfxdata->y[1] = (UWORD)zz_overlay.dst_h;
+		gfxdata->x[2] = zz_overlay.src_w;
+		gfxdata->y[2] = zz_overlay.src_h;
+		gfxdata->user[0] = (UWORD)((zz_overlay.occlusion ? 1 : 0) |
+			(zz_overlay.active ? 2 : 0));
+		/* pen convention: written as the raw 68k ULONG, the firmware
+		 * reads it unswapped (see overlay_handle_op) */
+		gfxdata->u32_user[1] = zz_overlay.color_key;
+	}
+	zzwrite16(&registers->blitter_dma_op, OP_VIDEO_OVERLAY);
+
+	return gfxdata->u32_user[0];
+}
+
+APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1(struct TagItem *tags)) {
+	if (!b || type != SFT_MEMORYWINDOW)
+		return NULL;
+	if (zz_overlay_bitmap)
+		return NULL; /* one overlay at a time (WinUAE parity) */
+	if (!(b->CardFlags & CARDFLAG_ZORRO_3) || !b->AllocBitMap)
+		return NULL;
+
+	memset(&zz_overlay, 0, sizeof(zz_overlay));
+
+	struct TagItem *tag = tags;
+	int guard = 64;
+	while (tag && tag->ti_Tag != TAG_DONE && guard--) {
+		switch (tag->ti_Tag) {
+			case TAG_IGNORE: break;
+			case TAG_SKIP: tag += tag->ti_Data; break;
+			case TAG_MORE: tag = (struct TagItem *)tag->ti_Data; continue;
+			default:
+#ifdef DEBUG
+				KPrintF("ZZ9000: CreateFeature tag=%08lx data=%08lx\n",
+					tag->ti_Tag, tag->ti_Data);
+#endif
+				zz_overlay_apply_tag(&zz_overlay, tag->ti_Tag, tag->ti_Data);
+				break;
+		}
+		tag++;
+	}
+
+	if (!zz_overlay_source_valid(zz_overlay.src_w, zz_overlay.src_h,
+			zz_overlay.rgbformat))
+		return NULL;
+
+	/* allocate the YUV source bitmap through our own AllocBitMap
+	 * (Displayable+Visible+Clear, the PicassoIV/WinUAE tag set) */
+	{
+		struct TagItem alloc_tags[5];
+		alloc_tags[0].ti_Tag = ABMA_RGBFormat;
+		alloc_tags[0].ti_Data = zz_overlay.rgbformat;
+		alloc_tags[1].ti_Tag = ABMA_Clear;
+		alloc_tags[1].ti_Data = 1;
+		alloc_tags[2].ti_Tag = ABMA_Displayable;
+		alloc_tags[2].ti_Data = 1;
+		alloc_tags[3].ti_Tag = ABMA_Visible;
+		alloc_tags[3].ti_Data = 1;
+		alloc_tags[4].ti_Tag = TAG_DONE;
+		alloc_tags[4].ti_Data = 0;
+
+		zz_overlay_bitmap = ZZ_AllocBitMap(b, zz_overlay.src_w,
+			zz_overlay.src_h, alloc_tags);
+	}
+	if (!zz_overlay_bitmap)
+		return NULL;
+
+	/* enable the firmware master gate (the vblank ISR checks it) */
+	{
+		MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
+		zzwrite16(&registers->blitter_user1, CARD_FEATURE_VIDEO_OVERLAY);
+		zzwrite16(&registers->set_feature_status, 1);
+	}
+
+	zz_overlay.magic = ZZ_OVERLAY_MAGIC;
+
+	if (zz_overlay_push(b, 0) != 0) {
+		zz_overlay.magic = 0;
+		ZZ_FreeBitMap(b, zz_overlay_bitmap, NULL);
+		zz_overlay_bitmap = NULL;
+		return NULL;
+	}
+
+	return (APTR)&zz_overlay;
+}
+
+static int zz_overlay_cookie_ok(APTR fd) {
+	return fd == (APTR)&zz_overlay && zz_overlay.magic == ZZ_OVERLAY_MAGIC &&
+		zz_overlay_bitmap != NULL;
+}
+
+ULONG ZZ_SetFeatureAttrs(__REGA0(struct BoardInfo *b), __REGA1(APTR fd), __REGD0(ULONG type), __REGA2(struct TagItem *tags)) {
+	ULONG count = 0;
+	int dirty = 0;
+
+	if (!b || !zz_overlay_cookie_ok(fd))
+		return 0;
+
+	struct TagItem *tag = tags;
+	int guard = 64;
+	while (tag && tag->ti_Tag != TAG_DONE && guard--) {
+		switch (tag->ti_Tag) {
+			case TAG_IGNORE: break;
+			case TAG_SKIP: tag += tag->ti_Data; break;
+			case TAG_MORE: tag = (struct TagItem *)tag->ti_Data; continue;
+			default:
+#ifdef DEBUG
+				KPrintF("ZZ9000: SetFeatureAttrs tag=%08lx data=%08lx\n",
+					tag->ti_Tag, tag->ti_Data);
+#endif
+				dirty |= zz_overlay_apply_tag(&zz_overlay, tag->ti_Tag,
+					tag->ti_Data);
+				count++;
+				break;
+		}
+		tag++;
+	}
+
+	if (dirty)
+		zz_overlay_push(b, 0);
+
+	return count;
+}
+
+ULONG ZZ_GetFeatureAttrs(__REGA0(struct BoardInfo *b), __REGA1(APTR fd), __REGD0(ULONG type), __REGA2(struct TagItem *tags)) {
+	ULONG count = 0;
+	int have = zz_overlay_cookie_ok(fd);
+
+	if (!b)
+		return 0;
+
+	struct TagItem *tag = tags;
+	int guard = 64;
+	while (tag && tag->ti_Tag != TAG_DONE && guard--) {
+		switch (tag->ti_Tag) {
+			case TAG_IGNORE: break;
+			case TAG_SKIP: tag += tag->ti_Data; break;
+			case TAG_MORE: tag = (struct TagItem *)tag->ti_Data; continue;
+			default: {
+				uint32_t out;
+				if (zz_overlay_query_tag(&zz_overlay, have,
+						(uint32_t)zz_overlay_bitmap,
+						tag->ti_Tag, &out)) {
+					/* ti_Data is a pointer to the result slot
+					 * (WinUAE settag semantics) */
+					if (tag->ti_Data)
+						*(ULONG *)tag->ti_Data = out;
+					count++;
+				}
+#ifdef DEBUG
+				KPrintF("ZZ9000: GetFeatureAttrs tag=%08lx data=%08lx\n",
+					tag->ti_Tag, tag->ti_Data);
+#endif
+				break;
+			}
+		}
+		tag++;
+	}
+
+	return count;
+}
+
+BOOL ZZ_DeleteFeature(__REGA0(struct BoardInfo *b), __REGA1(APTR fd), __REGD0(ULONG type)) {
+	if (!b || type != SFT_MEMORYWINDOW || !zz_overlay_cookie_ok(fd))
+		return FALSE;
+
+	zz_overlay_push(b, 1);
+	zz_overlay.magic = 0;
+	ZZ_FreeBitMap(b, zz_overlay_bitmap, NULL);
+	zz_overlay_bitmap = NULL;
+
+	return TRUE;
 }
 
 // This function shall blit a planar bitmap anywhere in the 68K address space into a chunky bitmap in video RAM.

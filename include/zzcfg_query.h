@@ -32,6 +32,8 @@
 #define ZZ_CFG_KEY_MAC_MID         7
 #define ZZ_CFG_KEY_MAC_LO          8
 #define ZZ_CFG_KEY_OFFSCREEN_BITMAPS 9
+#define ZZ_CFG_KEY_YUV_RECT          10
+#define ZZ_CFG_KEY_VIDEO_OVERLAY     11
 
 /* ZZ_REG_CONFIG_FILE statuses (mirror firmware zz_config_file_status). */
 #define ZZ_CFG_FILE_OK           0
