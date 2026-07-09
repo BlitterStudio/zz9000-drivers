@@ -120,6 +120,8 @@ char dummies[128];
 #define ZZ_CARD_DATA_DISPLAY_ENABLED 4
 #define ZZ_CARD_DATA_SECONDARY_PALETTE 5
 #define ZZ_CARD_DATA_OFFSCREEN_BITMAPS 6
+/* first firmware whose surface allocator really frees (major<<8|minor) */
+#define OFFSCREEN_BITMAPS_MIN_FWREV 0x0204
 #define MNT_MANUFACTURER 0x6d6e
 #define ZZ9000_PRODUCT_Z2 0x3
 #define ZZ9000_PRODUCT_Z3 0x4
@@ -846,15 +848,20 @@ int __attribute__((used)) InitCard(__REGA0(struct BoardInfo* b), __REGA1(char **
 	//b->ResetChip = (void *)NULL;
 	//b->GetFeatureAttrs = (void *)NULL;
 	/* Off-screen bitmaps in card VRAM (Z3 only; ZZ_AllocBitMap refuses
-	 * on Z2). Kill switch: ENV:ZZ9000-NO-OFFSCREEN, the ZZ9000.CFG
+	 * on Z2). Requires firmware 2.4+: its surface allocator actually
+	 * frees, while older firmware bump-allocates with a no-op free and
+	 * would leak VRAM on every bitmap free. Kill switch on capable
+	 * firmware: ENV:ZZ9000-NO-OFFSCREEN, the ZZ9000.CFG
 	 * offscreen_bitmaps key (both read in FindCard), or the
 	 * OFFSCREENBITMAPS tooltype, which wins over both. */
 	{
+		UWORD fwrev = ((volatile uint16_t*)b->RegisterBase)[0xC0/2];
 		BOOL offscreen = (BOOL)b->CardData[ZZ_CARD_DATA_OFFSCREEN_BITMAPS];
 		const char *value = tooltype_value(tool_types, "OFFSCREENBITMAPS");
 		if (value)
 			offscreen = !value_is_false(value);
-		if (offscreen && (b->CardFlags & CARDFLAG_ZORRO_3)) {
+		if (offscreen && fwrev >= OFFSCREEN_BITMAPS_MIN_FWREV &&
+				(b->CardFlags & CARDFLAG_ZORRO_3)) {
 			b->AllocBitMap = (void *)ZZ_AllocBitMap;
 			b->FreeBitMap = (void *)ZZ_FreeBitMap;
 			b->GetBitMapAttr = (void *)ZZ_GetBitMapAttr;
