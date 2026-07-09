@@ -906,6 +906,10 @@ int __attribute__((used)) InitCard(__REGA0(struct BoardInfo* b), __REGA1(char **
 		if (pip && fwrev >= VIDEO_OVERLAY_MIN_FWREV &&
 				(b->CardFlags & CARDFLAG_ZORRO_3) && b->AllocBitMap) {
 			b->Flags |= BIF_VIDEOWINDOW;
+			/* required for ON-BOARD placement of the PIP source:
+			 * p96AllocBitMap only considers card VRAM for a
+			 * displayable bitmap whose format bit is advertised */
+			b->RGBFormats |= (UWORD)ZZ_OVERLAY_BOARD_FORMATS;
 			b->GetFeatureAttrs = (void *)ZZ_GetFeatureAttrs;
 			b->CreateFeature = (void *)ZZ_CreateFeature;
 			b->SetFeatureAttrs = (void *)ZZ_SetFeatureAttrs;

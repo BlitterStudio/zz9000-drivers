@@ -55,6 +55,14 @@
 #define ZZ_OVERLAY_SOURCE_FORMATS \
 	((1UL << 14) | (1UL << 17) | (1UL << 18))
 
+/* The subset advertised in BoardInfo->RGBFormats (a UWORD, so only
+ * formats 0-15 fit): P96 only places a DISPLAYABLE bitmap on the board
+ * when its format bit is set here, and p96AllocBitMap must land the
+ * PIP source in VRAM or the feature open fails to the software path.
+ * YUV422CGX (14) is what P96's cgxvideo emulation requests; the mode
+ * database has no YUV entries, so no YUV screen modes can appear. */
+#define ZZ_OVERLAY_BOARD_FORMATS ((1UL << 14))
+
 /* RGBFB YUV format -> firmware yuv422_variant, -1 if unsupported. */
 static inline int zz_overlay_variant(uint32_t rgbformat)
 {
