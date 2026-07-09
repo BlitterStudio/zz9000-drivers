@@ -99,9 +99,12 @@ static void test_apply_tags(void)
 	CHECK(zz_overlay_apply_tag(&st, ZZ_FA_BRIGHTNESS, 0x1234) == 0);
 	CHECK(st.brightness == 0x1234);
 
-	/* FA_Pen is a key alias (boardinfo.h: the RGB-mode key pen) */
-	CHECK(zz_overlay_apply_tag(&st, ZZ_FA_PEN, 0x00FF00FF) == 1);
-	CHECK(st.color_key == 0x00FF00FF);
+	/* FA_Pen is the key's pen index: stored, but never clobbers the
+	 * truecolor key (P96 sends FA_Color first, then FA_Pen) */
+	CHECK(zz_overlay_apply_tag(&st, ZZ_FA_COLOR, 0x11001100) == 1);
+	CHECK(zz_overlay_apply_tag(&st, ZZ_FA_PEN, 0x2B) == 0);
+	CHECK(st.color_key == 0x11001100);
+	CHECK(st.pen == 0x2B);
 
 	/* unknown tags: ignored, not dirty */
 	CHECK(zz_overlay_apply_tag(&st, 0x80000030u, 7) == 0);
@@ -136,6 +139,7 @@ static void test_query_tags(void)
 	st.src_h = 360;
 	st.rgbformat = 14;
 	st.color_key = 0xAA55AA55;
+	st.pen = 0x2B;
 	st.occlusion = 1;
 	st.brightness = 9;
 	st.clip_l = 1;
@@ -153,7 +157,7 @@ static void test_query_tags(void)
 	CHECK(zz_overlay_query_tag(&st, 1, 0x40001234, ZZ_FA_SOURCEWIDTH, &out) && out == 640);
 	CHECK(zz_overlay_query_tag(&st, 1, 0x40001234, ZZ_FA_FORMAT, &out) && out == 14);
 	CHECK(zz_overlay_query_tag(&st, 1, 0x40001234, ZZ_FA_COLOR, &out) && out == 0xAA55AA55);
-	CHECK(zz_overlay_query_tag(&st, 1, 0x40001234, ZZ_FA_PEN, &out) && out == 0xAA55AA55);
+	CHECK(zz_overlay_query_tag(&st, 1, 0x40001234, ZZ_FA_PEN, &out) && out == 0x2B);
 	CHECK(zz_overlay_query_tag(&st, 1, 0x40001234, ZZ_FA_BITMAP, &out) && out == 0x40001234);
 	CHECK(zz_overlay_query_tag(&st, 1, 0x40001234, ZZ_FA_BRIGHTNESS, &out) && out == 9);
 	CHECK(zz_overlay_query_tag(&st, 1, 0x40001234, ZZ_FA_CLIPLEFT, &out) && out == 1);

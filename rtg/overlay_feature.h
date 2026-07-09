@@ -79,6 +79,10 @@ struct ZZOverlayState {
 	int16_t dst_x, dst_y;
 	int16_t dst_w, dst_h;
 	uint32_t color_key;     /* as P96 gave it (FA_Color) */
+	uint32_t pen;           /* FA_Pen: the key's PEN INDEX - captured
+	                         * logs show P96 sends FA_Color (the value)
+	                         * and then FA_Pen (the index); the index
+	                         * must not clobber the truecolor key */
 	uint8_t occlusion;
 	uint8_t active;
 	/* stored but deliberately not applied (WinUAE parity) */
@@ -102,10 +106,10 @@ static inline int zz_overlay_apply_tag(struct ZZOverlayState *st,
 		case ZZ_FA_HEIGHT:      st->dst_h = (int16_t)(int32_t)data; return 1;
 		case ZZ_FA_OCCLUSION:   st->occlusion = data ? 1 : 0; return 1;
 		case ZZ_FA_COLOR:       st->color_key = data; return 1;
-		/* boardinfo.h documents FA_Pen as the RGB-mode key pen; treat
-		 * it as a key alias (WinUAE ignores it - the DEBUG tag logs
-		 * show which one real P96 sends) */
-		case ZZ_FA_PEN:         st->color_key = data; return 1;
+		/* FA_Pen carries the key's pen INDEX (captured P96 logs show
+		 * it sent after FA_Color): stored for echo only - using it as
+		 * the key would break every truecolor screen */
+		case ZZ_FA_PEN:         st->pen = data; return 0;
 		case ZZ_FA_FORMAT:      st->rgbformat = data; return 1;
 		case ZZ_FA_SOURCEWIDTH: st->src_w = (uint16_t)data; return 1;
 		case ZZ_FA_SOURCEHEIGHT: st->src_h = (uint16_t)data; return 1;
@@ -154,8 +158,8 @@ static inline int zz_overlay_query_tag(const struct ZZOverlayState *st,
 		case ZZ_FA_SOURCEWIDTH:  *out = st->src_w; return 1;
 		case ZZ_FA_SOURCEHEIGHT: *out = st->src_h; return 1;
 		case ZZ_FA_FORMAT:       *out = st->rgbformat; return 1;
-		case ZZ_FA_COLOR:
-		case ZZ_FA_PEN:          *out = st->color_key; return 1;
+		case ZZ_FA_COLOR:        *out = st->color_key; return 1;
+		case ZZ_FA_PEN:          *out = st->pen; return 1;
 		case ZZ_FA_BITMAP:       *out = bitmap; return 1;
 		case ZZ_FA_BRIGHTNESS:   *out = st->brightness; return 1;
 		case ZZ_FA_CLIPLEFT:     *out = (uint32_t)(int32_t)st->clip_l; return 1;

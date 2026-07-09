@@ -2187,8 +2187,12 @@ APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1
 	}
 
 	if (!zz_overlay_source_valid(zz_overlay.src_w, zz_overlay.src_h,
-			zz_overlay.rgbformat))
+			zz_overlay.rgbformat)) {
+		KPrintF("ZZ9000: CreateFeature REJECT src %ldx%ld fmt %ld\n",
+			(LONG)zz_overlay.src_w, (LONG)zz_overlay.src_h,
+			(LONG)zz_overlay.rgbformat);
 		return NULL;
+	}
 
 	/* allocate the YUV source bitmap through our own AllocBitMap
 	 * (Displayable+Visible+Clear, the PicassoIV/WinUAE tag set) */
@@ -2208,8 +2212,10 @@ APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1
 		zz_overlay_bitmap = ZZ_AllocBitMap(b, zz_overlay.src_w,
 			zz_overlay.src_h, alloc_tags);
 	}
-	if (!zz_overlay_bitmap)
+	if (!zz_overlay_bitmap) {
+		KPrintF("ZZ9000: CreateFeature AllocBitMap FAILED\n");
 		return NULL;
+	}
 
 	/* enable the firmware master gate (the vblank ISR checks it) */
 	{
@@ -2220,13 +2226,21 @@ APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1
 
 	zz_overlay.magic = ZZ_OVERLAY_MAGIC;
 
-	if (zz_overlay_push(b, 0) != 0) {
-		zz_overlay.magic = 0;
-		ZZ_FreeBitMap(b, zz_overlay_bitmap, NULL);
-		zz_overlay_bitmap = NULL;
-		return NULL;
+	{
+		ULONG fw_status = zz_overlay_push(b, 0);
+		if (fw_status != 0) {
+			KPrintF("ZZ9000: CreateFeature fw SET status %ld\n",
+				(LONG)fw_status);
+			zz_overlay.magic = 0;
+			ZZ_FreeBitMap(b, zz_overlay_bitmap, NULL);
+			zz_overlay_bitmap = NULL;
+			return NULL;
+		}
 	}
 
+	KPrintF("ZZ9000: CreateFeature OK (%ldx%ld fmt %ld)\n",
+		(LONG)zz_overlay.src_w, (LONG)zz_overlay.src_h,
+		(LONG)zz_overlay.rgbformat);
 	return (APTR)&zz_overlay;
 }
 
