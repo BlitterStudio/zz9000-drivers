@@ -30,6 +30,7 @@
 #define ZZ_FA_MAXHEIGHT     0x8000000Fu
 #define ZZ_FA_BITMAP        0x80000012u
 #define ZZ_FA_BRIGHTNESS    0x80000013u
+#define ZZ_FA_PEN           0x8000001Fu
 #define ZZ_FA_CLIPLEFT      0x80000021u
 #define ZZ_FA_CLIPTOP       0x80000022u
 #define ZZ_FA_CLIPWIDTH     0x80000023u
@@ -101,6 +102,10 @@ static inline int zz_overlay_apply_tag(struct ZZOverlayState *st,
 		case ZZ_FA_HEIGHT:      st->dst_h = (int16_t)(int32_t)data; return 1;
 		case ZZ_FA_OCCLUSION:   st->occlusion = data ? 1 : 0; return 1;
 		case ZZ_FA_COLOR:       st->color_key = data; return 1;
+		/* boardinfo.h documents FA_Pen as the RGB-mode key pen; treat
+		 * it as a key alias (WinUAE ignores it - the DEBUG tag logs
+		 * show which one real P96 sends) */
+		case ZZ_FA_PEN:         st->color_key = data; return 1;
 		case ZZ_FA_FORMAT:      st->rgbformat = data; return 1;
 		case ZZ_FA_SOURCEWIDTH: st->src_w = (uint16_t)data; return 1;
 		case ZZ_FA_SOURCEHEIGHT: st->src_h = (uint16_t)data; return 1;
@@ -112,6 +117,15 @@ static inline int zz_overlay_apply_tag(struct ZZOverlayState *st,
 	}
 
 	return 0;
+}
+
+/* Tags that describe the source bitmap: only valid at CreateFeature.
+ * Applying them to a live feature would let the firmware composite
+ * beyond the allocated source surface, so SetFeatureAttrs skips them. */
+static inline int zz_overlay_tag_create_only(uint32_t tag)
+{
+	return tag == ZZ_FA_FORMAT || tag == ZZ_FA_SOURCEWIDTH ||
+		tag == ZZ_FA_SOURCEHEIGHT;
 }
 
 /* GetFeatureAttrs answer for one queried tag; returns 1 if answered.
@@ -140,7 +154,8 @@ static inline int zz_overlay_query_tag(const struct ZZOverlayState *st,
 		case ZZ_FA_SOURCEWIDTH:  *out = st->src_w; return 1;
 		case ZZ_FA_SOURCEHEIGHT: *out = st->src_h; return 1;
 		case ZZ_FA_FORMAT:       *out = st->rgbformat; return 1;
-		case ZZ_FA_COLOR:        *out = st->color_key; return 1;
+		case ZZ_FA_COLOR:
+		case ZZ_FA_PEN:          *out = st->color_key; return 1;
 		case ZZ_FA_BITMAP:       *out = bitmap; return 1;
 		case ZZ_FA_BRIGHTNESS:   *out = st->brightness; return 1;
 		case ZZ_FA_CLIPLEFT:     *out = (uint32_t)(int32_t)st->clip_l; return 1;

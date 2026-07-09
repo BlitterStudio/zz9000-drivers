@@ -2254,8 +2254,12 @@ ULONG ZZ_SetFeatureAttrs(__REGA0(struct BoardInfo *b), __REGA1(APTR fd), __REGD0
 				KPrintF("ZZ9000: SetFeatureAttrs tag=%08lx data=%08lx\n",
 					tag->ti_Tag, tag->ti_Data);
 #endif
-				dirty |= zz_overlay_apply_tag(&zz_overlay, tag->ti_Tag,
-					tag->ti_Data);
+				/* source geometry/format is fixed at CreateFeature:
+				 * the backing bitmap cannot grow under a live
+				 * feature */
+				if (!zz_overlay_tag_create_only(tag->ti_Tag))
+					dirty |= zz_overlay_apply_tag(&zz_overlay,
+						tag->ti_Tag, tag->ti_Data);
 				count++;
 				break;
 		}

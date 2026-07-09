@@ -99,9 +99,27 @@ static void test_apply_tags(void)
 	CHECK(zz_overlay_apply_tag(&st, ZZ_FA_BRIGHTNESS, 0x1234) == 0);
 	CHECK(st.brightness == 0x1234);
 
+	/* FA_Pen is a key alias (boardinfo.h: the RGB-mode key pen) */
+	CHECK(zz_overlay_apply_tag(&st, ZZ_FA_PEN, 0x00FF00FF) == 1);
+	CHECK(st.color_key == 0x00FF00FF);
+
 	/* unknown tags: ignored, not dirty */
 	CHECK(zz_overlay_apply_tag(&st, 0x80000030u, 7) == 0);
 	CHECK(zz_overlay_apply_tag(&st, 0, 7) == 0);
+}
+
+static void test_create_only_tags(void)
+{
+	/* source geometry/format cannot change under a live feature (the
+	 * backing bitmap was allocated at CreateFeature size) */
+	CHECK(zz_overlay_tag_create_only(ZZ_FA_FORMAT));
+	CHECK(zz_overlay_tag_create_only(ZZ_FA_SOURCEWIDTH));
+	CHECK(zz_overlay_tag_create_only(ZZ_FA_SOURCEHEIGHT));
+	CHECK(!zz_overlay_tag_create_only(ZZ_FA_ACTIVE));
+	CHECK(!zz_overlay_tag_create_only(ZZ_FA_LEFT));
+	CHECK(!zz_overlay_tag_create_only(ZZ_FA_WIDTH));
+	CHECK(!zz_overlay_tag_create_only(ZZ_FA_COLOR));
+	CHECK(!zz_overlay_tag_create_only(ZZ_FA_PEN));
 }
 
 static void test_query_tags(void)
@@ -135,6 +153,7 @@ static void test_query_tags(void)
 	CHECK(zz_overlay_query_tag(&st, 1, 0x40001234, ZZ_FA_SOURCEWIDTH, &out) && out == 640);
 	CHECK(zz_overlay_query_tag(&st, 1, 0x40001234, ZZ_FA_FORMAT, &out) && out == 14);
 	CHECK(zz_overlay_query_tag(&st, 1, 0x40001234, ZZ_FA_COLOR, &out) && out == 0xAA55AA55);
+	CHECK(zz_overlay_query_tag(&st, 1, 0x40001234, ZZ_FA_PEN, &out) && out == 0xAA55AA55);
 	CHECK(zz_overlay_query_tag(&st, 1, 0x40001234, ZZ_FA_BITMAP, &out) && out == 0x40001234);
 	CHECK(zz_overlay_query_tag(&st, 1, 0x40001234, ZZ_FA_BRIGHTNESS, &out) && out == 9);
 	CHECK(zz_overlay_query_tag(&st, 1, 0x40001234, ZZ_FA_CLIPLEFT, &out) && out == 1);
@@ -150,6 +169,7 @@ int main(void)
 	test_format_mask();
 	test_source_validation();
 	test_apply_tags();
+	test_create_only_tags();
 	test_query_tags();
 
 	if (failures) {
