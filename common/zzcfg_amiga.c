@@ -64,6 +64,19 @@ static int zzcfg_is_space(char c)
     return c == ' ' || c == '\t' || c == '\r';
 }
 
+int zzcfg_hdf_name_valid(const char *name)
+{
+    UWORD len = 0;
+
+    if (!name || !*name || *name == '.') return 0;
+    for (; *name; name++, len++) {
+        char c = *name;
+        if (c == '/' || c == '\\' || c == ':' || c < 0x21 || c > 0x7e)
+            return 0;
+    }
+    return len <= ZZCFG_HDF_CHARS;
+}
+
 static int zzcfg_str_eq_ci(const char *a, const char *b)
 {
     while (*a && *b) {

@@ -933,7 +933,10 @@ static void settings_save(struct Window *win)
 		settings_set_status(win, "Bad MAC - use aa:bb:cc:dd:ee:ff");
 		return;
 	}
-	if (sv->hdf[0] && !fwup_name_valid(sv->hdf)) {
+	/* Firmware hdf rules, not the FWUP name rules: they differ (no
+	 * leading '.', 63-char cap), and the firmware silently ignores a
+	 * name it rejects at the next cold boot. */
+	if (sv->hdf[0] && !zzcfg_hdf_name_valid(sv->hdf)) {
 		settings_set_status(win, "Bad HDF name (flat root file)");
 		return;
 	}

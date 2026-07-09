@@ -39,6 +39,14 @@ struct zzcfg_values {
  * ZZ_CFG_FILE_IDLE means the firmware never answered (no support). */
 UWORD zzcfg_read_raw(ULONG board, char *out, UWORD maxlen, UWORD *outlen);
 
+/* Is `name` a valid `hdf = ...` value? Mirrors the firmware's
+ * hdf_name_valid rules (zz_config.c), which differ from the FWUP
+ * destination-name rules: printable ASCII except '/', '\' and ':',
+ * no leading '.', 1..ZZCFG_HDF_CHARS characters. Validate with this
+ * before saving or the firmware will silently ignore the key at the
+ * next cold boot. */
+int zzcfg_hdf_name_valid(const char *name);
+
 /* Decode the ZZTop-editable keys from raw config text into v, using
  * the firmware parser's line rules (comments, case-insensitive keys,
  * last value wins). Keys absent from the text leave v untouched, so
