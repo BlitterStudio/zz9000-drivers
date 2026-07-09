@@ -818,7 +818,7 @@ static CONST_STRPTR settings_value_samples[] = {
 	(CONST_STRPTR)"PAL ~49.92Hz",
 	(CONST_STRPTR)"aa:bb:cc:dd:ee:ff",
 	(CONST_STRPTR)"Firmware lacks config support",
-	(CONST_STRPTR)"Saved - power-cycle to apply",
+	(CONST_STRPTR)"Saved (4095 bytes) - power-cycle to apply",
 	NULL
 };
 
@@ -852,6 +852,105 @@ static int settings_parse_mac(const char *s)
 	return s[ZZCFG_MAC_CHARS] == '\0';
 }
 
+static int settings_env_exists(const char *path)
+{
+	BPTR f = Open((CONST_STRPTR)path, MODE_OLDFILE);
+	if (!f) return 0;
+	Close(f);
+	return 1;
+}
+
+static int settings_env_read_mac(char *out, int outsz)
+{
+	BPTR f = Open((CONST_STRPTR)"ENV:ZZ9K_MAC", MODE_OLDFILE);
+	LONG n;
+
+	if (!f) return 0;
+	n = Read(f, out, outsz - 1);
+	Close(f);
+	if (n < ZZCFG_MAC_CHARS) return 0;
+	out[ZZCFG_MAC_CHARS] = '\0';
+	return settings_parse_mac(out);
+}
+
+/* The drivers apply ENV: variables over the config file, so show the
+ * effective values: pre-filling the editor from ENV both matches what
+ * the system actually does and turns Save into the migration path
+ * (values land in ZZ9000.CFG, then the ENV variables can go). Returns
+ * 1 if any override is active so the status line can say so. */
+static int settings_apply_env_overrides(struct zzcfg_values *sv)
+{
+	char envmac[ZZCFG_MAC_CHARS + 3];
+	int any = 0;
+
+	if (settings_env_exists("ENV:ZZ9000-VCAP-800x600")) {
+		sv->videocap_pal = 0;
+		any = 1;
+	}
+	if (settings_env_exists("ENV:ZZ9000-NS-VSYNC")) {
+		sv->vsync = 1;
+		any = 1;
+	} else if (settings_env_exists("ENV:ZZ9000-NS-VSYNC-NTSC")) {
+		sv->vsync = 2;
+		any = 1;
+	}
+	if (settings_env_exists("ENV:ZZ9K_INT2")) {
+		sv->int2 = 1;
+		any = 1;
+	}
+	if (settings_env_read_mac(envmac, sizeof(envmac))) {
+		strcpy(sv->mac, envmac);
+		any = 1;
+	}
+	return any;
+}
+
+/* After a save the config file holds the effective values, so offer
+ * to delete the ENV: variables that would keep overriding it. */
+static void settings_offer_env_cleanup(void)
+{
+	static const char *env_names[] = {
+		"ZZ9K_MAC", "ZZ9K_INT2", "ZZ9000-VCAP-800x600",
+		"ZZ9000-NS-VSYNC", "ZZ9000-NS-VSYNC-NTSC", NULL
+	};
+	char path[40];
+	char msg[400];
+	int i, any = 0;
+
+	snprintf(msg, sizeof(msg),
+		"These ENV: variables override the saved ZZ9000.CFG "
+		"whenever the drivers load:\n");
+	for (i = 0; env_names[i]; i++) {
+		snprintf(path, sizeof(path), "ENV:%s", env_names[i]);
+		if (settings_env_exists(path)) {
+			any = 1;
+			snprintf(path, sizeof(path), "\n  %s", env_names[i]);
+			strncat(msg, path, sizeof(msg) - strlen(msg) - 1);
+		}
+	}
+	if (!any) return;
+
+	strncat(msg, "\n\nDelete them (ENV: and ENVARC:) so the config "
+		"file takes effect?", sizeof(msg) - strlen(msg) - 1);
+
+	{
+		struct EasyStruct es = {
+			sizeof(struct EasyStruct), 0,
+			(UBYTE *)"ZZ9000 Settings",
+			(UBYTE *)msg,
+			(UBYTE *)"Delete|Keep"
+		};
+		if (!EasyRequestArgs(NULL, &es, NULL, NULL)) return;
+	}
+
+	for (i = 0; env_names[i]; i++) {
+		snprintf(path, sizeof(path), "ENV:%s", env_names[i]);
+		DeleteFile((STRPTR)path);
+		snprintf(path, sizeof(path), "ENVARC:%s", env_names[i]);
+		DeleteFile((STRPTR)path);
+	}
+}
+
 /* Populate settings_vals from the board and push into the gadgets. */
 static void settings_populate(struct Window *win)
 {
@@ -868,6 +967,8 @@ static void settings_populate(struct Window *win)
 	sv->scanline_parity = zz_get_scanline_parity();
 
 	if (settings_have_cfg) {
+		int env_active;
+
 		st = zzcfg_read_raw(board, settings_cfg_text,
 			sizeof(settings_cfg_text), &rawlen);
 		if (st == ZZ_CFG_FILE_OK) {
@@ -877,11 +978,23 @@ static void settings_populate(struct Window *win)
 			 * edited since boot on every Reload, and a subsequent
 			 * Save would then write those stale values back. */
 			zzcfg_parse_text(settings_cfg_text, rawlen, sv);
-			snprintf(settings_status_buf, sizeof(settings_status_buf),
-				"ZZ9000.CFG: %u bytes on card", (unsigned)rawlen);
+			env_active = settings_apply_env_overrides(sv);
+			if (env_active) {
+				snprintf(settings_status_buf, sizeof(settings_status_buf),
+					"%u bytes on card + ENV overrides", (unsigned)rawlen);
+			} else {
+				snprintf(settings_status_buf, sizeof(settings_status_buf),
+					"ZZ9000.CFG: %u bytes on card", (unsigned)rawlen);
+			}
 		} else if (st == ZZ_CFG_FILE_NO_FILE) {
-			snprintf(settings_status_buf, sizeof(settings_status_buf),
-				"No ZZ9000.CFG on card yet");
+			env_active = settings_apply_env_overrides(sv);
+			if (env_active) {
+				snprintf(settings_status_buf, sizeof(settings_status_buf),
+					"No file yet - showing ENV settings");
+			} else {
+				snprintf(settings_status_buf, sizeof(settings_status_buf),
+					"No ZZ9000.CFG on card yet");
+			}
 		} else if (st == ZZ_CFG_FILE_IDLE) {
 			snprintf(settings_status_buf, sizeof(settings_status_buf),
 				"Firmware lacks config support");
@@ -944,7 +1057,22 @@ static void settings_save(struct Window *win)
 	settings_set_status(win, "Saving...");
 	st = zzcfg_save((ULONG)zz_regs, sv);
 	if (st == FWUP_OK) {
-		settings_set_status(win, "Saved - power-cycle to apply");
+		UWORD rawlen = 0;
+
+		/* The file now holds the effective values - offer to drop the
+		 * ENV variables that would keep overriding it. */
+		settings_offer_env_cleanup();
+
+		/* Read back for confirmation that the write landed. */
+		if (zzcfg_read_raw((ULONG)zz_regs, settings_cfg_text,
+				sizeof(settings_cfg_text), &rawlen) == ZZ_CFG_FILE_OK) {
+			snprintf(settings_status_buf, sizeof(settings_status_buf),
+				"Saved (%u bytes) - power-cycle to apply",
+				(unsigned)rawlen);
+			settings_set_status(win, settings_status_buf);
+		} else {
+			settings_set_status(win, "Saved - power-cycle to apply");
+		}
 	} else {
 		snprintf(settings_status_buf, sizeof(settings_status_buf),
 			"Save failed: %s", fwup_strerror(st));
