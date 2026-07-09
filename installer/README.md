@@ -80,9 +80,12 @@ The SDK runtime payloads (`zz9k.library`, the ARM-accelerated
 JPEG/PNG descriptors under `Storage/DataTypes`, and the `zz9k-#?` CLI
 tools) are built from the pinned zz9000-sdk ref and populated by CI.
 They need the SDK-service ZZ9000 firmware to do anything useful. On
-Zorro 2 boards only the audio/MP3 offload is accelerated — image
-decoding and crypto offload need the Zorro 3 board window and fall
-back to software there (the installer prompts say so too).
+Zorro 2 boards, current matched firmware, SDK payloads, and drivers use
+host-window-aware audio/MP3 staging buffers for `mpega.library` and
+MHI. Image decoding and crypto offload need the Zorro 3 board window and
+fall back to software there (the installer prompts say so too). Keep the
+firmware, SDK payloads, and drivers from the same release set when using
+Zorro 2 SDK audio paths.
 
 When installing the ZZ9000-accelerated `amissl.library`, the installer
 first backs up the stock `LIBS:AmiSSL/amissl_v362.library` to
@@ -91,7 +94,9 @@ re-running the installer always preserves the genuine original — then
 installs the build matching the host CPU (`Libs/AmiSSL/68020-40/` for
 68020/030/040 and the Apollo 68080, `Libs/AmiSSL/68060/` for the 68060),
 detected exactly as AmiSSL's own installer does. To revert, delete the
-accelerated `amissl_v362.library` and rename the `.bak` back.
+accelerated `amissl_v362.library` and rename the `.bak` back. The
+accelerated library covers supported TLS handshake and record crypto;
+unsupported algorithms automatically stay on AmiSSL's software provider.
 
 ## Trying the installer locally
 

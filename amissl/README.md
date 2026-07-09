@@ -2,12 +2,15 @@
 
 A drop-in `amissl.library` with the ZZ9000 crypto-offload OpenSSL provider
 compiled inside it, so every AmiSSL application (AWeb3, IBrowse, mail clients)
-gets hardware-accelerated TLS — X25519 key exchange and AES-GCM /
-ChaCha20-Poly1305 bulk records — with no application changes. Certificate
-signature verification (ECDSA/RSA) stays in AmiSSL's software. When the board,
-the firmware crypto service, or a specific algorithm is absent the provider
-advertises nothing and every operation runs in AmiSSL's software exactly as
-stock, so the library is safe on machines without a ZZ9000.
+gets hardware-accelerated TLS with no application changes. Current builds can
+offload X25519, P-256 ECDHE, P-256 ECDSA certificate verification,
+RSA-2048 PKCS#1/SHA-256 certificate verification, AES-GCM, and
+ChaCha20-Poly1305 when the board and firmware advertise the matching service.
+Other algorithms, non-P256 curves, RSA-PSS, signing, and unsupported key sizes
+delegate to AmiSSL's software. When the board, the firmware crypto service, or
+a specific algorithm is absent, the provider advertises nothing for that path
+and operations run in AmiSSL's software exactly as stock, so the library is
+safe on machines without a ZZ9000.
 
 The integration (provider sources, AmiSSL patch, pinned AmiSSL ref) lives in
 the zz9000-sdk repo under `integration/amissl/`; this component only builds
