@@ -37,6 +37,8 @@
 #include "blitter_cache.h"
 #include "offscreen_bitmap.h"
 #include "overlay_feature.h"
+#include <clib/Picasso96_protos.h>
+#include <inline/Picasso96.h>
 
 #define STR(s) #s
 #define XSTR(s) STR(s)
@@ -2125,6 +2127,7 @@ int ZZ_WriteYUVRect(__REGA0(struct BoardInfo *b), __REGA1(APTR src), __REGD0(SHO
 
 static struct ZZOverlayState zz_overlay;
 static struct BitMap *zz_overlay_bitmap = NULL;
+static struct Library *P96Base = NULL;
 /* RastPort handed to the app for P96PIP_SourceRPort: wraps the source
  * bitmap; equivalent of InitRastPort defaults, built by hand so the
  * driver needs no graphics.library base */
@@ -2198,26 +2201,37 @@ APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1
 		return NULL;
 	}
 
-	/* allocate the YUV source bitmap through our own AllocBitMap
-	 * (Displayable+Visible+Clear, the PicassoIV/WinUAE tag set) */
-	{
-		struct TagItem alloc_tags[5];
-		alloc_tags[0].ti_Tag = ABMA_RGBFormat;
-		alloc_tags[0].ti_Data = zz_overlay.rgbformat;
-		alloc_tags[1].ti_Tag = ABMA_Clear;
-		alloc_tags[1].ti_Data = 1;
-		alloc_tags[2].ti_Tag = ABMA_Displayable;
-		alloc_tags[2].ti_Data = 1;
-		alloc_tags[3].ti_Tag = ABMA_Visible;
-		alloc_tags[3].ti_Data = 1;
-		alloc_tags[4].ti_Tag = TAG_DONE;
-		alloc_tags[4].ti_Data = 0;
-
-		zz_overlay_bitmap = ZZ_AllocBitMap(b, zz_overlay.src_w,
-			zz_overlay.src_h, alloc_tags);
+	/* the source bitmap must be a P96-MANAGED bitmap: P96's cgxvideo
+	 * emulation (RiVA's PIP path) runs LockVLayer/GetVLayerAttr over
+	 * P96's own bitmap bookkeeping, which crashes on a bare
+	 * driver-allocated bitmap. p96AllocBitMap routes back through our
+	 * AllocBitMap hook for the on-board VRAM placement (exec
+	 * semaphores nest per task, so the re-entry is safe - WinUAE's
+	 * CreateFeature does the same call-back). */
+	if (!P96Base)
+		P96Base = OpenLibrary((APTR)"Picasso96API.library", 2);
+	if (!P96Base) {
+		KPrintF("ZZ9000: CreateFeature: no Picasso96API.library\n");
+		return NULL;
 	}
+
+	zz_overlay_bitmap = p96AllocBitMap(zz_overlay.src_w, zz_overlay.src_h,
+		16, BMF_CLEAR | BMF_DISPLAYABLE, NULL,
+		(RGBFTYPE)zz_overlay.rgbformat);
 	if (!zz_overlay_bitmap) {
-		KPrintF("ZZ9000: CreateFeature AllocBitMap FAILED\n");
+		KPrintF("ZZ9000: CreateFeature p96AllocBitMap FAILED\n");
+		return NULL;
+	}
+
+	/* the compositor reads the source from card VRAM: refuse a bitmap
+	 * P96 placed in system RAM (fail the open cleanly) */
+	if ((uint32_t)zz_overlay_bitmap->Planes[0] < (uint32_t)b->MemoryBase ||
+	    (uint32_t)zz_overlay_bitmap->Planes[0] - (uint32_t)b->MemoryBase >=
+	    (uint32_t)b->MemorySize) {
+		KPrintF("ZZ9000: CreateFeature source NOT on board (%08lx)\n",
+			(ULONG)zz_overlay_bitmap->Planes[0]);
+		p96FreeBitMap(zz_overlay_bitmap);
+		zz_overlay_bitmap = NULL;
 		return NULL;
 	}
 
@@ -2244,7 +2258,7 @@ APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1
 			KPrintF("ZZ9000: CreateFeature fw SET status %ld\n",
 				(LONG)fw_status);
 			zz_overlay.magic = 0;
-			ZZ_FreeBitMap(b, zz_overlay_bitmap, NULL);
+			p96FreeBitMap(zz_overlay_bitmap);
 			zz_overlay_bitmap = NULL;
 			return NULL;
 		}
@@ -2365,7 +2379,7 @@ BOOL ZZ_DeleteFeature(__REGA0(struct BoardInfo *b), __REGA1(APTR fd), __REGD0(UL
 
 	zz_overlay_push(b, 1);
 	zz_overlay.magic = 0;
-	ZZ_FreeBitMap(b, zz_overlay_bitmap, NULL);
+	p96FreeBitMap(zz_overlay_bitmap);
 	zz_overlay_bitmap = NULL;
 
 	return TRUE;
