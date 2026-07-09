@@ -36,6 +36,14 @@
 #define ZZ_FA_CLIPWIDTH     0x80000023u
 #define ZZ_FA_CLIPHEIGHT    0x80000024u
 
+/* P96PIP_* tags P96 forwards to GetFeatureAttrs (TAG_USER + 0x30000 +
+ * 96 + n). Captured logs show the app's p96PIP_GetTags(SourceRPort)
+ * reaching the driver - an unanswered query hands the app an
+ * undefined pointer and crashes the Amiga, so the driver must supply
+ * the source objects. */
+#define ZZ_P96PIP_SOURCEBITMAP 0x80030062u
+#define ZZ_P96PIP_SOURCERPORT  0x80030063u
+
 /* WinUAE's answers for the size limits P96 queries. */
 #define ZZ_OVERLAY_MIN_DIM 16u
 #define ZZ_OVERLAY_MAX_DIM 4096u

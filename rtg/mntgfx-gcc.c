@@ -2125,6 +2125,10 @@ int ZZ_WriteYUVRect(__REGA0(struct BoardInfo *b), __REGA1(APTR src), __REGD0(SHO
 
 static struct ZZOverlayState zz_overlay;
 static struct BitMap *zz_overlay_bitmap = NULL;
+/* RastPort handed to the app for P96PIP_SourceRPort: wraps the source
+ * bitmap; equivalent of InitRastPort defaults, built by hand so the
+ * driver needs no graphics.library base */
+static struct RastPort zz_overlay_rport;
 
 /* Push the full overlay state (or OFF) to the firmware; returns the
  * firmware status word (0 = OK). */
@@ -2224,6 +2228,14 @@ APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1
 		zzwrite16(&registers->set_feature_status, 1);
 	}
 
+	memset(&zz_overlay_rport, 0, sizeof(zz_overlay_rport));
+	zz_overlay_rport.BitMap = zz_overlay_bitmap;
+	zz_overlay_rport.Mask = 0xFF;
+	zz_overlay_rport.FgPen = -1;
+	zz_overlay_rport.AOlPen = -1;
+	zz_overlay_rport.LinePtrn = 0xFFFF;
+	zz_overlay_rport.DrawMode = 1; /* JAM2 */
+
 	zz_overlay.magic = ZZ_OVERLAY_MAGIC;
 
 	{
@@ -2302,6 +2314,29 @@ ULONG ZZ_GetFeatureAttrs(__REGA0(struct BoardInfo *b), __REGA1(APTR fd), __REGD0
 			case TAG_MORE: tag = (struct TagItem *)tag->ti_Data; continue;
 			default: {
 				uint32_t out;
+				/* the app's p96PIP_GetTags queries arrive here:
+				 * unanswered source-object queries crash the app
+				 * on an undefined pointer */
+				if (have && tag->ti_Tag == ZZ_P96PIP_SOURCEBITMAP) {
+					if (tag->ti_Data)
+						*(ULONG *)tag->ti_Data = (ULONG)zz_overlay_bitmap;
+					count++;
+#ifdef DEBUG
+					KPrintF("ZZ9000: GetFeatureAttrs PIP bitmap -> %08lx\n",
+						(ULONG)zz_overlay_bitmap);
+#endif
+					break;
+				}
+				if (have && tag->ti_Tag == ZZ_P96PIP_SOURCERPORT) {
+					if (tag->ti_Data)
+						*(ULONG *)tag->ti_Data = (ULONG)&zz_overlay_rport;
+					count++;
+#ifdef DEBUG
+					KPrintF("ZZ9000: GetFeatureAttrs PIP rport -> %08lx\n",
+						(ULONG)&zz_overlay_rport);
+#endif
+					break;
+				}
 				if (zz_overlay_query_tag(&zz_overlay, have,
 						(uint32_t)zz_overlay_bitmap,
 						tag->ti_Tag, &out)) {
