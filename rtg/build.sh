@@ -8,4 +8,4 @@ fi
 
 export PATH=/opt/amiga/bin:"$PATH"
 
-m68k-amigaos-gcc mntgfx-gcc.c -m68020 -mtune=68020-60 -O2 -o ZZ9000.card -noixemul -Wall -Wextra -Wno-unused-parameter -fomit-frame-pointer -nostartfiles -lamiga
+m68k-amigaos-gcc mntgfx-gcc.c -m68020 -mtune=68020-60 -O2 -I../include -o ZZ9000.card -noixemul -Wall -Wextra -Wno-unused-parameter -fomit-frame-pointer -nostartfiles -lamiga

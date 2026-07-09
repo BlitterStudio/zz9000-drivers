@@ -58,6 +58,14 @@ firmware USB stack, scanline V2 controls need the matching bitstream,
 and `zzsd.device` is packed into `BOOT.bin` rather than installed as a
 normal AmigaOS file.
 
+SDK offload services are limited on Zorro 2 boards: the CPU-visible
+shared heap is a small window inside the 4 MB board aperture, which
+only fits the audio/MP3 staging buffers. Audio/MP3 acceleration
+(`mpega.library`, MHI) works on Zorro 2; image decoding
+(`zz9k-picture.datatype`, `zz9k-view`) and crypto offload
+(accelerated `amissl.library`) need Zorro 3 and transparently fall
+back to their software paths on Zorro 2.
+
 ## Components
 
 | Area | Artifact | Installed to | Notes |
@@ -73,7 +81,7 @@ normal AmigaOS file.
 | MHI audio | `mhizz9000.library` | `Libs:MHI/` | Exposes the AX hardware MP3 decoder to MHI-aware players. |
 | USB | `zzusbhw.device` | `Devs:USBHardware/` | Poseidon USB hardware driver. See [usb-poseidon/README.md](usb-poseidon/README.md). |
 | SD boot | `zzsd.device` | Firmware `BOOT.bin` | Size-constrained boot driver for FAT32-hosted HDF boot. See [sd-boot/README.md](sd-boot/README.md). |
-| Configuration | `ZZTop` | `SYS:Tools/` | GUI for resolution, scanlines, hardware toggles, hardware readback, and firmware update/restore. |
+| Configuration | `ZZTop` | `SYS:Tools/` | GUI for hardware readback, firmware update/restore, and the SD-card `ZZ9000.CFG` settings (Project menu > Settings: native video mode, exact refresh, scanlines, INT2, MAC, boot HDF; needs firmware 2.3+). |
 | Scanlines | `ZZScanlines` | `C:` | CLI for scanline V1/V2 modes. |
 | Firmware update | `ZZFwUpdate` | `C:` | Pushes `BOOT.bin` or another root-level file to the ZZ9000 FAT32 microSD card over Zorro. |
 | SDK services | `zz9k.library` | `Libs:` | AmigaOS gateway to the SDK v2 firmware services (image decode, audio, compression, crypto). Built from the pinned [zz9000-sdk](https://github.com/BlitterStudio/zz9000-sdk) ref by `sdk/build.sh`. |
@@ -82,6 +90,34 @@ normal AmigaOS file.
 | SDK tools | `zz9k-info`, `zz9k-services`, `zz9k-view`, `zz9k-mp3`, `zz9k-cryptobench`, `zz9k-archive` | `C:` | Board/service introspection and release smoke check, plus the accelerated image viewer, MP3 player, crypto-offload benchmark, and archive extractor (from zz9000-sdk). |
 | TLS offload | `amissl_v362.library` | `Libs:AmiSSL/` | AmiSSL 5.27 core with the ZZ9000 crypto-offload provider compiled in; accelerates TLS for all AmiSSL applications. Built per CPU (`68020-40` for 68020/030/040 and `68060`); the installer auto-detects the CPU and installs the matching build. Requires an existing AmiSSL 5.27 install. |
 | Installer | `ZZ9000Installer` | Release zip root | Commodore Installer drawer used for end-user deployment. |
+
+## SD-Card Configuration (ZZ9000.CFG)
+
+Firmware 2.3+ reads an optional `ZZ9000.CFG` file from the root of the
+ZZ9000's FAT32 microSD card at cold boot (documented in the
+[zz9000-firmware README](https://github.com/BlitterStudio/zz9000-firmware#configuration-file-zz9000cfg)).
+ZZTop's **Project → Settings…** window reads and writes it directly
+from AmigaOS, so the card never needs to leave the slot.
+
+The drivers in this repo consult it too:
+
+- `ZZ9000.card` takes its videocap mode and non-standard-vsync
+  defaults from `videocap_mode` / `nonstandard_vsync`. With neither
+  ENV nor config set, native video now defaults to 800x600 @ 60 Hz —
+  the mode most monitors accept, and what the firmware and ZZTop
+  default to (older `ZZ9000.card` versions forced 720x576 @ 50 Hz).
+  PAL-capable setups select `videocap_mode = pal` in ZZTop's Settings
+  window.
+- `ZZ9000Net.device`, `zz9000ax.audio` and `mhizz9000.library` honor
+  `int2 = on`; `ZZ9000Net.device` adopts the firmware's `mac`.
+
+Precedence is always: `ENV:` variable (and RTG tooltypes) first, then
+the config file, then the built-in default — so existing setups keep
+working, but a lingering ENV variable also hides the config value.
+Remove the ENV variables (`ZZ9K_INT2`, `ZZ9K_MAC`,
+`ZZ9000-VCAP-800x600`, `ZZ9000-NS-VSYNC[-NTSC]`) when migrating to the
+config file. On firmware older than 2.3 the drivers silently fall back
+to the ENV variables.
 
 ## Command-Line Tools
 
@@ -168,6 +204,10 @@ ZZScanlines 3 0
 Modes are `0=off`, `1=classic`, `2=soft`, `3=gradient`; parity is
 `0=odd dark`, `1=even dark`.
 
+Like ZZTop's Settings window, `ZZScanlines` changes the live FPGA
+state; to make scanlines survive a power cycle, save them to
+`ZZ9000.CFG` (firmware 2.3+, ZZTop Settings window's Save button).
+
 ## Building
 
 GitHub Actions is the source of truth for release builds. Every push and
@@ -249,7 +289,7 @@ GitHub release notes are generated automatically.
 | `ZZTop/` | Configuration GUI. |
 | `ZZScanlines/` | Scanline control CLI. |
 | `ZZFwUpdate/` | Firmware/file push CLI using the FWUP protocol. |
-| `common/` | Shared FWUP protocol client (`fwup_client.c`, `fwup_amiga.c`) linked by both `ZZFwUpdate` and `ZZTop`. |
+| `common/` | Shared FWUP protocol client (`fwup_client.c`, `fwup_amiga.c`) and ZZ9000.CFG client (`zzcfg_amiga.c`) linked by `ZZFwUpdate` and `ZZTop`. |
 | `sdk/` | Pulls the pinned zz9000-sdk ref and collects its end-user payloads (libraries, datatype, diagnostics). |
 | `amissl/` | Builds the ZZ9000-accelerated `amissl.library` (adtools toolchain image + zz9000-sdk integration). |
 

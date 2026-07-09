@@ -19,6 +19,7 @@ SOURCES = deviceheader.c deviceinit.c device.c
 CFLAGS  = -m$(CPU) -mtune=68020-60 -msoft-float -O2 \
           -Wall -Wextra -Wno-unused-parameter -Wno-pointer-sign \
           -fomit-frame-pointer \
+          -I../include \
           -DDEVICENAME=$(DEVICEID) \
           -DHAVE_VERSION_H
 
