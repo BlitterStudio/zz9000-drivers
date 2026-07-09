@@ -697,14 +697,21 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 		/* Precedence: ENV variable, then ZZ9000.CFG (firmware 2.3+;
 		 * the query reports "absent" on older firmware), then the
 		 * built-in default. Without this the unconditional re-apply
-		 * below would clobber the config file's cold-boot values. */
+		 * below would clobber the config file's cold-boot values.
+		 *
+		 * The default with neither ENV nor config is now 800x600
+		 * 60 Hz - the monitor-compatible choice, and what the
+		 * firmware, ZZTop and a freshly generated ZZ9000.CFG all
+		 * default to. Older ZZ9000.card versions forced 720x576
+		 * 50 Hz here; PAL-capable setups select it explicitly with
+		 * `videocap_mode = pal` (ZZTop Settings) or the tooltype. */
 		if (env_flag_exists(DOSBase, "ENV:ZZ9000-VCAP-800x600")) {
 			b->CardData[ZZ_CARD_DATA_SCANDBL_800X600] = 1;
 		} else {
 			cfg_value = zzcfg_query((ULONG)b->RegisterBase,
 				ZZ_CFG_KEY_VIDEOCAP_MODE, &cfg_present);
 			b->CardData[ZZ_CARD_DATA_SCANDBL_800X600] =
-				(cfg_present && cfg_value == ZZ_VMODE_800x600) ? 1 : 0;
+				(cfg_present && cfg_value == ZZ_VMODE_720x576) ? 0 : 1;
 		}
 
 		if (env_flag_exists(DOSBase, "ENV:ZZ9000-NS-VSYNC")) {

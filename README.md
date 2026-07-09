@@ -94,7 +94,12 @@ from AmigaOS, so the card never needs to leave the slot.
 The drivers in this repo consult it too:
 
 - `ZZ9000.card` takes its videocap mode and non-standard-vsync
-  defaults from `videocap_mode` / `nonstandard_vsync`.
+  defaults from `videocap_mode` / `nonstandard_vsync`. With neither
+  ENV nor config set, native video now defaults to 800x600 @ 60 Hz —
+  the mode most monitors accept, and what the firmware and ZZTop
+  default to (older `ZZ9000.card` versions forced 720x576 @ 50 Hz).
+  PAL-capable setups select `videocap_mode = pal` in ZZTop's Settings
+  window.
 - `ZZ9000Net.device`, `zz9000ax.audio` and `mhizz9000.library` honor
   `int2 = on`; `ZZ9000Net.device` adopts the firmware's `mac`.
 
