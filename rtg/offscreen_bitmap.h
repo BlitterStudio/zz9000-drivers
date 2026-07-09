@@ -18,10 +18,31 @@
  * so off-screen strides must be multiples of 4 bytes. */
 #define ZZ_OFFSCREEN_PITCH_ALIGN 4u
 
+/* The firmware allocator hands out 256-byte-aligned surfaces, so that
+ * is the strongest row alignment (ABMA_Alignment) we can promise. */
+#define ZZ_OFFSCREEN_MAX_ALIGN 256u
+
+/* An ABMA_Alignment request we can honor: a power of two no stronger
+ * than the allocator's start-address guarantee. */
+static inline int zz_offscreen_align_valid(uint32_t align)
+{
+	return align != 0 && (align & (align - 1)) == 0 &&
+		align <= ZZ_OFFSCREEN_MAX_ALIGN;
+}
+
+/* Pad a stride so every row keeps `align` alignment (rows stay aligned
+ * when the pitch is a multiple of it); the blitter minimum applies. */
+static inline uint32_t zz_offscreen_pad_pitch_to(uint32_t bytesperrow,
+	uint32_t align)
+{
+	if (align < ZZ_OFFSCREEN_PITCH_ALIGN)
+		align = ZZ_OFFSCREEN_PITCH_ALIGN;
+	return (bytesperrow + align - 1) & ~(align - 1);
+}
+
 static inline uint32_t zz_offscreen_pad_pitch(uint32_t bytesperrow)
 {
-	return (bytesperrow + (ZZ_OFFSCREEN_PITCH_ALIGN - 1)) &
-		~(ZZ_OFFSCREEN_PITCH_ALIGN - 1);
+	return zz_offscreen_pad_pitch_to(bytesperrow, ZZ_OFFSCREEN_PITCH_ALIGN);
 }
 
 /* GBMA_* GetBitMapAttr tags (mirror boardinfo.h: TAG_USER + n). */

@@ -1821,21 +1821,36 @@ void DrawLine(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 }
 
 /* Off-screen bitmaps we place in card VRAM. `bm` must stay the first
- * member so the struct BitMap* P96 hands back is also a ZZBitMap*;
- * magic + the Planes[0] range check tell ours apart from foreign
- * (system RAM / planar) bitmaps. */
+ * member so the struct BitMap* P96 hands back is also a ZZBitMap*.
+ * All live wrappers sit on zz_bitmap_list; the pointer-identity walk
+ * decides ours/foreign, with magic + the Planes[0] range check kept as
+ * consistency guards. */
 struct ZZBitMap {
 	struct BitMap bm;
+	struct ZZBitMap *next;
 	ULONG magic;
 	ULONG card_offset;
 	ULONG rgbformat;
 	UWORD width, height;
 };
 
-static struct ZZBitMap *zz_bitmap_ours(struct BoardInfo *b, struct BitMap *bm) {
-	struct ZZBitMap *zbm = (struct ZZBitMap *)bm;
+static struct ZZBitMap *zz_bitmap_list = NULL;
 
-	if (!bm || !zz_offscreen_is_ours(zbm->magic, (uint32_t)bm->Planes[0],
+static struct ZZBitMap *zz_bitmap_ours(struct BoardInfo *b, struct BitMap *bm) {
+	struct ZZBitMap *zbm;
+
+	if (!bm)
+		return NULL;
+
+	/* membership first: never read wrapper fields (they sit past the
+	 * end of a plain struct BitMap) before proving bm is ours */
+	for (zbm = zz_bitmap_list; zbm; zbm = zbm->next)
+		if (&zbm->bm == bm)
+			break;
+	if (!zbm)
+		return NULL;
+
+	if (!zz_offscreen_is_ours(zbm->magic, (uint32_t)bm->Planes[0],
 			(uint32_t)b->MemoryBase, (uint32_t)b->MemorySize))
 		return NULL;
 
@@ -1849,6 +1864,7 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 	MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
 	ULONG rgbformat = RGBFB_CLUT;
 	ULONG bytesperrow_override = 0;
+	ULONG alignment = 0;
 
 	struct TagItem *tag = tags;
 	while (tag && tag->ti_Tag != TAG_DONE) {
@@ -1859,6 +1875,7 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 			case ABMA_RGBFormat: rgbformat = tag->ti_Data; break;
 			case ABMA_NoMemory: return NULL;
 			case ABMA_ConstantBytesPerRow: bytesperrow_override = tag->ti_Data; break;
+			case ABMA_Alignment: alignment = tag->ti_Data; break;
 			/* requests we cannot honor in card VRAM: CPU-owned
 			 * fast-mem bitmaps, caller-supplied memory, byte-swapped
 			 * views -> NULL so P96 uses system RAM */
@@ -1877,16 +1894,25 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 	if (!zz_rgbformat_bytes_per_pixel(rgbformat))
 		return NULL;
 
+	/* the firmware allocator starts surfaces 256-byte aligned; refuse
+	 * alignment requests we cannot promise */
+	if (alignment && !zz_offscreen_align_valid(alignment))
+		return NULL;
+	uint32_t pitch_align = (alignment > ZZ_OFFSCREEN_PITCH_ALIGN) ?
+		alignment : ZZ_OFFSCREEN_PITCH_ALIGN;
+
 	uint16_t bytesperrow;
 	if (bytesperrow_override) {
 		/* P96 demands this exact stride; refuse what the blitter
-		 * cannot step (pitches are programmed as BytesPerRow >> 2) */
-		if (bytesperrow_override & (ZZ_OFFSCREEN_PITCH_ALIGN - 1))
+		 * cannot step (pitches are programmed as BytesPerRow >> 2)
+		 * or what breaks the requested row alignment */
+		if (bytesperrow_override & (pitch_align - 1))
 			return NULL;
 		bytesperrow = bytesperrow_override;
 	} else {
-		bytesperrow = zz_offscreen_pad_pitch(
-			CalculateBytesPerRow(b, NULL, width, height, rgbformat));
+		bytesperrow = zz_offscreen_pad_pitch_to(
+			CalculateBytesPerRow(b, NULL, width, height, rgbformat),
+			pitch_align);
 	}
 	uint32_t size = (uint32_t)bytesperrow * height;
 	if (!size) return NULL;
@@ -1916,6 +1942,8 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 	zbm->rgbformat = rgbformat;
 	zbm->width = width;
 	zbm->height = height;
+	zbm->next = zz_bitmap_list;
+	zz_bitmap_list = zbm;
 
 	return &zbm->bm;
 }
@@ -1923,6 +1951,12 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 BOOL ZZ_FreeBitMap(__REGA0(struct BoardInfo *b), __REGA1(struct BitMap *bm), __REGA2(struct TagItem *tags)) {
 	struct ZZBitMap *zbm = zz_bitmap_ours(b, bm);
 	if (!zbm) return FALSE;
+
+	struct ZZBitMap **pp = &zz_bitmap_list;
+	while (*pp && *pp != zbm)
+		pp = &(*pp)->next;
+	if (*pp)
+		*pp = zbm->next;
 
 	if (b->CardFlags & CARDFLAG_ZORRO_3) {
 		MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;

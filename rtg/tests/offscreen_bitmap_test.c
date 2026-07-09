@@ -59,6 +59,30 @@ static void test_pad_pitch(void)
 	CHECK(zz_offscreen_pad_pitch(5120) == 5120);
 }
 
+static void test_alignment(void)
+{
+	/* honorable ABMA_Alignment values: powers of two up to the
+	 * allocator's 256-byte start-address guarantee */
+	CHECK(zz_offscreen_align_valid(1));
+	CHECK(zz_offscreen_align_valid(4));
+	CHECK(zz_offscreen_align_valid(16));
+	CHECK(zz_offscreen_align_valid(64));
+	CHECK(zz_offscreen_align_valid(256));
+	CHECK(!zz_offscreen_align_valid(0));
+	CHECK(!zz_offscreen_align_valid(3));
+	CHECK(!zz_offscreen_align_valid(24));
+	CHECK(!zz_offscreen_align_valid(512));
+	CHECK(!zz_offscreen_align_valid(0x80000000u));
+
+	/* pitch padding to a requested row alignment; blitter minimum of
+	 * 4 always applies */
+	CHECK(zz_offscreen_pad_pitch_to(17, 0) == 20);
+	CHECK(zz_offscreen_pad_pitch_to(17, 16) == 32);
+	CHECK(zz_offscreen_pad_pitch_to(100, 64) == 128);
+	CHECK(zz_offscreen_pad_pitch_to(256, 256) == 256);
+	CHECK(zz_offscreen_pad_pitch_to(257, 256) == 512);
+}
+
 static void test_is_ours(void)
 {
 	const uint32_t base = 0x40000000u, size = 0x04000000u; /* 64 MB Z3 */
@@ -150,6 +174,7 @@ int main(void)
 {
 	test_format_tables();
 	test_pad_pitch();
+	test_alignment();
 	test_is_ours();
 	test_attr_dispatch();
 	test_planar_fallback_shape();
