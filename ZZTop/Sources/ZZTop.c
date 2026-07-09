@@ -97,10 +97,9 @@ static const char version[] __attribute__((used)) =
 #define LABEL_REFRESHMODE  "Auto Refresh"
 #define LABEL_VCAPMODE     "Native Video"
 #define LABEL_NSVSYNC      "Exact Refresh"
-#define LABEL_INT2         "Use INT2"
+#define LABEL_INT2         "Interrupt"
 #define LABEL_MAC          "MAC Address"
 #define LABEL_HDF          "SD HDF Image"
-#define LABEL_CFG_STATUS   "Config"
 #define LABEL_BTN_SAVE     "Save"
 #define LABEL_BTN_RELOAD   "Reload"
 #define LABEL_TEST_RESULT  "Result"
@@ -792,6 +791,13 @@ static STRPTR nsvsync_labels[] = {
 	NULL
 };
 
+/* Explicit INT6/INT2 choice: index == the config `int2` value. */
+static STRPTR interrupt_labels[] = {
+	(STRPTR)"INT6 (default)",
+	(STRPTR)"INT2",
+	NULL
+};
+
 static struct Gadget *sgads[SGAD_COUNT];
 static struct zzcfg_values settings_vals;
 static char settings_status_buf[64];
@@ -809,16 +815,22 @@ static CONST_STRPTR settings_label_samples[] = {
 	(CONST_STRPTR)LABEL_INT2,
 	(CONST_STRPTR)LABEL_MAC,
 	(CONST_STRPTR)LABEL_HDF,
-	(CONST_STRPTR)LABEL_CFG_STATUS,
 	NULL
 };
 
+/* Sized from the widest cycle/string content only; the status line
+ * spans the full row instead, so long messages don't inflate the
+ * control column (and with it the whole window). */
 static CONST_STRPTR settings_value_samples[] = {
 	(CONST_STRPTR)"PAL 720x576 50Hz",
-	(CONST_STRPTR)"PAL ~49.92Hz",
+	(CONST_STRPTR)"INT6 (default)",
 	(CONST_STRPTR)"aa:bb:cc:dd:ee:ff",
-	(CONST_STRPTR)"Firmware lacks config support",
-	(CONST_STRPTR)"Saved (4095 bytes) - power-cycle to apply",
+	NULL
+};
+
+static CONST_STRPTR settings_button_samples[] = {
+	(CONST_STRPTR)LABEL_BTN_SAVE,
+	(CONST_STRPTR)LABEL_BTN_RELOAD,
 	NULL
 };
 
@@ -1004,7 +1016,7 @@ static void settings_populate(struct Window *win)
 		}
 	} else {
 		snprintf(settings_status_buf, sizeof(settings_status_buf),
-			"Scanlines only - config needs FW 2.3+");
+			"Scanlines only (needs FW 2.3+)");
 	}
 
 	if (!win) return;
@@ -1018,7 +1030,7 @@ static void settings_populate(struct Window *win)
 	GT_SetGadgetAttrs(sgads[SGAD_PARITY], win, NULL,
 		GTCY_Active, sv->scanline_parity, TAG_END);
 	GT_SetGadgetAttrs(sgads[SGAD_INT2], win, NULL,
-		GTCB_Checked, sv->int2 ? TRUE : FALSE, TAG_END);
+		GTCY_Active, sv->int2 ? 1 : 0, TAG_END);
 	GT_SetGadgetAttrs(sgads[SGAD_MAC], win, NULL,
 		GTST_String, sv->mac, TAG_END);
 	GT_SetGadgetAttrs(sgads[SGAD_HDF], win, NULL,
@@ -1067,8 +1079,7 @@ static void settings_save(struct Window *win)
 		if (zzcfg_read_raw((ULONG)zz_regs, settings_cfg_text,
 				sizeof(settings_cfg_text), &rawlen) == ZZ_CFG_FILE_OK) {
 			snprintf(settings_status_buf, sizeof(settings_status_buf),
-				"Saved (%u bytes) - power-cycle to apply",
-				(unsigned)rawlen);
+				"Saved (%u bytes) - power-cycle", (unsigned)rawlen);
 			settings_set_status(win, settings_status_buf);
 		} else {
 			settings_set_status(win, "Saved - power-cycle to apply");
@@ -1086,16 +1097,23 @@ static struct Gadget *settings_create_gadgets(struct Gadget **glistptr,
 	struct NewGadget ng;
 	struct Gadget *gad;
 	struct ZZTopLayout l = *mainlayout;
-	WORD label_width, value_width, y, i;
+	WORD label_width, value_width, button_width, y, i;
+	WORD content_right, button_gap;
 
-	/* Same font metrics as the main window, own column widths. */
+	/* Same font metrics as the main window, own column widths (the
+	 * main window's are sized for its wider content, e.g. the
+	 * "Update Firmware" button). */
 	{
 		struct RastPort *rp = zztop_screen ? &zztop_screen->RastPort : NULL;
 		label_width = zztop_max_text_width(rp, settings_label_samples, 8);
 		value_width = zztop_max_text_width(rp, settings_value_samples, 8);
+		button_width = zztop_max_word(90,
+			zztop_max_text_width(rp, settings_button_samples, 8) + 32);
 	}
 	l.gadget_left = l.margin_x + label_width + l.label_gap;
-	l.gadget_width = zztop_max_word(200, value_width + 48);
+	l.gadget_width = zztop_max_word(160, value_width + 48);
+	content_right = l.gadget_left + l.gadget_width;
+	button_gap = 16;
 
 	gad = CreateContext(glistptr);
 
@@ -1141,8 +1159,8 @@ static struct Gadget *settings_create_gadgets(struct Gadget **glistptr,
 	ng.ng_TopEdge    = y;
 	ng.ng_GadgetID   = SGAD_INT2;
 	ng.ng_GadgetText = (STRPTR)LABEL_INT2;
-	sgads[SGAD_INT2] = gad = CreateGadget(CHECKBOX_KIND, gad, &ng,
-		GTCB_Checked, FALSE, TAG_END);
+	sgads[SGAD_INT2] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+		GTCY_Labels, interrupt_labels, GTCY_Active, 0, TAG_END);
 	y += l.row_step;
 
 	ng.ng_TopEdge    = y;
@@ -1161,31 +1179,34 @@ static struct Gadget *settings_create_gadgets(struct Gadget **glistptr,
 		GTST_MaxChars, ZZCFG_HDF_CHARS + 1, GTST_String, "", TAG_END);
 	y += l.row_step + l.section_gap;
 
+	/* The status line spans the whole row (no side label) so messages
+	 * get the label column's width too instead of widening the window. */
+	ng.ng_LeftEdge   = l.margin_x;
 	ng.ng_TopEdge    = y;
+	ng.ng_Width      = content_right - l.margin_x;
 	ng.ng_GadgetID   = SGAD_CFG_STATUS;
-	ng.ng_GadgetText = (STRPTR)LABEL_CFG_STATUS;
+	ng.ng_GadgetText = NULL;
 	sgads[SGAD_CFG_STATUS] = gad = CreateGadget(TEXT_KIND, gad, &ng,
 		GTTX_Text, settings_status_buf, GTTX_Border, TRUE, TAG_END);
 	y += l.row_step + l.section_gap;
 
-	ng.ng_LeftEdge   = l.margin_x;
 	ng.ng_TopEdge    = y;
-	ng.ng_Width      = l.button_width;
+	ng.ng_Width      = button_width;
 	ng.ng_GadgetID   = SGAD_BTN_SAVE;
 	ng.ng_GadgetText = (STRPTR)LABEL_BTN_SAVE;
 	ng.ng_Flags      = PLACETEXT_IN;
 	sgads[SGAD_BTN_SAVE] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
 		TAG_END);
 
-	ng.ng_LeftEdge   = l.button_col2;
+	ng.ng_LeftEdge   = l.margin_x + button_width + button_gap;
 	ng.ng_GadgetID   = SGAD_BTN_RELOAD;
 	ng.ng_GadgetText = (STRPTR)LABEL_BTN_RELOAD;
 	sgads[SGAD_BTN_RELOAD] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
 		TAG_END);
 	y += l.row_step;
 
-	*out_w = zztop_max_word(l.gadget_left + l.gadget_width + l.margin_x,
-		l.button_col2 + l.button_width + l.margin_x);
+	*out_w = zztop_max_word(content_right + l.margin_x,
+		l.margin_x + button_width + button_gap + button_width + l.margin_x);
 	*out_h = y + l.gadget_height + (l.margin_y / 2);
 
 	for (i = 0; i < SGAD_COUNT; i++) {
@@ -1224,7 +1245,7 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 		WA_Activate,     TRUE,    WA_CloseGadget,   TRUE,
 		WA_SizeGadget,   FALSE,   WA_SimpleRefresh, TRUE,
 		WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
-			BUTTONIDCMP | CYCLEIDCMP | CHECKBOXIDCMP | STRINGIDCMP,
+			BUTTONIDCMP | CYCLEIDCMP | STRINGIDCMP,
 		WA_PubScreen, mysc,
 		TAG_END);
 	if (!win) {
@@ -1281,8 +1302,7 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 							zz_set_scanline_parity(imsgCode);
 							break;
 						case SGAD_INT2:
-							settings_vals.int2 =
-								(gad->Flags & GFLG_SELECTED) ? 1 : 0;
+							settings_vals.int2 = imsgCode;
 							break;
 						case SGAD_BTN_SAVE:
 							settings_save(win);
