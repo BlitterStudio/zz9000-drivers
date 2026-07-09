@@ -35,13 +35,15 @@
 
 #include "zz9000.h"
 #include "fwup_amiga.h"
+#include "zzcfg_amiga.h"
 
-#define ZZTOP_RELEASE "2.2"
-#define ZZTOP_DATE    "28.06.2026"
+#define ZZTOP_RELEASE "2.3"
+#define ZZTOP_DATE    "09.07.2026"
 
 static const char version[] __attribute__((used)) =
 	"$VER: ZZTop " ZZTOP_RELEASE " (" ZZTOP_DATE ")\r\n";
 
+/* Scanline mode/parity moved to the Settings window (Project menu). */
 #define MYGAD_ZORROVER     (0)
 #define MYGAD_FWVER        (1)
 #define MYGAD_TEMP         (2)
@@ -52,17 +54,32 @@ static const char version[] __attribute__((used)) =
 #define MYGAD_STATUS       (7)
 #define MYGAD_RAWREGS      (8)
 #define MYGAD_LPF          (9)
-#define MYGAD_SCANLINES    (10)
-#define MYGAD_PARITY       (11)
-#define MYGAD_REFRESHMODE  (12)
-#define MYGAD_BTN_TEST     (13)
-#define MYGAD_BTN_REFRESH  (14)
-#define MYGAD_TEST_RESULT  (15)
-#define MYGAD_VIDEOCAP     (16)
-#define MYGAD_BTN_UPDATE   (17)
-#define MYGAD_BTN_RESTORE  (18)
-#define MYGAD_FW_STATUS    (19)
-#define MYGAD_COUNT        (20)
+#define MYGAD_REFRESHMODE  (10)
+#define MYGAD_BTN_TEST     (11)
+#define MYGAD_BTN_REFRESH  (12)
+#define MYGAD_TEST_RESULT  (13)
+#define MYGAD_VIDEOCAP     (14)
+#define MYGAD_BTN_UPDATE   (15)
+#define MYGAD_BTN_RESTORE  (16)
+#define MYGAD_FW_STATUS    (17)
+#define MYGAD_COUNT        (18)
+
+/* Settings window gadgets (own id space, own window). */
+#define SGAD_VIDEOCAP      (0)
+#define SGAD_NSVSYNC       (1)
+#define SGAD_SCANMODE      (2)
+#define SGAD_PARITY        (3)
+#define SGAD_INT2          (4)
+#define SGAD_MAC           (5)
+#define SGAD_HDF           (6)
+#define SGAD_CFG_STATUS    (7)
+#define SGAD_BTN_SAVE      (8)
+#define SGAD_BTN_RELOAD    (9)
+#define SGAD_COUNT         (10)
+
+/* Project menu userdata values. */
+#define MENU_ID_SETTINGS   (1)
+#define MENU_ID_QUIT       (2)
 
 #define LABEL_ZORROVER     "Zorro Version"
 #define LABEL_FWVER        "Firmware ABI"
@@ -78,6 +95,14 @@ static const char version[] __attribute__((used)) =
 #define LABEL_SCANLINES    "Scanlines"
 #define LABEL_PARITY       "Parity"
 #define LABEL_REFRESHMODE  "Auto Refresh"
+#define LABEL_VCAPMODE     "Native Video"
+#define LABEL_NSVSYNC      "Exact Refresh"
+#define LABEL_INT2         "Use INT2"
+#define LABEL_MAC          "MAC Address"
+#define LABEL_HDF          "SD HDF Image"
+#define LABEL_CFG_STATUS   "Config"
+#define LABEL_BTN_SAVE     "Save"
+#define LABEL_BTN_RELOAD   "Reload"
 #define LABEL_TEST_RESULT  "Result"
 #define LABEL_BTN_TEST     "Reg Probe"
 #define LABEL_BTN_REFRESH  "Refresh"
@@ -223,8 +248,6 @@ struct Library* AslBase;
 struct ConfigDev* zz_cd;
 volatile UBYTE* zz_regs;
 int zorro_version = 0;
-uint16_t scanline_mode = 0;
-uint16_t scanline_parity = 0;
 uint16_t refresh_mode = 0;
 double t_min = 0;
 double t_max = 0;
@@ -236,6 +259,20 @@ struct MsgPort *timerport;
 struct Library *TimerBase;
 BOOL timer_pending = FALSE;
 char readout_bufs[MYGAD_COUNT][64];
+
+/* Shared with the Settings window (opened from the Project menu). */
+static struct Screen *zztop_screen;
+static void *zztop_vi;
+static struct ZZTopLayout zztop_layout;
+static struct Menu *zztop_menustrip;
+
+static struct NewMenu zztop_newmenus[] = {
+	{ NM_TITLE, (STRPTR)"Project",     NULL, 0, 0, NULL },
+	{ NM_ITEM,  (STRPTR)"Settings...", (STRPTR)"S", 0, 0, (APTR)MENU_ID_SETTINGS },
+	{ NM_ITEM,  NM_BARLABEL,           NULL, 0, 0, NULL },
+	{ NM_ITEM,  (STRPTR)"Quit",        (STRPTR)"Q", 0, 0, (APTR)MENU_ID_QUIT },
+	{ NM_END,   NULL,                  NULL, 0, 0, NULL }
+};
 
 static WORD zztop_max_word(WORD a, WORD b)
 {
@@ -335,7 +372,7 @@ static void zztop_init_layout(struct ZZTopLayout *layout, struct Screen *screen)
 	y += layout->row_step * 10;
 	y += layout->section_gap;
 	y += layout->slider_step;
-	y += layout->control_step * 3;
+	y += layout->control_step;
 	y += layout->section_gap;
 	y += layout->row_step;
 	y += layout->section_gap;
@@ -734,6 +771,414 @@ static void do_fw_restore(struct Window *win)
 	}
 }
 
+/* ------------------------------------------------------------------ */
+/* Settings window: edits ZZ9000.CFG on the SD card (issue #33).      */
+/* Values load from the firmware's parsed config (cold-boot state)    */
+/* plus the raw file; Save regenerates the file and pushes it over    */
+/* the FWUP path. Scanline changes also apply live, everything else   */
+/* takes effect on the next power cycle.                              */
+/* ------------------------------------------------------------------ */
+
+static STRPTR vcapmode_labels[] = {
+	(STRPTR)"800x600 60Hz",
+	(STRPTR)"PAL 720x576 50Hz",
+	NULL
+};
+
+static STRPTR nsvsync_labels[] = {
+	(STRPTR)"Off",
+	(STRPTR)"PAL ~49.92Hz",
+	(STRPTR)"NTSC",
+	NULL
+};
+
+static struct Gadget *sgads[SGAD_COUNT];
+static struct zzcfg_values settings_vals;
+static char settings_status_buf[64];
+static char settings_cfg_text[ZZCFG_MAX_SIZE];
+/* ZZ9000.CFG needs firmware ABI 2.3+. On older firmware the window
+ * still opens for the live scanline controls; the config-file fields
+ * and Save/Reload are disabled. */
+static BOOL settings_have_cfg;
+
+static CONST_STRPTR settings_label_samples[] = {
+	(CONST_STRPTR)LABEL_VCAPMODE,
+	(CONST_STRPTR)LABEL_NSVSYNC,
+	(CONST_STRPTR)LABEL_SCANLINES,
+	(CONST_STRPTR)LABEL_PARITY,
+	(CONST_STRPTR)LABEL_INT2,
+	(CONST_STRPTR)LABEL_MAC,
+	(CONST_STRPTR)LABEL_HDF,
+	(CONST_STRPTR)LABEL_CFG_STATUS,
+	NULL
+};
+
+static CONST_STRPTR settings_value_samples[] = {
+	(CONST_STRPTR)"PAL 720x576 50Hz",
+	(CONST_STRPTR)"PAL ~49.92Hz",
+	(CONST_STRPTR)"aa:bb:cc:dd:ee:ff",
+	(CONST_STRPTR)"Firmware lacks config support",
+	(CONST_STRPTR)"Saved - power-cycle to apply",
+	NULL
+};
+
+static void settings_set_status(struct Window *win, const char *text)
+{
+	/* callers may pass settings_status_buf itself - don't self-copy */
+	if (text != settings_status_buf) {
+		snprintf(settings_status_buf, sizeof(settings_status_buf), "%s", text);
+	}
+	if (win && sgads[SGAD_CFG_STATUS]) {
+		GT_SetGadgetAttrs(sgads[SGAD_CFG_STATUS], win, NULL,
+			GTTX_Text, settings_status_buf, TAG_END);
+	}
+}
+
+static int settings_parse_mac(const char *s)
+{
+	int i;
+
+	for (i = 0; i < 6; i++) {
+		int j;
+		for (j = 0; j < 2; j++) {
+			char c = s[i * 3 + j];
+			if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+					(c >= 'A' && c <= 'F')))
+				return 0;
+		}
+		if (i < 5 && s[i * 3 + 2] != ':' && s[i * 3 + 2] != '-')
+			return 0;
+	}
+	return s[ZZCFG_MAC_CHARS] == '\0';
+}
+
+/* Populate settings_vals from the board and push into the gadgets. */
+static void settings_populate(struct Window *win)
+{
+	ULONG board = (ULONG)zz_regs;
+	struct zzcfg_values *sv = &settings_vals;
+	UWORD st, rawlen = 0;
+
+	/* Editor defaults; keys present in the raw file override them.
+	 * Scanlines default to the live FPGA state - the config applied
+	 * it at cold boot and this tool/ZZScanlines may have changed it
+	 * since. */
+	memset(sv, 0, sizeof(*sv));
+	sv->scanline_mode = zz_get_scanline_mode();
+	sv->scanline_parity = zz_get_scanline_parity();
+
+	if (settings_have_cfg) {
+		st = zzcfg_read_raw(board, settings_cfg_text,
+			sizeof(settings_cfg_text), &rawlen);
+		if (st == ZZ_CFG_FILE_OK) {
+			/* The raw SD file - not the firmware's cold-boot parse
+			 * (REG_ZZ_CONFIG_KEY) - is the editor's source of truth:
+			 * the query would revert values saved or externally
+			 * edited since boot on every Reload, and a subsequent
+			 * Save would then write those stale values back. */
+			zzcfg_parse_text(settings_cfg_text, rawlen, sv);
+			snprintf(settings_status_buf, sizeof(settings_status_buf),
+				"ZZ9000.CFG: %u bytes on card", (unsigned)rawlen);
+		} else if (st == ZZ_CFG_FILE_NO_FILE) {
+			snprintf(settings_status_buf, sizeof(settings_status_buf),
+				"No ZZ9000.CFG on card yet");
+		} else if (st == ZZ_CFG_FILE_IDLE) {
+			snprintf(settings_status_buf, sizeof(settings_status_buf),
+				"Firmware lacks config support");
+		} else {
+			snprintf(settings_status_buf, sizeof(settings_status_buf),
+				"Config read failed (SD error)");
+		}
+	} else {
+		snprintf(settings_status_buf, sizeof(settings_status_buf),
+			"Scanlines only - config needs FW 2.3+");
+	}
+
+	if (!win) return;
+
+	GT_SetGadgetAttrs(sgads[SGAD_VIDEOCAP], win, NULL,
+		GTCY_Active, sv->videocap_pal, TAG_END);
+	GT_SetGadgetAttrs(sgads[SGAD_NSVSYNC], win, NULL,
+		GTCY_Active, sv->vsync, TAG_END);
+	GT_SetGadgetAttrs(sgads[SGAD_SCANMODE], win, NULL,
+		GTCY_Active, sv->scanline_mode, TAG_END);
+	GT_SetGadgetAttrs(sgads[SGAD_PARITY], win, NULL,
+		GTCY_Active, sv->scanline_parity, TAG_END);
+	GT_SetGadgetAttrs(sgads[SGAD_INT2], win, NULL,
+		GTCB_Checked, sv->int2 ? TRUE : FALSE, TAG_END);
+	GT_SetGadgetAttrs(sgads[SGAD_MAC], win, NULL,
+		GTST_String, sv->mac, TAG_END);
+	GT_SetGadgetAttrs(sgads[SGAD_HDF], win, NULL,
+		GTST_String, sv->hdf, TAG_END);
+	settings_set_status(win, settings_status_buf);
+}
+
+static void settings_save(struct Window *win)
+{
+	struct zzcfg_values *sv = &settings_vals;
+	struct StringInfo *si;
+	UWORD st;
+
+	if (!settings_have_cfg) {
+		settings_set_status(win, "Config needs firmware 2.3+");
+		return;
+	}
+
+	si = (struct StringInfo *)sgads[SGAD_MAC]->SpecialInfo;
+	snprintf(sv->mac, sizeof(sv->mac), "%s", (const char *)si->Buffer);
+	si = (struct StringInfo *)sgads[SGAD_HDF]->SpecialInfo;
+	snprintf(sv->hdf, sizeof(sv->hdf), "%s", (const char *)si->Buffer);
+
+	if (sv->mac[0] && !settings_parse_mac(sv->mac)) {
+		settings_set_status(win, "Bad MAC - use aa:bb:cc:dd:ee:ff");
+		return;
+	}
+	/* Firmware hdf rules, not the FWUP name rules: they differ (no
+	 * leading '.', 63-char cap), and the firmware silently ignores a
+	 * name it rejects at the next cold boot. */
+	if (sv->hdf[0] && !zzcfg_hdf_name_valid(sv->hdf)) {
+		settings_set_status(win, "Bad HDF name (flat root file)");
+		return;
+	}
+
+	settings_set_status(win, "Saving...");
+	st = zzcfg_save((ULONG)zz_regs, sv);
+	if (st == FWUP_OK) {
+		settings_set_status(win, "Saved - power-cycle to apply");
+	} else {
+		snprintf(settings_status_buf, sizeof(settings_status_buf),
+			"Save failed: %s", fwup_strerror(st));
+		settings_set_status(win, settings_status_buf);
+	}
+}
+
+static struct Gadget *settings_create_gadgets(struct Gadget **glistptr,
+	void *vi, const struct ZZTopLayout *mainlayout, WORD *out_w, WORD *out_h)
+{
+	struct NewGadget ng;
+	struct Gadget *gad;
+	struct ZZTopLayout l = *mainlayout;
+	WORD label_width, value_width, y, i;
+
+	/* Same font metrics as the main window, own column widths. */
+	{
+		struct RastPort *rp = zztop_screen ? &zztop_screen->RastPort : NULL;
+		label_width = zztop_max_text_width(rp, settings_label_samples, 8);
+		value_width = zztop_max_text_width(rp, settings_value_samples, 8);
+	}
+	l.gadget_left = l.margin_x + label_width + l.label_gap;
+	l.gadget_width = zztop_max_word(200, value_width + 48);
+
+	gad = CreateContext(glistptr);
+
+	for (i = 0; i < SGAD_COUNT; i++) sgads[i] = NULL;
+
+	y = l.topborder + l.margin_y;
+
+	ng.ng_LeftEdge   = l.gadget_left;
+	ng.ng_TopEdge    = y;
+	ng.ng_Width      = l.gadget_width;
+	ng.ng_Height     = l.gadget_height;
+	ng.ng_TextAttr   = l.text_attr;
+	ng.ng_VisualInfo = vi;
+	ng.ng_Flags      = PLACETEXT_LEFT;
+
+	ng.ng_GadgetID   = SGAD_VIDEOCAP;
+	ng.ng_GadgetText = (STRPTR)LABEL_VCAPMODE;
+	sgads[SGAD_VIDEOCAP] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+		GTCY_Labels, vcapmode_labels, GTCY_Active, 0, TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge    = y;
+	ng.ng_GadgetID   = SGAD_NSVSYNC;
+	ng.ng_GadgetText = (STRPTR)LABEL_NSVSYNC;
+	sgads[SGAD_NSVSYNC] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+		GTCY_Labels, nsvsync_labels, GTCY_Active, 0, TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge    = y;
+	ng.ng_GadgetID   = SGAD_SCANMODE;
+	ng.ng_GadgetText = (STRPTR)LABEL_SCANLINES;
+	sgads[SGAD_SCANMODE] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+		GTCY_Labels, scanline_labels, GTCY_Active, 0, TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge    = y;
+	ng.ng_GadgetID   = SGAD_PARITY;
+	ng.ng_GadgetText = (STRPTR)LABEL_PARITY;
+	sgads[SGAD_PARITY] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+		GTCY_Labels, parity_labels, GTCY_Active, 0, TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge    = y;
+	ng.ng_GadgetID   = SGAD_INT2;
+	ng.ng_GadgetText = (STRPTR)LABEL_INT2;
+	sgads[SGAD_INT2] = gad = CreateGadget(CHECKBOX_KIND, gad, &ng,
+		GTCB_Checked, FALSE, TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge    = y;
+	ng.ng_GadgetID   = SGAD_MAC;
+	ng.ng_GadgetText = (STRPTR)LABEL_MAC;
+	/* MaxChars includes the trailing NUL (intuition StringInfo), so add
+	 * one or a full 17-char MAC could not be typed. */
+	sgads[SGAD_MAC] = gad = CreateGadget(STRING_KIND, gad, &ng,
+		GTST_MaxChars, ZZCFG_MAC_CHARS + 1, GTST_String, "", TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge    = y;
+	ng.ng_GadgetID   = SGAD_HDF;
+	ng.ng_GadgetText = (STRPTR)LABEL_HDF;
+	sgads[SGAD_HDF] = gad = CreateGadget(STRING_KIND, gad, &ng,
+		GTST_MaxChars, ZZCFG_HDF_CHARS + 1, GTST_String, "", TAG_END);
+	y += l.row_step + l.section_gap;
+
+	ng.ng_TopEdge    = y;
+	ng.ng_GadgetID   = SGAD_CFG_STATUS;
+	ng.ng_GadgetText = (STRPTR)LABEL_CFG_STATUS;
+	sgads[SGAD_CFG_STATUS] = gad = CreateGadget(TEXT_KIND, gad, &ng,
+		GTTX_Text, settings_status_buf, GTTX_Border, TRUE, TAG_END);
+	y += l.row_step + l.section_gap;
+
+	ng.ng_LeftEdge   = l.margin_x;
+	ng.ng_TopEdge    = y;
+	ng.ng_Width      = l.button_width;
+	ng.ng_GadgetID   = SGAD_BTN_SAVE;
+	ng.ng_GadgetText = (STRPTR)LABEL_BTN_SAVE;
+	ng.ng_Flags      = PLACETEXT_IN;
+	sgads[SGAD_BTN_SAVE] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		TAG_END);
+
+	ng.ng_LeftEdge   = l.button_col2;
+	ng.ng_GadgetID   = SGAD_BTN_RELOAD;
+	ng.ng_GadgetText = (STRPTR)LABEL_BTN_RELOAD;
+	sgads[SGAD_BTN_RELOAD] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		TAG_END);
+	y += l.row_step;
+
+	*out_w = zztop_max_word(l.gadget_left + l.gadget_width + l.margin_x,
+		l.button_col2 + l.button_width + l.margin_x);
+	*out_h = y + l.gadget_height + (l.margin_y / 2);
+
+	for (i = 0; i < SGAD_COUNT; i++) {
+		if (!sgads[i]) return NULL;
+	}
+
+	return gad;
+}
+
+static VOID settings_window(struct Screen *mysc, void *vi,
+	const struct ZZTopLayout *mainlayout)
+{
+	struct Window *win;
+	struct Gadget *glist = NULL;
+	struct IntuiMessage *imsg;
+	struct Gadget *gad;
+	ULONG imsgClass;
+	UWORD imsgCode;
+	BOOL done = FALSE;
+	WORD w = 0, h = 0;
+
+	settings_have_cfg = (zz_get_reg16(REG_ZZ_FW_VERSION) >= 0x0203);
+
+	if (NULL == settings_create_gadgets(&glist, vi, mainlayout, &w, &h)) {
+		if (glist) FreeGadgets(glist);
+		errorMessage("Settings: gadget creation failed");
+		return;
+	}
+
+	win = OpenWindowTags(NULL,
+		WA_Title,        "ZZ9000 Settings (SD card)",
+		WA_Gadgets,      glist,   WA_AutoAdjust,    TRUE,
+		WA_Width,        w,       WA_MinWidth,      w,
+		WA_InnerHeight,  h,       WA_MinHeight,     h,
+		WA_DragBar,      TRUE,    WA_DepthGadget,   TRUE,
+		WA_Activate,     TRUE,    WA_CloseGadget,   TRUE,
+		WA_SizeGadget,   FALSE,   WA_SimpleRefresh, TRUE,
+		WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
+			BUTTONIDCMP | CYCLEIDCMP | CHECKBOXIDCMP | STRINGIDCMP,
+		WA_PubScreen, mysc,
+		TAG_END);
+	if (!win) {
+		FreeGadgets(glist);
+		errorMessage("Settings: OpenWindow() failed");
+		return;
+	}
+
+	settings_populate(win);
+
+	if (!settings_have_cfg) {
+		/* Live scanline controls stay usable on 2.0-2.2 firmware
+		 * (they were on the main window before); everything that
+		 * needs the config-file interface is greyed out. */
+		static const UWORD cfg_only_gadgets[] = {
+			SGAD_VIDEOCAP, SGAD_NSVSYNC, SGAD_INT2,
+			SGAD_MAC, SGAD_HDF, SGAD_BTN_SAVE, SGAD_BTN_RELOAD
+		};
+		size_t i;
+		for (i = 0; i < sizeof(cfg_only_gadgets) / sizeof(cfg_only_gadgets[0]); i++) {
+			GT_SetGadgetAttrs(sgads[cfg_only_gadgets[i]], win, NULL,
+				GA_Disabled, TRUE, TAG_END);
+		}
+	}
+
+	GT_RefreshWindow(win, NULL);
+
+	while (!done) {
+		Wait(1UL << win->UserPort->mp_SigBit);
+
+		while ((imsg = GT_GetIMsg(win->UserPort))) {
+			gad = (struct Gadget *)imsg->IAddress;
+			imsgClass = imsg->Class;
+			imsgCode = imsg->Code;
+			GT_ReplyIMsg(imsg);
+
+			switch (imsgClass) {
+				case IDCMP_GADGETUP:
+					if (!gad) break;
+					switch (gad->GadgetID) {
+						case SGAD_VIDEOCAP:
+							settings_vals.videocap_pal = imsgCode;
+							break;
+						case SGAD_NSVSYNC:
+							settings_vals.vsync = imsgCode;
+							break;
+						case SGAD_SCANMODE:
+							/* live, like the old main-window control */
+							settings_vals.scanline_mode = imsgCode;
+							zz_set_scanline_mode(imsgCode);
+							break;
+						case SGAD_PARITY:
+							settings_vals.scanline_parity = imsgCode;
+							zz_set_scanline_parity(imsgCode);
+							break;
+						case SGAD_INT2:
+							settings_vals.int2 =
+								(gad->Flags & GFLG_SELECTED) ? 1 : 0;
+							break;
+						case SGAD_BTN_SAVE:
+							settings_save(win);
+							break;
+						case SGAD_BTN_RELOAD:
+							settings_populate(win);
+							break;
+					}
+					break;
+				case IDCMP_CLOSEWINDOW:
+					done = TRUE;
+					break;
+				case IDCMP_REFRESHWINDOW:
+					GT_BeginRefresh(win);
+					GT_EndRefresh(win, TRUE);
+					break;
+			}
+		}
+	}
+
+	CloseWindow(win);
+	FreeGadgets(glist);
+}
+
 VOID handleGadgetEvent(struct Window *win, struct Gadget *gad, ULONG code)
 {
 	if (!gad) return;
@@ -768,22 +1213,6 @@ VOID handleGadgetEvent(struct Window *win, struct Gadget *gad, ULONG code)
 		}
 		case MYGAD_LPF: {
 			zz_set_lpf_freq(code);
-			break;
-		}
-		case MYGAD_SCANLINES: {
-			scanline_mode = (scanline_mode + 1) % SCANLINE_MODE_COUNT;
-			zz_set_scanline_mode(scanline_mode);
-			GT_SetGadgetAttrs(gads[MYGAD_SCANLINES], win, NULL,
-				GTCY_Active, scanline_mode, TAG_END);
-			refresh_zz_info(win);
-			break;
-		}
-		case MYGAD_PARITY: {
-			scanline_parity = (scanline_parity + 1) & 0x1;
-			zz_set_scanline_parity(scanline_parity);
-			GT_SetGadgetAttrs(gads[MYGAD_PARITY], win, NULL,
-				GTCY_Active, scanline_parity, TAG_END);
-			refresh_zz_info(win);
 			break;
 		}
 		case MYGAD_REFRESHMODE: {
@@ -900,26 +1329,6 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, const struct
 	y += layout->slider_step;
 
 	ng.ng_TopEdge	= y;
-	ng.ng_GadgetID	= MYGAD_SCANLINES;
-	ng.ng_GadgetText = (STRPTR)LABEL_SCANLINES;
-
-	gads[MYGAD_SCANLINES] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
-											GTCY_Labels, scanline_labels,
-											GTCY_Active, scanline_mode,
-											TAG_END);
-	y += layout->control_step;
-
-	ng.ng_TopEdge	= y;
-	ng.ng_GadgetID	= MYGAD_PARITY;
-	ng.ng_GadgetText = (STRPTR)LABEL_PARITY;
-
-	gads[MYGAD_PARITY] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
-											GTCY_Labels, parity_labels,
-											GTCY_Active, scanline_parity,
-											TAG_END);
-	y += layout->control_step;
-
-	ng.ng_TopEdge	= y;
 	ng.ng_GadgetID	= MYGAD_REFRESHMODE;
 	ng.ng_GadgetText = (STRPTR)LABEL_REFRESHMODE;
 
@@ -1031,6 +1440,23 @@ VOID process_window_events(struct Window *mywin)
 				case IDCMP_VANILLAKEY:
 					//handleVanillaKey(mywin, imsgCode, slider_level);
 					break;
+				case IDCMP_MENUPICK: {
+					UWORD menuNumber = imsgCode;
+					while (menuNumber != MENUNULL && zztop_menustrip) {
+						struct MenuItem *item = ItemAddress(zztop_menustrip, menuNumber);
+						if (!item) break;
+						switch ((ULONG)GTMENUITEM_USERDATA(item)) {
+							case MENU_ID_SETTINGS:
+								settings_window(zztop_screen, zztop_vi, &zztop_layout);
+								break;
+							case MENU_ID_QUIT:
+								terminated = TRUE;
+								break;
+						}
+						menuNumber = item->NextSelect;
+					}
+					break;
+				}
 				case IDCMP_CLOSEWINDOW:
 					terminated = TRUE;
 					break;
@@ -1053,7 +1479,6 @@ VOID gadtoolsWindow(VOID) {
 	struct Window		*mywin;
 	struct Gadget		*glist = NULL;
 	void						*vi;
-	struct ZZTopLayout layout;
 
 	if (NULL == (mysc = LockPubScreen(NULL)))
 		errorMessage("Couldn't lock default public screen");
@@ -1061,33 +1486,50 @@ VOID gadtoolsWindow(VOID) {
 		if (NULL == (vi = GetVisualInfo(mysc, TAG_END)))
 			errorMessage("GetVisualInfo() failed");
 		else {
-			zztop_init_layout(&layout, mysc);
+			zztop_init_layout(&zztop_layout, mysc);
+			zztop_screen = mysc;
+			zztop_vi = vi;
 
-			if (NULL == createAllGadgets(&glist, vi, &layout))
+			/* Menu strip is optional: without it the tool still works,
+			 * just without the Settings window. */
+			zztop_menustrip = CreateMenus(zztop_newmenus, TAG_END);
+			if (zztop_menustrip &&
+					!LayoutMenus(zztop_menustrip, vi, GTMN_NewLookMenus, TRUE, TAG_END)) {
+				FreeMenus(zztop_menustrip);
+				zztop_menustrip = NULL;
+			}
+
+			if (NULL == createAllGadgets(&glist, vi, &zztop_layout))
 				errorMessage("createAllGadgets() failed");
 			else {
 				if (NULL == (mywin = OpenWindowTags(NULL,
 						WA_Title,			"ZZTop " ZZTOP_RELEASE,
 						WA_Gadgets,		glist,			WA_AutoAdjust,		TRUE,
-						WA_Width,				layout.window_width,			WA_MinWidth,			 layout.window_width,
-						WA_InnerHeight, layout.window_height,			WA_MinHeight,			 layout.window_height,
+						WA_Width,				zztop_layout.window_width,			WA_MinWidth,			 zztop_layout.window_width,
+						WA_InnerHeight, zztop_layout.window_height,			WA_MinHeight,			 zztop_layout.window_height,
 						WA_DragBar,		 TRUE,			WA_DepthGadget,		TRUE,
 						WA_Activate,	 TRUE,			WA_CloseGadget,		TRUE,
 						WA_SizeGadget, FALSE,			WA_SimpleRefresh, TRUE,
 						WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
-							IDCMP_VANILLAKEY | SLIDERIDCMP | BUTTONIDCMP |
-							CYCLEIDCMP,
+							IDCMP_VANILLAKEY | IDCMP_MENUPICK | SLIDERIDCMP |
+							BUTTONIDCMP | CYCLEIDCMP,
 						WA_PubScreen, mysc,
 						TAG_END))) {
 					errorMessage("OpenWindow() failed");
 				} else {
+					if (zztop_menustrip) SetMenuStrip(mywin, zztop_menustrip);
 					refresh_zz_info(mywin);
 					GT_RefreshWindow(mywin, NULL);
 					process_window_events(mywin);
+					if (zztop_menustrip) ClearMenuStrip(mywin);
 					CloseWindow(mywin);
 				}
 			}
 
+			if (zztop_menustrip) {
+				FreeMenus(zztop_menustrip);
+				zztop_menustrip = NULL;
+			}
 			if (glist) FreeGadgets(glist);
 			FreeVisualInfo(vi);
 		}
@@ -1124,12 +1566,6 @@ int main(void) {
 
 	zz_regs = (UBYTE*)zz_cd->cd_BoardAddr;
 	CloseLibrary(ExpansionBase);
-
-	/* Sync the controls with whatever mode the FPGA currently holds - the
-	 * V2 bitstream keeps scanline state across soft resets, so a prior
-	 * CLI or ZZTop session may have left a non-zero mode configured. */
-	scanline_mode = zz_get_scanline_mode();
-	scanline_parity = zz_get_scanline_parity();
 
 	if (NULL == (GfxBase = OpenLibrary((CONST_STRPTR)"graphics.library", 37)))
 		errorMessage("Requires V37 graphics.library");

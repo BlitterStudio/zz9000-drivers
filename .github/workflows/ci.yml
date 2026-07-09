@@ -58,6 +58,7 @@ jobs:
         run: |
           docker run --rm -v "$PWD":/src -w /src/rtg "$AMIGA_IMAGE" \
             m68k-amigaos-gcc mntgfx-gcc.c -m68020 -mtune=68020-60 -O2 \
+              -I../include \
               -o ZZ9000.card -noixemul -Wall -Wextra \
               -Wno-unused-parameter -fomit-frame-pointer \
               -nostartfiles -lamiga
@@ -76,6 +77,7 @@ jobs:
         run: |
           docker run --rm -v "$PWD":/src -w /src/ZZTop "$AMIGA_IMAGE" \
             m68k-amigaos-gcc Sources/ZZTop.c ../common/fwup_amiga.c ../common/fwup_client.c \
+              ../common/zzcfg_amiga.c \
               -m68030 -O2 -I../common -I../include -o ZZTop \
               -Wall -Wextra -Wno-unused-parameter -lamiga -noixemul -lm
       - uses: actions/upload-artifact@v7

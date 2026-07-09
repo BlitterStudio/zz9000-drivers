@@ -79,6 +79,18 @@
 #define ZZ_REG_AUDIO_CONFIG      0xF4
 #define ZZ_REG_DEBUG             0xFC
 
+/* Feature toggles (write ZZ_REG_USER1 = feature id, then the value here). */
+#define ZZ_REG_USER1             0x40
+#define ZZ_REG_SET_FEATURE       0x60
+#define ZZ_CARD_FEATURE_NONSTANDARD_VSYNC 2
+
+/* ZZ9000.CFG interface (firmware >= 2.3, issue #33). Key ids, file
+ * statuses and the client API live in common/zzcfg_amiga.h. */
+#define ZZ_REG_CONFIG_KEY        0xE8
+#define ZZ_REG_CONFIG_PRESENT    0xEA
+#define ZZ_REG_CONFIG_FILE       0xEC
+#define ZZ_REG_CONFIG_FILE_LEN   0xEE
+
 #define ZZ_SCANLINE_MODE_REG     0x100C
 #define ZZ_SCANLINE_PARITY_REG   0x100E
 

@@ -43,6 +43,7 @@
 #include <stdint.h>
 
 #include "zz9000_ax.h"
+#include "zzcfg_query.h"
 #include "zz9000ax-ahi.h"
 
 // Comment out to enable debug output:
@@ -191,9 +192,15 @@ static uint32_t __attribute__((used)) init(BPTR seg_list asm("a0"), struct Libra
   }
 
   BPTR fh;
+  UWORD cfg_present = 0;
   if ((fh=Open((CONST_STRPTR)ZZ_AX_INT2_ENV, MODE_OLDFILE))) {
-    kprintf((CONST_STRPTR)"ZZ9000AX: Using INT2 mode.\n");
+    kprintf((CONST_STRPTR)"ZZ9000AX: Using INT2 mode (ENV).\n");
     Close(fh);
+    Z9AXBase->flags |= ZZ_AX_DEVF_INT2MODE;
+  } else if (zzcfg_query(Z9AXBase->hw_addr, ZZ_CFG_KEY_INT2, &cfg_present) &&
+             cfg_present) {
+    // `int2 = on` in ZZ9000.CFG (firmware 2.3+)
+    kprintf((CONST_STRPTR)"ZZ9000AX: Using INT2 mode (ZZ9000.CFG).\n");
     Z9AXBase->flags |= ZZ_AX_DEVF_INT2MODE;
   } else {
     kprintf((CONST_STRPTR)"ZZ9000AX: Using INT6 mode (default).\n");
