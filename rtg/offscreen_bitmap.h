@@ -50,7 +50,10 @@ static inline uint32_t zz_rgbformat_bytes_per_pixel(uint32_t rgbformat)
 	return 0;
 }
 
-static inline uint32_t zz_rgbformat_bits_per_pixel(uint32_t rgbformat)
+/* Format color depth, the P96 ModeInfo convention: RGB555 is a
+ * "15-bit" format even though it occupies 16 bits of storage. Feeds
+ * struct BitMap Depth and GBMA_DEPTH. */
+static inline uint32_t zz_rgbformat_depth(uint32_t rgbformat)
 {
 	switch (rgbformat) {
 		case 1:  return 8;
@@ -60,6 +63,12 @@ static inline uint32_t zz_rgbformat_bits_per_pixel(uint32_t rgbformat)
 	}
 
 	return 0;
+}
+
+/* Storage bits per pixel (GBMA_BITSPERPIXEL): 16 for RGB555. */
+static inline uint32_t zz_rgbformat_storage_bits(uint32_t rgbformat)
+{
+	return zz_rgbformat_bytes_per_pixel(rgbformat) * 8;
 }
 
 /* Does (magic, pixels) identify a bitmap we allocated in card VRAM?

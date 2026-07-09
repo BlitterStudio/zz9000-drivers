@@ -26,10 +26,14 @@ static void test_format_tables(void)
 	CHECK(zz_rgbformat_bytes_per_pixel(9) == 4);   /* B8G8R8A8 */
 	CHECK(zz_rgbformat_bytes_per_pixel(10) == 2);  /* R5G6B5 */
 	CHECK(zz_rgbformat_bytes_per_pixel(11) == 2);  /* R5G5B5 */
-	CHECK(zz_rgbformat_bits_per_pixel(1) == 8);
-	CHECK(zz_rgbformat_bits_per_pixel(9) == 32);
-	CHECK(zz_rgbformat_bits_per_pixel(10) == 16);
-	CHECK(zz_rgbformat_bits_per_pixel(11) == 15);
+	CHECK(zz_rgbformat_depth(1) == 8);
+	CHECK(zz_rgbformat_depth(9) == 32);
+	CHECK(zz_rgbformat_depth(10) == 16);
+	CHECK(zz_rgbformat_depth(11) == 15);   /* color depth: "15-bit" mode */
+	CHECK(zz_rgbformat_storage_bits(1) == 8);
+	CHECK(zz_rgbformat_storage_bits(9) == 32);
+	CHECK(zz_rgbformat_storage_bits(10) == 16);
+	CHECK(zz_rgbformat_storage_bits(11) == 16); /* but 16 bits of storage */
 
 	/* planar, unsupported orders, YUV, out of range: all refused */
 	CHECK(zz_rgbformat_bytes_per_pixel(0) == 0);   /* RGBFB_NONE/planar */
@@ -38,8 +42,9 @@ static void test_format_tables(void)
 	CHECK(zz_rgbformat_bytes_per_pixel(14) == 0);  /* YUV 4:2:2 */
 	CHECK(zz_rgbformat_bytes_per_pixel(21) == 0);
 	CHECK(zz_rgbformat_bytes_per_pixel(0xffffffffu) == 0);
-	CHECK(zz_rgbformat_bits_per_pixel(0) == 0);
-	CHECK(zz_rgbformat_bits_per_pixel(6) == 0);
+	CHECK(zz_rgbformat_depth(0) == 0);
+	CHECK(zz_rgbformat_depth(6) == 0);
+	CHECK(zz_rgbformat_storage_bits(0) == 0);
 }
 
 static void test_pad_pitch(void)
@@ -101,6 +106,22 @@ static void test_attr_dispatch(void)
 	CHECK(zz_offscreen_attr(&a, 0x8000000Au) == 0);
 	CHECK(zz_offscreen_attr(&a, 0) == 0);
 	CHECK(zz_offscreen_attr(&a, 1) == 0);
+
+	/* RGB555: 15-bit color depth in 16 bits of storage */
+	struct ZZBitMapAttrs a15 = {
+		.memory = 0x40200000u,
+		.basememory = 0x40000000u,
+		.bytesperrow = 640 * 2,
+		.bytesperpixel = 2,
+		.bitsperpixel = zz_rgbformat_storage_bits(11),
+		.rgbformat = 11,
+		.width = 640,
+		.height = 480,
+		.depth = zz_rgbformat_depth(11),
+	};
+	CHECK(zz_offscreen_attr(&a15, ZZ_GBMA_DEPTH) == 15);
+	CHECK(zz_offscreen_attr(&a15, ZZ_GBMA_BITSPERPIXEL) == 16);
+	CHECK(zz_offscreen_attr(&a15, ZZ_GBMA_BYTESPERPIXEL) == 2);
 }
 
 static void test_planar_fallback_shape(void)

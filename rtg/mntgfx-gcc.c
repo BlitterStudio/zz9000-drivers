@@ -1859,6 +1859,14 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 			case ABMA_RGBFormat: rgbformat = tag->ti_Data; break;
 			case ABMA_NoMemory: return NULL;
 			case ABMA_ConstantBytesPerRow: bytesperrow_override = tag->ti_Data; break;
+			/* requests we cannot honor in card VRAM: CPU-owned
+			 * fast-mem bitmaps, caller-supplied memory, byte-swapped
+			 * views -> NULL so P96 uses system RAM */
+			case ABMA_UserPrivate:
+			case ABMA_Memory:
+			case ABMA_ConstantByteSwapping:
+				if (tag->ti_Data) return NULL;
+				break;
 			/* ABMA_Clear needs no handling: the firmware zero-fills
 			 * every surface it allocates */
 			default: break;
@@ -1901,7 +1909,7 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 
 	zbm->bm.BytesPerRow = bytesperrow;
 	zbm->bm.Rows = height;
-	zbm->bm.Depth = (UBYTE)zz_rgbformat_bits_per_pixel(rgbformat);
+	zbm->bm.Depth = (UBYTE)zz_rgbformat_depth(rgbformat);
 	zbm->bm.Planes[0] = (PLANEPTR)((uint32_t)b->MemoryBase + card_offset);
 	zbm->magic = ZZ_OFFSCREEN_MAGIC;
 	zbm->card_offset = card_offset;
@@ -1939,11 +1947,12 @@ ULONG ZZ_GetBitMapAttr(__REGA0(struct BoardInfo *b), __REGA1(struct BitMap *bm),
 		attrs.basememory = (uint32_t)b->MemoryBase;
 		attrs.bytesperrow = bm->BytesPerRow;
 		attrs.bytesperpixel = zz_rgbformat_bytes_per_pixel(zbm->rgbformat);
-		attrs.bitsperpixel = zz_rgbformat_bits_per_pixel(zbm->rgbformat);
+		attrs.bitsperpixel = zz_rgbformat_storage_bits(zbm->rgbformat);
 		attrs.rgbformat = zbm->rgbformat;
 		attrs.width = zbm->width;
 		attrs.height = zbm->height;
-		attrs.depth = attrs.bitsperpixel;
+		/* ModeInfo convention: color depth, 15 for RGB555 */
+		attrs.depth = zz_rgbformat_depth(zbm->rgbformat);
 	} else {
 		/* foreign bitmap (system RAM, planar): answer from the plain
 		 * struct BitMap fields */
