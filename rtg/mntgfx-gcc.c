@@ -1877,9 +1877,11 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 			case ABMA_ConstantBytesPerRow: bytesperrow_override = tag->ti_Data; break;
 			case ABMA_Alignment: alignment = tag->ti_Data; break;
 			/* requests we cannot honor in card VRAM: CPU-owned
-			 * fast-mem bitmaps, caller-supplied memory, byte-swapped
-			 * views -> NULL so P96 uses system RAM */
+			 * fast-mem bitmaps, explicit system-memory bitmaps,
+			 * caller-supplied memory, byte-swapped views -> NULL so
+			 * P96 uses system RAM */
 			case ABMA_UserPrivate:
+			case ABMA_System:
 			case ABMA_Memory:
 			case ABMA_ConstantByteSwapping:
 				if (tag->ti_Data) return NULL;
