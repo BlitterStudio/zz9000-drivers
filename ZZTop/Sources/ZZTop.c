@@ -1510,6 +1510,14 @@ VOID gadtoolsWindow(VOID) {
 						WA_DragBar,		 TRUE,			WA_DepthGadget,		TRUE,
 						WA_Activate,	 TRUE,			WA_CloseGadget,		TRUE,
 						WA_SizeGadget, FALSE,			WA_SimpleRefresh, TRUE,
+						/* Renders the menu strip with the new-look pens
+						 * (black on white). GTMN_NewLookMenus at
+						 * LayoutMenus() only handles the layout half;
+						 * without this tag Intuition draws the old-style
+						 * pens - black on black on many screens. Unknown
+						 * (thus ignored) on V37, where menus stay
+						 * old-look. */
+						WA_NewLookMenus, TRUE,
 						WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
 							IDCMP_VANILLAKEY | IDCMP_MENUPICK | SLIDERIDCMP |
 							BUTTONIDCMP | CYCLEIDCMP,
