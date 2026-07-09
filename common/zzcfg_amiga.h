@@ -40,11 +40,12 @@ struct zzcfg_values {
 UWORD zzcfg_read_raw(ULONG board, char *out, UWORD maxlen, UWORD *outlen);
 
 /* Is `name` a valid `hdf = ...` value? Mirrors the firmware's
- * hdf_name_valid rules (zz_config.c), which differ from the FWUP
- * destination-name rules: printable ASCII except '/', '\' and ':',
- * no leading '.', 1..ZZCFG_HDF_CHARS characters. Validate with this
- * before saving or the firmware will silently ignore the key at the
- * next cold boot. */
+ * hdf_name_valid rules (zz_config.c): printable ASCII except '/',
+ * '\' and ':', no leading '.', 1..ZZCFG_HDF_CHARS characters —
+ * additionally rejecting '#' and ';', which the config parsers treat
+ * as comment starts and would silently truncate the name at the next
+ * cold-boot parse. Validate with this before saving; these rules
+ * differ from the FWUP destination-name rules. */
 int zzcfg_hdf_name_valid(const char *name);
 
 /* Decode the ZZTop-editable keys from raw config text into v, using

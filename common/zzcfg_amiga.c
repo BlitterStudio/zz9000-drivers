@@ -73,6 +73,11 @@ int zzcfg_hdf_name_valid(const char *name)
         char c = *name;
         if (c == '/' || c == '\\' || c == ':' || c < 0x21 || c > 0x7e)
             return 0;
+        /* '#' and ';' start comments in the config parser, so a name
+         * containing them would save fine and then silently truncate
+         * at the next cold-boot parse (hdf = disk#1.hdf -> "disk"). */
+        if (c == '#' || c == ';')
+            return 0;
     }
     return len <= ZZCFG_HDF_CHARS;
 }
