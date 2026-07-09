@@ -366,8 +366,8 @@
 ; --------------------------------------------------------------------
 
 (if (exists "Libs/zz9k.library")
-   (if (askbool (prompt "Install the ZZ9000 SDK runtime?\n\nzz9k.library (firmware services), an ARM-accelerated mpega.library drop-in, and the zz9k-picture.datatype.\n\nRequires the SDK-service ZZ9000 firmware.")
-                (help "zz9k.library is the AmigaOS gateway to the ZZ9000's firmware services (image decode, audio, compression, crypto). mpega.library is a drop-in replacement that decodes MP3 on the ZZ9000's ARM cores. zz9k-picture.datatype accelerates picture decoding; its JPEG/PNG descriptors are staged inactive under SYS:Storage/DataTypes for explicit opt-in."))
+   (if (askbool (prompt "Install the ZZ9000 SDK runtime?\n\nzz9k.library (firmware services), an ARM-accelerated mpega.library drop-in, and the zz9k-picture.datatype.\n\nRequires the SDK-service ZZ9000 firmware.\n\nNote for Zorro 2 boards: only the audio/MP3 offload (mpega.library, MHI) is accelerated. Image decoding and crypto offload need the larger Zorro 3 board window and fall back to software on Zorro 2.")
+                (help "zz9k.library is the AmigaOS gateway to the ZZ9000's firmware services (image decode, audio, compression, crypto). mpega.library is a drop-in replacement that decodes MP3 on the ZZ9000's ARM cores. zz9k-picture.datatype accelerates picture decoding; its JPEG/PNG descriptors are staged inactive under SYS:Storage/DataTypes for explicit opt-in. On Zorro 2 the CPU-visible shared heap is a small window that only fits the audio/MP3 staging buffers, so image-decode and crypto services are not accelerated there."))
       (
          (set #newver   (getversion "Libs/zz9k.library"))
          (set #newmajor (/ #newver 65536))
@@ -437,8 +437,8 @@
 (if (OR (exists "Libs/AmiSSL/68020-40/amissl_v362.library")
         (exists "Libs/AmiSSL/68060/amissl_v362.library"))
    (if (exists "LIBS:AmiSSL/amissl_v362.library")
-       (if (askbool (prompt "Install the ZZ9000-accelerated amissl.library?\n\nThis replaces LIBS:AmiSSL/amissl_v362.library with a build that offloads TLS cryptography (handshakes and AES-GCM/ChaCha20 records) to the ZZ9000. Without the board or its crypto firmware it behaves exactly like stock AmiSSL.\n\nThe original is backed up to amissl_v362.library.bak before it is replaced.")
-                    (help "A drop-in AmiSSL 5.27 core library with the ZZ9000 crypto-offload provider compiled in: every AmiSSL application (browsers, mail clients) gets hardware-accelerated TLS with no changes. The combined binary is GPLv3; sources are public in the BlitterStudio zz9000-sdk repository."))
+       (if (askbool (prompt "Install the ZZ9000-accelerated amissl.library?\n\nThis replaces LIBS:AmiSSL/amissl_v362.library with a build that offloads TLS cryptography (handshakes and AES-GCM/ChaCha20 records) to the ZZ9000. Without the board or its crypto firmware it behaves exactly like stock AmiSSL.\n\nNote: the crypto offload needs a Zorro 3 board window; on Zorro 2 boards this library behaves exactly like stock AmiSSL (no acceleration, no harm).\n\nThe original is backed up to amissl_v362.library.bak before it is replaced.")
+                    (help "A drop-in AmiSSL 5.27 core library with the ZZ9000 crypto-offload provider compiled in: every AmiSSL application (browsers, mail clients) gets hardware-accelerated TLS with no changes. On Zorro 2 the offload path is unavailable (the CPU-visible shared window is too small for crypto payloads) and the library transparently uses the stock software path. The combined binary is GPLv3; sources are public in the BlitterStudio zz9000-sdk repository."))
            (
               ; Pick the CPU build exactly as AmiSSL's own installer does: default
               ; to the 68060 build when the OS reports a 68060, or 68060.library /

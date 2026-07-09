@@ -58,6 +58,14 @@ firmware USB stack, scanline V2 controls need the matching bitstream,
 and `zzsd.device` is packed into `BOOT.bin` rather than installed as a
 normal AmigaOS file.
 
+SDK offload services are limited on Zorro 2 boards: the CPU-visible
+shared heap is a small window inside the 4 MB board aperture, which
+only fits the audio/MP3 staging buffers. Audio/MP3 acceleration
+(`mpega.library`, MHI) works on Zorro 2; image decoding
+(`zz9k-picture.datatype`, `zz9k-view`) and crypto offload
+(accelerated `amissl.library`) need Zorro 3 and transparently fall
+back to their software paths on Zorro 2.
+
 ## Components
 
 | Area | Artifact | Installed to | Notes |
