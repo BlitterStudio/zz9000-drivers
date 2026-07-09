@@ -42,6 +42,18 @@ static void test_format_tables(void)
 	CHECK(zz_rgbformat_bits_per_pixel(6) == 0);
 }
 
+static void test_pad_pitch(void)
+{
+	/* the blitter steps pitches in longwords: strides pad up to 4 */
+	CHECK(zz_offscreen_pad_pitch(0) == 0);
+	CHECK(zz_offscreen_pad_pitch(1) == 4);
+	CHECK(zz_offscreen_pad_pitch(3) == 4);
+	CHECK(zz_offscreen_pad_pitch(4) == 4);
+	CHECK(zz_offscreen_pad_pitch(17) == 20);   /* 17px CLUT bitmap */
+	CHECK(zz_offscreen_pad_pitch(34) == 36);   /* 17px hi/truecolor */
+	CHECK(zz_offscreen_pad_pitch(5120) == 5120);
+}
+
 static void test_is_ours(void)
 {
 	const uint32_t base = 0x40000000u, size = 0x04000000u; /* 64 MB Z3 */
@@ -116,6 +128,7 @@ static void test_planar_fallback_shape(void)
 int main(void)
 {
 	test_format_tables();
+	test_pad_pitch();
 	test_is_ours();
 	test_attr_dispatch();
 	test_planar_fallback_shape();

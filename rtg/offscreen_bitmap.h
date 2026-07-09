@@ -14,6 +14,16 @@
 
 #define ZZ_OFFSCREEN_MAGIC 0x5A5A424Du /* 'ZZBM' */
 
+/* The blitter programs pitches in longword units (BytesPerRow >> 2),
+ * so off-screen strides must be multiples of 4 bytes. */
+#define ZZ_OFFSCREEN_PITCH_ALIGN 4u
+
+static inline uint32_t zz_offscreen_pad_pitch(uint32_t bytesperrow)
+{
+	return (bytesperrow + (ZZ_OFFSCREEN_PITCH_ALIGN - 1)) &
+		~(ZZ_OFFSCREEN_PITCH_ALIGN - 1);
+}
+
 /* GBMA_* GetBitMapAttr tags (mirror boardinfo.h: TAG_USER + n). */
 #define ZZ_GBMA_MEMORY        0x80000000u
 #define ZZ_GBMA_BASEMEMORY    0x80000001u

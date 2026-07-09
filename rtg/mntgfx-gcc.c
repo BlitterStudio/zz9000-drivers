@@ -1852,6 +1852,8 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 			case ABMA_RGBFormat: rgbformat = tag->ti_Data; break;
 			case ABMA_NoMemory: return NULL;
 			case ABMA_ConstantBytesPerRow: bytesperrow_override = tag->ti_Data; break;
+			/* ABMA_Clear needs no handling: the firmware zero-fills
+			 * every surface it allocates */
 			default: break;
 		}
 		tag++;
@@ -1860,8 +1862,17 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 	if (!zz_rgbformat_bytes_per_pixel(rgbformat))
 		return NULL;
 
-	uint16_t bytesperrow = bytesperrow_override ? bytesperrow_override :
-		CalculateBytesPerRow(b, NULL, width, height, rgbformat);
+	uint16_t bytesperrow;
+	if (bytesperrow_override) {
+		/* P96 demands this exact stride; refuse what the blitter
+		 * cannot step (pitches are programmed as BytesPerRow >> 2) */
+		if (bytesperrow_override & (ZZ_OFFSCREEN_PITCH_ALIGN - 1))
+			return NULL;
+		bytesperrow = bytesperrow_override;
+	} else {
+		bytesperrow = zz_offscreen_pad_pitch(
+			CalculateBytesPerRow(b, NULL, width, height, rgbformat));
+	}
 	uint32_t size = (uint32_t)bytesperrow * height;
 	if (!size) return NULL;
 
