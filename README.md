@@ -25,6 +25,28 @@ fork-specific issues belong in this repository's
 
 Upstream pre-fork source: <https://source.mnt.re/amiga/zz9000-drivers>
 
+## What This Fork Adds
+
+Compared with the older MNT driver releases, this fork is now a full
+installer-driven AmigaOS package for the current BlitterStudio firmware
+and SDK stack:
+
+- Commodore Installer packaging with Picasso96 settings migration,
+  Zorro III high-memory settings, icons, rollback-safe AmiSSL backup,
+  and CI-built binaries only.
+- Native `BT_MNT_ZZ9000` Picasso96 identity, RTG fixes, 1920x1080x32
+  settings for Zorro III, and clearer Zorro II/Zorro III profiles.
+- `ZZTop` as the configuration GUI for firmware readback, FWUP
+  update/restore, and SD-card `ZZ9000.CFG` editing.
+- Poseidon USB hardware driver, SD-card boot support, firmware-file
+  update/restore tooling, and board/network diagnostics.
+- SDK runtime payloads (`zz9k.library`, picture datatype, `mpega.library`,
+  SDK tools) built from the pinned `zz9000-sdk` revision.
+- Accelerated AmiSSL packaging with CPU-specific `amissl.library` builds
+  and the ZZ9000 OpenSSL provider compiled in.
+- ZZ9000AX audio/MHI modernization and shared interrupt/config handling
+  across AHI, MHI, and networking.
+
 ## Quick Start
 
 For normal installation, use the latest GitHub Release zip:
@@ -37,7 +59,9 @@ For normal installation, use the latest GitHub Release zip:
 
 The installer handles driver placement, tool installation, icons,
 Picasso96 settings, the optional Roadshow NetInterface template, and
-the `ENVARC:ZZ9K_MAC` prompt for networking. It also installs the SDK
+network setup prompts. Current releases also install `ZZTop`, which can
+edit the SD-card `ZZ9000.CFG` file for MAC, INT2, native-video,
+scanline, and boot-HDF settings. The installer also installs the SDK
 runtime (`zz9k.library`, `mpega.library`, and the picture datatype) and
 the per-CPU accelerated `amissl.library` (auto-detecting the CPU,
 installing the matching build, and backing up the stock library once).
@@ -59,12 +83,15 @@ and `zzsd.device` is packed into `BOOT.bin` rather than installed as a
 normal AmigaOS file.
 
 SDK offload services are limited on Zorro 2 boards: the CPU-visible
-shared heap is a small window inside the 4 MB board aperture, which
-only fits the audio/MP3 staging buffers. Audio/MP3 acceleration
-(`mpega.library`, MHI) works on Zorro 2; image decoding
-(`zz9k-picture.datatype`, `zz9k-view`) and crypto offload
-(accelerated `amissl.library`) need Zorro 3 and transparently fall
-back to their software paths on Zorro 2.
+shared heap is a small window inside the 4 MB board aperture. Current
+matched firmware, SDK runtime, and driver releases reserve a host-window
+heap for audio/MP3 staging, so `mpega.library` and `mhizz9000.library`
+work on Zorro 2. Do not mix older firmware or SDK payloads with current
+drivers on Zorro 2, because the host-window/card-only allocation flags
+must agree across the stack. Image decoding (`zz9k-picture.datatype`,
+`zz9k-view`) and crypto offload (accelerated `amissl.library`) still
+need Zorro 3 and transparently fall back to their software paths on
+Zorro 2.
 
 ## Components
 
@@ -88,7 +115,7 @@ back to their software paths on Zorro 2.
 | MP3 decode | `mpega.library` | `Libs:` | ARM-accelerated drop-in MPEGA replacement (from zz9000-sdk). |
 | Picture datatype | `zz9k-picture.datatype` | `SYS:Classes/DataTypes/` | Hardware-accelerated picture datatype; JPEG/PNG descriptors staged inactive in `SYS:Storage/DataTypes` (from zz9000-sdk). |
 | SDK tools | `zz9k-info`, `zz9k-services`, `zz9k-view`, `zz9k-mp3`, `zz9k-cryptobench`, `zz9k-archive` | `C:` | Board/service introspection and release smoke check, plus the accelerated image viewer, MP3 player, crypto-offload benchmark, and archive extractor (from zz9000-sdk). |
-| TLS offload | `amissl_v362.library` | `Libs:AmiSSL/` | AmiSSL 5.27 core with the ZZ9000 crypto-offload provider compiled in; accelerates TLS for all AmiSSL applications. Built per CPU (`68020-40` for 68020/030/040 and `68060`); the installer auto-detects the CPU and installs the matching build. Requires an existing AmiSSL 5.27 install. |
+| TLS offload | `amissl_v362.library` | `Libs:AmiSSL/` | AmiSSL 5.27 core with the ZZ9000 crypto-offload provider compiled in; accelerates supported TLS handshake and record crypto for all AmiSSL applications. Built per CPU (`68020-40` for 68020/030/040 and `68060`); the installer auto-detects the CPU and installs the matching build. Requires an existing AmiSSL 5.27 install. |
 | Installer | `ZZ9000Installer` | Release zip root | Commodore Installer drawer used for end-user deployment. |
 
 ## SD-Card Configuration (ZZ9000.CFG)
@@ -251,8 +278,8 @@ Pushing a tag matching `v*` builds all artifacts and publishes a GitHub
 Release zip:
 
 ```bash
-git tag -a v2.2.0 -m "ZZ9000 drivers 2.2.0"
-git push origin v2.2.0
+git tag -a v2.3.0 -m "ZZ9000 drivers 2.3.0"
+git push origin v2.3.0
 ```
 
 The release bundle layout is:
@@ -270,7 +297,7 @@ at the zip root. The release zip's `README.md` is copied from
 [installer/README.md](installer/README.md), which is focused on the
 installer drawer layout and local installer testing.
 
-Tags containing `-`, such as `v2.2.0-rc1`, are marked as pre-releases.
+Tags containing `-`, such as `v2.3.0-rc1`, are marked as pre-releases.
 GitHub release notes are generated automatically.
 
 ## Repository Layout
@@ -295,9 +322,10 @@ GitHub release notes are generated automatically.
 
 ## Credits
 
-- RTG optimization work, scanline tooling, ZZTop V2 updates, USB
-  Poseidon driver, SD-card boot driver, firmware update tool, network
-  diagnostics tool, CI/release packaging, and installer modernization:
+- RTG optimization work, scanline tooling, ZZTop V2/Settings updates,
+  USB Poseidon driver, SD-card boot driver, firmware update/restore
+  tool, network diagnostics, SDK runtime packaging, accelerated AmiSSL
+  packaging, CI/release packaging, and installer modernization:
   Dimitris Panokostas (midwan).
 - Scanline bitstream V1 and V2: Xanxi. V2 adds multi-mode patterns
   with odd/even parity, gated to AGA scandoubled modes and RTG

@@ -7,10 +7,12 @@
 
 `zzsd.device` lets the ZZ9000 boot AmigaOS from a **hardfile** (`.hdf`)
 stored as a regular file on a FAT-formatted SD card. The whole stack
-is self-contained: the firmware reads the HDF via FatFs, exposes its
-contents through a shared Zorro window, and a small AmigaOS device
-driver shipped inside the board's autoboot ROM presents the HDF's
-RDB-partitioned contents as bootable volumes.
+is self-contained: at boot, the firmware locates the HDF through FatFs,
+records its on-card extents, then services block I/O directly through
+raw SD sectors instead of keeping FatFs in the hot path. A shared Zorro
+window carries the block data, and a small AmigaOS device driver shipped
+inside the board's autoboot ROM presents the HDF's RDB-partitioned
+contents as bootable volumes.
 
 ## What you need
 
@@ -88,9 +90,9 @@ window) per round-trip. The driver loops internally for larger I/O.
   The planned fix is an FPGA-assisted Zorro interrupt. Until then,
   single-threaded heavy I/O is going to feel sluggish.
 
-* **HDF is opened once at firmware boot.** If the card is removed
-  afterwards, writes fail mid-stream and subsequent I/O returns errors;
-  there is no hot-remount. Power-cycle to recover.
+* **HDF extents are captured once at firmware boot.** If the card is
+  removed afterwards, writes fail mid-stream and subsequent I/O returns
+  errors; there is no hot-remount. Power-cycle to recover.
 
 * **RDB-only HDFs.** No DOS-style single-partition hardfiles.
 
