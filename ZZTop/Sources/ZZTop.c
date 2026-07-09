@@ -796,6 +796,10 @@ static struct Gadget *sgads[SGAD_COUNT];
 static struct zzcfg_values settings_vals;
 static char settings_status_buf[64];
 static char settings_cfg_text[ZZCFG_MAX_SIZE];
+/* ZZ9000.CFG needs firmware ABI 2.3+. On older firmware the window
+ * still opens for the live scanline controls; the config-file fields
+ * and Save/Reload are disabled. */
+static BOOL settings_have_cfg;
 
 static CONST_STRPTR settings_label_samples[] = {
 	(CONST_STRPTR)LABEL_VCAPMODE,
@@ -820,7 +824,10 @@ static CONST_STRPTR settings_value_samples[] = {
 
 static void settings_set_status(struct Window *win, const char *text)
 {
-	snprintf(settings_status_buf, sizeof(settings_status_buf), "%s", text);
+	/* callers may pass settings_status_buf itself - don't self-copy */
+	if (text != settings_status_buf) {
+		snprintf(settings_status_buf, sizeof(settings_status_buf), "%s", text);
+	}
 	if (win && sgads[SGAD_CFG_STATUS]) {
 		GT_SetGadgetAttrs(sgads[SGAD_CFG_STATUS], win, NULL,
 			GTTX_Text, settings_status_buf, TAG_END);
@@ -855,44 +862,49 @@ static void settings_populate(struct Window *win)
 
 	memset(sv, 0, sizeof(*sv));
 
-	v = zzcfg_query(board, ZZ_CFG_KEY_VIDEOCAP_MODE, &present);
-	sv->videocap_pal = (present && v == ZZ_VMODE_720x576) ? 1 : 0;
-
-	v = zzcfg_query(board, ZZ_CFG_KEY_NS_VSYNC, &present);
-	sv->vsync = (present && v <= 2) ? v : 0;
-
 	/* Scanlines reflect the live FPGA state - the config applied it at
 	 * cold boot and this tool/ZZScanlines may have changed it since. */
 	sv->scanline_mode = zz_get_scanline_mode();
 	sv->scanline_parity = zz_get_scanline_parity();
 
-	v = zzcfg_query(board, ZZ_CFG_KEY_INT2, &present);
-	sv->int2 = (present && v) ? 1 : 0;
+	if (settings_have_cfg) {
+		v = zzcfg_query(board, ZZ_CFG_KEY_VIDEOCAP_MODE, &present);
+		sv->videocap_pal = (present && v == ZZ_VMODE_720x576) ? 1 : 0;
 
-	zzcfg_query(board, ZZ_CFG_KEY_MAC_HI, &present);
-	if (present) {
-		UWORD hi = zzcfg_query(board, ZZ_CFG_KEY_MAC_HI, NULL);
-		UWORD mid = zzcfg_query(board, ZZ_CFG_KEY_MAC_MID, NULL);
-		UWORD lo = zzcfg_query(board, ZZ_CFG_KEY_MAC_LO, NULL);
-		snprintf(sv->mac, sizeof(sv->mac), "%02x:%02x:%02x:%02x:%02x:%02x",
-			hi >> 8, hi & 0xff, mid >> 8, mid & 0xff, lo >> 8, lo & 0xff);
-	}
+		v = zzcfg_query(board, ZZ_CFG_KEY_NS_VSYNC, &present);
+		sv->vsync = (present && v <= 2) ? v : 0;
 
-	st = zzcfg_read_raw(board, settings_cfg_text,
-		sizeof(settings_cfg_text), &rawlen);
-	if (st == ZZ_CFG_FILE_OK) {
-		zzcfg_extract_hdf(settings_cfg_text, rawlen, sv->hdf, sizeof(sv->hdf));
-		snprintf(settings_status_buf, sizeof(settings_status_buf),
-			"ZZ9000.CFG: %u bytes on card", (unsigned)rawlen);
-	} else if (st == ZZ_CFG_FILE_NO_FILE) {
-		snprintf(settings_status_buf, sizeof(settings_status_buf),
-			"No ZZ9000.CFG on card yet");
-	} else if (st == ZZ_CFG_FILE_IDLE) {
-		snprintf(settings_status_buf, sizeof(settings_status_buf),
-			"Firmware lacks config support");
+		v = zzcfg_query(board, ZZ_CFG_KEY_INT2, &present);
+		sv->int2 = (present && v) ? 1 : 0;
+
+		zzcfg_query(board, ZZ_CFG_KEY_MAC_HI, &present);
+		if (present) {
+			UWORD hi = zzcfg_query(board, ZZ_CFG_KEY_MAC_HI, NULL);
+			UWORD mid = zzcfg_query(board, ZZ_CFG_KEY_MAC_MID, NULL);
+			UWORD lo = zzcfg_query(board, ZZ_CFG_KEY_MAC_LO, NULL);
+			snprintf(sv->mac, sizeof(sv->mac), "%02x:%02x:%02x:%02x:%02x:%02x",
+				hi >> 8, hi & 0xff, mid >> 8, mid & 0xff, lo >> 8, lo & 0xff);
+		}
+
+		st = zzcfg_read_raw(board, settings_cfg_text,
+			sizeof(settings_cfg_text), &rawlen);
+		if (st == ZZ_CFG_FILE_OK) {
+			zzcfg_extract_hdf(settings_cfg_text, rawlen, sv->hdf, sizeof(sv->hdf));
+			snprintf(settings_status_buf, sizeof(settings_status_buf),
+				"ZZ9000.CFG: %u bytes on card", (unsigned)rawlen);
+		} else if (st == ZZ_CFG_FILE_NO_FILE) {
+			snprintf(settings_status_buf, sizeof(settings_status_buf),
+				"No ZZ9000.CFG on card yet");
+		} else if (st == ZZ_CFG_FILE_IDLE) {
+			snprintf(settings_status_buf, sizeof(settings_status_buf),
+				"Firmware lacks config support");
+		} else {
+			snprintf(settings_status_buf, sizeof(settings_status_buf),
+				"Config read failed (SD error)");
+		}
 	} else {
 		snprintf(settings_status_buf, sizeof(settings_status_buf),
-			"Config read failed (SD error)");
+			"Scanlines only - config needs FW 2.3+");
 	}
 
 	if (!win) return;
@@ -919,6 +931,11 @@ static void settings_save(struct Window *win)
 	struct zzcfg_values *sv = &settings_vals;
 	struct StringInfo *si;
 	UWORD st;
+
+	if (!settings_have_cfg) {
+		settings_set_status(win, "Config needs firmware 2.3+");
+		return;
+	}
 
 	si = (struct StringInfo *)sgads[SGAD_MAC]->SpecialInfo;
 	snprintf(sv->mac, sizeof(sv->mac), "%s", (const char *)si->Buffer);
@@ -1070,14 +1087,7 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 	BOOL done = FALSE;
 	WORD w = 0, h = 0;
 
-	{
-		uint16_t fwrev = zz_get_reg16(REG_ZZ_FW_VERSION);
-		if (fwrev < 0x0203) {
-			errorMessage("ZZ9000.CFG settings need firmware (BOOT.bin) 2.3+.\n"
-				"Update the firmware first.");
-			return;
-		}
-	}
+	settings_have_cfg = (zz_get_reg16(REG_ZZ_FW_VERSION) >= 0x0203);
 
 	if (NULL == settings_create_gadgets(&glist, vi, mainlayout, &w, &h)) {
 		if (glist) FreeGadgets(glist);
@@ -1104,6 +1114,22 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 	}
 
 	settings_populate(win);
+
+	if (!settings_have_cfg) {
+		/* Live scanline controls stay usable on 2.0-2.2 firmware
+		 * (they were on the main window before); everything that
+		 * needs the config-file interface is greyed out. */
+		static const UWORD cfg_only_gadgets[] = {
+			SGAD_VIDEOCAP, SGAD_NSVSYNC, SGAD_INT2,
+			SGAD_MAC, SGAD_HDF, SGAD_BTN_SAVE, SGAD_BTN_RELOAD
+		};
+		size_t i;
+		for (i = 0; i < sizeof(cfg_only_gadgets) / sizeof(cfg_only_gadgets[0]); i++) {
+			GT_SetGadgetAttrs(sgads[cfg_only_gadgets[i]], win, NULL,
+				GA_Disabled, TRUE, TAG_END);
+		}
+	}
+
 	GT_RefreshWindow(win, NULL);
 
 	while (!done) {
