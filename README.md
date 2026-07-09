@@ -73,7 +73,7 @@ normal AmigaOS file.
 | MHI audio | `mhizz9000.library` | `Libs:MHI/` | Exposes the AX hardware MP3 decoder to MHI-aware players. |
 | USB | `zzusbhw.device` | `Devs:USBHardware/` | Poseidon USB hardware driver. See [usb-poseidon/README.md](usb-poseidon/README.md). |
 | SD boot | `zzsd.device` | Firmware `BOOT.bin` | Size-constrained boot driver for FAT32-hosted HDF boot. See [sd-boot/README.md](sd-boot/README.md). |
-| Configuration | `ZZTop` | `SYS:Tools/` | GUI for resolution, scanlines, hardware toggles, hardware readback, and firmware update/restore. |
+| Configuration | `ZZTop` | `SYS:Tools/` | GUI for hardware readback, firmware update/restore, and the SD-card `ZZ9000.CFG` settings (Project menu > Settings: native video mode, exact refresh, scanlines, INT2, MAC, boot HDF; needs firmware 2.3+). |
 | Scanlines | `ZZScanlines` | `C:` | CLI for scanline V1/V2 modes. |
 | Firmware update | `ZZFwUpdate` | `C:` | Pushes `BOOT.bin` or another root-level file to the ZZ9000 FAT32 microSD card over Zorro. |
 | SDK services | `zz9k.library` | `Libs:` | AmigaOS gateway to the SDK v2 firmware services (image decode, audio, compression, crypto). Built from the pinned [zz9000-sdk](https://github.com/BlitterStudio/zz9000-sdk) ref by `sdk/build.sh`. |
@@ -249,7 +249,7 @@ GitHub release notes are generated automatically.
 | `ZZTop/` | Configuration GUI. |
 | `ZZScanlines/` | Scanline control CLI. |
 | `ZZFwUpdate/` | Firmware/file push CLI using the FWUP protocol. |
-| `common/` | Shared FWUP protocol client (`fwup_client.c`, `fwup_amiga.c`) linked by both `ZZFwUpdate` and `ZZTop`. |
+| `common/` | Shared FWUP protocol client (`fwup_client.c`, `fwup_amiga.c`) and ZZ9000.CFG client (`zzcfg_amiga.c`) linked by `ZZFwUpdate` and `ZZTop`. |
 | `sdk/` | Pulls the pinned zz9000-sdk ref and collects its end-user payloads (libraries, datatype, diagnostics). |
 | `amissl/` | Builds the ZZ9000-accelerated `amissl.library` (adtools toolchain image + zz9000-sdk integration). |
 
