@@ -39,9 +39,14 @@ struct zzcfg_values {
  * ZZ_CFG_FILE_IDLE means the firmware never answered (no support). */
 UWORD zzcfg_read_raw(ULONG board, char *out, UWORD maxlen, UWORD *outlen);
 
-/* Scan raw config text for a `hdf = name` line (comments stripped,
- * case-insensitive key). Returns 1 and copies the name if found. */
-int zzcfg_extract_hdf(const char *text, UWORD len, char *out, UWORD outsz);
+/* Decode the ZZTop-editable keys from raw config text into v, using
+ * the firmware parser's line rules (comments, case-insensitive keys,
+ * last value wins). Keys absent from the text leave v untouched, so
+ * pre-fill v with the desired defaults. This is what makes the raw
+ * SD file — not the firmware's boot-time parse — the editor's source
+ * of truth: values saved or externally edited after boot survive a
+ * Reload instead of being reverted to the cold-boot state. */
+void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v);
 
 /* Render a fresh, fully commented ZZ9000.CFG from v. Returns the byte
  * count (always < ZZCFG_MAX_SIZE for any input). */

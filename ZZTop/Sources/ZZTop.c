@@ -857,39 +857,26 @@ static void settings_populate(struct Window *win)
 {
 	ULONG board = (ULONG)zz_regs;
 	struct zzcfg_values *sv = &settings_vals;
-	UWORD present = 0;
-	UWORD v, st, rawlen = 0;
+	UWORD st, rawlen = 0;
 
+	/* Editor defaults; keys present in the raw file override them.
+	 * Scanlines default to the live FPGA state - the config applied
+	 * it at cold boot and this tool/ZZScanlines may have changed it
+	 * since. */
 	memset(sv, 0, sizeof(*sv));
-
-	/* Scanlines reflect the live FPGA state - the config applied it at
-	 * cold boot and this tool/ZZScanlines may have changed it since. */
 	sv->scanline_mode = zz_get_scanline_mode();
 	sv->scanline_parity = zz_get_scanline_parity();
 
 	if (settings_have_cfg) {
-		v = zzcfg_query(board, ZZ_CFG_KEY_VIDEOCAP_MODE, &present);
-		sv->videocap_pal = (present && v == ZZ_VMODE_720x576) ? 1 : 0;
-
-		v = zzcfg_query(board, ZZ_CFG_KEY_NS_VSYNC, &present);
-		sv->vsync = (present && v <= 2) ? v : 0;
-
-		v = zzcfg_query(board, ZZ_CFG_KEY_INT2, &present);
-		sv->int2 = (present && v) ? 1 : 0;
-
-		zzcfg_query(board, ZZ_CFG_KEY_MAC_HI, &present);
-		if (present) {
-			UWORD hi = zzcfg_query(board, ZZ_CFG_KEY_MAC_HI, NULL);
-			UWORD mid = zzcfg_query(board, ZZ_CFG_KEY_MAC_MID, NULL);
-			UWORD lo = zzcfg_query(board, ZZ_CFG_KEY_MAC_LO, NULL);
-			snprintf(sv->mac, sizeof(sv->mac), "%02x:%02x:%02x:%02x:%02x:%02x",
-				hi >> 8, hi & 0xff, mid >> 8, mid & 0xff, lo >> 8, lo & 0xff);
-		}
-
 		st = zzcfg_read_raw(board, settings_cfg_text,
 			sizeof(settings_cfg_text), &rawlen);
 		if (st == ZZ_CFG_FILE_OK) {
-			zzcfg_extract_hdf(settings_cfg_text, rawlen, sv->hdf, sizeof(sv->hdf));
+			/* The raw SD file - not the firmware's cold-boot parse
+			 * (REG_ZZ_CONFIG_KEY) - is the editor's source of truth:
+			 * the query would revert values saved or externally
+			 * edited since boot on every Reload, and a subsequent
+			 * Save would then write those stale values back. */
+			zzcfg_parse_text(settings_cfg_text, rawlen, sv);
 			snprintf(settings_status_buf, sizeof(settings_status_buf),
 				"ZZ9000.CFG: %u bytes on card", (unsigned)rawlen);
 		} else if (st == ZZ_CFG_FILE_NO_FILE) {

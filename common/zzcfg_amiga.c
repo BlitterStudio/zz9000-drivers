@@ -64,46 +64,92 @@ static int zzcfg_is_space(char c)
     return c == ' ' || c == '\t' || c == '\r';
 }
 
-int zzcfg_extract_hdf(const char *text, UWORD len, char *out, UWORD outsz)
+static int zzcfg_str_eq_ci(const char *a, const char *b)
+{
+    while (*a && *b) {
+        if (zzcfg_lower(*a) != zzcfg_lower(*b)) return 0;
+        a++; b++;
+    }
+    return *a == *b;
+}
+
+/* Mirrors the firmware parser's line rules: `key = value`, `#`/`;`
+ * comments, case-insensitive keys and keyword values, last value
+ * wins. Only the keys ZZTop edits are decoded; anything else is
+ * skipped (the firmware is the validator of record at cold boot). */
+void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v)
 {
     UWORD pos = 0;
 
     while (pos < len) {
-        const char *p;
+        char key[24];
+        char value[ZZCFG_HDF_CHARS + 2];
         UWORD line_end = pos;
         UWORD n;
 
         while (line_end < len && text[line_end] != '\n') line_end++;
 
-        /* trim leading whitespace */
+        /* trim leading whitespace, copy the key up to '=' or space */
         while (pos < line_end && zzcfg_is_space(text[pos])) pos++;
-        p = &text[pos];
-
-        if (line_end - pos > 4 &&
-                zzcfg_lower(p[0]) == 'h' &&
-                zzcfg_lower(p[1]) == 'd' &&
-                zzcfg_lower(p[2]) == 'f') {
-            UWORD v = pos + 3;
-            while (v < line_end && zzcfg_is_space(text[v])) v++;
-            if (v < line_end && text[v] == '=') {
-                v++;
-                while (v < line_end && zzcfg_is_space(text[v])) v++;
-                n = 0;
-                while (v < line_end && n < outsz - 1 &&
-                        text[v] != '#' && text[v] != ';' &&
-                        !zzcfg_is_space(text[v])) {
-                    out[n++] = text[v++];
-                }
-                out[n] = '\0';
-                if (n > 0) return 1;
-            }
+        n = 0;
+        while (pos < line_end && n < sizeof(key) - 1 &&
+                text[pos] != '=' && text[pos] != '#' && text[pos] != ';' &&
+                !zzcfg_is_space(text[pos])) {
+            key[n++] = text[pos];
+            pos++;
         }
+        key[n] = '\0';
 
+        while (pos < line_end && zzcfg_is_space(text[pos])) pos++;
+        if (n == 0 || pos >= line_end || text[pos] != '=') {
+            pos = line_end + 1;
+            continue;
+        }
+        pos++; /* skip '=' */
+        while (pos < line_end && zzcfg_is_space(text[pos])) pos++;
+
+        n = 0;
+        while (pos < line_end && n < sizeof(value) - 1 &&
+                text[pos] != '#' && text[pos] != ';' &&
+                !zzcfg_is_space(text[pos])) {
+            value[n++] = text[pos];
+            pos++;
+        }
+        value[n] = '\0';
         pos = line_end + 1;
-    }
+        if (n == 0) continue;
 
-    out[0] = '\0';
-    return 0;
+        if (zzcfg_str_eq_ci(key, "videocap_mode")) {
+            if (zzcfg_str_eq_ci(value, "pal") ||
+                    zzcfg_str_eq_ci(value, "720x576"))
+                v->videocap_pal = 1;
+            else if (zzcfg_str_eq_ci(value, "800x600"))
+                v->videocap_pal = 0;
+        } else if (zzcfg_str_eq_ci(key, "nonstandard_vsync")) {
+            if (zzcfg_str_eq_ci(value, "off")) v->vsync = 0;
+            else if (zzcfg_str_eq_ci(value, "pal") ||
+                     zzcfg_str_eq_ci(value, "on")) v->vsync = 1;
+            else if (zzcfg_str_eq_ci(value, "ntsc")) v->vsync = 2;
+        } else if (zzcfg_str_eq_ci(key, "scanline_mode")) {
+            if (value[1] == '\0' && value[0] >= '0' && value[0] <= '3')
+                v->scanline_mode = (UWORD)(value[0] - '0');
+        } else if (zzcfg_str_eq_ci(key, "scanline_parity")) {
+            if (value[1] == '\0' && (value[0] == '0' || value[0] == '1'))
+                v->scanline_parity = (UWORD)(value[0] - '0');
+        } else if (zzcfg_str_eq_ci(key, "int2")) {
+            if (zzcfg_str_eq_ci(value, "on") || zzcfg_str_eq_ci(value, "1"))
+                v->int2 = 1;
+            else if (zzcfg_str_eq_ci(value, "off") ||
+                     zzcfg_str_eq_ci(value, "0"))
+                v->int2 = 0;
+        } else if (zzcfg_str_eq_ci(key, "mac")) {
+            if (strlen(value) < sizeof(v->mac))
+                strcpy(v->mac, value);
+        } else if (zzcfg_str_eq_ci(key, "hdf")) {
+            if (strlen(value) < sizeof(v->hdf))
+                strcpy(v->hdf, value);
+        }
+    }
 }
 
 UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
