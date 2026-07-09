@@ -2219,9 +2219,35 @@ APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1
 		return NULL;
 	}
 
-	zz_overlay_bitmap = p96AllocBitMap(zz_overlay.src_w, zz_overlay.src_h,
-		16, BMF_CLEAR | BMF_DISPLAYABLE, NULL,
-		(RGBFTYPE)zz_overlay.rgbformat);
+	/* On-board placement needs BOARD AFFINITY: a friend bitmap that
+	 * lives in card VRAM (the same mechanism that routes off-screen
+	 * bitmaps through our AllocBitMap hook - friend-compatibility runs
+	 * through GetCompatibleFormats, where the YUV formats are OR'd in
+	 * while the hooks are enabled). BMF_DISPLAYABLE would do the
+	 * opposite: no display mode exists for YUV, so a displayable
+	 * request lands in system RAM. The PIP window sits on the default
+	 * public screen, whose bitmap is the natural friend. */
+	{
+		struct IntuitionBase *IntuitionBase =
+			(struct IntuitionBase *)OpenLibrary((APTR)"intuition.library", 36);
+		struct Screen *scr = NULL;
+		struct BitMap *friend_bm = NULL;
+
+		if (IntuitionBase) {
+			scr = LockPubScreen(NULL);
+			if (scr)
+				friend_bm = scr->RastPort.BitMap;
+		}
+
+		zz_overlay_bitmap = p96AllocBitMap(zz_overlay.src_w,
+			zz_overlay.src_h, 16, BMF_CLEAR, friend_bm,
+			(RGBFTYPE)zz_overlay.rgbformat);
+
+		if (scr)
+			UnlockPubScreen(NULL, scr);
+		if (IntuitionBase)
+			CloseLibrary((struct Library *)IntuitionBase);
+	}
 	if (!zz_overlay_bitmap) {
 		KPrintF("ZZ9000: CreateFeature p96AllocBitMap FAILED\n");
 		return NULL;
