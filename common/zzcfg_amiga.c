@@ -21,18 +21,6 @@ static volatile UWORD *reg16(ULONG board, ULONG offset)
     return (volatile UWORD *)(board + offset);
 }
 
-UWORD zzcfg_query(ULONG board, UWORD key, UWORD *present)
-{
-    UWORD value, p;
-
-    *reg16(board, ZZ_REG_CONFIG_KEY) = key;
-    value = *reg16(board, ZZ_REG_CONFIG_KEY);
-    p = *reg16(board, ZZ_REG_CONFIG_PRESENT);
-
-    if (present) *present = p;
-    return value;
-}
-
 UWORD zzcfg_read_raw(ULONG board, char *out, UWORD maxlen, UWORD *outlen)
 {
     volatile UBYTE *buf = (volatile UBYTE *)(board + ZZ_BUFFER_OFFSET);

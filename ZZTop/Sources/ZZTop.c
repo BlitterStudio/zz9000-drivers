@@ -1030,15 +1030,17 @@ static struct Gadget *settings_create_gadgets(struct Gadget **glistptr,
 	ng.ng_TopEdge    = y;
 	ng.ng_GadgetID   = SGAD_MAC;
 	ng.ng_GadgetText = (STRPTR)LABEL_MAC;
+	/* MaxChars includes the trailing NUL (intuition StringInfo), so add
+	 * one or a full 17-char MAC could not be typed. */
 	sgads[SGAD_MAC] = gad = CreateGadget(STRING_KIND, gad, &ng,
-		GTST_MaxChars, ZZCFG_MAC_CHARS, GTST_String, "", TAG_END);
+		GTST_MaxChars, ZZCFG_MAC_CHARS + 1, GTST_String, "", TAG_END);
 	y += l.row_step;
 
 	ng.ng_TopEdge    = y;
 	ng.ng_GadgetID   = SGAD_HDF;
 	ng.ng_GadgetText = (STRPTR)LABEL_HDF;
 	sgads[SGAD_HDF] = gad = CreateGadget(STRING_KIND, gad, &ng,
-		GTST_MaxChars, ZZCFG_HDF_CHARS, GTST_String, "", TAG_END);
+		GTST_MaxChars, ZZCFG_HDF_CHARS + 1, GTST_String, "", TAG_END);
 	y += l.row_step + l.section_gap;
 
 	ng.ng_TopEdge    = y;

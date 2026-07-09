@@ -14,32 +14,12 @@
 
 #include <exec/types.h>
 #include <stdint.h>
+#include "zzcfg_query.h"   /* key ids, statuses, inline zzcfg_query() */
 
 /* Matches the firmware's boot-time parse cap (ZZ_CONFIG_MAX_SIZE). */
 #define ZZCFG_MAX_SIZE   4096
 #define ZZCFG_MAC_CHARS  17          /* aa:bb:cc:dd:ee:ff */
 #define ZZCFG_HDF_CHARS  63
-
-/* Key ids for zzcfg_query (mirror firmware zz_config.h). */
-#define ZZ_CFG_KEY_LOADED          0
-#define ZZ_CFG_KEY_VIDEOCAP_MODE   1
-#define ZZ_CFG_KEY_NS_VSYNC        2
-#define ZZ_CFG_KEY_SCANLINE_MODE   3
-#define ZZ_CFG_KEY_SCANLINE_PARITY 4
-#define ZZ_CFG_KEY_INT2            5
-#define ZZ_CFG_KEY_MAC_HI          6
-#define ZZ_CFG_KEY_MAC_MID         7
-#define ZZ_CFG_KEY_MAC_LO          8
-
-/* zzcfg_read_raw statuses (mirror firmware zz_config_file_status). */
-#define ZZ_CFG_FILE_OK           0
-#define ZZ_CFG_FILE_NO_FILE      1
-#define ZZ_CFG_FILE_IO_ERROR     2
-#define ZZ_CFG_FILE_IDLE         0xFFFF
-
-/* enum zz_video_modes values the config interface deals in. */
-#define ZZ_VMODE_800x600         1
-#define ZZ_VMODE_720x576         6
 
 /* Everything ZZTop's Settings window edits. mac/hdf are C strings;
  * an empty string means "not configured" and is emitted as a
@@ -53,11 +33,6 @@ struct zzcfg_values {
     char  mac[ZZCFG_MAC_CHARS + 3];
     char  hdf[ZZCFG_HDF_CHARS + 5];
 };
-
-/* Query one parsed config value from the firmware. *present is set to
- * 1 if the key was given in ZZ9000.CFG (for ZZ_CFG_KEY_LOADED: whether
- * the file was found at cold boot). */
-UWORD zzcfg_query(ULONG board, UWORD key, UWORD *present);
 
 /* Fetch the raw file contents into out (NUL-terminated, maxlen must be
  * >= 1). Returns a ZZ_CFG_FILE_* status; *outlen is the byte count.

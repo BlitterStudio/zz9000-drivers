@@ -64,6 +64,7 @@ const struct NSDeviceQueryResult NSDQueryAnswer = {
 #endif /* DEVICES_NEWSTYLE_H */
 
 #include "device.h"
+#include "zzcfg_query.h"
 #include "macros.h"
 
 // FIXME get rid of global var!
@@ -268,13 +269,7 @@ SAVEDS struct Device *DevInit( ASMR(d0) DEVBASEP                  ASMREG(d0),
           D(("ZZ9000Net: MNT ZZ9000 found.\n"));
           ZZ9K_REGS = (ULONG)cd->cd_BoardAddr;
 
-          // Thanks to https://grandcentrix.team
-          HW_MAC[0]=0x68;
-          HW_MAC[1]=0x82;
-          HW_MAC[2]=0xF2;
-          HW_MAC[3]=0x00;
-          HW_MAC[4]=0x01;
-          HW_MAC[5]=0x00;
+          BOOL have_env_mac = FALSE;
 
           if ((fh=Open("ENV:ZZ9K_MAC",MODE_OLDFILE))) {
             UBYTE char_buf[32];
@@ -284,16 +279,35 @@ SAVEDS struct Device *DevInit( ASMR(d0) DEVBASEP                  ASMREG(d0),
             } else {
               D(("ZZ9000Net: Setting MAC address from ENV:ZZ9K_MAC.\n"));
               set_mac_from_string(char_buf);
+              have_env_mac = TRUE;
             }
             Close(fh);
           }
 
-          // FIXME
-          *(volatile USHORT*)(ZZ9K_REGS+0x84) = (HW_MAC[0]<<8)|HW_MAC[1];
-          *(volatile USHORT*)(ZZ9K_REGS+0x84) = (HW_MAC[0]<<8)|HW_MAC[1];
-          *(volatile USHORT*)(ZZ9K_REGS+0x86) = (HW_MAC[2]<<8)|HW_MAC[3];
-          *(volatile USHORT*)(ZZ9K_REGS+0x86) = (HW_MAC[2]<<8)|HW_MAC[3];
-          *(volatile USHORT*)(ZZ9K_REGS+0x88) = (HW_MAC[4]<<8)|HW_MAC[5];
+          if (have_env_mac) {
+            // ENV override wins: push it into the firmware
+            // FIXME
+            *(volatile USHORT*)(ZZ9K_REGS+0x84) = (HW_MAC[0]<<8)|HW_MAC[1];
+            *(volatile USHORT*)(ZZ9K_REGS+0x84) = (HW_MAC[0]<<8)|HW_MAC[1];
+            *(volatile USHORT*)(ZZ9K_REGS+0x86) = (HW_MAC[2]<<8)|HW_MAC[3];
+            *(volatile USHORT*)(ZZ9K_REGS+0x86) = (HW_MAC[2]<<8)|HW_MAC[3];
+            *(volatile USHORT*)(ZZ9K_REGS+0x88) = (HW_MAC[4]<<8)|HW_MAC[5];
+          } else {
+            // Adopt the firmware's current MAC instead of forcing the
+            // old built-in default: honors a `mac` line in ZZ9000.CFG
+            // (applied at cold boot, firmware 2.3+) and reads back the
+            // same 68:82:F2:00:01:00 default otherwise.
+            USHORT mac_hi  = *(volatile USHORT*)(ZZ9K_REGS+0x84);
+            USHORT mac_mid = *(volatile USHORT*)(ZZ9K_REGS+0x86);
+            USHORT mac_lo  = *(volatile USHORT*)(ZZ9K_REGS+0x88);
+            HW_MAC[0] = mac_hi >> 8;
+            HW_MAC[1] = mac_hi & 0xff;
+            HW_MAC[2] = mac_mid >> 8;
+            HW_MAC[3] = mac_mid & 0xff;
+            HW_MAC[4] = mac_lo >> 8;
+            HW_MAC[5] = mac_lo & 0xff;
+            D(("ZZ9000Net: Using firmware MAC.\n"));
+          }
 
           ok = 1;
 
@@ -321,9 +335,15 @@ SAVEDS struct Device *DevInit( ASMR(d0) DEVBASEP                  ASMREG(d0),
 
 	{
 		BPTR fh;
+		UWORD cfg_present = 0;
 		if ((fh=Open("ENV:ZZ9K_INT2",MODE_OLDFILE))) {
-			D(("ZZ9000Net: Using INT2 mode.\n"));
+			D(("ZZ9000Net: Using INT2 mode (ENV).\n"));
 			Close(fh);
+			db->db_Flags |= DEVF_INT2MODE;
+		} else if (ok && ZZ9K_REGS &&
+				zzcfg_query(ZZ9K_REGS, ZZ_CFG_KEY_INT2, &cfg_present) && cfg_present) {
+			// `int2 = on` in ZZ9000.CFG (firmware 2.3+)
+			D(("ZZ9000Net: Using INT2 mode (ZZ9000.CFG).\n"));
 			db->db_Flags |= DEVF_INT2MODE;
 		} else {
 			D(("ZZ9000Net: Using INT6 mode (default).\n"));
