@@ -136,7 +136,7 @@
 ; --------------------------------------------------------------------
 
 (if (askbool (prompt "Does your monitor support 50 Hz modes? Say No to create ENVARC:ZZ9000-VCAP-800x600, which switches the scandoubler to 60 Hz.")
-             (help "The default scandoubler output is 720x576 @ 50 Hz. Saying No creates the 60 Hz flag."))
+             (help "The default scandoubler output is 720x576 @ 50 Hz. Saying No creates the 60 Hz flag. With firmware 2.3+ this can also live as videocap_mode in ZZ9000.CFG on the SD card (editable in ZZTop's Settings window); the ENV variable overrides the config file when both exist."))
     (delete "ENVARC:ZZ9000-VCAP-800x600"
        (prompt "Remove any existing 800x600 / 60 Hz flag.")
        (help ""))
@@ -229,7 +229,7 @@
    (
       (set #mac (askstring
          (prompt "Enter your unique Ethernet MAC address (printed in your ZZ9000 manual). Only the last six hex digits need to change.")
-         (help "To change the MAC later, edit ENVARC:ZZ9K_MAC.")
+         (help "To change the MAC later, edit ENVARC:ZZ9K_MAC. With firmware 2.3+ it can also live as mac in ZZ9000.CFG on the SD card (ZZTop's Settings window); the ENV variable overrides the config file when both exist.")
          (default "68:82:f2:01:02:00")))
 
       (textfile

@@ -33,6 +33,7 @@
 
 #include "mntgfx-gcc.h"
 #include "zz9000.h"
+#include "zzcfg_query.h"
 #include "blitter_cache.h"
 
 #define STR(s) #s
@@ -690,11 +691,32 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 		}
 
 		MNTZZ9KRegs* registers = (MNTZZ9KRegs *)b->RegisterBase;
-		b->CardData[ZZ_CARD_DATA_SCANDBL_800X600] = env_flag_exists(DOSBase, "ENV:ZZ9000-VCAP-800x600");
-		if (env_flag_exists(DOSBase, "ENV:ZZ9000-NS-VSYNC"))
+		UWORD cfg_present = 0;
+		UWORD cfg_value;
+
+		/* Precedence: ENV variable, then ZZ9000.CFG (firmware 2.3+;
+		 * the query reports "absent" on older firmware), then the
+		 * built-in default. Without this the unconditional re-apply
+		 * below would clobber the config file's cold-boot values. */
+		if (env_flag_exists(DOSBase, "ENV:ZZ9000-VCAP-800x600")) {
+			b->CardData[ZZ_CARD_DATA_SCANDBL_800X600] = 1;
+		} else {
+			cfg_value = zzcfg_query((ULONG)b->RegisterBase,
+				ZZ_CFG_KEY_VIDEOCAP_MODE, &cfg_present);
+			b->CardData[ZZ_CARD_DATA_SCANDBL_800X600] =
+				(cfg_present && cfg_value == ZZ_VMODE_800x600) ? 1 : 0;
+		}
+
+		if (env_flag_exists(DOSBase, "ENV:ZZ9000-NS-VSYNC")) {
 			b->CardData[ZZ_CARD_DATA_NSVSYNC] = 1;
-		else if (env_flag_exists(DOSBase, "ENV:ZZ9000-NS-VSYNC-NTSC"))
+		} else if (env_flag_exists(DOSBase, "ENV:ZZ9000-NS-VSYNC-NTSC")) {
 			b->CardData[ZZ_CARD_DATA_NSVSYNC] = 2;
+		} else {
+			cfg_value = zzcfg_query((ULONG)b->RegisterBase,
+				ZZ_CFG_KEY_NS_VSYNC, &cfg_present);
+			if (cfg_present && cfg_value <= 2)
+				b->CardData[ZZ_CARD_DATA_NSVSYNC] = cfg_value;
+		}
 
 		apply_vcap_settings(registers, (LONG)b->CardData[ZZ_CARD_DATA_SCANDBL_800X600]);
 		apply_nonstandard_vsync_settings(registers, (LONG)b->CardData[ZZ_CARD_DATA_NSVSYNC]);

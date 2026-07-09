@@ -119,6 +119,12 @@ it.
 setenv ZZ9K_INT2 1
 ```
 
+With firmware 2.3+ the preferred home for this option is `int2 = on`
+in the SD card's `ZZ9000.CFG` (editable from ZZTop's Settings window),
+which configures AHI, MHI and ZZ9000Net uniformly. An existing
+`ENV:ZZ9K_INT2` variable still takes precedence over the config file,
+so remove the ENV variable when migrating.
+
 ## Troubleshooting
 
 | Symptom                                               | Likely cause / fix |

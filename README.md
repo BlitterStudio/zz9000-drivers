@@ -83,6 +83,29 @@ normal AmigaOS file.
 | TLS offload | `amissl_v362.library` | `Libs:AmiSSL/` | AmiSSL 5.27 core with the ZZ9000 crypto-offload provider compiled in; accelerates TLS for all AmiSSL applications. Built per CPU (`68020-40` for 68020/030/040 and `68060`); the installer auto-detects the CPU and installs the matching build. Requires an existing AmiSSL 5.27 install. |
 | Installer | `ZZ9000Installer` | Release zip root | Commodore Installer drawer used for end-user deployment. |
 
+## SD-Card Configuration (ZZ9000.CFG)
+
+Firmware 2.3+ reads an optional `ZZ9000.CFG` file from the root of the
+ZZ9000's FAT32 microSD card at cold boot (documented in the
+[zz9000-firmware README](https://github.com/BlitterStudio/zz9000-firmware#configuration-file-zz9000cfg)).
+ZZTop's **Project → Settings…** window reads and writes it directly
+from AmigaOS, so the card never needs to leave the slot.
+
+The drivers in this repo consult it too:
+
+- `ZZ9000.card` takes its videocap mode and non-standard-vsync
+  defaults from `videocap_mode` / `nonstandard_vsync`.
+- `ZZ9000Net.device`, `zz9000ax.audio` and `mhizz9000.library` honor
+  `int2 = on`; `ZZ9000Net.device` adopts the firmware's `mac`.
+
+Precedence is always: `ENV:` variable (and RTG tooltypes) first, then
+the config file, then the built-in default — so existing setups keep
+working, but a lingering ENV variable also hides the config value.
+Remove the ENV variables (`ZZ9K_INT2`, `ZZ9K_MAC`,
+`ZZ9000-VCAP-800x600`, `ZZ9000-NS-VSYNC[-NTSC]`) when migrating to the
+config file. On firmware older than 2.3 the drivers silently fall back
+to the ENV variables.
+
 ## Command-Line Tools
 
 ### Firmware Updates
@@ -167,6 +190,10 @@ ZZScanlines 3 0
 
 Modes are `0=off`, `1=classic`, `2=soft`, `3=gradient`; parity is
 `0=odd dark`, `1=even dark`.
+
+Like ZZTop's Settings window, `ZZScanlines` changes the live FPGA
+state; to make scanlines survive a power cycle, save them to
+`ZZ9000.CFG` (firmware 2.3+, ZZTop Settings window's Save button).
 
 ## Building
 
