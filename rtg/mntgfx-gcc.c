@@ -655,7 +655,15 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 
 		b->MemoryBase = (uint8_t*)(cd->cd_BoardAddr)+0x10000;
 		if (zorro_version == 2) {
-			b->MemorySize = cd->cd_BoardSize-0x30000;
+			// Top-of-window carve on Z2 (board offsets, 4 MB window):
+			// VRAM ends 0x3D0000, template scratch (zz_template_addr =
+			// MemorySize, so it slides with this constant) 0x3D0000..
+			// 0x3E0000, firmware SDK host-window heap 0x3E0000..
+			// 0x3F0000, AHI/MHI audio scratch 0x3F0000..0x400000. The
+			// heap slot is what lets zz9k.library map SDK buffers on
+			// Z2 (MHI/mpega MP3 playback); an older RTG driver with
+			// new firmware would blit templates over it.
+			b->MemorySize = cd->cd_BoardSize-0x40000;
 		} else {
 			// 13.8 MB for Z3 (safety, will be expanded later)
 			// one full HD screen @8bit ~ 2MB

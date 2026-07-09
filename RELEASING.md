@@ -45,6 +45,16 @@ CI must be green on each dev branch before tagging. Cut the tags in this order:
 4. **Drivers** — merge `sdk-payloads` → `master`; tag `vX.Y.Z`; push. The tag
    push runs CI and the `release` job assembles + publishes the installer.
 
+### Version-skew note for release notes (Zorro 2)
+
+Since the Zorro 2 host-window heap (firmware `SDK_HOST_WINDOW_HEAP` at board
+offset 0x3E0000), the RTG driver carves 64 KB out of Z2 VRAM
+(`BoardSize-0x40000`) to keep that region free. An **older ZZ9000.card with
+newer firmware** will still place its template-blit scratch over the heap, so
+template blits can corrupt in-flight MHI/mpega audio staging on Z2. Releases
+ship the pieces bundled; call out in the release notes that Z2 users must
+update ZZ9000.card together with the firmware.
+
 ## 3. CI notes
 
 - All three repos run CI on every branch push (plus PRs and `workflow_dispatch`),

@@ -364,18 +364,30 @@ static BOOL mhi_stream_open(struct MhiPlayer *mp) {
 	if(mp->session != 0) return TRUE;
 
 	if(!mp->rings_allocated) {
-		if(ZZ9KAllocShared(ZZ_MHI_STAGING_BYTES, 16, 0,
+		// The staging buffer is the only one the 68k writes, so it is
+		// the only one that must be CPU-mappable. HOST_WINDOW places it
+		// in the firmware's board-window heap on Zorro 2 (the library
+		// strips the flag on Zorro 3, and pre-host-window-heap firmware
+		// ignores it -- the alloc then fails to map on Z2 exactly like
+		// a plain alloc did). The mp3/pcm rings live card-side only
+		// (decode input, AX playback output): CARD_ONLY skips the
+		// board-window mapping entirely, which is what makes them
+		// allocatable on Z2 in the first place.
+		if(ZZ9KAllocShared(ZZ_MHI_STAGING_BYTES, 16,
+		                   ZZ9K_ALLOC_HOST_WINDOW,
 		                   &mp->staging) != ZZ9K_STATUS_OK) {
 			KPrintF("stream_open: staging alloc failed\n");
 			return FALSE;
 		}
-		if(ZZ9KAllocShared(ZZ_MHI_MP3_RING_BYTES, 16, 0,
+		if(ZZ9KAllocShared(ZZ_MHI_MP3_RING_BYTES, 16,
+		                   ZZ9K_ALLOC_CARD_ONLY,
 		                   &mp->mp3_ring) != ZZ9K_STATUS_OK) {
 			KPrintF("stream_open: mp3 ring alloc failed\n");
 			ZZ9KFreeShared(mp->staging.handle);
 			return FALSE;
 		}
-		if(ZZ9KAllocShared(ZZ_MHI_PCM_RING_BYTES, 16, 0,
+		if(ZZ9KAllocShared(ZZ_MHI_PCM_RING_BYTES, 16,
+		                   ZZ9K_ALLOC_CARD_ONLY,
 		                   &mp->pcm_ring) != ZZ9K_STATUS_OK) {
 			KPrintF("stream_open: pcm ring alloc failed\n");
 			ZZ9KFreeShared(mp->mp3_ring.handle);
@@ -749,8 +761,13 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 		KPrintF("Can't open zz9k.library.\n");
 		return NULL;
 	}
-	if(base->lib_Revision < ZZ9K_LIBRARY_MIN_REVISION_AUDIO_PLAYBACK) {
-		KPrintF("zz9k.library too old for audio playback.\n");
+	// ALLOC_FLAGS (rev 26) rather than AUDIO_PLAYBACK (rev 25): this
+	// driver passes ZZ9K_ALLOC_HOST_WINDOW/CARD_ONLY, and it is the
+	// LIBRARY that strips HOST_WINDOW on Zorro 3. An older library
+	// forwards the bit verbatim and new firmware would then place the
+	// staging buffer inside Z3 P96 VRAM -- refuse the skew instead.
+	if(base->lib_Revision < ZZ9K_LIBRARY_MIN_REVISION_ALLOC_FLAGS) {
+		KPrintF("zz9k.library too old for alloc flags.\n");
 		CloseLibrary(base);
 		return NULL;
 	}
