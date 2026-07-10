@@ -1243,7 +1243,7 @@ void SetDPMSLevel(__REGA0(struct BoardInfo *b), __REGD0(ULONG level)) {
 		return;
 
 	MNTZZ9KRegs *registers = (MNTZZ9KRegs *)b->RegisterBase;
-	zzwrite16(&registers->blitter_user1, CARD_FEATURE_DPMS);
+	writeBlitterUser1(registers, CARD_FEATURE_DPMS);
 	zzwrite16(&registers->set_feature_status, (UWORD)level);
 }
 
