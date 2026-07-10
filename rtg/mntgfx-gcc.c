@@ -156,6 +156,13 @@ struct ExecBase *SysBase;
 static struct ConfigDev *reserved_cd = NULL;
 static struct BlitterRegisterCache blitter_register_cache;
 static BOOL zz_overlay_hooks_enabled = FALSE;
+/* Card memory addressable from MemoryBase (autoconfig window minus the
+ * 64 KB register space). b->MemorySize is SMALLER on Z3: it only caps
+ * P96's own VRAM allocator, while the firmware surface heap for
+ * off-screen bitmaps sits deliberately ABOVE it (board ~0x3310000+),
+ * still inside the autoconfig window. Ownership/on-board checks must
+ * bound Planes[0] against this, never against b->MemorySize. */
+static ULONG zz_card_window_size = 0;
 
 static inline volatile struct GFXData *zz_gfxdata(struct BoardInfo *b) {
 	return (volatile struct GFXData *)b->CardData[ZZ_CARD_DATA_GFXDATA];
@@ -665,6 +672,7 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 	if (zorro_version>=2) {
 
 		b->MemoryBase = (uint8_t*)(cd->cd_BoardAddr)+0x10000;
+		zz_card_window_size = (ULONG)cd->cd_BoardSize - 0x10000;
 		if (zorro_version == 2) {
 			// Top-of-window carve on Z2 (board offsets, 4 MB window):
 			// VRAM ends 0x3D0000, template scratch (zz_template_addr =
@@ -1893,7 +1901,9 @@ static struct ZZBitMap *zz_bitmap_ours(struct BoardInfo *b, struct BitMap *bm) {
 		return NULL;
 
 	if (!zz_offscreen_is_ours(zbm->magic, (uint32_t)bm->Planes[0],
-			(uint32_t)b->MemoryBase, (uint32_t)b->MemorySize))
+			(uint32_t)b->MemoryBase,
+			zz_card_window_size ? (uint32_t)zz_card_window_size :
+			(uint32_t)b->MemorySize))
 		return NULL;
 
 	return zbm;
@@ -2233,10 +2243,14 @@ APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1
 	}
 
 	/* the compositor reads the source from card VRAM; ZZ_AllocBitMap
-	 * guarantees that, so this is a belt-and-braces diagnostic */
+	 * guarantees that, so this is a belt-and-braces diagnostic. The
+	 * bound is the autoconfig window, NOT b->MemorySize: the firmware
+	 * surface heap sits above the P96 window (see zz_card_window_size),
+	 * which a previous MemorySize-based check here misread as a
+	 * system-RAM placement. */
 	if ((uint32_t)zz_overlay_bitmap->Planes[0] < (uint32_t)b->MemoryBase ||
 	    (uint32_t)zz_overlay_bitmap->Planes[0] - (uint32_t)b->MemoryBase >=
-	    (uint32_t)b->MemorySize) {
+	    (uint32_t)zz_card_window_size) {
 		KPrintF("ZZ9000: CreateFeature source NOT on board (%08lx)\n",
 			(ULONG)zz_overlay_bitmap->Planes[0]);
 		ZZ_FreeBitMap(b, zz_overlay_bitmap, NULL);
@@ -2273,9 +2287,9 @@ APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1
 		}
 	}
 
-	KPrintF("ZZ9000: CreateFeature OK (%ldx%ld fmt %ld)\n",
+	KPrintF("ZZ9000: CreateFeature OK (%ldx%ld fmt %ld src %08lx)\n",
 		(LONG)zz_overlay.src_w, (LONG)zz_overlay.src_h,
-		(LONG)zz_overlay.rgbformat);
+		(LONG)zz_overlay.rgbformat, (ULONG)zz_overlay_bitmap->Planes[0]);
 	return (APTR)&zz_overlay;
 }
 
