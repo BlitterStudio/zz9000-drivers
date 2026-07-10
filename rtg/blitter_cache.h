@@ -45,6 +45,13 @@ static inline void blitter_cache_select(struct BlitterRegisterCache *cache,
 	}
 }
 
+static inline void blitter_cache_invalidate(struct BlitterRegisterCache *cache,
+	const volatile void *registers, uint32_t bits)
+{
+	blitter_cache_select(cache, registers);
+	cache->valid &= ~bits;
+}
+
 static inline int blitter_cache_write16_needed(struct BlitterRegisterCache *cache,
 	const volatile void *registers, uint32_t bit, uint16_t *slot, uint16_t value)
 {

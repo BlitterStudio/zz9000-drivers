@@ -57,6 +57,14 @@ int main(void)
 		blitter_cache_write16_needed(&cache, &regs_a, BLITTER_CACHE_USER2,
 			&user2, 0x5a), 0);
 
+	blitter_cache_invalidate(&cache, &regs_a, BLITTER_CACHE_USER1);
+	expect_write("invalidated user1 writes",
+		blitter_cache_write16_needed(&cache, &regs_a, BLITTER_CACHE_USER1,
+			&user1, 12), 1);
+	expect_write("user2 survives user1 invalidate",
+		blitter_cache_write16_needed(&cache, &regs_a, BLITTER_CACHE_USER2,
+			&user2, 0x5a), 0);
+
 	expect_write("first rgb2 writes",
 		blitter_cache_write32_needed(&cache, &regs_a, BLITTER_CACHE_RGB2,
 			&rgb2, 0x11223344), 1);

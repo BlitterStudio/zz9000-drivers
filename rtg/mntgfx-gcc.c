@@ -352,6 +352,7 @@ static LONG tooltype_nonstandard_vsync(char **tool_types, LONG current) {
 }
 
 static inline void zzwrite16(volatile uint16_t* reg, uint16_t value);
+static inline void selectCardFeature(MNTZZ9KRegs* registers, UWORD feature);
 
 static struct ConfigDev *find_unconfigured_configdev(struct ExpansionBase *ExpansionBase, UWORD manufacturer, UBYTE product) {
 	struct ConfigDev *cd = NULL;
@@ -375,7 +376,7 @@ static void apply_vcap_settings(MNTZZ9KRegs *regs, LONG scandoubler_800x600) {
 }
 
 static void apply_nonstandard_vsync_settings(MNTZZ9KRegs *regs, LONG nonstandard_vsync_mode) {
-	zzwrite16(&regs->blitter_user1, CARD_FEATURE_NONSTANDARD_VSYNC);
+	selectCardFeature(regs, CARD_FEATURE_NONSTANDARD_VSYNC);
 	zzwrite16(&regs->set_feature_status, (UWORD)nonstandard_vsync_mode);
 }
 
@@ -472,6 +473,15 @@ static inline void writeBlitterUser1(MNTZZ9KRegs* registers, UWORD value) {
 			BLITTER_CACHE_USER1, &blitter_register_cache.user1, value)) {
 		zzwrite16(&registers->blitter_user1, value);
 	}
+}
+
+/* USER1 doubles as the selector for set_feature_status. Feature commands must
+ * always reach the card, then leave USER1 invalid in the blitter cache because
+ * the selector is not a reusable blitter operand. */
+static inline void selectCardFeature(MNTZZ9KRegs* registers, UWORD feature) {
+	zzwrite16(&registers->blitter_user1, feature);
+	blitter_cache_invalidate(&blitter_register_cache, registers,
+		BLITTER_CACHE_USER1);
 }
 
 static inline void writeBlitterUser2(MNTZZ9KRegs* registers, UWORD value) {
@@ -1130,7 +1140,7 @@ void SetColorArray(__REGA0(struct BoardInfo *b), __REGD0(UWORD start), __REGD1(U
 
 	if (start >= 256) {
 		if (!b->CardData[ZZ_CARD_DATA_SECONDARY_PALETTE]) {
-			writeBlitterUser1(registers, CARD_FEATURE_SECONDARY_PALETTE);
+			selectCardFeature(registers, CARD_FEATURE_SECONDARY_PALETTE);
 			zzwrite16(&registers->set_feature_status, 1);
 			b->CardData[ZZ_CARD_DATA_SECONDARY_PALETTE] = 1;
 		}
@@ -1243,7 +1253,7 @@ void SetDPMSLevel(__REGA0(struct BoardInfo *b), __REGD0(ULONG level)) {
 		return;
 
 	MNTZZ9KRegs *registers = (MNTZZ9KRegs *)b->RegisterBase;
-	writeBlitterUser1(registers, CARD_FEATURE_DPMS);
+	selectCardFeature(registers, CARD_FEATURE_DPMS);
 	zzwrite16(&registers->set_feature_status, (UWORD)level);
 }
 
@@ -2321,7 +2331,7 @@ APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1
 	/* enable the firmware master gate (the vblank ISR checks it) */
 	{
 		MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
-		zzwrite16(&registers->blitter_user1, CARD_FEATURE_VIDEO_OVERLAY);
+		selectCardFeature(registers, CARD_FEATURE_VIDEO_OVERLAY);
 		zzwrite16(&registers->set_feature_status, 1);
 	}
 
