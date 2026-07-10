@@ -2204,6 +2204,11 @@ static ULONG zz_overlay_push(struct BoardInfo *b, int off) {
 }
 
 APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1(struct TagItem *tags)) {
+#ifdef DEBUG
+	/* build fingerprint: identifies the exact binary in every capture
+	 * (three bench rounds in a row ran a stale card unnoticed) */
+	KPrintF("ZZ9000: CreateFeature build " __DATE__ " " __TIME__ "\n");
+#endif
 	if (!b || type != SFT_MEMORYWINDOW)
 		return NULL;
 	if (zz_overlay_bitmap)
