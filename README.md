@@ -35,7 +35,8 @@ and SDK stack:
   Zorro III high-memory settings, icons, rollback-safe AmiSSL backup,
   and CI-built binaries only.
 - Native `BT_MNT_ZZ9000` Picasso96 identity, RTG fixes, 1920x1080x32
-  settings for Zorro III, and clearer Zorro II/Zorro III profiles.
+  settings for Zorro III, monitor DPMS power management, and clearer
+  Zorro II/Zorro III profiles.
 - `ZZTop` as the configuration GUI for firmware readback, FWUP
   update/restore, and SD-card `ZZ9000.CFG` editing.
 - Poseidon USB hardware driver, SD-card boot support, firmware-file
@@ -79,8 +80,9 @@ installing the matching build, and backing up the stock library once).
 Several features require current ZZ9000 firmware. In particular,
 `ZZFwUpdate` needs firmware with FWUP protocol support, USB needs the
 firmware USB stack, scanline V2 controls need the matching bitstream,
-and `zzsd.device` is packed into `BOOT.bin` rather than installed as a
-normal AmigaOS file.
+Picasso96 DPMS needs firmware 2.7+ with a matching rebuilt bitstream, and
+`zzsd.device` is packed into `BOOT.bin` rather than installed as a normal
+AmigaOS file.
 
 SDK offload services are limited on Zorro 2 boards: the CPU-visible
 shared heap is a small window inside the 4 MB board aperture. Current
@@ -97,8 +99,8 @@ Zorro 2.
 
 | Area | Artifact | Installed to | Notes |
 |------|----------|--------------|-------|
-| RTG graphics | `ZZ9000.card` | `Libs:Picasso96/` | Picasso96 RTG driver using the native `BT_MNT_ZZ9000` board identity in current builds. |
-| P96 settings | `Picasso96Settings` / `Picasso96Settings-Z3` | `Devs:Picasso96Settings` | Installer backs up an existing file to `Devs:Picasso96Settings.pre-ZZ9000-2.4` and offers a Zorro III high-memory profile with 1920x1080x32 enabled. |
+| RTG graphics | `ZZ9000.card` | `Libs:Picasso96/` | Picasso96 RTG driver using the native `BT_MNT_ZZ9000` board identity, accelerated VRAM/PIP paths, and firmware-gated DPMS monitor power management. |
+| P96 settings | `Picasso96Settings` / `Picasso96Settings-Z3` | `Devs:Picasso96Settings` | Installer backs up an existing file to `Devs:Picasso96Settings.pre-ZZ9000-2.4`, advertises Standby/Suspend/Active Off DPMS support, and offers a Zorro III high-memory profile with 1920x1080x32 enabled. |
 | Networking | `ZZ9000Net.device` | `Devs:Networks/` | SANA-II Ethernet driver. |
 | Network template | `ZZ9000Net` | `Devs:NetInterfaces/` | Optional Roadshow DHCP template installed by the installer. |
 | Network diagnostics | `ZZNetStats` | `C:` | Dumps SANA-II counters plus firmware RX backlog/drop registers. |

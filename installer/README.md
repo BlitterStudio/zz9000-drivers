@@ -70,7 +70,9 @@ driver; old settings saved under the legacy `uaegfx` board type are not
 guaranteed to attach to the new driver identity. The default
 `Picasso96Settings` profile is safe for Zorro II and Zorro III. The
 `Picasso96Settings-Z3` profile enables 1920x1080x32 and should only be
-installed on Zorro III systems.
+installed on Zorro III systems. Both profiles advertise the monitor's
+Picasso96 DPMS Standby, Suspend, and Active Off capabilities so DPMS
+utilities can reach the firmware-gated `ZZ9000.card` callback.
 The installer backs up the previous settings file as
 `Devs:Picasso96Settings.pre-ZZ9000-2.4` before installing the migrated
 settings file.

@@ -61,13 +61,13 @@ struct DOSBase;
 #define __saveds__
 
 #define DEVICE_VERSION 2
-#define DEVICE_REVISION 6
+#define DEVICE_REVISION 7
 #define REQUIRED_FW_VERSION_MAJOR 2
 #define REQUIRED_FW_VERSION_MINOR 0
 #define DEVICE_PRIORITY 0
 #define DEVICE_ID_STRING "$VER: ZZ9000.card+blitter " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
 #define DEVICE_NAME "ZZ9000.card"
-#define DEVICE_DATE "(19.05.2026)"
+#define DEVICE_DATE "(10.07.2026)"
 
 int __attribute__((no_reorder)) _start()
 {
@@ -128,6 +128,8 @@ char dummies[128];
 #define OFFSCREEN_BITMAPS_MIN_FWREV 0x0204
 /* first firmware with OP_VIDEO_OVERLAY + the shadow-scanout compositor */
 #define VIDEO_OVERLAY_MIN_FWREV 0x0206
+/* first firmware with CARD_FEATURE_DPMS + formatter sync gating */
+#define DPMS_MIN_FWREV 0x0207
 #define MNT_MANUFACTURER 0x6d6e
 #define ZZ9000_PRODUCT_Z2 0x3
 #define ZZ9000_PRODUCT_Z3 0x4
@@ -871,7 +873,10 @@ int __attribute__((used)) InitCard(__REGA0(struct BoardInfo* b), __REGA1(char **
 	b->WriteYUVRect = (void *)ZZ_WriteYUVRect;
 	b->GetVSyncState = (void *)GetVSyncState;
 	//b->GetVBeamPos = (void *)NULL;
-	//b->SetDPMSLevel = (void *)NULL;
+	/* Older firmware ignores CARD_FEATURE_DPMS, so only advertise the P96
+	 * callback when the formatter can actually gate HSync/VSync. */
+	if (((volatile uint16_t*)b->RegisterBase)[0xC0/2] >= DPMS_MIN_FWREV)
+		b->SetDPMSLevel = (void *)SetDPMSLevel;
 	//b->ResetChip = (void *)NULL;
 	/* Off-screen bitmaps in card VRAM (Z3 only; ZZ_AllocBitMap refuses
 	 * on Z2). Requires firmware 2.4+: its surface allocator actually
@@ -1231,6 +1236,15 @@ UWORD SetDisplay(__REGA0(struct BoardInfo *b), __REGD0(UWORD enabled)) {
 	// No firmware display-blanking register is exposed; keep sync and report
 	// the previous logical state as required by the P96 callback contract.
 	return old;
+}
+
+void SetDPMSLevel(__REGA0(struct BoardInfo *b), __REGD0(ULONG level)) {
+	if (!b || !b->RegisterBase || level > DPMS_OFF)
+		return;
+
+	MNTZZ9KRegs *registers = (MNTZZ9KRegs *)b->RegisterBase;
+	writeBlitterUser1(registers, CARD_FEATURE_DPMS);
+	zzwrite16(&registers->set_feature_status, (UWORD)level);
 }
 
 LONG ResolvePixelClock(__REGA0(struct BoardInfo *b), __REGA1(struct ModeInfo *mode_info), __REGD0(ULONG pixel_clock), __REGD7(RGBFTYPE format)) {
