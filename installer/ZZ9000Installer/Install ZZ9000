@@ -122,7 +122,7 @@
 
       (copyfiles
          (prompt "Install native ZZ9000 Picasso96Settings")
-         (help "Installs the Picasso96 configuration containing ZZ9000-specific screenmodes. ZZ9000.card 2.4 and newer use the native BT_MNT_ZZ9000 board type, so this matching settings file is required when upgrading from older releases.")
+         (help "Installs the Picasso96 configuration containing ZZ9000-specific screenmodes and monitor DPMS capabilities. ZZ9000.card 2.4 and newer use the native BT_MNT_ZZ9000 board type, so this matching settings file is required when upgrading from older releases.")
          (source (tackon "Devs" #zz-p96-settings))
          (dest "Devs:")
          (newname "Picasso96Settings")

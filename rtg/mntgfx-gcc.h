@@ -48,6 +48,7 @@ void SetColorArray (__REGA0(struct BoardInfo *b), __REGD0(UWORD start), __REGD1(
 void SetPanning (__REGA0(struct BoardInfo *b), __REGA1(UBYTE *addr), __REGD0(UWORD width), __REGD1(WORD x_offset), __REGD2(WORD y_offset), __REGD4(UWORD height), __REGD7(RGBFTYPE format));
 UWORD SetSwitch (__REGA0(struct BoardInfo *b), __REGD0(UWORD enabled));
 UWORD SetDisplay (__REGA0(struct BoardInfo *b), __REGD0(UWORD enabled));
+void SetDPMSLevel (__REGA0(struct BoardInfo *b), __REGD0(ULONG level));
 void WaitBlitter (__REGA0(struct BoardInfo *b));
 
 UWORD CalculateBytesPerRow (__REGA0(struct BoardInfo *b), __REGA1(struct ModeInfo *mode_info), __REGD0(UWORD width), __REGD1(UWORD height), __REGD7(RGBFTYPE format));

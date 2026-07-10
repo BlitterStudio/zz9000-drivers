@@ -13,6 +13,17 @@ enum {
 };
 
 enum {
+	MNTR_FLAGS = 44,
+	MNTR_MIN_SIZE = 48,
+	MNTR_DPMS_STANDBY = 1 << 0,
+	MNTR_DPMS_SUSPEND = 1 << 1,
+	MNTR_DPMS_ACTIVE_OFF = 1 << 2,
+	MNTR_DPMS_ALL = MNTR_DPMS_STANDBY |
+		MNTR_DPMS_SUSPEND |
+		MNTR_DPMS_ACTIVE_OFF,
+};
+
+enum {
 	MIHD_ACTIVE = 2,
 	MIHD_WIDTH = 4,
 	MIHD_HEIGHT = 6,
@@ -30,6 +41,11 @@ struct ModeDepths {
 	int saw_resolution;
 	unsigned active_mask;
 	unsigned timing_mask;
+};
+
+struct MonitorCaps {
+	unsigned chunks;
+	uint32_t flags;
 };
 
 static uint16_t be16(const uint8_t *p)
@@ -92,10 +108,12 @@ static int mode_timings_populated(const uint8_t *data)
 }
 
 static int parse_p96_settings(const char *settings_path,
-	struct ModeDepths *full_hd, struct ModeDepths *wide_1440)
+	struct ModeDepths *full_hd, struct ModeDepths *wide_1440,
+	struct MonitorCaps *monitor)
 {
 	FILE *fp;
 	uint8_t hdr[12];
+	uint32_t form_size;
 	uint16_t current_w = 0;
 	uint16_t current_h = 0;
 
@@ -112,6 +130,7 @@ static int parse_p96_settings(const char *settings_path,
 		fclose(fp);
 		return 0;
 	}
+	form_size = be32(hdr + 4);
 
 	for (;;) {
 		uint8_t chunk_hdr[8];
@@ -140,7 +159,16 @@ static int parse_p96_settings(const char *settings_path,
 			return 0;
 		}
 
-		if (memcmp(chunk_hdr, "RSHD", 4) == 0 && size >= 8) {
+		if (memcmp(chunk_hdr, "MNTR", 4) == 0) {
+			if (size < MNTR_MIN_SIZE) {
+				fprintf(stderr, "FAIL short Picasso96 monitor chunk\n");
+				free(data);
+				fclose(fp);
+				return 0;
+			}
+			monitor->chunks++;
+			monitor->flags = be32(data + MNTR_FLAGS);
+		} else if (memcmp(chunk_hdr, "RSHD", 4) == 0 && size >= 8) {
 			current_w = be16(data + 4);
 			current_h = be16(data + 6);
 
@@ -184,6 +212,12 @@ static int parse_p96_settings(const char *settings_path,
 		}
 	}
 
+	if (ftell(fp) != (long)form_size + 8) {
+		fprintf(stderr, "FAIL FORM size does not match Picasso96 settings file\n");
+		fclose(fp);
+		return 0;
+	}
+
 	fclose(fp);
 	return 1;
 }
@@ -219,18 +253,42 @@ static int expect_timed_depths(const char *name, const struct ModeDepths *actual
 	return 1;
 }
 
+static int expect_dpms(const char *name, const struct MonitorCaps *monitor)
+{
+	if (monitor->chunks != 1) {
+		printf("FAIL %-32s monitor chunks=%u required=1\n",
+			name, monitor->chunks);
+		return 0;
+	}
+
+	if ((monitor->flags & MNTR_DPMS_ALL) != MNTR_DPMS_ALL) {
+		printf("FAIL %-32s DPMS flags=0x%x required=0x%x\n",
+			name, monitor->flags, MNTR_DPMS_ALL);
+		return 0;
+	}
+
+	printf("ok   %s DPMS flags=0x%x\n", name, monitor->flags);
+	return 1;
+}
+
 int main(void)
 {
 	struct ModeDepths full_hd = {0, 0, 0};
 	struct ModeDepths wide_1440 = {0, 0, 0};
 	struct ModeDepths z3_full_hd = {0, 0, 0};
 	struct ModeDepths z3_wide_1440 = {0, 0, 0};
+	struct MonitorCaps monitor = {0, 0};
+	struct MonitorCaps z3_monitor = {0, 0};
 	int ok = 1;
 
-	if (!parse_p96_settings(SETTINGS_PATH, &full_hd, &wide_1440))
+	if (!parse_p96_settings(SETTINGS_PATH, &full_hd, &wide_1440, &monitor))
 		return 1;
-	if (!parse_p96_settings(SETTINGS_Z3_PATH, &z3_full_hd, &z3_wide_1440))
+	if (!parse_p96_settings(SETTINGS_Z3_PATH, &z3_full_hd, &z3_wide_1440,
+		&z3_monitor))
 		return 1;
+
+	ok &= expect_dpms("Picasso96 shared monitor", &monitor);
+	ok &= expect_dpms("Picasso96 Z3 monitor", &z3_monitor);
 
 	ok &= expect_depths("Picasso96 shared 1920x1080", &full_hd,
 		DEPTH_8 | DEPTH_16);
