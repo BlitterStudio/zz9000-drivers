@@ -163,6 +163,20 @@ static BOOL zz_overlay_hooks_enabled = FALSE;
  * still inside the autoconfig window. Ownership/on-board checks must
  * bound Planes[0] against this, never against b->MemorySize. */
 static ULONG zz_card_window_size = 0;
+/* rtg.library's own AllocBitMap/FreeBitMap, captured from the
+ * BoardInfo before InitCard installs the ZZ hooks. The PIP source
+ * bitmap must come from THIS constructor when available: it returns a
+ * bitmap P96 fully manages, placed inside the board window
+ * [MemoryBase..MemorySize] that P96's bitmap bookkeeping (board
+ * lookups in the LockVLayer/PIP paths) can attribute to this board.
+ * Our surface-heap bitmaps sit above that window, which P96's
+ * internals cannot attribute to any board. This is the PicassoIV
+ * contract: its CreateFeature calls bi->AllocBitMap - the library
+ * default, since it installs no hook of its own. */
+static struct BitMap * ASM (*zz_p96_alloc_bitmap)(__REGA0(struct BoardInfo *),
+	__REGD0(ULONG), __REGD1(ULONG), __REGA1(struct TagItem *)) = NULL;
+static BOOL ASM (*zz_p96_free_bitmap)(__REGA0(struct BoardInfo *),
+	__REGA1(struct BitMap *), __REGA2(struct TagItem *)) = NULL;
 
 static inline volatile struct GFXData *zz_gfxdata(struct BoardInfo *b) {
 	return (volatile struct GFXData *)b->CardData[ZZ_CARD_DATA_GFXDATA];
@@ -884,6 +898,15 @@ int __attribute__((used)) InitCard(__REGA0(struct BoardInfo* b), __REGA1(char **
 		const char *value = tooltype_value(tool_types, "OFFSCREENBITMAPS");
 		if (value)
 			offscreen = !value_is_false(value);
+		/* capture the library defaults (NULL if rtg.library fills
+		 * them only after InitCard) before installing our hooks;
+		 * ZZ_CreateFeature prefers the saved constructor */
+		zz_p96_alloc_bitmap = b->AllocBitMap;
+		zz_p96_free_bitmap = b->FreeBitMap;
+#ifdef DEBUG
+		KPrintF("ZZ9000: InitCard P96 AllocBitMap=%08lx FreeBitMap=%08lx\n",
+			(ULONG)zz_p96_alloc_bitmap, (ULONG)zz_p96_free_bitmap);
+#endif
 		if (offscreen && fwrev >= OFFSCREEN_BITMAPS_MIN_FWREV &&
 				(b->CardFlags & CARDFLAG_ZORRO_3)) {
 			b->AllocBitMap = (void *)ZZ_AllocBitMap;
@@ -2135,10 +2158,23 @@ int ZZ_WriteYUVRect(__REGA0(struct BoardInfo *b), __REGA1(APTR src), __REGD0(SHO
 
 static struct ZZOverlayState zz_overlay;
 static struct BitMap *zz_overlay_bitmap = NULL;
+/* which allocator made it, so the right one frees it */
+static BOOL zz_overlay_bitmap_p96 = FALSE;
 /* RastPort handed to the app for P96PIP_SourceRPort: wraps the source
  * bitmap; equivalent of InitRastPort defaults, built by hand so the
  * driver needs no graphics.library base */
 static struct RastPort zz_overlay_rport;
+
+static void zz_overlay_free_source(struct BoardInfo *b) {
+	if (!zz_overlay_bitmap)
+		return;
+	if (zz_overlay_bitmap_p96 && zz_p96_free_bitmap)
+		zz_p96_free_bitmap(b, zz_overlay_bitmap, NULL);
+	else
+		ZZ_FreeBitMap(b, zz_overlay_bitmap, NULL);
+	zz_overlay_bitmap = NULL;
+	zz_overlay_bitmap_p96 = FALSE;
+}
 
 /* Push the full overlay state (or OFF) to the firmware; returns the
  * firmware status word (0 = OK). */
@@ -2208,19 +2244,17 @@ APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1
 		return NULL;
 	}
 
-	/* Allocate the YUV source through our own AllocBitMap hook with
-	 * the PicassoIV tag set (ABMA_Displayable/Visible/Clear - the tags
-	 * WinUAE's uaegfx CreateFeature copied from the PicassoIV driver,
-	 * which calls bi->AllocBitMap exactly like this). Board-pinned by
-	 * construction, so the source always lands in card VRAM. The
-	 * p96AllocBitMap detours were dead ends: without a friend it
-	 * places non-screen bitmaps in system RAM even with
-	 * BMF_DISPLAYABLE (no YUV display mode exists), and a
-	 * LockPubScreen friend deadlocks inside CreateFeature (P96 calls
-	 * us holding locks the pubscreen path contends on). The bare
-	 * bitmap is fine: rtg.library wraps feature bitmaps itself, the
-	 * same way every off-screen bitmap from this hook becomes
-	 * P96-managed. */
+	/* Allocate the YUV source with the PicassoIV tag set
+	 * (ABMA_Displayable/Visible/Clear - the tags WinUAE's uaegfx
+	 * CreateFeature copied from the PicassoIV driver, which calls
+	 * bi->AllocBitMap exactly like this). PREFER the saved rtg.library
+	 * constructor: it returns a bitmap P96 fully manages, inside the
+	 * board window its bookkeeping can attribute to this board. A
+	 * bench with the source in our surface heap (outside every board
+	 * window) froze the machine at the activating SetFeatureAttrs -
+	 * the moment RiVA's first LockVLayer runs over P96's bitmap
+	 * bookkeeping. Fall back to our own hook (board-pinned surface
+	 * heap) when the library default was not captured. */
 	{
 		struct TagItem alloc_tags[5];
 		alloc_tags[0].ti_Tag = ABMA_RGBFormat;
@@ -2234,8 +2268,20 @@ APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1
 		alloc_tags[4].ti_Tag = TAG_DONE;
 		alloc_tags[4].ti_Data = 0;
 
-		zz_overlay_bitmap = ZZ_AllocBitMap(b, zz_overlay.src_w,
-			zz_overlay.src_h, alloc_tags);
+		zz_overlay_bitmap_p96 = FALSE;
+		if (zz_p96_alloc_bitmap) {
+			zz_overlay_bitmap = zz_p96_alloc_bitmap(b,
+				zz_overlay.src_w, zz_overlay.src_h, alloc_tags);
+			if (zz_overlay_bitmap) {
+				zz_overlay_bitmap_p96 = TRUE;
+			} else {
+				KPrintF("ZZ9000: CreateFeature P96 AllocBitMap "
+					"declined, using ZZ hook\n");
+			}
+		}
+		if (!zz_overlay_bitmap)
+			zz_overlay_bitmap = ZZ_AllocBitMap(b, zz_overlay.src_w,
+				zz_overlay.src_h, alloc_tags);
 	}
 	if (!zz_overlay_bitmap) {
 		KPrintF("ZZ9000: CreateFeature AllocBitMap FAILED\n");
@@ -2253,8 +2299,7 @@ APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1
 	    (uint32_t)zz_card_window_size) {
 		KPrintF("ZZ9000: CreateFeature source NOT on board (%08lx)\n",
 			(ULONG)zz_overlay_bitmap->Planes[0]);
-		ZZ_FreeBitMap(b, zz_overlay_bitmap, NULL);
-		zz_overlay_bitmap = NULL;
+		zz_overlay_free_source(b);
 		return NULL;
 	}
 
@@ -2281,8 +2326,7 @@ APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1
 			KPrintF("ZZ9000: CreateFeature fw SET status %ld\n",
 				(LONG)fw_status);
 			zz_overlay.magic = 0;
-			ZZ_FreeBitMap(b, zz_overlay_bitmap, NULL);
-			zz_overlay_bitmap = NULL;
+			zz_overlay_free_source(b);
 			return NULL;
 		}
 	}
@@ -2402,8 +2446,7 @@ BOOL ZZ_DeleteFeature(__REGA0(struct BoardInfo *b), __REGA1(APTR fd), __REGD0(UL
 
 	zz_overlay_push(b, 1);
 	zz_overlay.magic = 0;
-	ZZ_FreeBitMap(b, zz_overlay_bitmap, NULL);
-	zz_overlay_bitmap = NULL;
+	zz_overlay_free_source(b);
 
 	return TRUE;
 }
