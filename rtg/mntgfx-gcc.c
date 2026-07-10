@@ -1184,6 +1184,15 @@ uint16_t pitch_to_shift(uint16_t p) {
 UWORD CalculateBytesPerRow(__REGA0(struct BoardInfo *b), __REGA1(struct ModeInfo *mode_info), __REGD0(UWORD width), __REGD1(UWORD height), __REGD7(RGBFTYPE format)) {
 	if (!b)
 		return 0;
+	/* packed YUV 4:2:2 PIP sources are 2 bytes/pixel, and the pitch
+	 * MUST be exactly width*2: P96 sizes the managed source bitmap
+	 * through this hook (returning 0 made it fall back to 4
+	 * bytes/pixel), and RiVA hardcodes its write modulo as width*2
+	 * because cgxvideo has no modulo attribute (RendererCGXInit.i,
+	 * "modulo.... (cgx sux!)") - any padding breaks every VLayer
+	 * writer with that assumption */
+	if (zz_overlay_hooks_enabled && zz_overlay_variant(format) >= 0)
+		return (UWORD)zz_offscreen_bytes_per_row(format, width);
 	if (!supported_rgb_format(format))
 		return 0;
 
@@ -1191,7 +1200,10 @@ UWORD CalculateBytesPerRow(__REGA0(struct BoardInfo *b), __REGA1(struct ModeInfo
 }
 
 APTR CalculateMemory(__REGA0(struct BoardInfo *b), __REGA1(APTR addr), __REGD0(struct RenderInfo *r), __REGD7(RGBFTYPE format)) {
-	if (!b || !supported_rgb_format(format))
+	if (!b)
+		return NULL;
+	if (!supported_rgb_format(format) &&
+			!(zz_overlay_hooks_enabled && zz_overlay_variant(format) >= 0))
 		return NULL;
 
 	return addr;
