@@ -56,9 +56,11 @@ static inline uint32_t zz_offscreen_pad_pitch(uint32_t bytesperrow)
 #define ZZ_GBMA_HEIGHT        0x80000008u
 #define ZZ_GBMA_DEPTH         0x80000009u
 
-/* Bytes per pixel for the RGBFB formats the card advertises
- * (ZZ_SUPPORTED_RGB_FORMATS); 0 for planar and everything else, which
- * makes AllocBitMap refuse and P96 fall back to system RAM. */
+/* Bytes per pixel for the RGBFB formats AllocBitMap accepts: the
+ * chunky formats the card advertises (ZZ_SUPPORTED_RGB_FORMATS) plus
+ * the packed 4:2:2 YUV formats used as video-overlay (PIP) sources.
+ * 0 for planar and everything else, which makes AllocBitMap refuse
+ * and P96 fall back to system RAM. */
 static inline uint32_t zz_rgbformat_bytes_per_pixel(uint32_t rgbformat)
 {
 	switch (rgbformat) {
@@ -66,9 +68,21 @@ static inline uint32_t zz_rgbformat_bytes_per_pixel(uint32_t rgbformat)
 		case 9:  return 4; /* RGBFB_B8G8R8A8 */
 		case 10: return 2; /* RGBFB_R5G6B5 */
 		case 11: return 2; /* RGBFB_R5G5B5 */
+		case 14: return 2; /* RGBFB_YUV422CGX (YUY2) */
+		case 17: return 2; /* RGBFB_YUV422 */
+		case 18: return 2; /* RGBFB_YUV422PC (UYVY) */
 	}
 
 	return 0;
+}
+
+/* Bytes per row for the offscreen/overlay allocation path only: the
+ * P96-facing CalculateBytesPerRow stays YUV-blind (it sizes display
+ * modes). Identical to width * bytes-per-pixel for every format. */
+static inline uint32_t zz_offscreen_bytes_per_row(uint32_t rgbformat,
+	uint32_t width)
+{
+	return width * zz_rgbformat_bytes_per_pixel(rgbformat);
 }
 
 /* Format color depth, the P96 ModeInfo convention: RGB555 is a
@@ -81,6 +95,9 @@ static inline uint32_t zz_rgbformat_depth(uint32_t rgbformat)
 		case 9:  return 32;
 		case 10: return 16;
 		case 11: return 15;
+		case 14: /* the packed YUV formats occupy 16 bits per pixel */
+		case 17:
+		case 18: return 16;
 	}
 
 	return 0;

@@ -67,6 +67,19 @@ jobs:
           name: ZZ9000.card
           path: rtg/ZZ9000.card
           if-no-files-found: error
+      - name: Build ZZ9000.card (debug/probe, KPrintF via Sashimi)
+        run: |
+          docker run --rm -v "$PWD":/src -w /src/rtg "$AMIGA_IMAGE" \
+            m68k-amigaos-gcc mntgfx-gcc.c -DDEBUG -m68020 -mtune=68020-60 -O2 \
+              -I../include \
+              -o ZZ9000-debug.card -noixemul -Wall -Wextra \
+              -Wno-unused-parameter -fomit-frame-pointer \
+              -nostartfiles -ldebug -lamiga
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ZZ9000-debug.card
+          path: rtg/ZZ9000-debug.card
+          if-no-files-found: error
 
   zztop:
     name: ZZTop

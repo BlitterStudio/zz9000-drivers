@@ -39,8 +39,24 @@ static void test_format_tables(void)
 	CHECK(zz_rgbformat_bytes_per_pixel(0) == 0);   /* RGBFB_NONE/planar */
 	CHECK(zz_rgbformat_bytes_per_pixel(2) == 0);   /* 24BPP RGB */
 	CHECK(zz_rgbformat_bytes_per_pixel(6) == 0);   /* 32BPP ARGB */
-	CHECK(zz_rgbformat_bytes_per_pixel(14) == 0);  /* YUV 4:2:2 */
 	CHECK(zz_rgbformat_bytes_per_pixel(21) == 0);
+
+	/* packed 4:2:2 YUV: allocatable as PIP overlay sources */
+	CHECK(zz_rgbformat_bytes_per_pixel(14) == 2);  /* YUV422CGX */
+	CHECK(zz_rgbformat_bytes_per_pixel(17) == 2);  /* YUV422 */
+	CHECK(zz_rgbformat_bytes_per_pixel(18) == 2);  /* YUV422PC */
+	CHECK(zz_rgbformat_bytes_per_pixel(15) == 0);  /* ACCUPAK stays out */
+	CHECK(zz_rgbformat_depth(14) == 16);
+	CHECK(zz_rgbformat_depth(17) == 16);
+	CHECK(zz_rgbformat_depth(18) == 16);
+
+	/* offscreen pitch equals width * bpp for every accepted format */
+	CHECK(zz_offscreen_bytes_per_row(1, 640) == 640);
+	CHECK(zz_offscreen_bytes_per_row(9, 640) == 2560);
+	CHECK(zz_offscreen_bytes_per_row(10, 640) == 1280);
+	CHECK(zz_offscreen_bytes_per_row(11, 640) == 1280);
+	CHECK(zz_offscreen_bytes_per_row(14, 640) == 1280);
+	CHECK(zz_offscreen_bytes_per_row(0, 640) == 0);
 	CHECK(zz_rgbformat_bytes_per_pixel(0xffffffffu) == 0);
 	CHECK(zz_rgbformat_depth(0) == 0);
 	CHECK(zz_rgbformat_depth(6) == 0);

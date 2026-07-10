@@ -36,6 +36,9 @@
 #include "zzcfg_query.h"
 #include "blitter_cache.h"
 #include "offscreen_bitmap.h"
+#include "overlay_feature.h"
+#include <clib/Picasso96_protos.h>
+#include <inline/Picasso96.h>
 
 #define STR(s) #s
 #define XSTR(s) STR(s)
@@ -120,8 +123,11 @@ char dummies[128];
 #define ZZ_CARD_DATA_DISPLAY_ENABLED 4
 #define ZZ_CARD_DATA_SECONDARY_PALETTE 5
 #define ZZ_CARD_DATA_OFFSCREEN_BITMAPS 6
+#define ZZ_CARD_DATA_VIDEO_OVERLAY 7
 /* first firmware whose surface allocator really frees (major<<8|minor) */
 #define OFFSCREEN_BITMAPS_MIN_FWREV 0x0204
+/* first firmware with OP_VIDEO_OVERLAY + the shadow-scanout compositor */
+#define VIDEO_OVERLAY_MIN_FWREV 0x0206
 #define MNT_MANUFACTURER 0x6d6e
 #define ZZ9000_PRODUCT_Z2 0x3
 #define ZZ9000_PRODUCT_Z3 0x4
@@ -151,6 +157,14 @@ char dummies[128];
 struct ExecBase *SysBase;
 static struct ConfigDev *reserved_cd = NULL;
 static struct BlitterRegisterCache blitter_register_cache;
+static BOOL zz_overlay_hooks_enabled = FALSE;
+/* Card memory addressable from MemoryBase (autoconfig window minus the
+ * 64 KB register space). b->MemorySize is SMALLER on Z3: it only caps
+ * P96's own VRAM allocator, while the firmware surface heap for
+ * off-screen bitmaps sits deliberately ABOVE it (board ~0x3310000+),
+ * still inside the autoconfig window. Ownership/on-board checks must
+ * bound Planes[0] against this, never against b->MemorySize. */
+static ULONG zz_card_window_size = 0;
 
 static inline volatile struct GFXData *zz_gfxdata(struct BoardInfo *b) {
 	return (volatile struct GFXData *)b->CardData[ZZ_CARD_DATA_GFXDATA];
@@ -652,6 +666,7 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 	b->CardData[ZZ_CARD_DATA_DISPLAY_ENABLED] = 1;
 	b->CardData[ZZ_CARD_DATA_SECONDARY_PALETTE] = 0;
 	b->CardData[ZZ_CARD_DATA_OFFSCREEN_BITMAPS] = 1;
+	b->CardData[ZZ_CARD_DATA_VIDEO_OVERLAY] = 1;
 	if ((cd = find_unconfigured_configdev(ExpansionBase, MNT_MANUFACTURER, ZZ9000_PRODUCT_Z3))) zorro_version = 3;
 	else if ((cd = find_unconfigured_configdev(ExpansionBase, MNT_MANUFACTURER, ZZ9000_PRODUCT_Z2))) zorro_version = 2;
 
@@ -659,6 +674,7 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 	if (zorro_version>=2) {
 
 		b->MemoryBase = (uint8_t*)(cd->cd_BoardAddr)+0x10000;
+		zz_card_window_size = (ULONG)cd->cd_BoardSize - 0x10000;
 		if (zorro_version == 2) {
 			// Top-of-window carve on Z2 (board offsets, 4 MB window):
 			// VRAM ends 0x3D0000, template scratch (zz_template_addr =
@@ -745,6 +761,15 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 				ZZ_CFG_KEY_OFFSCREEN_BITMAPS, &cfg_present);
 			if (cfg_present)
 				b->CardData[ZZ_CARD_DATA_OFFSCREEN_BITMAPS] = (cfg_value != 0);
+		}
+
+		if (env_flag_exists(DOSBase, "ENV:ZZ9000-NO-PIP")) {
+			b->CardData[ZZ_CARD_DATA_VIDEO_OVERLAY] = 0;
+		} else {
+			cfg_value = zzcfg_query((ULONG)b->RegisterBase,
+				ZZ_CFG_KEY_VIDEO_OVERLAY, &cfg_present);
+			if (cfg_present)
+				b->CardData[ZZ_CARD_DATA_VIDEO_OVERLAY] = (cfg_value != 0);
 		}
 
 		apply_vcap_settings(registers, (LONG)b->CardData[ZZ_CARD_DATA_SCANDBL_800X600]);
@@ -841,12 +866,13 @@ int __attribute__((used)) InitCard(__REGA0(struct BoardInfo* b), __REGA1(char **
 	//b->AllocCardMemAbs = (void *)NULL;
 	b->SetSplitPosition = (void *)SetSplitPosition;
 	//b->ReInitMemory = (void *)NULL;
-	//b->WriteYUVRect = (void *)NULL;
+	/* Stage A contract probe: logs + delegates to WriteYUVRectDefault
+	 * (pure pass-through in release builds). See ZZ_WriteYUVRect. */
+	b->WriteYUVRect = (void *)ZZ_WriteYUVRect;
 	b->GetVSyncState = (void *)GetVSyncState;
 	//b->GetVBeamPos = (void *)NULL;
 	//b->SetDPMSLevel = (void *)NULL;
 	//b->ResetChip = (void *)NULL;
-	//b->GetFeatureAttrs = (void *)NULL;
 	/* Off-screen bitmaps in card VRAM (Z3 only; ZZ_AllocBitMap refuses
 	 * on Z2). Requires firmware 2.4+: its surface allocator actually
 	 * frees, while older firmware bump-allocates with a no-op free and
@@ -873,9 +899,28 @@ int __attribute__((used)) InitCard(__REGA0(struct BoardInfo* b), __REGA1(char **
 	b->SetSpriteImage = (void *)SetSpriteImage;
 	b->SetSpriteColor = (void *)SetSpriteColor;
 
-	//b->CreateFeature = (void *)NULL;
-	//b->SetFeatureAttrs = (void *)NULL;
-	//b->DeleteFeature = (void *)NULL;
+	/* P96 video window (PIP): Features API + BIF_VIDEOWINDOW. Requires
+	 * firmware 2.6+ (OP_VIDEO_OVERLAY compositor) and the off-screen
+	 * bitmap hooks (CreateFeature allocates the YUV source through
+	 * AllocBitMap). Kill switch: ENV:ZZ9000-NO-PIP, the ZZ9000.CFG
+	 * video_overlay key (both read in FindCard), or the VIDEOPIP
+	 * tooltype, which wins over both. */
+	{
+		UWORD fwrev = ((volatile uint16_t*)b->RegisterBase)[0xC0/2];
+		BOOL pip = (BOOL)b->CardData[ZZ_CARD_DATA_VIDEO_OVERLAY];
+		const char *value = tooltype_value(tool_types, "VIDEOPIP");
+		if (value)
+			pip = !value_is_false(value);
+		if (pip && fwrev >= VIDEO_OVERLAY_MIN_FWREV &&
+				(b->CardFlags & CARDFLAG_ZORRO_3) && b->AllocBitMap) {
+			b->Flags |= BIF_VIDEOWINDOW;
+			b->GetFeatureAttrs = (void *)ZZ_GetFeatureAttrs;
+			b->CreateFeature = (void *)ZZ_CreateFeature;
+			b->SetFeatureAttrs = (void *)ZZ_SetFeatureAttrs;
+			b->DeleteFeature = (void *)ZZ_DeleteFeature;
+			zz_overlay_hooks_enabled = TRUE;
+		}
+	}
 
 	apply_card_settings(b, tool_types);
 	blitter_cache_reset(&blitter_register_cache);
@@ -1139,6 +1184,15 @@ uint16_t pitch_to_shift(uint16_t p) {
 UWORD CalculateBytesPerRow(__REGA0(struct BoardInfo *b), __REGA1(struct ModeInfo *mode_info), __REGD0(UWORD width), __REGD1(UWORD height), __REGD7(RGBFTYPE format)) {
 	if (!b)
 		return 0;
+	/* packed YUV 4:2:2 PIP sources are 2 bytes/pixel, and the pitch
+	 * MUST be exactly width*2: P96 sizes the managed source bitmap
+	 * through this hook (returning 0 made it fall back to 4
+	 * bytes/pixel), and RiVA hardcodes its write modulo as width*2
+	 * because cgxvideo has no modulo attribute (RendererCGXInit.i,
+	 * "modulo.... (cgx sux!)") - any padding breaks every VLayer
+	 * writer with that assumption */
+	if (zz_overlay_hooks_enabled && zz_overlay_variant(format) >= 0)
+		return (UWORD)zz_offscreen_bytes_per_row(format, width);
 	if (!supported_rgb_format(format))
 		return 0;
 
@@ -1146,17 +1200,27 @@ UWORD CalculateBytesPerRow(__REGA0(struct BoardInfo *b), __REGA1(struct ModeInfo
 }
 
 APTR CalculateMemory(__REGA0(struct BoardInfo *b), __REGA1(APTR addr), __REGD0(struct RenderInfo *r), __REGD7(RGBFTYPE format)) {
-	if (!b || !supported_rgb_format(format))
+	if (!b)
+		return NULL;
+	if (!supported_rgb_format(format) &&
+			!(zz_overlay_hooks_enabled && zz_overlay_variant(format) >= 0))
 		return NULL;
 
 	return addr;
 }
 
 ULONG GetCompatibleFormats(__REGA0(struct BoardInfo *b), __REGD7(RGBFTYPE format)) {
-	if (!supported_rgb_format(format))
+	ULONG mask = b ? b->RGBFormats : ZZ_SUPPORTED_RGB_FORMATS;
+
+	/* the packed YUV formats are valid PIP overlay SOURCES (never
+	 * framebuffer formats; b->RGBFormats stays untouched) */
+	if (zz_overlay_hooks_enabled)
+		mask |= ZZ_OVERLAY_SOURCE_FORMATS;
+
+	if (format >= 32 || !(mask & (1UL << format)))
 		return 0;
 
-	return b ? b->RGBFormats : ZZ_SUPPORTED_RGB_FORMATS;
+	return mask;
 }
 
 UWORD SetDisplay(__REGA0(struct BoardInfo *b), __REGD0(UWORD enabled)) {
@@ -1851,7 +1915,9 @@ static struct ZZBitMap *zz_bitmap_ours(struct BoardInfo *b, struct BitMap *bm) {
 		return NULL;
 
 	if (!zz_offscreen_is_ours(zbm->magic, (uint32_t)bm->Planes[0],
-			(uint32_t)b->MemoryBase, (uint32_t)b->MemorySize))
+			(uint32_t)b->MemoryBase,
+			zz_card_window_size ? (uint32_t)zz_card_window_size :
+			(uint32_t)b->MemorySize))
 		return NULL;
 
 	return zbm;
@@ -1914,8 +1980,11 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 	if (constant_pitch && mode_width > pitch_width)
 		pitch_width = mode_width;
 
+	/* pitch computed locally rather than via CalculateBytesPerRow: the
+	 * P96-facing callback sizes display modes and stays YUV-blind,
+	 * while this path also allocates YUV overlay source bitmaps */
 	uint16_t bytesperrow = zz_offscreen_pad_pitch_to(
-		CalculateBytesPerRow(b, NULL, pitch_width, height, rgbformat),
+		zz_offscreen_bytes_per_row(rgbformat, pitch_width),
 		pitch_align);
 	uint32_t size = (uint32_t)bytesperrow * height;
 	if (!size) return NULL;
@@ -2005,6 +2074,384 @@ ULONG ZZ_GetBitMapAttr(__REGA0(struct BoardInfo *b), __REGA1(struct BitMap *bm),
 	}
 
 	return zz_offscreen_attr(&attrs, attr);
+}
+
+/* WriteYUVRect contract probe (Stage A). P96 calls this hook from its
+ * software picture-in-picture path (p96PIP with a YUV source), but the
+ * TagItem contract - how the source stride and format arrive - is
+ * undocumented and P96's source is closed. This probe logs every
+ * argument, the full tag list and the head of the source data, then
+ * delegates to P96's own converter, so a Sashimi capture from a real
+ * PIP session defines the contract the accelerated implementation will
+ * code against. Build with -DDEBUG (and -ldebug) to enable the
+ * logging; a release build is a pure pass-through. */
+int ZZ_WriteYUVRect(__REGA0(struct BoardInfo *b), __REGA1(APTR src), __REGD0(SHORT srcx), __REGD1(SHORT srcy), __REGA2(struct RenderInfo *r), __REGD2(SHORT dstx), __REGD3(SHORT dsty), __REGD4(SHORT w), __REGD5(SHORT h), __REGA3(struct TagItem *tags)) {
+	int result;
+#ifdef DEBUG
+	static ULONG yuv_calls = 0;
+	ULONG n = yuv_calls++;
+	int do_log = (n < 8) || ((n & 0xFF) == 0);
+
+	if (do_log) {
+		KPrintF("ZZ9000: WriteYUVRect #%ld src=%lx sx=%ld sy=%ld dst=%lx bpr=%ld fmt=%ld dx=%ld dy=%ld w=%ld h=%ld tags=%lx\n",
+			n, (ULONG)src, (LONG)srcx, (LONG)srcy,
+			(ULONG)(r ? (ULONG)r->Memory : 0),
+			(LONG)(r ? r->BytesPerRow : 0),
+			(LONG)(r ? (LONG)r->RGBFormat : -1),
+			(LONG)dstx, (LONG)dsty, (LONG)w, (LONG)h, (ULONG)tags);
+
+		struct TagItem *tag = tags;
+		int guard = 32;
+		while (tag && tag->ti_Tag != TAG_DONE && guard--) {
+			switch (tag->ti_Tag) {
+				case TAG_IGNORE: break;
+				case TAG_SKIP: tag += tag->ti_Data; break;
+				case TAG_MORE: tag = (struct TagItem *)tag->ti_Data; continue;
+				default:
+					KPrintF("ZZ9000:   tag=%08lx data=%08lx\n",
+						tag->ti_Tag, tag->ti_Data);
+					break;
+			}
+			tag++;
+		}
+
+		if (src) {
+			const UBYTE *p = (const UBYTE *)src;
+			KPrintF("ZZ9000:   src[0..7]=%02lx %02lx %02lx %02lx %02lx %02lx %02lx %02lx\n",
+				(ULONG)p[0], (ULONG)p[1], (ULONG)p[2], (ULONG)p[3],
+				(ULONG)p[4], (ULONG)p[5], (ULONG)p[6], (ULONG)p[7]);
+			KPrintF("ZZ9000:   src[8..15]=%02lx %02lx %02lx %02lx %02lx %02lx %02lx %02lx\n",
+				(ULONG)p[8], (ULONG)p[9], (ULONG)p[10], (ULONG)p[11],
+				(ULONG)p[12], (ULONG)p[13], (ULONG)p[14], (ULONG)p[15]);
+		}
+	}
+#endif
+
+	if (!b->WriteYUVRectDefault)
+		return 0;
+	result = b->WriteYUVRectDefault(b, src, srcx, srcy, r, dstx, dsty, w, h, tags);
+
+#ifdef DEBUG
+	if (do_log)
+		KPrintF("ZZ9000:   WriteYUVRectDefault returned %ld\n", (LONG)result);
+#endif
+
+	return result;
+}
+
+
+/* --- P96 video window (PIP) Features API -----------------------------
+ * Contract modeled on WinUAE's uaegfx overlay (the only public
+ * reference): P96 creates the PIP as an SFT_MEMORYWINDOW feature, the
+ * driver supplies a YUV source bitmap and the firmware composites it
+ * into the display (OP_VIDEO_OVERLAY + shadow scanout). One overlay
+ * at a time.
+ *
+ * The source bitmap MUST be P96-MANAGED (from p96AllocBitMap, in
+ * rtg.library's own bookkeeping): every bench round that handed out a
+ * bare driver-cooked bitmap froze the machine at RiVA's first
+ * LockVLayer (P96's cgxvideo emulation walks its bitmap bookkeeping),
+ * while the round with a p96AllocBitMap source played video through
+ * the software path. On-board placement comes from a FRIEND bitmap
+ * with board affinity: b->VisibleBitMap, the displayed screen's
+ * bitmap, which P96 maintains in the BoardInfo - Intuition-free, so
+ * no LockPubScreen deadlock (that variant froze CreateFeature). A
+ * source P96 still places in system RAM fails the open cleanly into
+ * P96's software PIP instead of risking the frozen hardware path. */
+
+static struct ZZOverlayState zz_overlay;
+static struct BitMap *zz_overlay_bitmap = NULL;
+static struct Library *P96Base = NULL;
+/* RastPort handed to the app for P96PIP_SourceRPort (the prefill=0
+ * capture proved P96 does NOT construct the source objects itself):
+ * wraps the managed source bitmap; InitRastPort defaults built by
+ * hand so the driver needs no graphics.library base. Proven safe with
+ * a managed bitmap - RiVA played video through exactly this pair. */
+static struct RastPort zz_overlay_rport;
+static void zz_overlay_free_source(struct BoardInfo *b) {
+	(void)b;
+	if (!zz_overlay_bitmap)
+		return;
+	p96FreeBitMap(zz_overlay_bitmap);
+	zz_overlay_bitmap = NULL;
+}
+
+/* Push the full overlay state (or OFF) to the firmware; returns the
+ * firmware status word (0 = OK). */
+static ULONG zz_overlay_push(struct BoardInfo *b, int off) {
+	MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
+
+	dmy_cache
+	if (off) {
+		gfxdata->u8_user[GFXDATA_U8_OVERLAY_SUBCMD] = OVERLAY_SUBCMD_OFF;
+	} else {
+		gfxdata->u8_user[GFXDATA_U8_OVERLAY_SUBCMD] = OVERLAY_SUBCMD_SET;
+		gfxdata->u8_user[GFXDATA_U8_YUV_VARIANT] =
+			(uint8_t)zz_overlay_variant(zz_overlay.rgbformat);
+		gfxdata->offset[1] = (uint32_t)zz_overlay_bitmap->Planes[0] -
+			(uint32_t)b->MemoryBase;
+		gfxdata->pitch[1] = zz_overlay_bitmap->BytesPerRow;
+		gfxdata->x[0] = (UWORD)zz_overlay.dst_x;
+		gfxdata->y[0] = (UWORD)zz_overlay.dst_y;
+		gfxdata->x[1] = (UWORD)zz_overlay.dst_w;
+		gfxdata->y[1] = (UWORD)zz_overlay.dst_h;
+		gfxdata->x[2] = zz_overlay.src_w;
+		gfxdata->y[2] = zz_overlay.src_h;
+		gfxdata->user[0] = (UWORD)((zz_overlay.occlusion ? 1 : 0) |
+			(zz_overlay.active ? 2 : 0));
+		/* pen convention: written as the raw 68k ULONG, the firmware
+		 * reads it unswapped (see overlay_handle_op) */
+		gfxdata->u32_user[1] = zz_overlay.color_key;
+	}
+	zzwrite16(&registers->blitter_dma_op, OP_VIDEO_OVERLAY);
+
+	return gfxdata->u32_user[0];
+}
+
+APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1(struct TagItem *tags)) {
+#ifdef DEBUG
+	/* build fingerprint: identifies the exact binary in every capture
+	 * (three bench rounds in a row ran a stale card unnoticed) */
+	KPrintF("ZZ9000: CreateFeature build " __DATE__ " " __TIME__ "\n");
+#endif
+	if (!b || type != SFT_MEMORYWINDOW)
+		return NULL;
+	if (zz_overlay_bitmap)
+		return NULL; /* one overlay at a time (WinUAE parity) */
+	if (!(b->CardFlags & CARDFLAG_ZORRO_3) || !b->AllocBitMap)
+		return NULL;
+
+	memset(&zz_overlay, 0, sizeof(zz_overlay));
+
+	struct TagItem *tag = tags;
+	int guard = 64;
+	while (tag && tag->ti_Tag != TAG_DONE && guard--) {
+		switch (tag->ti_Tag) {
+			case TAG_IGNORE: break;
+			case TAG_SKIP: tag += tag->ti_Data; break;
+			case TAG_MORE: tag = (struct TagItem *)tag->ti_Data; continue;
+			default:
+#ifdef DEBUG
+				KPrintF("ZZ9000: CreateFeature tag=%08lx data=%08lx\n",
+					tag->ti_Tag, tag->ti_Data);
+#endif
+				zz_overlay_apply_tag(&zz_overlay, tag->ti_Tag, tag->ti_Data);
+				break;
+		}
+		tag++;
+	}
+
+	if (!zz_overlay_source_valid(zz_overlay.src_w, zz_overlay.src_h,
+			zz_overlay.rgbformat)) {
+		KPrintF("ZZ9000: CreateFeature REJECT src %ldx%ld fmt %ld\n",
+			(LONG)zz_overlay.src_w, (LONG)zz_overlay.src_h,
+			(LONG)zz_overlay.rgbformat);
+		return NULL;
+	}
+
+	/* P96-managed source (see the block comment above the statics):
+	 * p96AllocBitMap with b->VisibleBitMap as the friend for board
+	 * affinity. No BMF_DISPLAYABLE - a displayable YUV request has no
+	 * display mode and lands in system RAM; the friend is what pins
+	 * the board. */
+	if (!P96Base)
+		P96Base = OpenLibrary((APTR)"Picasso96API.library", 2);
+	if (!P96Base) {
+		KPrintF("ZZ9000: CreateFeature: no Picasso96API.library\n");
+		return NULL;
+	}
+#ifdef DEBUG
+	KPrintF("ZZ9000: CreateFeature friend VisibleBitMap %08lx\n",
+		(ULONG)b->VisibleBitMap);
+#endif
+	/* HALF the width: P96 sizes the managed bitmap from the friend's
+	 * 4-byte format regardless of the requested YUV format or of
+	 * CalculateBytesPerRow (bench: pitch stayed width*4 with the hook
+	 * answering width*2). RiVA hardcodes its write modulo as width*2
+	 * (cgxvideo has no modulo attribute), so the pitch must be EXACTLY
+	 * that: a half-width allocation lands the friend-derived sizing on
+	 * (width/2)*4 = width*2. The feature keeps the true source
+	 * geometry; only the managed bitmap's nominal width is halved. */
+	zz_overlay_bitmap = p96AllocBitMap((zz_overlay.src_w + 1) / 2,
+		zz_overlay.src_h, 16, BMF_CLEAR, b->VisibleBitMap,
+		(RGBFTYPE)zz_overlay.rgbformat);
+	if (!zz_overlay_bitmap) {
+		KPrintF("ZZ9000: CreateFeature p96AllocBitMap FAILED\n");
+		return NULL;
+	}
+#ifdef DEBUG
+	KPrintF("ZZ9000: CreateFeature bm fmt %ld w %ld bpr %ld bpp %ld p96 %ld onboard %ld\n",
+		p96GetBitMapAttr(zz_overlay_bitmap, P96BMA_RGBFORMAT),
+		p96GetBitMapAttr(zz_overlay_bitmap, P96BMA_WIDTH),
+		p96GetBitMapAttr(zz_overlay_bitmap, P96BMA_BYTESPERROW),
+		p96GetBitMapAttr(zz_overlay_bitmap, P96BMA_BYTESPERPIXEL),
+		p96GetBitMapAttr(zz_overlay_bitmap, P96BMA_ISP96),
+		p96GetBitMapAttr(zz_overlay_bitmap, P96BMA_ISONBOARD));
+#endif
+
+	/* the compositor reads the source from card VRAM: a source the
+	 * friend affinity failed to place on board fails the open cleanly
+	 * into P96's software PIP. The bound is the autoconfig window, NOT
+	 * b->MemorySize: the firmware surface heap sits above the P96
+	 * window (see zz_card_window_size), which a previous
+	 * MemorySize-based check here misread as a system-RAM placement. */
+	if ((uint32_t)zz_overlay_bitmap->Planes[0] < (uint32_t)b->MemoryBase ||
+	    (uint32_t)zz_overlay_bitmap->Planes[0] - (uint32_t)b->MemoryBase >=
+	    (uint32_t)zz_card_window_size) {
+		KPrintF("ZZ9000: CreateFeature source NOT on board (%08lx)\n",
+			(ULONG)zz_overlay_bitmap->Planes[0]);
+		zz_overlay_free_source(b);
+		return NULL;
+	}
+
+	/* enable the firmware master gate (the vblank ISR checks it) */
+	{
+		MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
+		zzwrite16(&registers->blitter_user1, CARD_FEATURE_VIDEO_OVERLAY);
+		zzwrite16(&registers->set_feature_status, 1);
+	}
+
+	memset(&zz_overlay_rport, 0, sizeof(zz_overlay_rport));
+	zz_overlay_rport.BitMap = zz_overlay_bitmap;
+	zz_overlay_rport.Mask = 0xFF;
+	zz_overlay_rport.FgPen = -1;
+	zz_overlay_rport.AOlPen = -1;
+	zz_overlay_rport.LinePtrn = 0xFFFF;
+	zz_overlay_rport.DrawMode = 1; /* JAM2 */
+
+	zz_overlay.magic = ZZ_OVERLAY_MAGIC;
+
+	{
+		ULONG fw_status = zz_overlay_push(b, 0);
+		if (fw_status != 0) {
+			KPrintF("ZZ9000: CreateFeature fw SET status %ld\n",
+				(LONG)fw_status);
+			zz_overlay.magic = 0;
+			zz_overlay_free_source(b);
+			return NULL;
+		}
+	}
+
+	KPrintF("ZZ9000: CreateFeature OK (%ldx%ld fmt %ld src %08lx)\n",
+		(LONG)zz_overlay.src_w, (LONG)zz_overlay.src_h,
+		(LONG)zz_overlay.rgbformat, (ULONG)zz_overlay_bitmap->Planes[0]);
+	return (APTR)&zz_overlay;
+}
+
+static int zz_overlay_cookie_ok(APTR fd) {
+	return fd == (APTR)&zz_overlay && zz_overlay.magic == ZZ_OVERLAY_MAGIC &&
+		zz_overlay_bitmap != NULL;
+}
+
+ULONG ZZ_SetFeatureAttrs(__REGA0(struct BoardInfo *b), __REGA1(APTR fd), __REGD0(ULONG type), __REGA2(struct TagItem *tags)) {
+	ULONG count = 0;
+	int dirty = 0;
+
+	if (!b || !zz_overlay_cookie_ok(fd))
+		return 0;
+
+	struct TagItem *tag = tags;
+	int guard = 64;
+	while (tag && tag->ti_Tag != TAG_DONE && guard--) {
+		switch (tag->ti_Tag) {
+			case TAG_IGNORE: break;
+			case TAG_SKIP: tag += tag->ti_Data; break;
+			case TAG_MORE: tag = (struct TagItem *)tag->ti_Data; continue;
+			default:
+#ifdef DEBUG
+				KPrintF("ZZ9000: SetFeatureAttrs tag=%08lx data=%08lx\n",
+					tag->ti_Tag, tag->ti_Data);
+#endif
+				/* source geometry/format is fixed at CreateFeature:
+				 * the backing bitmap cannot grow under a live
+				 * feature */
+				if (!zz_overlay_tag_create_only(tag->ti_Tag))
+					dirty |= zz_overlay_apply_tag(&zz_overlay,
+						tag->ti_Tag, tag->ti_Data);
+				count++;
+				break;
+		}
+		tag++;
+	}
+
+	if (dirty)
+		zz_overlay_push(b, 0);
+
+	return count;
+}
+
+ULONG ZZ_GetFeatureAttrs(__REGA0(struct BoardInfo *b), __REGA1(APTR fd), __REGD0(ULONG type), __REGA2(struct TagItem *tags)) {
+	ULONG count = 0;
+	int have = zz_overlay_cookie_ok(fd);
+
+	if (!b)
+		return 0;
+
+	struct TagItem *tag = tags;
+	int guard = 64;
+	while (tag && tag->ti_Tag != TAG_DONE && guard--) {
+		switch (tag->ti_Tag) {
+			case TAG_IGNORE: break;
+			case TAG_SKIP: tag += tag->ti_Data; break;
+			case TAG_MORE: tag = (struct TagItem *)tag->ti_Data; continue;
+			default: {
+				uint32_t out;
+				/* the app's p96PIP_GetTags source-object queries:
+				 * P96 does NOT construct these itself (a capture
+				 * showed the stores arrive zeroed), so answer with
+				 * the managed bitmap and the RastPort wrapping it -
+				 * the pair RiVA demonstrably played video through. */
+				if (have && tag->ti_Tag == ZZ_P96PIP_SOURCEBITMAP) {
+					if (tag->ti_Data)
+						*(ULONG *)tag->ti_Data = (ULONG)zz_overlay_bitmap;
+					count++;
+#ifdef DEBUG
+					KPrintF("ZZ9000: GetFeatureAttrs PIP bitmap -> %08lx\n",
+						(ULONG)zz_overlay_bitmap);
+#endif
+					break;
+				}
+				if (have && tag->ti_Tag == ZZ_P96PIP_SOURCERPORT) {
+					if (tag->ti_Data)
+						*(ULONG *)tag->ti_Data = (ULONG)&zz_overlay_rport;
+					count++;
+#ifdef DEBUG
+					KPrintF("ZZ9000: GetFeatureAttrs PIP rport -> %08lx\n",
+						(ULONG)&zz_overlay_rport);
+#endif
+					break;
+				}
+				if (zz_overlay_query_tag(&zz_overlay, have,
+						(uint32_t)zz_overlay_bitmap,
+						tag->ti_Tag, &out)) {
+					/* ti_Data is a pointer to the result slot
+					 * (WinUAE settag semantics) */
+					if (tag->ti_Data)
+						*(ULONG *)tag->ti_Data = out;
+					count++;
+				}
+#ifdef DEBUG
+				KPrintF("ZZ9000: GetFeatureAttrs tag=%08lx data=%08lx\n",
+					tag->ti_Tag, tag->ti_Data);
+#endif
+				break;
+			}
+		}
+		tag++;
+	}
+
+	return count;
+}
+
+BOOL ZZ_DeleteFeature(__REGA0(struct BoardInfo *b), __REGA1(APTR fd), __REGD0(ULONG type)) {
+	if (!b || type != SFT_MEMORYWINDOW || !zz_overlay_cookie_ok(fd))
+		return FALSE;
+
+	zz_overlay_push(b, 1);
+	zz_overlay.magic = 0;
+	zz_overlay_free_source(b);
+
+	return TRUE;
 }
 
 // This function shall blit a planar bitmap anywhere in the 68K address space into a chunky bitmap in video RAM.
