@@ -2264,13 +2264,30 @@ APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1
 	KPrintF("ZZ9000: CreateFeature friend VisibleBitMap %08lx\n",
 		(ULONG)b->VisibleBitMap);
 #endif
-	zz_overlay_bitmap = p96AllocBitMap(zz_overlay.src_w,
+	/* HALF the width: P96 sizes the managed bitmap from the friend's
+	 * 4-byte format regardless of the requested YUV format or of
+	 * CalculateBytesPerRow (bench: pitch stayed width*4 with the hook
+	 * answering width*2). RiVA hardcodes its write modulo as width*2
+	 * (cgxvideo has no modulo attribute), so the pitch must be EXACTLY
+	 * that: a half-width allocation lands the friend-derived sizing on
+	 * (width/2)*4 = width*2. The feature keeps the true source
+	 * geometry; only the managed bitmap's nominal width is halved. */
+	zz_overlay_bitmap = p96AllocBitMap((zz_overlay.src_w + 1) / 2,
 		zz_overlay.src_h, 16, BMF_CLEAR, b->VisibleBitMap,
 		(RGBFTYPE)zz_overlay.rgbformat);
 	if (!zz_overlay_bitmap) {
 		KPrintF("ZZ9000: CreateFeature p96AllocBitMap FAILED\n");
 		return NULL;
 	}
+#ifdef DEBUG
+	KPrintF("ZZ9000: CreateFeature bm fmt %ld w %ld bpr %ld bpp %ld p96 %ld onboard %ld\n",
+		p96GetBitMapAttr(zz_overlay_bitmap, P96BMA_RGBFORMAT),
+		p96GetBitMapAttr(zz_overlay_bitmap, P96BMA_WIDTH),
+		p96GetBitMapAttr(zz_overlay_bitmap, P96BMA_BYTESPERROW),
+		p96GetBitMapAttr(zz_overlay_bitmap, P96BMA_BYTESPERPIXEL),
+		p96GetBitMapAttr(zz_overlay_bitmap, P96BMA_ISP96),
+		p96GetBitMapAttr(zz_overlay_bitmap, P96BMA_ISONBOARD));
+#endif
 
 	/* the compositor reads the source from card VRAM: a source the
 	 * friend affinity failed to place on board fails the open cleanly
