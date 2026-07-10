@@ -2160,11 +2160,6 @@ static struct ZZOverlayState zz_overlay;
 static struct BitMap *zz_overlay_bitmap = NULL;
 /* which allocator made it, so the right one frees it */
 static BOOL zz_overlay_bitmap_p96 = FALSE;
-/* RastPort handed to the app for P96PIP_SourceRPort: wraps the source
- * bitmap; equivalent of InitRastPort defaults, built by hand so the
- * driver needs no graphics.library base */
-static struct RastPort zz_overlay_rport;
-
 static void zz_overlay_free_source(struct BoardInfo *b) {
 	if (!zz_overlay_bitmap)
 		return;
@@ -2310,14 +2305,6 @@ APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1
 		zzwrite16(&registers->set_feature_status, 1);
 	}
 
-	memset(&zz_overlay_rport, 0, sizeof(zz_overlay_rport));
-	zz_overlay_rport.BitMap = zz_overlay_bitmap;
-	zz_overlay_rport.Mask = 0xFF;
-	zz_overlay_rport.FgPen = -1;
-	zz_overlay_rport.AOlPen = -1;
-	zz_overlay_rport.LinePtrn = 0xFFFF;
-	zz_overlay_rport.DrawMode = 1; /* JAM2 */
-
 	zz_overlay.magic = ZZ_OVERLAY_MAGIC;
 
 	{
@@ -2395,26 +2382,24 @@ ULONG ZZ_GetFeatureAttrs(__REGA0(struct BoardInfo *b), __REGA1(APTR fd), __REGD0
 			case TAG_MORE: tag = (struct TagItem *)tag->ti_Data; continue;
 			default: {
 				uint32_t out;
-				/* the app's p96PIP_GetTags queries arrive here:
-				 * unanswered source-object queries crash the app
-				 * on an undefined pointer */
-				if (have && tag->ti_Tag == ZZ_P96PIP_SOURCEBITMAP) {
-					if (tag->ti_Data)
-						*(ULONG *)tag->ti_Data = (ULONG)zz_overlay_bitmap;
-					count++;
+				/* the app's p96PIP_GetTags source-object queries
+				 * (P96PIP_SourceBitMap/SourceRPort) arrive here too.
+				 * DO NOT answer them - uaegfx parity: WinUAE's
+				 * GetFeatureAttrs handles only FA_* tags and leaves
+				 * these stores alone, and RiVA PIP works there. P96
+				 * constructs the source RastPort/BitMap objects
+				 * itself (around FA_BitMap); a bench where we
+				 * overwrote the stores with the raw bitmap and a
+				 * hand-built RastPort froze the machine at RiVA's
+				 * first LockVLayer over those bare objects. */
+				if (tag->ti_Tag == ZZ_P96PIP_SOURCEBITMAP ||
+				    tag->ti_Tag == ZZ_P96PIP_SOURCERPORT) {
 #ifdef DEBUG
-					KPrintF("ZZ9000: GetFeatureAttrs PIP bitmap -> %08lx\n",
-						(ULONG)zz_overlay_bitmap);
-#endif
-					break;
-				}
-				if (have && tag->ti_Tag == ZZ_P96PIP_SOURCERPORT) {
-					if (tag->ti_Data)
-						*(ULONG *)tag->ti_Data = (ULONG)&zz_overlay_rport;
-					count++;
-#ifdef DEBUG
-					KPrintF("ZZ9000: GetFeatureAttrs PIP rport -> %08lx\n",
-						(ULONG)&zz_overlay_rport);
+					KPrintF("ZZ9000: GetFeatureAttrs PIP query "
+						"%08lx store %08lx prefill %08lx\n",
+						tag->ti_Tag, tag->ti_Data,
+						tag->ti_Data ?
+						*(ULONG *)tag->ti_Data : 0);
 #endif
 					break;
 				}
