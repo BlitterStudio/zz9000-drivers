@@ -56,10 +56,11 @@ cp "$pkg/Libs/mpega.library"                      "$out/Libs/"
 cp "$pkg/Classes/DataTypes/zz9k-picture.datatype" "$out/Classes/DataTypes/"
 cp -R "$pkg/Storage/DataTypes/."                  "$out/Storage/DataTypes/"
 # End-user CLI tools: runtime diagnostics plus the tools that exercise the
-# ZZ9000's accelerated features (image viewers, MP3, crypto bench, archive).
+# ZZ9000's accelerated features (image/video viewers, MP3, crypto bench,
+# archive).
 # The remaining SDK C/ tools are developer-oriented and ship with the SDK
 # package instead.
-for tool in zz9k-info zz9k-services zz9k-view zz9k-mp3 zz9k-cryptobench zz9k-archive; do
+for tool in zz9k-info zz9k-services zz9k-view zzplay zz9k-mp3 zz9k-cryptobench zz9k-archive; do
     cp "$pkg/C/$tool" "$out/C/"
 done
 
