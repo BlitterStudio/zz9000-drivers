@@ -158,6 +158,45 @@ class RepoToolingTests(unittest.TestCase):
         artifacts = [path for path in tracked if artifact_pattern.match(path)]
         self.assertEqual([], artifacts)
 
+    def test_locally_packaged_tools_are_ignored(self):
+        package_script = self.read("tools/package-local.sh")
+        tools = (
+            "ZZTop",
+            "ZZScanlines",
+            "ZZFwUpdate",
+            "ZZNetStats",
+            "ZZDiag",
+            "zz9k-info",
+            "zz9k-services",
+            "zz9k-view",
+            "zzplay",
+            "zz9k-mp3",
+            "zz9k-cryptobench",
+            "zz9k-archive",
+        )
+        placeholder = ROOT / "installer/ZZ9000Installer/Tools/.keep"
+
+        self.assertTrue(placeholder.is_file())
+        self.assertEqual(0, placeholder.stat().st_size)
+        subprocess.run(
+            ["git", "ls-files", "--error-unmatch", str(placeholder.relative_to(ROOT))],
+            cwd=ROOT,
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+        for tool in tools:
+            self.assertIn(tool, package_script)
+            subprocess.run(
+                [
+                    "git",
+                    "check-ignore",
+                    "--quiet",
+                    f"installer/ZZ9000Installer/Tools/{tool}",
+                ],
+                cwd=ROOT,
+                check=True,
+            )
+
     def test_audio_stack_uses_shared_ax_header(self):
         header = self.read("include/zz9000_ax.h")
         for token in (
