@@ -23,15 +23,25 @@ sd-boot/boot-rom/boot.bin
 ZZDiag/ZZDiag
 net/ZZ9000Net.device.68000
 net/ZZNetStats/ZZNetStats
-installer/ZZ9000Installer/Tools/ZZDiag
-installer/ZZ9000Installer/Tools/ZZNetStats
 *.datatype
 sdk/work/
 sdk/out/
 amissl/work/
 amissl/out/
+
+# generated tools staged by tools/package-local.sh
+installer/ZZ9000Installer/Tools/ZZTop
+installer/ZZ9000Installer/Tools/ZZScanlines
+installer/ZZ9000Installer/Tools/ZZFwUpdate
+installer/ZZ9000Installer/Tools/ZZNetStats
+installer/ZZ9000Installer/Tools/ZZDiag
 installer/ZZ9000Installer/Tools/zz9k-info
 installer/ZZ9000Installer/Tools/zz9k-services
+installer/ZZ9000Installer/Tools/zz9k-view
+installer/ZZ9000Installer/Tools/zzplay
+installer/ZZ9000Installer/Tools/zz9k-mp3
+installer/ZZ9000Installer/Tools/zz9k-cryptobench
+installer/ZZ9000Installer/Tools/zz9k-archive
 installer/ZZ9000Installer/Storage/
 zz9000-drivers-*/
 attic

@@ -418,9 +418,9 @@
 
          (copyfiles
             (prompt "Install the ZZ9000 SDK command-line tools into C:")
-            (help "Diagnostics: zz9k-info (board/firmware details) and zz9k-services (firmware services + capability flags; zz9k-services --check-release runs the release smoke check). Feature tools: zz9k-view (ZZ9000-accelerated JPEG/PNG image viewer), zz9k-mp3 (ARM MP3 player), zz9k-cryptobench (crypto-offload benchmark) and zz9k-archive (accelerated archive extraction). All require zz9k.library and the SDK-service firmware.")
+            (help "Diagnostics: zz9k-info (board/firmware details) and zz9k-services (firmware services + capability flags; zz9k-services --check-release runs the release smoke check). Feature tools: zz9k-view (ZZ9000-accelerated JPEG/PNG image viewer), zzplay (MPEG-1 P96 video player), zz9k-mp3 (ARM MP3 player), zz9k-cryptobench (crypto-offload benchmark) and zz9k-archive (accelerated archive extraction). All require zz9k.library and the SDK-service firmware.")
             (source "Tools")
-            (pattern "zz9k-#?")
+            (pattern "(zz9k-#?|zzplay)")
             (dest "C:")
             (confirm))
       )

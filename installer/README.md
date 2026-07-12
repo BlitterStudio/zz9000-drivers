@@ -49,7 +49,8 @@ installer/
         └──                           ← ZZTop, ZZScanlines, ZZFwUpdate,
                                         ZZNetStats, ZZDiag,
                                         zz9k-info, zz9k-services, zz9k-view,
-                                        zz9k-mp3, zz9k-cryptobench, zz9k-archive
+                                        zzplay, zz9k-mp3, zz9k-cryptobench,
+                                        zz9k-archive
                                         populated by CI
 ```
 
