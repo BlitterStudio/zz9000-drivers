@@ -130,8 +130,10 @@ supported output contains no more frames than the 960-frame source period.
 ## Overrun behavior
 
 The driver calculates the unsigned modulo-4096 distance from its last consumed
-sequence. If more than eight periods completed, older data has been overwritten;
-the driver drops it and delivers only the newest eight periods in chronological
+sequence. Although the ring contains eight periods, only seven completed
+periods are immutable because the formatter is already writing the eighth.
+If more than seven periods completed, older data has been overwritten; the
+driver drops it and delivers only the newest seven periods in chronological
 order. Recording then continues without restarting the formatter.
 
 No synthetic silence is required for dropped capture periods. A future
@@ -151,4 +153,3 @@ diagnostic counter may expose overruns, but it is not part of this protocol.
   shared audio interrupt enabled.
 - Firmware unit tests cover conversion, status packing and sequence wrap.
 - The firmware-only build, AHI Docker build and repository host checks pass.
-

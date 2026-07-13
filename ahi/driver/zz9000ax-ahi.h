@@ -6,8 +6,11 @@ struct z9ax {
   struct Interrupt irq;
   uint32_t hw_addr;
   uint32_t audio_buf_addr;
+  uint32_t record_buf_addr;
   uint32_t audio_hw_buf_addr;
+  uint32_t audio_rx_hw_buf_addr;
   uint32_t buf_offset;
+  uint16_t record_sequence;
   int8_t mainproc_signal;
   int8_t worker_signal;
   int8_t enable_signal;
@@ -17,8 +20,11 @@ struct z9ax {
   uint8_t zorro_version;
   struct AHIAudioCtrlDrv *audioctrl;
   uint16_t play_stop;
+  uint16_t record_stop;
+  struct AHIRecordMessage record_message;
   uint8_t flags;
   uint8_t irq_installed;
+  uint8_t record_capable;
 };
 
 // TW: Driver base includes hardware address and zorro version besides library base.

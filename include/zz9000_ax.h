@@ -8,15 +8,45 @@
 #ifndef ZZ9000_AX_H
 #define ZZ9000_AX_H
 
+#include <stdint.h>
+
 #include "zz9000_hw.h"
 
 #define ZZ_AX_DEVF_INT2MODE 1
 
 #define ZZ_AX_BYTES_PER_PERIOD 3840
 #define ZZ_AX_AUDIO_PERIODS    8
+#define ZZ_AX_AUDIO_RX_RESIDENT_PERIODS (ZZ_AX_AUDIO_PERIODS - 1)
 #define ZZ_AX_AUDIO_BUFSZ      (ZZ_AX_BYTES_PER_PERIOD * ZZ_AX_AUDIO_PERIODS)
 #define ZZ_AX_BOUNCE_BUFSZ     ZZ_AX_BYTES_PER_PERIOD
 #define ZZ_AX_BOUNCE_MAX_FRAMES (ZZ_AX_BOUNCE_BUFSZ / 4)
+#define ZZ_AX_RX_BUFFER_DELTA   0x8000
+
+#define ZZ_AX_AUDIO_CONFIG_PLAY   0x0001
+#define ZZ_AX_AUDIO_CONFIG_RECORD 0x0002
+#define ZZ_AX_AUDIO_CONFIG_MASK   0x0003
+
+#define ZZ_AX_AUDIO_RX_STATUS_CAPABLE       0x8000
+#define ZZ_AX_AUDIO_RX_STATUS_PERIOD_SHIFT  12
+#define ZZ_AX_AUDIO_RX_STATUS_PERIOD_MASK   0x7000
+#define ZZ_AX_AUDIO_RX_STATUS_SEQUENCE_MASK 0x0fff
+
+static inline uint8_t zz_ax_audio_rx_status_period(uint16_t status)
+{
+    return (uint8_t)((status & ZZ_AX_AUDIO_RX_STATUS_PERIOD_MASK) >>
+                     ZZ_AX_AUDIO_RX_STATUS_PERIOD_SHIFT);
+}
+
+static inline uint16_t zz_ax_audio_rx_status_sequence(uint16_t status)
+{
+    return status & ZZ_AX_AUDIO_RX_STATUS_SEQUENCE_MASK;
+}
+
+static inline uint16_t zz_ax_audio_rx_sequence_distance(uint16_t newer,
+                                                         uint16_t older)
+{
+    return (newer - older) & ZZ_AX_AUDIO_RX_STATUS_SEQUENCE_MASK;
+}
 
 #define ZZ_AX_DECODER_FIFO_SIZE (1152 * 4)
 #define ZZ_AX_DECODE_CLEAR      0

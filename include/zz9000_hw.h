@@ -77,6 +77,7 @@
 #define ZZ_REG_VOLTAGE_AUX       0xE2
 #define ZZ_REG_VOLTAGE_INT       0xE4
 #define ZZ_REG_AUDIO_CONFIG      0xF4
+#define ZZ_REG_AUDIO_RX_STATUS   0xF6
 #define ZZ_REG_DEBUG             0xFC
 
 /* Feature toggles (write ZZ_REG_USER1 = feature id, then the value here). */
