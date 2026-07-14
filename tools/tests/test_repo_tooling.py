@@ -223,8 +223,8 @@ class RepoToolingTests(unittest.TestCase):
     def test_ahi_initializes_period_size_before_enabling_interrupt(self):
         source = self.read("ahi/driver/zz9000ax-ahi.c")
         assign = source.index("AudioCtrl->ahiac_BuffSamples =")
-        enable = source.index("enable_hw_interrupt(ahi_data);")
-        self.assertLess(assign, enable)
+        start = source.index("intAHIsub_Start")
+        self.assertLess(assign, start)
 
     def test_mhi_queue_rejects_empty_buffers(self):
         source = self.read("mhi/mhizz9000.c")
@@ -268,12 +268,60 @@ class RepoToolingTests(unittest.TestCase):
 
         self.assertIn("uint32_t buf_offset;", header)
         self.assertIn("static void zero_hw_audio_ring", source)
-        self.assertIn("disable_hw_interrupt(ahi_data);", stop_body)
+        self.assertIn("ahi_data->play_stop = 1;", stop_body)
+        self.assertIn("ahi_data->record_stop = 1;", stop_body)
+        self.assertIn("update_hw_interrupts(ahi_data);", stop_body)
         self.assertIn("ahi_data->buf_offset = 0;", stop_body)
         self.assertIn("zero_hw_audio_ring(ahi_data);", stop_body)
         self.assertIn("ahi_data->buf_offset = 0;", start_body)
         self.assertIn("zero_hw_audio_ring(ahi_data);", start_body)
-        self.assertIn("enable_hw_interrupt(ahi_data);", start_body)
+        self.assertIn("ahi_data->record_sequence =", start_body)
+        self.assertIn("ahi_data->record_stop = 0;", start_body)
+        self.assertIn("update_hw_interrupts(ahi_data);", start_body)
+
+    def test_ahi_recording_protocol_and_callback_contract(self):
+        shared = self.read("include/zz9000_ax.h")
+        source = self.read("ahi/driver/zz9000ax-ahi.c")
+
+        for token in (
+            "ZZ_AX_AUDIO_CONFIG_RECORD",
+            "ZZ_AX_AUDIO_RX_STATUS_CAPABLE",
+            "ZZ_AX_AUDIO_RX_STATUS_PERIOD_MASK",
+            "ZZ_AX_AUDIO_RX_STATUS_SEQUENCE_MASK",
+            "ZZ_AX_RX_BUFFER_DELTA",
+        ):
+            self.assertIn(token, shared)
+
+        self.assertIn("ZZ_REG_AUDIO_TX_STATUS",
+                      self.read("include/zz9000_hw.h"))
+
+        self.assertIn("recording_supported", source)
+        self.assertIn("playback_period_ready", source)
+        self.assertIn("sequence == ahi_data->play_sequence", source)
+        self.assertIn("AHISF_CANRECORD", source)
+        self.assertIn("AHIDB_Record", source)
+        self.assertIn("AHIDB_FullDuplex", source)
+        self.assertIn("AHIDB_MaxRecordSamples", source)
+        self.assertIn("AHISF_RECORD", source)
+        self.assertIn("AHIST_S16S", source)
+        self.assertIn("ahiac_SamplerFunc", source)
+        self.assertIn("struct AHIRecordMessage record_message;",
+                      self.read("ahi/driver/zz9000ax-ahi.h"))
+        self.assertIn("uint16_t play_sequence;",
+                      self.read("ahi/driver/zz9000ax-ahi.h"))
+
+    def test_ahi_recording_drains_only_resident_periods(self):
+        source = self.read("ahi/driver/zz9000ax-ahi.c")
+        body = source[
+            source.index("static void process_recording"):
+            source.index("void WorkerProcess")
+        ]
+
+        self.assertIn("zz_ax_audio_rx_sequence_distance", body)
+        self.assertIn("available > ZZ_AX_AUDIO_RX_RESIDENT_PERIODS", body)
+        self.assertIn("available = ZZ_AX_AUDIO_RX_RESIDENT_PERIODS", body)
+        self.assertIn("newest_period + ZZ_AX_AUDIO_PERIODS", body)
+        self.assertIn("period * ZZ_AX_BYTES_PER_PERIOD", body)
 
 
 if __name__ == "__main__":

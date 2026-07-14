@@ -53,9 +53,9 @@
 #define XSTR(s) STR(s)
 
 #define DEVICE_NAME "zz9000ax.audio"
-#define DEVICE_DATE "(19.05.2026)"
+#define DEVICE_DATE "(13.07.2026)"
 #define DEVICE_VERSION 4
-#define DEVICE_REVISION 23
+#define DEVICE_REVISION 24
 #define DEVICE_ID_STRING "ZZ9000AX " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
 #define DEVICE_PRIORITY 0
 
@@ -116,6 +116,15 @@ static inline void write_audio_param(uint32_t base, uint16_t param, uint16_t val
   *((volatile uint16_t*)(base+ZZ_REG_AUDIO_PARAM)) = param;
   *((volatile uint16_t*)(base+ZZ_REG_AUDIO_VAL))   = val;
   *((volatile uint16_t*)(base+ZZ_REG_AUDIO_PARAM)) = 0;
+}
+
+static BOOL recording_supported(uint32_t hw_addr)
+{
+  if (!hw_addr) return FALSE;
+
+  return (read_reg(hw_addr, ZZ_REG_AUDIO_CONFIG) & 1) &&
+         (read_reg(hw_addr, ZZ_REG_AUDIO_RX_STATUS) &
+          ZZ_AX_AUDIO_RX_STATUS_CAPABLE);
 }
 
 const char device_name[] = DEVICE_NAME;
@@ -277,6 +286,82 @@ static uint32_t __attribute__((used)) SoundFunc(struct Hook *hook asm("a0"), str
   return 0;
 }
 
+static void process_recording(struct z9ax *ahi_data,
+                              struct AHIAudioCtrlDrv *AudioCtrl)
+{
+#ifdef REAL_HARDWARE
+  uint16_t status = read_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_RX_STATUS);
+  uint16_t sequence;
+  uint16_t available;
+  uint8_t newest_period;
+  uint16_t index;
+  uint32_t bytes;
+
+  if (!(status & ZZ_AX_AUDIO_RX_STATUS_CAPABLE)) return;
+
+  sequence = zz_ax_audio_rx_status_sequence(status);
+  available = zz_ax_audio_rx_sequence_distance(sequence,
+                                                ahi_data->record_sequence);
+  if (!available) return;
+  if (available > ZZ_AX_AUDIO_RX_RESIDENT_PERIODS)
+    available = ZZ_AX_AUDIO_RX_RESIDENT_PERIODS;
+
+  if (AudioCtrl->ahiac_BuffSamples > BOUNCE_MAX_FRAMES) {
+    ahi_data->record_sequence = sequence;
+    return;
+  }
+
+  newest_period = zz_ax_audio_rx_status_period(status);
+  bytes = AudioCtrl->ahiac_BuffSamples << 2;
+
+  for (index = 0; index < available; index++) {
+    uint8_t period = (uint8_t)((newest_period + ZZ_AX_AUDIO_PERIODS -
+                                available + 1U + index) %
+                               ZZ_AX_AUDIO_PERIODS);
+
+    CopyMem((void *)(ahi_data->audio_rx_hw_buf_addr +
+                     period * ZZ_AX_BYTES_PER_PERIOD),
+            (void *)ahi_data->record_buf_addr, bytes);
+
+    ahi_data->record_message.ahirm_Type = AHIST_S16S;
+    ahi_data->record_message.ahirm_Buffer =
+        (void *)ahi_data->record_buf_addr;
+    ahi_data->record_message.ahirm_Length = AudioCtrl->ahiac_BuffSamples;
+
+    if (AudioCtrl->ahiac_SamplerFunc) {
+      CallHookPkt(AudioCtrl->ahiac_SamplerFunc, AudioCtrl,
+                  &ahi_data->record_message);
+    }
+
+    if (ahi_data->record_stop) break;
+  }
+
+  ahi_data->record_sequence = sequence;
+#else
+  (void)ahi_data;
+  (void)AudioCtrl;
+#endif
+}
+
+static BOOL playback_period_ready(struct z9ax *ahi_data)
+{
+  if (ahi_data->play_stop) return FALSE;
+
+#ifdef REAL_HARDWARE
+  /* Capture-capable firmware publishes a TX sequence so a capture-only
+   * assertion of the shared audio interrupt cannot advance playback. */
+  if (ahi_data->record_capable) {
+    uint16_t sequence = read_reg(ahi_data->hw_addr,
+                                 ZZ_REG_AUDIO_TX_STATUS);
+
+    if (sequence == ahi_data->play_sequence) return FALSE;
+    ahi_data->play_sequence = sequence;
+  }
+#endif
+
+  return TRUE;
+}
+
 void WorkerProcess() {
   struct Process* proc = (struct Process *) FindTask(NULL);
   struct z9ax* ahi_data = proc->pr_Task.tc_UserData;
@@ -311,59 +396,69 @@ void WorkerProcess() {
     if (signals & SIGBREAKF_CTRL_C) break;
 
     // A pending enable_signal may have been latched by the ISR between
-    // Stop()/teardown setting play_stop and this wake-up. Drop those
-    // cycles on the floor — the hardware is already (or about to be)
-    // disabled and the AHI layer may be mid-teardown.
-    if (ahi_data->play_stop) continue;
+    // Stop()/teardown updating the direction flags and this wake-up.
+    if (ahi_data->play_stop && ahi_data->record_stop) continue;
 
-    CallHookPkt(AudioCtrl->ahiac_PlayerFunc, AudioCtrl, NULL);
+    if (playback_period_ready(ahi_data)) {
+      CallHookPkt(AudioCtrl->ahiac_PlayerFunc, AudioCtrl, NULL);
 
-    if (!(*AudioCtrl->ahiac_PreTimer)()) {
-      // Defence in depth: the mixer writes ahiac_BuffSamples*4 bytes into
-      // our bounce buffer. We set BuffSamples to MixFreq/50 in AllocAudio,
-      // which is bounded by our advertised max mix rate (48 kHz => 960
-      // frames => 3840 bytes = BOUNCE_BUFSZ). If anything ever drifts —
-      // AHI layer override, higher mix rate added to freqs[], buffer
-      // shrunk — catch it here instead of smashing memory.
-      if (AudioCtrl->ahiac_BuffSamples > BOUNCE_MAX_FRAMES) {
-        kprintf((CONST_STRPTR)"ZZ9000AX: BuffSamples %ld exceeds bounce cap %ld; skipping\n",
-                (long)AudioCtrl->ahiac_BuffSamples, (long)BOUNCE_MAX_FRAMES);
-        (*AudioCtrl->ahiac_PostTimer)();
-        continue;
-      }
+      if (!(*AudioCtrl->ahiac_PreTimer)()) {
+        // Defence in depth: the mixer writes ahiac_BuffSamples*4 bytes into
+        // our bounce buffer. We set BuffSamples to MixFreq/50 in AllocAudio,
+        // which is bounded by our advertised max mix rate (48 kHz => 960
+        // frames => 3840 bytes = BOUNCE_BUFSZ). If anything ever drifts —
+        // AHI layer override, higher mix rate added to freqs[], buffer
+        // shrunk — catch it here instead of smashing memory.
+        if (AudioCtrl->ahiac_BuffSamples > BOUNCE_MAX_FRAMES) {
+          kprintf((CONST_STRPTR)"ZZ9000AX: BuffSamples %ld exceeds bounce cap %ld; skipping\n",
+                  (long)AudioCtrl->ahiac_BuffSamples,
+                  (long)BOUNCE_MAX_FRAMES);
+          (*AudioCtrl->ahiac_PostTimer)();
+          if (!ahi_data->record_stop)
+            process_recording(ahi_data, AudioCtrl);
+          continue;
+        }
 #ifdef REAL_HARDWARE
-      CallHookPkt(AudioCtrl->ahiac_MixerFunc, AudioCtrl, (void*)ahi_data->audio_buf_addr);
+        CallHookPkt(AudioCtrl->ahiac_MixerFunc, AudioCtrl,
+                    (void*)ahi_data->audio_buf_addr);
 #else
-      CallHookPkt(AudioCtrl->ahiac_MixerFunc, AudioCtrl, glob_buf);
-      uint32_t* xbuf = (uint32_t*)glob_buf;
-      kprintf((uint8_t*)"%lx %lx %lx %lx\n", xbuf[0], xbuf[1], xbuf[2], xbuf[3]);
+        CallHookPkt(AudioCtrl->ahiac_MixerFunc, AudioCtrl, glob_buf);
+        uint32_t* xbuf = (uint32_t*)glob_buf;
+        kprintf((uint8_t*)"%lx %lx %lx %lx\n", xbuf[0], xbuf[1],
+                xbuf[2], xbuf[3]);
 #endif
-      uint32_t bytes = AudioCtrl->ahiac_BuffSamples << 2; //(AudioCtrl->ahiac_Flags & AHIACF_STEREO ? 2 : 1);
+        uint32_t bytes = AudioCtrl->ahiac_BuffSamples << 2;
 
-      int overrun = 0;
+        int overrun = 0;
 #ifdef REAL_HARDWARE
-      write_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_SCALE, AudioCtrl->ahiac_BuffSamples);
+        write_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_SCALE,
+                  AudioCtrl->ahiac_BuffSamples);
 
-      // def. the faster way
-      CopyMem((void*)ahi_data->audio_buf_addr, (void*)ahi_data->audio_hw_buf_addr + ahi_data->buf_offset, bytes);
-      // byteswap, resample and play buffer
-      write_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_SWAB, ahi_data->buf_offset>>8);
-      overrun = read_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_SWAB);
+        // def. the faster way
+        CopyMem((void*)ahi_data->audio_buf_addr,
+                (void*)(ahi_data->audio_hw_buf_addr + ahi_data->buf_offset),
+                bytes);
+        // byteswap, resample and play buffer
+        write_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_SWAB,
+                  ahi_data->buf_offset>>8);
+        overrun = read_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_SWAB);
 #endif
 
-      if (overrun == 1) {
-        //memset((void*)ahi_data->audio_buf_addr, 0, ZZ_AX_AUDIO_BUFSZ);
-        ahi_data->buf_offset = 0;
-      } else {
-        ahi_data->buf_offset += ZZ_AX_BYTES_PER_PERIOD;
-      }
+        if (overrun == 1) {
+          ahi_data->buf_offset = 0;
+        } else {
+          ahi_data->buf_offset += ZZ_AX_BYTES_PER_PERIOD;
+        }
 
-      if (ahi_data->buf_offset >= ZZ_AX_AUDIO_BUFSZ) {
-        ahi_data->buf_offset = 0;
-      }
+        if (ahi_data->buf_offset >= ZZ_AX_AUDIO_BUFSZ) {
+          ahi_data->buf_offset = 0;
+        }
 
-      (*AudioCtrl->ahiac_PostTimer)();
+        (*AudioCtrl->ahiac_PostTimer)();
+      }
     }
+
+    if (!ahi_data->record_stop) process_recording(ahi_data, AudioCtrl);
   }
 
   Forbid();
@@ -390,7 +485,7 @@ void cdev_isr(struct z9ax* data asm("a1")) {
     *(USHORT*)(data->hw_addr+ZZ_REG_CONFIG) = 8|32;
 
     if(data->disable_cnt) return;
-    if(data->play_stop) return;
+    if(data->play_stop && data->record_stop) return;
     if(data->worker_process) {
       Signal((struct Task*)data->worker_process, 1L<<data->enable_signal);
     }
@@ -430,13 +525,20 @@ static void install_irq_server_locked(struct z9ax* ahi_data) {
   ahi_data->irq_installed = 1;
 }
 
-// Flip the hardware-side audio interrupt on. Called only once the worker is
-// up and ready to handle the resulting signals.
-static void enable_hw_interrupt(struct z9ax* ahi_data) {
+static uint16_t active_hw_interrupts(const struct z9ax* ahi_data) {
+  uint16_t mask = 0;
+
+  if (!ahi_data->play_stop) mask |= ZZ_AX_AUDIO_CONFIG_PLAY;
+  if (ahi_data->record_capable && !ahi_data->record_stop)
+    mask |= ZZ_AX_AUDIO_CONFIG_RECORD;
+
+  return mask;
+}
+
+static void update_hw_interrupts(struct z9ax* ahi_data) {
 #ifdef REAL_HARDWARE
-  USHORT hw_config = read_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_CONFIG);
-  hw_config |= 1;
-  write_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_CONFIG, hw_config);
+  write_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_CONFIG,
+            active_hw_interrupts(ahi_data));
 #else
   (void)ahi_data;
 #endif
@@ -569,11 +671,21 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
     return AHISF_ERROR; // TW: Only AHISF_xxx return codes are allowed here.
   }
 
+  BOOL record_capable = recording_supported(hw_addr);
+
+  // One 20 ms period at the selected mix rate, in sample frames.
+  AudioCtrl->ahiac_BuffSamples = AudioCtrl->ahiac_MixFreq/50;
+  if (AudioCtrl->ahiac_BuffSamples > BOUNCE_MAX_FRAMES)
+    return AHISF_ERROR;
+
   struct z9ax *ahi_data = AllocVec(sizeof(struct z9ax), MEMF_PUBLIC | MEMF_FAST | MEMF_CLEAR);
   // allocate bounce buffer, as letting AHI write directly to hardware is slower than CopyMem
   void* audio_buf = AllocVec(BOUNCE_BUFSZ, MEMF_PUBLIC | MEMF_FAST | MEMF_CLEAR);
+  void* record_buf = record_capable ?
+      AllocVec(BOUNCE_BUFSZ, MEMF_PUBLIC | MEMF_FAST | MEMF_CLEAR) : NULL;
 
-  if (!ahi_data || !audio_buf) {
+  if (!ahi_data || !audio_buf || (record_capable && !record_buf)) {
+    if (record_buf) FreeVec(record_buf);
     if (audio_buf) FreeVec(audio_buf);
     if (ahi_data)  FreeVec(ahi_data);
     return AHISF_ERROR; // TW: Only AHISF_xxx return codes are allowed here.
@@ -581,8 +693,11 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
 
   // TW: Upon allocation playback is initially stopped.
   ahi_data->play_stop = 1;
+  ahi_data->record_stop = 1;
+  ahi_data->record_capable = record_capable;
   ahi_data->flags = Z9AXBase->flags;
   ahi_data->audio_buf_addr = (uint32_t)audio_buf;
+  ahi_data->record_buf_addr = (uint32_t)record_buf;
   ahi_data->hw_addr = hw_addr;
   ahi_data->audioctrl = AudioCtrl;
   ahi_data->ahi_base = AHIsubBase;
@@ -594,7 +709,9 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
   ahi_data->buf_offset = 0;
   // FIXME: see also zz_template_addr in RTG driver
   uint32_t offset_tx = Z9AXBase->hw_size - 0x20000;
+  uint32_t offset_rx = offset_tx + ZZ_AX_RX_BUFFER_DELTA;
   ahi_data->audio_hw_buf_addr = hw_addr + 0x10000 + offset_tx;
+  ahi_data->audio_rx_hw_buf_addr = hw_addr + 0x10000 + offset_rx;
 
   AudioCtrl->ahiac_DriverData = ahi_data;
 
@@ -603,12 +720,13 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
   // the two steps under one Forbid closes the TOCTOU that would otherwise
   // let AHI and MHI both "win" the claim (we saw it; we took it; nobody
   // could slip in between). The HW-side interrupt stays OFF until the
-  // worker is up — see enable_hw_interrupt() near the end.
+  // worker is up; Start() publishes the requested direction mask.
   prepare_irq_struct(ahi_data);
   Forbid();
   if (mhi_present_locked()) {
     Permit();
     kprintf((CONST_STRPTR)"Can't allocate! Hardware already used by MHI.\n");
+    if (record_buf) FreeVec(record_buf);
     FreeVec(audio_buf);
     FreeVec(ahi_data);
     AudioCtrl->ahiac_DriverData = NULL;
@@ -647,6 +765,11 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
   // set tx buffer address
   write_audio_param(hw_addr, 0, offset_tx>>16);
   write_audio_param(hw_addr, 1, offset_tx&0xffff);
+
+  if (record_capable) {
+    write_audio_param(hw_addr, ZZ_AX_AP_RX_BUF_OFFS_HI, offset_rx>>16);
+    write_audio_param(hw_addr, ZZ_AX_AP_RX_BUF_OFFS_LO, offset_rx&0xffff);
+  }
 
   // set LPF freq to half of sampling freq
   write_audio_param(hw_addr, 9, lpf_freq);
@@ -705,14 +828,12 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
     goto fail;
   }
 
-  // yields 960 samples (3840 bytes) for 48000Hz
-  AudioCtrl->ahiac_BuffSamples = AudioCtrl->ahiac_MixFreq/50;
-
   // Worker is up and the period size is initialized. Start() will reset
-  // the ring and enable hardware interrupts when AHI begins playback.
+  // the ring and enable the requested hardware directions.
 
   // none of that weird timing
-  return AHISF_KNOWSTEREO | AHISF_MIXING; // | AHISF_TIMING;
+  return AHISF_KNOWSTEREO | AHISF_MIXING |
+         (record_capable ? AHISF_CANRECORD : 0); // | AHISF_TIMING;
 
 fail:
   // Invariant at this label: the worker has NOT been fully brought up.
@@ -732,6 +853,10 @@ fail:
     FreeVec((void*)ahi_data->audio_buf_addr);
     ahi_data->audio_buf_addr = 0;
   }
+  if (ahi_data->record_buf_addr) {
+    FreeVec((void*)ahi_data->record_buf_addr);
+    ahi_data->record_buf_addr = 0;
+  }
   FreeVec(ahi_data);
   AudioCtrl->ahiac_DriverData = NULL;
   return AHISF_ERROR;
@@ -744,6 +869,7 @@ static void __attribute__((used)) intAHIsub_FreeAudio(struct AHIAudioCtrlDrv *Au
 
   // Make sure the worker's mix loop won't try to touch hardware after we tear down.
   ahi_data->play_stop = 1;
+  ahi_data->record_stop = 1;
 
   // Remove ISR first so we know nothing will signal the worker concurrently.
   destroy_interrupt(ahi_data);
@@ -766,6 +892,10 @@ static void __attribute__((used)) intAHIsub_FreeAudio(struct AHIAudioCtrlDrv *Au
     FreeVec((void*)ahi_data->audio_buf_addr);
     ahi_data->audio_buf_addr = 0;
   }
+  if (ahi_data->record_buf_addr) {
+    FreeVec((void*)ahi_data->record_buf_addr);
+    ahi_data->record_buf_addr = 0;
+  }
 
   FreeVec(AudioCtrl->ahiac_DriverData);
   AudioCtrl->ahiac_DriverData = NULL;
@@ -774,28 +904,39 @@ static void __attribute__((used)) intAHIsub_FreeAudio(struct AHIAudioCtrlDrv *Au
 // TW: Prepared Stop() and Start() to store status in a flag in z9ax.
 static void __attribute__((used)) intAHIsub_Stop(uint32_t Flags asm("d0"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
   struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
-  if (!ahi_data) return;
-  if (Flags & AHISF_PLAY) {
-    Forbid();
-    ahi_data->play_stop = 1;
-    disable_hw_interrupt(ahi_data);
-    ahi_data->buf_offset = 0;
-    Permit();
+  BOOL stop_play;
 
+  if (!ahi_data) return;
+
+  stop_play = (Flags & AHISF_PLAY) != 0;
+  if (Flags & (AHISF_PLAY | AHISF_RECORD)) {
+    Forbid();
+    if (Flags & AHISF_PLAY) {
+      ahi_data->play_stop = 1;
+      ahi_data->buf_offset = 0;
+    }
+    if (Flags & AHISF_RECORD) ahi_data->record_stop = 1;
+    update_hw_interrupts(ahi_data);
+    Permit();
+  }
+
+  if (stop_play) {
     // Clear the 30 KB Zorro-side ring outside Forbid(); AHI serializes
-    // Start/Stop calls for this driver instance, and the hardware is off.
+    // Start/Stop calls for this driver instance, and playback is off.
     zero_hw_audio_ring(ahi_data);
   }
 }
 
 static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
   struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
+  uint16_t play_sequence = 0;
   if (!ahi_data) return AHIE_OK;
+
   if (flags & AHISF_PLAY) {
     Forbid();
-    disable_hw_interrupt(ahi_data);
     ahi_data->buf_offset = 0;
     ahi_data->play_stop = 1;
+    update_hw_interrupts(ahi_data);
     Permit();
 
     // Clear the 30 KB Zorro-side ring outside Forbid(); play_stop remains
@@ -803,12 +944,32 @@ static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), 
     // silence pass.
     zero_hw_audio_ring(ahi_data);
 
+    if (ahi_data->record_capable)
+      play_sequence = read_reg(ahi_data->hw_addr,
+                               ZZ_REG_AUDIO_TX_STATUS);
+
     Forbid();
     ahi_data->buf_offset = 0;
+    ahi_data->play_sequence = play_sequence;
     ahi_data->play_stop = 0;
-    enable_hw_interrupt(ahi_data);
+    update_hw_interrupts(ahi_data);
     Permit();
   }
+
+  if ((flags & AHISF_RECORD) && ahi_data->record_capable) {
+    uint16_t status;
+
+    write_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_SCALE,
+              AudioCtrl->ahiac_BuffSamples);
+    status = read_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_RX_STATUS);
+
+    Forbid();
+    ahi_data->record_sequence = zz_ax_audio_rx_status_sequence(status);
+    ahi_data->record_stop = 0;
+    update_hw_interrupts(ahi_data);
+    Permit();
+  }
+
   // Returns AHIE_OK if successful.
   return AHIE_OK;
 }
@@ -816,6 +977,7 @@ static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), 
 static int32_t __attribute__((used)) intAHIsub_GetAttr(uint32_t attr_ asm("d0"), int32_t arg_ asm("d1"), int32_t def_ asm("d2"), struct TagItem *tagList asm("a1"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
   uint32_t attr = attr_;
   int32_t arg = arg_, def = def_;
+  BOOL can_record = Z9AXBase && recording_supported(Z9AXBase->hw_addr);
 
   // TW: We can't rely on AudioCtrl->ahiac_DriverData being valid during this function call!
 
@@ -844,9 +1006,9 @@ static int32_t __attribute__((used)) intAHIsub_GetAttr(uint32_t attr_ asm("d0"),
     case AHIDB_Annotation:
       return (int32_t) "https://mntre.com/zz9000";
     case AHIDB_Record:
-      return FALSE;
+      return can_record;
     case AHIDB_FullDuplex:
-      return TRUE;
+      return can_record;
     case AHIDB_Realtime:
       return TRUE;
     case AHIDB_MaxChannels:
@@ -857,23 +1019,23 @@ static int32_t __attribute__((used)) intAHIsub_GetAttr(uint32_t attr_ asm("d0"),
       // MixFreq/50 = 960 frames, which is exactly BOUNCE_MAX_FRAMES.
       return BOUNCE_MAX_FRAMES;
     case AHIDB_MaxRecordSamples:
-      return 0;
+      return can_record ? BOUNCE_MAX_FRAMES : 0;
     case AHIDB_MinMonitorVolume:
       return 0x0;
     case AHIDB_MaxMonitorVolume:
       return 0x0;
     case AHIDB_MinInputGain:
-      return 0x0;
+      return can_record ? 0x10000 : 0;
     case AHIDB_MaxInputGain:
-      return 0x0;
+      return can_record ? 0x10000 : 0;
     case AHIDB_MinOutputVolume:
       return 0x0;
     case AHIDB_MaxOutputVolume:
       return 0x0;
     case AHIDB_Inputs:
-      return 0;
+      return can_record ? 1 : 0;
     case AHIDB_Input:
-      return 0;
+      return (can_record && arg == 0) ? (int32_t) "RCA In" : def;
     case AHIDB_Outputs:
       return 1;
     case AHIDB_Output:
@@ -885,7 +1047,30 @@ static int32_t __attribute__((used)) intAHIsub_GetAttr(uint32_t attr_ asm("d0"),
 
 static int32_t __attribute__((used)) intAHIsub_HardwareControl(uint32_t attr asm("d0"), uint32_t arg asm("d1"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2"))
 {
-  return 0;
+  struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
+
+  if (!ahi_data) return FALSE;
+
+  switch (attr) {
+    case AHIC_MixFreq_Query:
+      return AudioCtrl->ahiac_MixFreq;
+    case AHIC_InputGain:
+      ahi_data->input_gain = 0x10000;
+      return ahi_data->record_capable ? TRUE : FALSE;
+    case AHIC_InputGain_Query:
+      return ahi_data->record_capable ? 0x10000 : 0;
+    case AHIC_Input:
+      if (!ahi_data->record_capable || arg != 0) return FALSE;
+      return TRUE;
+    case AHIC_Input_Query:
+      return 0;
+    case AHIC_MonitorVolume_Query:
+    case AHIC_OutputVolume_Query:
+    case AHIC_Output_Query:
+      return 0;
+    default:
+      return FALSE;
+  }
 }
 
 static uint32_t __attribute__((used)) intAHIsub_SetEffect(uint8_t *effect asm("a0"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2"))

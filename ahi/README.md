@@ -21,6 +21,24 @@ shared interrupt list and refuses to allocate.
 
 Build and install locations are covered in the [main README](../README.md).
 
+## AHI recording
+
+`zz9000ax.audio` supports stereo recording from the ZZ9000AX RCA inputs when
+used with firmware that exposes the AX receive-status register. Firmware
+without that capability continues to provide playback, but the driver does
+not advertise AHI recording.
+
+Set both ZZ9000AX auxiliary jumpers to **IN** before recording. AHI sees one
+fixed-gain input named `RCA In`; samples are delivered as signed 16-bit stereo
+at the selected AudioMode rate. Playback and recording may be started and
+stopped independently, including full-duplex operation.
+
+The FPGA already contains the I2S receive formatter, DMA ring and receive
+interrupt, so this feature does not require a new bitstream. It does require
+matching ARM firmware and `zz9000ax.audio` builds. The register and buffer
+contract is documented in
+[`docs/ahi-recording-spec.md`](../docs/ahi-recording-spec.md).
+
 ## Hardware revisions
 
 Early ZZ9000AX **Revision 1** boards carry an opamp at **U4** on the
@@ -134,6 +152,8 @@ so remove the ENV variable when migrating.
 | "Can't allocate! Hardware already used by MHI/AHI."   | The other driver owns the card. Close whatever MHI/AHI app is running first. |
 | Audio device fails to open on specific accelerators   | INT6 conflict. `setenv ZZ9K_INT2 1` to move both drivers to INT2. |
 | Short random burst before playback on first app open  | Fixed in recent commits (driver now silences the DAC at allocate time). Update to the latest `zz9000ax.audio`. |
+| AHI application has no recording option               | Update both the ARM firmware and `zz9000ax.audio`; old firmware is intentionally detected as playback-only. |
+| Recording is silent                                   | Move both ZZ9000AX auxiliary jumpers to `IN` and select `RCA In`. |
 
 ## References
 
