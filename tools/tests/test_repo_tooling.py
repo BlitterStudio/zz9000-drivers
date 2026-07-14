@@ -292,7 +292,12 @@ class RepoToolingTests(unittest.TestCase):
         ):
             self.assertIn(token, shared)
 
+        self.assertIn("ZZ_REG_AUDIO_TX_STATUS",
+                      self.read("include/zz9000_hw.h"))
+
         self.assertIn("recording_supported", source)
+        self.assertIn("playback_period_ready", source)
+        self.assertIn("sequence == ahi_data->play_sequence", source)
         self.assertIn("AHISF_CANRECORD", source)
         self.assertIn("AHIDB_Record", source)
         self.assertIn("AHIDB_FullDuplex", source)
@@ -301,6 +306,8 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("AHIST_S16S", source)
         self.assertIn("ahiac_SamplerFunc", source)
         self.assertIn("struct AHIRecordMessage record_message;",
+                      self.read("ahi/driver/zz9000ax-ahi.h"))
+        self.assertIn("uint16_t play_sequence;",
                       self.read("ahi/driver/zz9000ax-ahi.h"))
 
     def test_ahi_recording_drains_only_resident_periods(self):

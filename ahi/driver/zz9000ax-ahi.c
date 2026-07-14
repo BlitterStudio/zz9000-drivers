@@ -343,6 +343,25 @@ static void process_recording(struct z9ax *ahi_data,
 #endif
 }
 
+static BOOL playback_period_ready(struct z9ax *ahi_data)
+{
+  if (ahi_data->play_stop) return FALSE;
+
+#ifdef REAL_HARDWARE
+  /* Capture-capable firmware publishes a TX sequence so a capture-only
+   * assertion of the shared audio interrupt cannot advance playback. */
+  if (ahi_data->record_capable) {
+    uint16_t sequence = read_reg(ahi_data->hw_addr,
+                                 ZZ_REG_AUDIO_TX_STATUS);
+
+    if (sequence == ahi_data->play_sequence) return FALSE;
+    ahi_data->play_sequence = sequence;
+  }
+#endif
+
+  return TRUE;
+}
+
 void WorkerProcess() {
   struct Process* proc = (struct Process *) FindTask(NULL);
   struct z9ax* ahi_data = proc->pr_Task.tc_UserData;
@@ -380,7 +399,7 @@ void WorkerProcess() {
     // Stop()/teardown updating the direction flags and this wake-up.
     if (ahi_data->play_stop && ahi_data->record_stop) continue;
 
-    if (!ahi_data->play_stop) {
+    if (playback_period_ready(ahi_data)) {
       CallHookPkt(AudioCtrl->ahiac_PlayerFunc, AudioCtrl, NULL);
 
       if (!(*AudioCtrl->ahiac_PreTimer)()) {
@@ -910,6 +929,7 @@ static void __attribute__((used)) intAHIsub_Stop(uint32_t Flags asm("d0"), struc
 
 static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
   struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
+  uint16_t play_sequence = 0;
   if (!ahi_data) return AHIE_OK;
 
   if (flags & AHISF_PLAY) {
@@ -924,8 +944,13 @@ static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), 
     // silence pass.
     zero_hw_audio_ring(ahi_data);
 
+    if (ahi_data->record_capable)
+      play_sequence = read_reg(ahi_data->hw_addr,
+                               ZZ_REG_AUDIO_TX_STATUS);
+
     Forbid();
     ahi_data->buf_offset = 0;
+    ahi_data->play_sequence = play_sequence;
     ahi_data->play_stop = 0;
     update_hw_interrupts(ahi_data);
     Permit();

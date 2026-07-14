@@ -75,15 +75,24 @@ Firmware without recording support returns zero for the previously unused
 register. The driver must require both `CAPABLE` and the existing codec-present
 bit before advertising recording.
 
+### `ZZ_REG_AUDIO_TX_STATUS` (`0xF8`)
+
+This read-only 16-bit sequence increments modulo 65536 after every transmit
+period completes and before firmware asserts the shared audio interrupt. The
+driver samples it when playback starts and advances the player/mixer only when
+the value changes. The register is required whenever `CAPABLE` is set in the
+receive status; legacy firmware remains on the original playback-only path.
+
 The sequence value is the publication boundary. Firmware shall not change it
 until the period named by `PERIOD` has been converted, flushed from the ARM
 caches and made visible to the Zorro/ACP side. The Amiga shall sample the
 status at recording start and consume only later sequence values.
 
 The shared audio interrupt bit remains `AMIGA_INTERRUPT_AUDIO`. Playback and
-recording events may coalesce; after acknowledging it, the driver checks both
-directions and uses the receive sequence to discover every still-resident
-capture period.
+recording events may coalesce; after acknowledging it, the driver uses the
+transmit sequence to decide whether to service playback and the receive
+sequence to discover every still-resident capture period. A capture-only
+wake-up must never advance the playback buffer.
 
 ## Capture ring and sample format
 

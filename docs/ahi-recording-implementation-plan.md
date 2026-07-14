@@ -60,8 +60,9 @@ Work:
    ring after the transmit ring in reserved card memory.
 4. Track play and record states independently and write their combined mask to
    the firmware.
-5. Let the interrupt worker continue playback service and also drain all new
-   receive sequences in chronological order.
+5. Gate playback service on the firmware transmit sequence, then drain all new
+   receive sequences in chronological order. This keeps capture-only shared
+   interrupts from advancing the playback ring.
 6. Copy each published period into the persistent buffer and invoke
    `ahiac_SamplerFunc` with an `AHIRecordMessage` describing `AHIST_S16S`.
 7. Advertise one fixed-gain `RCA In`, recording limits and full-duplex support;
@@ -90,4 +91,3 @@ Validation:
 Bench validation remains required before either pull request is marked ready,
 because the local build can validate the protocol and binary but cannot inject
 physical RCA input into the card.
-

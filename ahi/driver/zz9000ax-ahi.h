@@ -10,6 +10,7 @@ struct z9ax {
   uint32_t audio_hw_buf_addr;
   uint32_t audio_rx_hw_buf_addr;
   uint32_t buf_offset;
+  uint16_t play_sequence;
   uint16_t record_sequence;
   int8_t mainproc_signal;
   int8_t worker_signal;
