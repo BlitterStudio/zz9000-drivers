@@ -62,6 +62,28 @@ static void test_source_validation(void)
 	CHECK(!zz_overlay_source_valid(0, 0, 14));
 }
 
+static void test_friend_allocation_width(void)
+{
+	/* The nominal width compensates for P96 deriving storage from the
+	 * visible friend rather than the requested YUV source format. */
+	CHECK(zz_overlay_line_bytes(640) == 1280);
+	CHECK(zz_overlay_line_bytes(318) == 636);
+	CHECK(zz_overlay_line_bytes(319) == 640); /* complete YUV pair */
+	CHECK(zz_overlay_line_bytes(0) == 0);
+	CHECK(zz_overlay_line_bytes(4097) == 0);
+	CHECK(zz_overlay_friend_width(640, 4) == 320); /* 32-bit screen */
+	CHECK(zz_overlay_friend_width(640, 2) == 640); /* 15/16-bit screen */
+	CHECK(zz_overlay_friend_width(640, 1) == 1280); /* 8-bit screen */
+	CHECK(zz_overlay_friend_width(318, 4) == 159);
+	CHECK(zz_overlay_friend_width(319, 4) == 160); /* round up */
+	CHECK(zz_overlay_friend_width(318, 2) == 318);
+	CHECK(zz_overlay_friend_width(319, 2) == 320); /* complete YUV pair */
+	CHECK(zz_overlay_friend_width(0, 4) == 0);
+	CHECK(zz_overlay_friend_width(4097, 4) == 0);
+	CHECK(zz_overlay_friend_width(640, 0) == 0);
+	CHECK(zz_overlay_friend_width(640, 5) == 0);
+}
+
 static void test_apply_tags(void)
 {
 	struct ZZOverlayState st;
@@ -172,6 +194,7 @@ int main(void)
 	test_variant_map();
 	test_format_mask();
 	test_source_validation();
+	test_friend_allocation_width();
 	test_apply_tags();
 	test_create_only_tags();
 	test_query_tags();

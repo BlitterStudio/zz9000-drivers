@@ -2243,6 +2243,8 @@ static ULONG zz_overlay_push(struct BoardInfo *b, int off) {
 }
 
 APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1(struct TagItem *tags)) {
+	ULONG friend_bpp;
+	ULONG alloc_width;
 #ifdef DEBUG
 	/* build fingerprint: identifies the exact binary in every capture
 	 * (three bench rounds in a row ran a stale card unnoticed) */
@@ -2298,19 +2300,38 @@ APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1
 	KPrintF("ZZ9000: CreateFeature friend VisibleBitMap %08lx\n",
 		(ULONG)b->VisibleBitMap);
 #endif
-	/* HALF the width: P96 sizes the managed bitmap from the friend's
-	 * 4-byte format regardless of the requested YUV format or of
-	 * CalculateBytesPerRow (bench: pitch stayed width*4 with the hook
-	 * answering width*2). RiVA hardcodes its write modulo as width*2
-	 * (cgxvideo has no modulo attribute), so the pitch must be EXACTLY
-	 * that: a half-width allocation lands the friend-derived sizing on
-	 * (width/2)*4 = width*2. The feature keeps the true source
-	 * geometry; only the managed bitmap's nominal width is halved. */
-	zz_overlay_bitmap = p96AllocBitMap((zz_overlay.src_w + 1) / 2,
+	/* P96 sizes the managed bitmap from the friend's storage format despite
+	 * the requested YUV format. Choose a nominal width that yields the
+	 * required packed-YUV row span in every screen depth: half width for a
+	 * 32-bit friend, full width for 15/16-bit, double width for 8-bit. The
+	 * feature retains the true source geometry. */
+	/* BoardInfo.RGBFormat is authoritative for the active display friend.
+	 * Do not query the foreign VisibleBitMap through our GetBitMapAttr
+	 * fallback: its conservative planar answer would mis-size the source. */
+	friend_bpp = zz_rgbformat_bytes_per_pixel(b->RGBFormat);
+	alloc_width = zz_overlay_friend_width(zz_overlay.src_w, friend_bpp);
+	if (alloc_width == 0) {
+		KPrintF("ZZ9000: CreateFeature unsupported display fmt %ld\n",
+			(LONG)b->RGBFormat);
+		return NULL;
+	}
+#ifdef DEBUG
+	KPrintF("ZZ9000: CreateFeature friend bpp %ld alloc width %ld\n",
+		(LONG)friend_bpp, (LONG)alloc_width);
+#endif
+	zz_overlay_bitmap = p96AllocBitMap(alloc_width,
 		zz_overlay.src_h, 16, BMF_CLEAR, b->VisibleBitMap,
 		(RGBFTYPE)zz_overlay.rgbformat);
 	if (!zz_overlay_bitmap) {
 		KPrintF("ZZ9000: CreateFeature p96AllocBitMap FAILED\n");
+		return NULL;
+	}
+	if ((uint32_t)zz_overlay_bitmap->BytesPerRow <
+	    zz_overlay_line_bytes(zz_overlay.src_w)) {
+		KPrintF("ZZ9000: CreateFeature source pitch too small (%ld < %ld)\n",
+			(LONG)zz_overlay_bitmap->BytesPerRow,
+			(LONG)zz_overlay_line_bytes(zz_overlay.src_w));
+		zz_overlay_free_source(b);
 		return NULL;
 	}
 #ifdef DEBUG

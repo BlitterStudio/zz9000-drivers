@@ -47,6 +47,7 @@
 /* WinUAE's answers for the size limits P96 queries. */
 #define ZZ_OVERLAY_MIN_DIM 16u
 #define ZZ_OVERLAY_MAX_DIM 4096u
+#define ZZ_OVERLAY_PAIR_BYTES 4u
 
 /* Overlay source formats accepted initially: the unambiguous packed
  * 4:2:2 orderings (RGBFB bit space, as in supported_rgb_format). The
@@ -76,6 +77,33 @@ static inline int zz_overlay_source_valid(uint32_t src_w, uint32_t src_h,
 	return src_w >= ZZ_OVERLAY_MIN_DIM && src_h >= ZZ_OVERLAY_MIN_DIM &&
 		src_w <= ZZ_OVERLAY_MAX_DIM && src_h <= ZZ_OVERLAY_MAX_DIM &&
 		zz_overlay_variant(rgbformat) >= 0;
+}
+
+static inline uint32_t zz_overlay_line_bytes(uint32_t src_w)
+{
+	if (src_w == 0 || src_w > ZZ_OVERLAY_MAX_DIM)
+		return 0;
+	return ((src_w + 1) / 2) * ZZ_OVERLAY_PAIR_BYTES;
+}
+
+/* P96 allocates a friend bitmap using the FRIEND's storage format even when
+ * the requested RGB format is packed YUV. Select the nominal allocation width
+ * that therefore yields at least ceil(src_w / 2) * 4 bytes per row. A 32-bit
+ * Workbench needs the historical half-width allocation; 15/16-bit needs full
+ * width for even sources; 8-bit needs double width. */
+static inline uint32_t zz_overlay_friend_width(uint32_t src_w,
+	uint32_t friend_bytes_per_pixel)
+{
+	uint32_t bytes;
+
+	if (friend_bytes_per_pixel == 0 ||
+	    friend_bytes_per_pixel > 4)
+		return 0;
+	bytes = zz_overlay_line_bytes(src_w);
+	if (bytes == 0)
+		return 0;
+	return (bytes + friend_bytes_per_pixel - 1) /
+		friend_bytes_per_pixel;
 }
 
 /* The driver-side feature record; a pointer to it is the opaque cookie
