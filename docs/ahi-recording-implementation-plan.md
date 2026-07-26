@@ -1,5 +1,9 @@
 # ZZ9000AX AHI recording implementation plan
 
+> **IMPLEMENTED; RETAINED AS HISTORY.** Firmware #57 and drivers #48 merged on
+> 2026-07-14. The remaining work is the physical hardware acceptance below,
+> not implementation or PR creation.
+
 This plan implements the behavior in
 [`ahi-recording-spec.md`](ahi-recording-spec.md) as two coordinated changes:
 one pull request in `zz9000-firmware` and one in `zz9000-drivers`.
@@ -78,16 +82,15 @@ Validation:
 - `make ahi` using `sacredbanana/amiga-compiler:m68k-amigaos`
 - inspect the final diff for generated binaries
 
-## 3. Hardware acceptance and pull requests
+## 3. Hardware acceptance (pending; delivery PRs complete)
 
 1. Install the firmware build on a test card without replacing its bitstream.
 2. Install the matching `zz9000ax.audio` and AudioMode file.
 3. Set both ZZ9000AX auxiliary jumpers to `IN` and verify AHI Record at 48 kHz,
    44.1 kHz and one lower rate.
 4. Exercise playback-only, record-only and full-duplex start/stop sequences.
-5. Open linked draft pull requests. The driver PR closes issue 47; the firmware
-   PR references the issue and the driver PR.
+5. Record the matched firmware and driver artifact hashes with the result.
 
-Bench validation remains required before either pull request is marked ready,
-because the local build can validate the protocol and binary but cannot inject
-physical RCA input into the card.
+Bench validation remains required before release qualification because the
+local build can validate the protocol and binary but cannot inject physical
+RCA input into the card.

@@ -1,5 +1,10 @@
 # ZZ9000AX AHI recording specification
 
+**Implementation status (2026-07-26):** firmware #57 and drivers #48 are
+merged. Host tests and both repository CI pipelines passed. The physical RCA
+input, all-rate, and full-duplex acceptance criteria at the end of this
+document are still pending on real ZZ9000AX hardware.
+
 ## Scope
 
 Add stereo recording from the ZZ9000AX RCA inputs to `zz9000ax.audio`
