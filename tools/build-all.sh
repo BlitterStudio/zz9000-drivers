@@ -23,6 +23,7 @@ cd "$repo_root"
 # the host, then re-execs itself through amiga-docker.sh.
 mhi/build.sh
 "$amiga_docker" ahi/driver ./build.sh
+"$amiga_docker" ahi/duplextest ./build.sh
 "$amiga_docker" ZZDiag ./build.sh
 
 # Runs its own Docker invocation (the SDK's build scripts wrap the same

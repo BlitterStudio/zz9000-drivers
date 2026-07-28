@@ -32,6 +32,7 @@ struct z9ax {
 // Driver base
 struct z9ax_base {
   struct Library ahisub_base;
+  struct z9ax *owner;
   uint32_t hw_addr;
   uint32_t hw_size;
   uint8_t zorro_version;

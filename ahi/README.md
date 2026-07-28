@@ -33,11 +33,16 @@ fixed-gain input named `RCA In`; samples are delivered as signed 16-bit stereo
 at the selected AudioMode rate. Playback and recording may be started and
 stopped independently, including full-duplex operation.
 
-The FPGA already contains the I2S receive formatter, DMA ring and receive
-interrupt, so this feature does not require a new bitstream. It does require
-matching ARM firmware and `zz9000ax.audio` builds. The register and buffer
-contract is documented in
+The production capture path uses a TDM8 slot-0/1 bridge ahead of the existing
+I2S receive formatter, DMA ring, and receive interrupt. It therefore requires
+a matching FPGA bitstream, ARM firmware, and `zz9000ax.audio` build. The
+register and buffer contract is documented in
 [`docs/ahi-recording-spec.md`](../docs/ahi-recording-spec.md).
+
+For the production full-duplex hardware gate, build and run
+[`ZZAXDuplexTest`](duplextest/README.md). It starts playback and recording
+together on one low-level AHI control, unlike two-client tests involving AHI
+Record and a separate player.
 
 ## Hardware revisions
 

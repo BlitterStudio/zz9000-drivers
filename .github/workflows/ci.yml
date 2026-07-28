@@ -245,13 +245,16 @@ jobs:
           if-no-files-found: error
 
   ahi:
-    name: ahi — zz9000ax.audio
+    name: ahi — zz9000ax.audio + duplex test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - name: Build zz9000ax.audio + ZZ9000AX
         run: |
           docker run --rm -v "$PWD":/src -w /src/ahi/driver "$AMIGA_IMAGE" ./build.sh
+      - name: Build ZZAXDuplexTest
+        run: |
+          docker run --rm -v "$PWD":/src -w /src/ahi/duplextest "$AMIGA_IMAGE" ./build.sh
       - uses: actions/upload-artifact@v7
         with:
           name: zz9000ax.audio
@@ -261,6 +264,11 @@ jobs:
         with:
           name: ZZ9000AX
           path: ahi/driver/ZZ9000AX
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ZZAXDuplexTest
+          path: ahi/duplextest/ZZAXDuplexTest
           if-no-files-found: error
 
   sdk:
