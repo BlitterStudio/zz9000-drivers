@@ -1,8 +1,10 @@
 # ZZ9000AX AHI recording implementation plan
 
-> **IMPLEMENTED; RETAINED AS HISTORY.** Firmware #57 and drivers #48 merged on
-> 2026-07-14. The remaining work is the physical hardware acceptance below,
-> not implementation or PR creation.
+> **IMPLEMENTED AND HARDWARE ACCEPTED; RETAINED AS HISTORY.** Firmware #57 and
+> drivers #48 merged on 2026-07-14. The production `0xa204` candidate completed
+> the R17 hardware gate on 2026-07-29. Remaining final installer/release smoke
+> is distinct from recording implementation and production hardware
+> acceptance.
 
 This plan implements the behavior in
 [`ahi-recording-spec.md`](ahi-recording-spec.md) as two coordinated changes:
@@ -82,15 +84,18 @@ Validation:
 - `make ahi` using `sacredbanana/amiga-compiler:m68k-amigaos`
 - inspect the final diff for generated binaries
 
-## 3. Hardware acceptance (pending; delivery PRs complete)
+## 3. Hardware acceptance (completed 2026-07-29)
 
-1. Install the firmware build on a test card without replacing its bitstream.
-2. Install the matching `zz9000ax.audio` and AudioMode file.
-3. Set both ZZ9000AX auxiliary jumpers to `IN` and verify AHI Record at 48 kHz,
-   44.1 kHz and one lower rate.
-4. Exercise playback-only, record-only and full-duplex start/stop sequences.
-5. Record the matched firmware and driver artifact hashes with the result.
+The R17 run exercised the matched `0xa204` firmware, default-Z3 bitstream,
+`zz9000ax.audio`, and AudioMode on a real Amiga/ZZ9000AX system. Playback-only,
+second-owner rejection, left-only, right-only, stereo and silence capture,
+true one-control full duplex, all six advertised recording rates, repeated
+teardown/reopen, and final playback passed without noise or unexpected
+behavior. The duplex report recorded exactly 240,000 frames with
+`result=PASS`, no callback type errors, no overflow frames, and no generated
+playback-tone leakage into the RCA recording.
 
-Bench validation remains required before release qualification because the
-local build can validate the protocol and binary but cannot inject physical
-RCA input into the card.
+This completed the production recording hardware gate. The exact R17 evidence
+remains the accepted hardware baseline; the later post-review firmware build
+and final installed matched release still require combined release smoke.
+Rebuilt non-default bitstream variants remain hardware-untested.

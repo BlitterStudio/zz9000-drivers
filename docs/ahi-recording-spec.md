@@ -1,11 +1,17 @@
 # ZZ9000AX AHI recording specification
 
-**Implementation status (2026-07-28):** firmware #57 and drivers #48 are
-merged. TDM8 slots 0/1 passed the separate hardware transport
-characterization, and the production candidate is in progress. Host tests and
-both repository CI pipelines passed. The complete production RCA-input,
-all-rate, and one-control full-duplex acceptance criteria at the end of this
-document are still pending on real ZZ9000AX hardware.
+**Implementation and hardware status (2026-07-29):** the production `0xa204`
+candidate completed the R17 gate on a real Amiga and default-Z3 ZZ9000AX
+system. RCA channel isolation, stereo and silence capture, all six advertised
+recording rates, repeated teardown/reopen, final playback, and true
+one-`AHIAudioCtrl` full duplex all passed without noise or unexpected
+behavior. Host tests and both repository CI pipelines also passed.
+
+That acceptance applies to the exact R17 firmware, default-Z3 bitstream and
+driver artifacts. The later post-review firmware build and final matched
+installer/release payload still require their combined release smoke; rebuilt
+non-default bitstream variants are build/report validated but not
+hardware-tested.
 
 ## Scope
 

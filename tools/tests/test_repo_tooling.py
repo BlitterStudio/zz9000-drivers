@@ -1,10 +1,30 @@
 import pathlib
-import re
 import subprocess
 import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+GENERATED_ARTIFACT_PATHS = (
+    "rtg/ZZ9000.card",
+    "usb-poseidon/zzusbhw.device",
+    "net/ZZ9000Net.device",
+    "net/ZZ9000Net.device.68000",
+    "ahi/driver/zz9000ax.audio",
+    "ahi/driver/ZZ9000AX",
+    "mhi/mhizz9000.library",
+    "mhi/mhizz9000.library.debug",
+    "mhi/mhizz9000.library.trace",
+    "mhi/mhizz9000.library.trace.debug",
+    "sd-boot/zzsd.device",
+    "sd-boot/boot-rom/boot.bin",
+    "ZZFwUpdate/ZZFwUpdate",
+    "ZZScanlines/ZZScanlines",
+    "ZZTop/ZZTop",
+    "net/ZZNetStats/ZZNetStats",
+    "ZZDiag/ZZDiag",
+    "ahi/axtest/axtest",
+    "ahi/duplextest/ZZAXDuplexTest",
+)
 
 
 class RepoToolingTests(unittest.TestCase):
@@ -143,25 +163,26 @@ class RepoToolingTests(unittest.TestCase):
         tracked = subprocess.check_output(
             ["git", "ls-files"], cwd=ROOT, text=True
         ).splitlines()
-        artifact_pattern = re.compile(
-            r"^(rtg/ZZ9000\.card|"
-            r"usb-poseidon/zzusbhw\.device|"
-            r"net/ZZ9000Net\.device(\.68000)?|"
-            r"ahi/driver/zz9000ax\.audio|"
-            r"ZZFwUpdate/ZZFwUpdate|"
-            r"ZZScanlines/ZZScanlines|"
-            r"ZZTop/ZZTop|"
-            r"ZZDiag/ZZDiag|"
-            r"ahi/driver/ZZ9000AX|"
-            r"ahi/axtest/axtest|"
-            r"ahi/duplextest/ZZAXDuplexTest|"
-            r"mhi/mhizz9000\.library(\.trace)?(\.debug)?|"
-            r"net/ZZNetStats/ZZNetStats|"
-            r"sd-boot/zzsd\.device|"
-            r"sd-boot/boot-rom/boot\.bin)$"
-        )
-        artifacts = [path for path in tracked if artifact_pattern.match(path)]
+        artifacts = [
+            path for path in tracked if path in GENERATED_ARTIFACT_PATHS
+        ]
         self.assertEqual([], artifacts)
+
+    def test_release_gate_matches_generated_artifact_policy(self):
+        script = self.read("tools/check-release.sh")
+        tracked_block = script.split("tracked_artifacts=$(", 1)[1]
+        path_block = tracked_block.split("for path in \\", 1)[1]
+        path_block = path_block.split("\n    do", 1)[0]
+        release_paths = set()
+
+        for line in path_block.splitlines():
+            path = line.strip()
+            if path.endswith("\\"):
+                path = path[:-1].rstrip()
+            if path:
+                release_paths.add(path)
+
+        self.assertEqual(set(GENERATED_ARTIFACT_PATHS), release_paths)
 
     def test_locally_packaged_tools_are_ignored(self):
         package_script = self.read("tools/package-local.sh")
