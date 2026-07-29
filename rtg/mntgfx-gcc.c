@@ -2326,9 +2326,9 @@ APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1
 		KPrintF("ZZ9000: CreateFeature p96AllocBitMap FAILED\n");
 		return NULL;
 	}
-	if ((uint32_t)zz_overlay_bitmap->BytesPerRow <
-	    zz_overlay_line_bytes(zz_overlay.src_w)) {
-		KPrintF("ZZ9000: CreateFeature source pitch too small (%ld < %ld)\n",
+	if (!zz_overlay_pitch_valid(zz_overlay.src_w,
+			(uint32_t)zz_overlay_bitmap->BytesPerRow)) {
+		KPrintF("ZZ9000: CreateFeature source pitch mismatch (%ld != %ld)\n",
 			(LONG)zz_overlay_bitmap->BytesPerRow,
 			(LONG)zz_overlay_line_bytes(zz_overlay.src_w));
 		zz_overlay_free_source(b);

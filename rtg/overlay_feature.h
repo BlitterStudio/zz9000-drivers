@@ -86,6 +86,17 @@ static inline uint32_t zz_overlay_line_bytes(uint32_t src_w)
 	return ((src_w + 1) / 2) * ZZ_OVERLAY_PAIR_BYTES;
 }
 
+/* RiVA/cgxvideo writes tightly packed source rows without a configurable
+ * modulo, while the firmware advances by the bitmap pitch. The two strides
+ * must therefore match exactly; accepting a padded bitmap would skew every
+ * row after the first. */
+static inline int zz_overlay_pitch_valid(uint32_t src_w, uint32_t pitch)
+{
+	uint32_t expected = zz_overlay_line_bytes(src_w);
+
+	return expected != 0 && pitch == expected;
+}
+
 /* P96 allocates a friend bitmap using the FRIEND's storage format even when
  * the requested RGB format is packed YUV. Select the nominal allocation width
  * that therefore yields at least ceil(src_w / 2) * 4 bytes per row. A 32-bit

@@ -84,6 +84,18 @@ static void test_friend_allocation_width(void)
 	CHECK(zz_overlay_friend_width(640, 5) == 0);
 }
 
+static void test_source_pitch(void)
+{
+	/* The producer and firmware must advance by the same exact stride. */
+	CHECK(zz_overlay_pitch_valid(640, 1280));
+	CHECK(!zz_overlay_pitch_valid(640, 1276)); /* undersized */
+	CHECK(!zz_overlay_pitch_valid(640, 1284)); /* padded */
+	CHECK(zz_overlay_pitch_valid(319, 640));   /* complete YUV pair */
+	CHECK(!zz_overlay_pitch_valid(319, 644));  /* padded odd width */
+	CHECK(!zz_overlay_pitch_valid(0, 0));
+	CHECK(!zz_overlay_pitch_valid(4097, 8194));
+}
+
 static void test_apply_tags(void)
 {
 	struct ZZOverlayState st;
@@ -195,6 +207,7 @@ int main(void)
 	test_format_mask();
 	test_source_validation();
 	test_friend_allocation_width();
+	test_source_pitch();
 	test_apply_tags();
 	test_create_only_tags();
 	test_query_tags();

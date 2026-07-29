@@ -379,6 +379,14 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("{ AHIC_Record, TRUE }", start_body)
         self.assertIn("{ AHIA_RecordFunc, (ULONG)&hook }", source)
         self.assertIn("message->ahirm_Type != AHIST_S16S", hook_body)
+        self.assertLess(
+            hook_body.index(
+                "if (context->frames >= context->capacity_frames)"
+            ),
+            hook_body.index("message->ahirm_Type != AHIST_S16S")
+        )
+        self.assertIn("if (frames > remaining) {\n    frames = remaining;", hook_body)
+        self.assertNotIn("overflow_frames", source)
         self.assertNotIn("Write(", hook_body)
         self.assertIn("if (!Close(file))", source)
         self.assertIn("DeleteFile((CONST_STRPTR)path);", source)

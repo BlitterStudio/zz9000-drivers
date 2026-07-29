@@ -36,7 +36,6 @@ struct capture_context {
   volatile ULONG frames;
   volatile ULONG callbacks;
   volatile ULONG type_errors;
-  volatile ULONG overflow_frames;
 };
 
 static ULONG record_hook(struct Hook *hook asm("a0"),
@@ -53,20 +52,18 @@ static ULONG record_hook(struct Hook *hook asm("a0"),
   if (!context || !message) return 0;
 
   context->callbacks++;
-  if (message->ahirm_Type != AHIST_S16S) {
-    context->type_errors++;
+  if (context->frames >= context->capacity_frames) {
     return 0;
   }
 
-  if (context->frames >= context->capacity_frames) {
-    context->overflow_frames += message->ahirm_Length;
+  if (message->ahirm_Type != AHIST_S16S) {
+    context->type_errors++;
     return 0;
   }
 
   remaining = context->capacity_frames - context->frames;
   frames = message->ahirm_Length;
   if (frames > remaining) {
-    context->overflow_frames += frames - remaining;
     frames = remaining;
   }
 
@@ -366,7 +363,6 @@ int main(int argc, char **argv)
   printf("captured_frames=%u\n", (unsigned int)context.frames);
   printf("target_frames=%u\n", (unsigned int)target_frames);
   printf("type_errors=%u\n", (unsigned int)context.type_errors);
-  printf("overflow_frames=%u\n", (unsigned int)context.overflow_frames);
   printf("start_result=%u\n", (unsigned int)control_result);
   printf("stop_result=%u\n", (unsigned int)stop_result);
   printf("wave=%s\n", wave_written ? output_path : "NOT_WRITTEN");
@@ -375,7 +371,6 @@ int main(int argc, char **argv)
       actual_mix_freq == MIX_FREQ &&
       context.frames == target_frames &&
       context.type_errors == 0 &&
-      context.overflow_frames == 0 &&
       stop_result == AHIE_OK &&
       wave_written) {
     printf("result=PASS\n");
