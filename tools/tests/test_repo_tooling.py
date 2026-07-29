@@ -1,10 +1,30 @@
 import pathlib
-import re
 import subprocess
 import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+GENERATED_ARTIFACT_PATHS = (
+    "rtg/ZZ9000.card",
+    "usb-poseidon/zzusbhw.device",
+    "net/ZZ9000Net.device",
+    "net/ZZ9000Net.device.68000",
+    "ahi/driver/zz9000ax.audio",
+    "ahi/driver/ZZ9000AX",
+    "mhi/mhizz9000.library",
+    "mhi/mhizz9000.library.debug",
+    "mhi/mhizz9000.library.trace",
+    "mhi/mhizz9000.library.trace.debug",
+    "sd-boot/zzsd.device",
+    "sd-boot/boot-rom/boot.bin",
+    "ZZFwUpdate/ZZFwUpdate",
+    "ZZScanlines/ZZScanlines",
+    "ZZTop/ZZTop",
+    "net/ZZNetStats/ZZNetStats",
+    "ZZDiag/ZZDiag",
+    "ahi/axtest/axtest",
+    "ahi/duplextest/ZZAXDuplexTest",
+)
 
 
 class RepoToolingTests(unittest.TestCase):
@@ -72,6 +92,9 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("mhi/build.sh", ci)
         self.assertNotIn('-w /src/mhi "$AMIGA_IMAGE" ./build.sh', ci)
         self.assertIn('-w /src/ahi/driver "$AMIGA_IMAGE" ./build.sh', ci)
+        self.assertIn(
+            '-w /src/ahi/duplextest "$AMIGA_IMAGE" ./build.sh', ci
+        )
 
     def test_release_script_mentions_every_packaged_artifact(self):
         script = self.read("tools/check-release.sh")
@@ -105,6 +128,7 @@ class RepoToolingTests(unittest.TestCase):
             "usb-poseidon/build.sh",
             "sd-boot/build.sh",
             "ZZDiag/build.sh",
+            "ahi/duplextest/build.sh",
             "sdk/build.sh",
             "amissl/build.sh",
         )
@@ -139,24 +163,26 @@ class RepoToolingTests(unittest.TestCase):
         tracked = subprocess.check_output(
             ["git", "ls-files"], cwd=ROOT, text=True
         ).splitlines()
-        artifact_pattern = re.compile(
-            r"^(rtg/ZZ9000\.card|"
-            r"usb-poseidon/zzusbhw\.device|"
-            r"net/ZZ9000Net\.device(\.68000)?|"
-            r"ahi/driver/zz9000ax\.audio|"
-            r"ZZFwUpdate/ZZFwUpdate|"
-            r"ZZScanlines/ZZScanlines|"
-            r"ZZTop/ZZTop|"
-            r"ZZDiag/ZZDiag|"
-            r"ahi/driver/ZZ9000AX|"
-            r"ahi/axtest/axtest|"
-            r"mhi/mhizz9000\.library(\.trace)?(\.debug)?|"
-            r"net/ZZNetStats/ZZNetStats|"
-            r"sd-boot/zzsd\.device|"
-            r"sd-boot/boot-rom/boot\.bin)$"
-        )
-        artifacts = [path for path in tracked if artifact_pattern.match(path)]
+        artifacts = [
+            path for path in tracked if path in GENERATED_ARTIFACT_PATHS
+        ]
         self.assertEqual([], artifacts)
+
+    def test_release_gate_matches_generated_artifact_policy(self):
+        script = self.read("tools/check-release.sh")
+        tracked_block = script.split("tracked_artifacts=$(", 1)[1]
+        path_block = tracked_block.split("for path in \\", 1)[1]
+        path_block = path_block.split("\n    do", 1)[0]
+        release_paths = set()
+
+        for line in path_block.splitlines():
+            path = line.strip()
+            if path.endswith("\\"):
+                path = path[:-1].rstrip()
+            if path:
+                release_paths.add(path)
+
+        self.assertEqual(set(GENERATED_ARTIFACT_PATHS), release_paths)
 
     def test_locally_packaged_tools_are_ignored(self):
         package_script = self.read("tools/package-local.sh")
@@ -281,6 +307,7 @@ class RepoToolingTests(unittest.TestCase):
 
     def test_ahi_recording_protocol_and_callback_contract(self):
         shared = self.read("include/zz9000_ax.h")
+        header = self.read("ahi/driver/zz9000ax-ahi.h")
         source = self.read("ahi/driver/zz9000ax-ahi.c")
 
         for token in (
@@ -306,9 +333,84 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("AHIST_S16S", source)
         self.assertIn("ahiac_SamplerFunc", source)
         self.assertIn("struct AHIRecordMessage record_message;",
-                      self.read("ahi/driver/zz9000ax-ahi.h"))
+                      header)
         self.assertIn("uint16_t play_sequence;",
-                      self.read("ahi/driver/zz9000ax-ahi.h"))
+                      header)
+
+    def test_ahi_exclusive_owner_is_claimed_before_hardware_mutation(self):
+        header = self.read("ahi/driver/zz9000ax-ahi.h")
+        source = self.read("ahi/driver/zz9000ax-ahi.c")
+        alloc_body = source[
+            source.index("intAHIsub_AllocAudio"):
+            source.index("static void __attribute__((used)) intAHIsub_FreeAudio")
+        ]
+        free_body = source[
+            source.index("intAHIsub_FreeAudio"):
+            source.index("intAHIsub_Stop")
+        ]
+        destroy_body = source[
+            source.index("void destroy_interrupt"):
+            source.index("static BOOL mhi_present_locked")
+        ]
+
+        self.assertIn("struct z9ax *owner;", header)
+        self.assertIn("Z9AXBase->owner = NULL;", source)
+        self.assertIn("Z9AXBase->owner || mhi_present_locked()", alloc_body)
+        self.assertIn("Z9AXBase->owner = ahi_data;", alloc_body)
+        forbid = alloc_body.index("Forbid();")
+        owner_check = alloc_body.index(
+            "Z9AXBase->owner || mhi_present_locked()"
+        )
+        owner_publish = alloc_body.index("Z9AXBase->owner = ahi_data;")
+        irq_install = alloc_body.index(
+            "install_irq_server_locked(ahi_data);", owner_publish
+        )
+        success_permit = alloc_body.index("Permit();", irq_install)
+        self.assertLess(forbid, owner_check)
+        self.assertLess(owner_check, owner_publish)
+        self.assertLess(owner_publish, irq_install)
+        self.assertLess(irq_install, success_permit)
+        self.assertLess(
+            owner_check,
+            alloc_body.index("write_reg(hw_addr, ZZ_REG_AUDIO_CONFIG, 0)")
+        )
+        self.assertLess(
+            owner_check,
+            alloc_body.index("zero_hw_audio_ring(ahi_data)")
+        )
+        self.assertIn("Z9AXBase->owner = NULL;", destroy_body)
+        self.assertLess(
+            free_body.index("disable_hw_interrupt(ahi_data);"),
+            free_body.index("destroy_interrupt(ahi_data);")
+        )
+
+    def test_ahi_duplex_tool_uses_one_control_for_both_directions(self):
+        source = self.read("ahi/duplextest/ZZAXDuplexTest.c")
+        start_body = source[
+            source.index("struct TagItem start_tags[]"):
+            source.index("control_result = AHI_ControlAudioA")
+        ]
+        hook_body = source[
+            source.index("static ULONG record_hook"):
+            source.index("static void put_le16")
+        ]
+
+        self.assertEqual(1, source.count("audioctrl = AHI_AllocAudioA("))
+        self.assertIn("{ AHIC_Play, TRUE }", start_body)
+        self.assertIn("{ AHIC_Record, TRUE }", start_body)
+        self.assertIn("{ AHIA_RecordFunc, (ULONG)&hook }", source)
+        self.assertIn("message->ahirm_Type != AHIST_S16S", hook_body)
+        self.assertLess(
+            hook_body.index(
+                "if (context->frames >= context->capacity_frames)"
+            ),
+            hook_body.index("message->ahirm_Type != AHIST_S16S")
+        )
+        self.assertIn("if (frames > remaining) {\n    frames = remaining;", hook_body)
+        self.assertNotIn("overflow_frames", source)
+        self.assertNotIn("Write(", hook_body)
+        self.assertIn("if (!Close(file))", source)
+        self.assertIn("DeleteFile((CONST_STRPTR)path);", source)
 
     def test_ahi_recording_drains_only_resident_periods(self):
         source = self.read("ahi/driver/zz9000ax-ahi.c")

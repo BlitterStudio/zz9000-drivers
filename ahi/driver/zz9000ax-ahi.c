@@ -162,6 +162,7 @@ static uint32_t __attribute__((used)) init(BPTR seg_list asm("a0"), struct Libra
   Z9AXBase->hw_addr = 0;
   Z9AXBase->hw_size = 0;
   Z9AXBase->flags = 0;
+  Z9AXBase->owner = NULL;
 
   // Same reasoning for the library-base globals: the fail: label below
   // calls CloseLibrary on any non-NULL base, so leftover pointers from a
@@ -509,8 +510,8 @@ static void prepare_irq_struct(struct z9ax* ahi_data) {
 }
 
 // Install the interrupt server. MUST be called with Forbid() already active
-// so the caller can combine the MHI-presence check and the AddIntServer into
-// one atomic "claim" step (otherwise MHI could slip in between).
+// so the caller can combine both ownership checks, the AHI owner publication,
+// and AddIntServer into one atomic claim step.
 static void install_irq_server_locked(struct z9ax* ahi_data) {
   struct Interrupt* irq = &ahi_data->irq;
 #ifdef REAL_HARDWARE
@@ -570,20 +571,22 @@ void destroy_interrupt(struct z9ax* ahi_data) {
 #ifdef REAL_HARDWARE
   // disable HW interrupt
   disable_hw_interrupt(ahi_data);
+#endif
 
   Forbid();
+#ifdef REAL_HARDWARE
   if (ahi_data->flags & ZZ_AX_DEVF_INT2MODE) {
     RemIntServer(INTB_PORTS, irq);
   } else {
     RemIntServer(INTB_EXTER, irq);
   }
-  Permit();
 #else
-  Forbid();
   RemIntServer(INTB_VERTB, irq);
-  Permit();
 #endif
   ahi_data->irq_installed = 0;
+  if (Z9AXBase && Z9AXBase->owner == ahi_data)
+    Z9AXBase->owner = NULL;
+  Permit();
 }
 
 // Check whether MHI has its ISR installed on our shared interrupt level.
@@ -715,23 +718,25 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
 
   AudioCtrl->ahiac_DriverData = ahi_data;
 
-  // Atomic ownership claim: check MHI isn't already on the shared interrupt
-  // level AND install our own ISR node in a single Forbid() window. Doing
-  // the two steps under one Forbid closes the TOCTOU that would otherwise
-  // let AHI and MHI both "win" the claim (we saw it; we took it; nobody
-  // could slip in between). The HW-side interrupt stays OFF until the
-  // worker is up; Start() publishes the requested direction mask.
+  // Atomic ownership claim: reject both another low-level AHI allocation and
+  // MHI before touching shared hardware. AHI's low-level API is exclusive;
+  // full duplex is AHISF_PLAY|AHISF_RECORD on this one AudioCtrl, not two
+  // independent AudioCtrls. Publishing owner and installing the ISR under the
+  // same Forbid closes both AHI/AHI and AHI/MHI TOCTOU windows. The HW-side
+  // interrupt stays OFF until the worker is up; Start() publishes the
+  // requested direction mask.
   prepare_irq_struct(ahi_data);
   Forbid();
-  if (mhi_present_locked()) {
+  if (Z9AXBase->owner || mhi_present_locked()) {
     Permit();
-    kprintf((CONST_STRPTR)"Can't allocate! Hardware already used by MHI.\n");
+    kprintf((CONST_STRPTR)"Can't allocate! Audio hardware already owned.\n");
     if (record_buf) FreeVec(record_buf);
     FreeVec(audio_buf);
     FreeVec(ahi_data);
     AudioCtrl->ahiac_DriverData = NULL;
     return AHISF_ERROR;
   }
+  Z9AXBase->owner = ahi_data;
   install_irq_server_locked(ahi_data);
   // Explicitly silence the FPGA DAC before we touch any audio state.
   // Rationale: destroy_interrupt() writes this same 0 on FreeAudio, so
@@ -871,9 +876,12 @@ static void __attribute__((used)) intAHIsub_FreeAudio(struct AHIAudioCtrlDrv *Au
   ahi_data->play_stop = 1;
   ahi_data->record_stop = 1;
 
-  // Remove ISR first so we know nothing will signal the worker concurrently.
-  destroy_interrupt(ahi_data);
-
+  // Stop the worker while our named ISR still advertises ownership to MHI.
+  // Both directions are stopped and the hardware interrupt is disabled, so a
+  // late shared-level invocation can only acknowledge and return. Removing
+  // the ISR before the worker exits would open a hand-off window in which MHI
+  // could claim the hardware while this instance was still tearing down.
+  disable_hw_interrupt(ahi_data);
   if (ahi_data->worker_process) {
     Signal((struct Task *)ahi_data->worker_process, SIGBREAKF_CTRL_C);
     // Worker clears worker_process and signals mainproc_signal on exit.
@@ -882,6 +890,7 @@ static void __attribute__((used)) intAHIsub_FreeAudio(struct AHIAudioCtrlDrv *Au
     }
     ahi_data->worker_process = NULL;
   }
+  destroy_interrupt(ahi_data);
 
   if (ahi_data->mainproc_signal != -1) {
     FreeSignal(ahi_data->mainproc_signal);

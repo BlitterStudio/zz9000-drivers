@@ -1,22 +1,38 @@
 # ZZ9000AX AHI recording specification
 
+**Implementation and hardware status (2026-07-29):** the production `0xa204`
+candidate completed the R17 gate on a real Amiga and default-Z3 ZZ9000AX
+system. RCA channel isolation, stereo and silence capture, all six advertised
+recording rates, repeated teardown/reopen, final playback, and true
+one-`AHIAudioCtrl` full duplex all passed without noise or unexpected
+behavior. Host tests and both repository CI pipelines also passed.
+
+That acceptance applies to the exact R17 firmware, default-Z3 bitstream and
+driver artifacts. The later post-review firmware build and final matched
+installer/release payload still require their combined release smoke; rebuilt
+non-default bitstream variants are build/report validated but not
+hardware-tested.
+
 ## Scope
 
-Add stereo recording from the ZZ9000AX RCA inputs to `zz9000ax.audio`
-without changing the FPGA bitstream. The existing I2S receiver, S2MM audio
-formatter, DDR ring and receive interrupt are already present in the shipped
-hardware design. This work adds the missing ARM-firmware producer protocol and
-AHI-driver consumer.
+Add stereo recording from the ZZ9000AX RCA inputs to `zz9000ax.audio`.
+Characterization established that the ADAU1761 publishes valid input on TDM8
+slots 0 and 1, while its nominal I2S output leaves the published right channel
+zero. The production FPGA therefore converts those two TDM slots to the
+conventional I2S stream expected by the existing receiver. The existing S2MM
+audio formatter, DDR ring and receive interrupt remain in use. ARM firmware
+selects and verifies the matching codec serial-output mode, then publishes the
+capture ring through the protocol below.
 
 Recording must remain compatible with:
 
 - old firmware, where the driver continues to provide playback and does not
   advertise recording;
 - old drivers, whose `ZZ_REG_AUDIO_CONFIG` writes contain only playback bit 0;
-- simultaneous AHI playback and recording;
+- simultaneous AHI playback and recording on one `AHIAudioCtrl`;
 - every sample rate currently advertised by the `ZZ9000AX` AudioMode.
 
-No Verilog, Vivado project or committed bitstream changes are required.
+A matching FPGA bitstream, ARM firmware and AHI driver are required.
 
 ## AHI-facing behavior
 
@@ -28,6 +44,8 @@ When supported by the running firmware, `zz9000ax.audio` shall:
 - report a maximum recording buffer of 960 sample frames;
 - accept `AHISF_PLAY` and `AHISF_RECORD` independently in `AHIsub_Start` and
   `AHIsub_Stop`;
+- reject a second low-level `AHIsub_AllocAudio` while an instance owns the
+  hardware, before changing registers, buffers, or interrupt servers;
 - call `ahiac_SamplerFunc` once for each completed 20 ms capture period, using
   an `AHIRecordMessage` with `ahirm_Type = AHIST_S16S`;
 - provide exactly `ahiac_BuffSamples` signed 16-bit stereo frames at
@@ -36,6 +54,13 @@ When supported by the running firmware, `zz9000ax.audio` shall:
 
 Input gain is fixed at unity. Input selection has a single valid index, zero.
 The driver does not claim an independently adjustable monitor path.
+
+AHI's full-duplex contract is directional operation on one allocated
+`AHIAudioCtrl`: the driver must also accept both `AHISF_PLAY` and
+`AHISF_RECORD` in one start call. It does not make separate low-level clients
+share the hardware. AHIRecord uses the low-level `AHI_NO_UNIT` interface and
+allocates its own control, so opening it while another control owns the card
+must fail cleanly without silencing or reconfiguring the owner.
 
 This follows the behavior of the tested UAESND implementation: recording is
 started independently of playback, capture data is delivered as signed
@@ -156,9 +181,14 @@ diagnostic counter may expose overruns, but it is not part of this protocol.
   AudioMode rates.
 - Playback-only, record-only and full-duplex sessions start and stop without
   changing the other direction's state.
+- A second low-level allocation fails without changing the active owner's
+  playback, registers, ring contents, or interrupt server.
 - Callback messages use `AHIST_S16S`, the selected mix rate and one complete
   20 ms buffer.
 - Repeated opens, starts, stops and closes do not leak memory or leave the
   shared audio interrupt enabled.
+- `ZZAXDuplexTest` reports `result=PASS` while its generated stereo playback
+  tone and the normal RCA analogue pass-through remain audible; its WAVE file
+  contains clean stereo RCA input and not the generated playback tone.
 - Firmware unit tests cover conversion, status packing and sequence wrap.
 - The firmware-only build, AHI Docker build and repository host checks pass.

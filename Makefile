@@ -3,7 +3,7 @@ AMIGA_DOCKER = ./tools/amiga-docker.sh
 
 .PHONY: all build-all package-local check-release quality rtg-tests \
 	rtg zztop zzscanlines zzfwupdate usb-poseidon sd-boot net ZZNetStats \
-	mhi ahi ZZDiag sdk amissl
+	mhi ahi ahi-duplextest ZZDiag sdk amissl
 
 all: build-all
 
@@ -60,6 +60,9 @@ mhi:
 
 ahi:
 	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) ahi/driver ./build.sh
+
+ahi-duplextest:
+	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) ahi/duplextest ./build.sh
 
 ZZDiag:
 	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) ZZDiag ./build.sh

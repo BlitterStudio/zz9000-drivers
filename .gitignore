@@ -16,6 +16,7 @@ ZZFwUpdate/ZZFwUpdate
 ZZScanlines/ZZScanlines
 ZZTop/ZZTop
 ahi/axtest/axtest
+ahi/duplextest/ZZAXDuplexTest
 ahi/driver/ZZ9000AX
 rtg/tests/build/
 sd-boot/zzsd-device.h
