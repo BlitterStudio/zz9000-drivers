@@ -2245,6 +2245,7 @@ static ULONG zz_overlay_push(struct BoardInfo *b, int off) {
 APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1(struct TagItem *tags)) {
 	ULONG friend_bpp;
 	ULONG alloc_width;
+	ULONG allocated_pitch;
 #ifdef DEBUG
 	/* build fingerprint: identifies the exact binary in every capture
 	 * (three bench rounds in a row ran a stale card unnoticed) */
@@ -2326,13 +2327,22 @@ APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1
 		KPrintF("ZZ9000: CreateFeature p96AllocBitMap FAILED\n");
 		return NULL;
 	}
-	if (!zz_overlay_pitch_valid(zz_overlay.src_w,
-			(uint32_t)zz_overlay_bitmap->BytesPerRow)) {
-		KPrintF("ZZ9000: CreateFeature source pitch mismatch (%ld != %ld)\n",
-			(LONG)zz_overlay_bitmap->BytesPerRow,
+	allocated_pitch = zz_overlay_bitmap->BytesPerRow;
+	if (!zz_overlay_tighten_pitch(zz_overlay.src_w,
+			&zz_overlay_bitmap->BytesPerRow)) {
+		KPrintF("ZZ9000: CreateFeature source pitch too small (%ld < %ld)\n",
+			(LONG)allocated_pitch,
 			(LONG)zz_overlay_line_bytes(zz_overlay.src_w));
 		zz_overlay_free_source(b);
 		return NULL;
+	}
+	/* The P96 allocation retains its full reserved capacity. Tighten the
+	 * public BitMap stride so cgxvideo's fixed width*2 modulo, RastPort
+	 * writers, and the firmware all advance by the same amount. */
+	if (allocated_pitch != (ULONG)zz_overlay_bitmap->BytesPerRow) {
+		KPrintF("ZZ9000: CreateFeature tighten source pitch %ld -> %ld\n",
+			(LONG)allocated_pitch,
+			(LONG)zz_overlay_bitmap->BytesPerRow);
 	}
 #ifdef DEBUG
 	KPrintF("ZZ9000: CreateFeature bm fmt %ld w %ld bpr %ld bpp %ld p96 %ld onboard %ld\n",
