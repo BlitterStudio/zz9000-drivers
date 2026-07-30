@@ -312,9 +312,13 @@ class RepoToolingTests(unittest.TestCase):
 
         for token in (
             "ZZ_AX_AUDIO_CONFIG_RECORD",
+            "ZZ_AX_AUDIO_CONFIG_TX_STATUS_CAPABLE",
             "ZZ_AX_AUDIO_RX_STATUS_CAPABLE",
             "ZZ_AX_AUDIO_RX_STATUS_PERIOD_MASK",
             "ZZ_AX_AUDIO_RX_STATUS_SEQUENCE_MASK",
+            "ZZ_AX_AUDIO_TX_STATUS_CAPABLE",
+            "ZZ_AX_AUDIO_TX_STATUS_PERIOD_MASK",
+            "ZZ_AX_AUDIO_TX_STATUS_SEQUENCE_MASK",
             "ZZ_AX_RX_BUFFER_DELTA",
         ):
             self.assertIn(token, shared)
@@ -325,6 +329,11 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("recording_supported", source)
         self.assertIn("playback_period_ready", source)
         self.assertIn("sequence == ahi_data->play_sequence", source)
+        self.assertIn("zz_ax_audio_tx_status_sequence(status)", source)
+        self.assertIn("zz_ax_audio_tx_status_period(status)", source)
+        self.assertIn("period_offset + ZZ_AX_BYTES_PER_PERIOD", source)
+        self.assertIn("uint8_t tx_status_capable;", header)
+        self.assertIn("ahi_data->tx_status_capable", source)
         self.assertIn("AHISF_CANRECORD", source)
         self.assertIn("AHIDB_Record", source)
         self.assertIn("AHIDB_FullDuplex", source)
