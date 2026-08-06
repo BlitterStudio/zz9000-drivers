@@ -26,6 +26,7 @@ struct z9ax {
   uint8_t flags;
   uint8_t irq_installed;
   uint8_t record_capable;
+  uint8_t tx_status_capable;
 };
 
 // TW: Driver base includes hardware address and zorro version besides library base.

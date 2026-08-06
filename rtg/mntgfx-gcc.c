@@ -35,6 +35,7 @@
 #include "zz9000.h"
 #include "zzcfg_query.h"
 #include "blitter_cache.h"
+#include "memory_layout.h"
 #include "offscreen_bitmap.h"
 #include "overlay_feature.h"
 #include <clib/Picasso96_protos.h>
@@ -698,9 +699,14 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 			// new firmware would blit templates over it.
 			b->MemorySize = cd->cd_BoardSize-0x40000;
 		} else {
-			// 13.8 MB for Z3 (safety, will be expanded later)
-			// one full HD screen @8bit ~ 2MB
-			b->MemorySize = 0x3000000 - 0x10000;
+			/*
+			 * End P96-owned VRAM exactly where the firmware SDK shared
+			 * heap begins. The previous 0x02ff0000 size reached ARM
+			 * 0x031f0000 and overlapped the first 0x1f0000 bytes of that
+			 * heap; streaming PCM could therefore paint RTG pixels while
+			 * P96 writes corrupted audio samples in the opposite direction.
+			 */
+			b->MemorySize = ZZ_Z3_P96_MEMORY_SIZE;
 			b->CardFlags |= CARDFLAG_ZORRO_3;
 			volatile struct GFXData *gd = (struct GFXData*)(((uint32_t)b->MemoryBase) + (uint32_t)Z3_GFXDATA_ADDR);
 			b->CardData[ZZ_CARD_DATA_GFXDATA] = (ULONG)gd;
@@ -2245,6 +2251,7 @@ static ULONG zz_overlay_push(struct BoardInfo *b, int off) {
 APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1(struct TagItem *tags)) {
 	ULONG friend_bpp;
 	ULONG alloc_width;
+	ULONG allocated_pitch;
 #ifdef DEBUG
 	/* build fingerprint: identifies the exact binary in every capture
 	 * (three bench rounds in a row ran a stale card unnoticed) */
@@ -2326,13 +2333,22 @@ APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1
 		KPrintF("ZZ9000: CreateFeature p96AllocBitMap FAILED\n");
 		return NULL;
 	}
-	if (!zz_overlay_pitch_valid(zz_overlay.src_w,
-			(uint32_t)zz_overlay_bitmap->BytesPerRow)) {
-		KPrintF("ZZ9000: CreateFeature source pitch mismatch (%ld != %ld)\n",
-			(LONG)zz_overlay_bitmap->BytesPerRow,
+	allocated_pitch = zz_overlay_bitmap->BytesPerRow;
+	if (!zz_overlay_tighten_pitch(zz_overlay.src_w,
+			&zz_overlay_bitmap->BytesPerRow)) {
+		KPrintF("ZZ9000: CreateFeature source pitch too small (%ld < %ld)\n",
+			(LONG)allocated_pitch,
 			(LONG)zz_overlay_line_bytes(zz_overlay.src_w));
 		zz_overlay_free_source(b);
 		return NULL;
+	}
+	/* The P96 allocation retains its full reserved capacity. Tighten the
+	 * public BitMap stride so cgxvideo's fixed width*2 modulo, RastPort
+	 * writers, and the firmware all advance by the same amount. */
+	if (allocated_pitch != (ULONG)zz_overlay_bitmap->BytesPerRow) {
+		KPrintF("ZZ9000: CreateFeature tighten source pitch %ld -> %ld\n",
+			(LONG)allocated_pitch,
+			(LONG)zz_overlay_bitmap->BytesPerRow);
 	}
 #ifdef DEBUG
 	KPrintF("ZZ9000: CreateFeature bm fmt %ld w %ld bpr %ld bpp %ld p96 %ld onboard %ld\n",

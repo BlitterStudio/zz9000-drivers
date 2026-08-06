@@ -55,6 +55,10 @@ struct MhiPlayer {
 	UBYTE backpressure;          /* card mp3 ring full; retry later */
 	UBYTE have_unfed;            /* queued app data not yet on the card */
 	UBYTE staged_valid;          /* staging holds the chunk keyed below */
+	UBYTE eof_announced;         /* firmware stream has received EOF */
+	UBYTE drain_requested;       /* resumable starvation drain in flight */
+	UBYTE starvation_polls;      /* consecutive NEED_INPUT probes */
+	ULONG submitted_bytes;       /* cumulative bytes accepted this session */
 	ULONG list_gen;              /* bumped on drain: aborts in-flight feeds */
 
 	/*
@@ -100,6 +104,8 @@ struct ListNode {
 	UBYTE*         Buffer;
 	ULONG          Size;
 	ULONG          Index;
+	ULONG          StreamEnd;
+	UBYTE          StreamEndValid;
 	BOOL           Played;
 };
 

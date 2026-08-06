@@ -69,13 +69,16 @@ static inline int zz_overlay_variant(uint32_t rgbformat)
 }
 
 /* CreateFeature source validation (WinUAE parity: >=16x16, <=4096,
- * supported format). The <=screen check is left to the firmware, which
- * clips at composite time anyway. */
+ * supported format). Packed YUV422 requires an even pixel width because
+ * cgxvideo advances each row by width*2 and cannot include a partial final
+ * macropixel. The <=screen check is left to the firmware, which clips at
+ * composite time anyway. */
 static inline int zz_overlay_source_valid(uint32_t src_w, uint32_t src_h,
 	uint32_t rgbformat)
 {
 	return src_w >= ZZ_OVERLAY_MIN_DIM && src_h >= ZZ_OVERLAY_MIN_DIM &&
 		src_w <= ZZ_OVERLAY_MAX_DIM && src_h <= ZZ_OVERLAY_MAX_DIM &&
+		(src_w & 1U) == 0U &&
 		zz_overlay_variant(rgbformat) >= 0;
 }
 
@@ -95,6 +98,20 @@ static inline int zz_overlay_pitch_valid(uint32_t src_w, uint32_t pitch)
 	uint32_t expected = zz_overlay_line_bytes(src_w);
 
 	return expected != 0 && pitch == expected;
+}
+
+/* A P96-managed bitmap may reserve a padded row even when packed-YUV
+ * producers require a tight modulo. The allocation is still large enough
+ * when its pitch is at least the visible row span; expose the tight pitch
+ * through the public BitMap so every producer and the firmware use it. */
+static inline int zz_overlay_tighten_pitch(uint32_t src_w, uint16_t *pitch)
+{
+	uint32_t expected = zz_overlay_line_bytes(src_w);
+
+	if (!pitch || expected == 0 || *pitch < expected)
+		return 0;
+	*pitch = (uint16_t)expected;
+	return 1;
 }
 
 /* P96 allocates a friend bitmap using the FRIEND's storage format even when

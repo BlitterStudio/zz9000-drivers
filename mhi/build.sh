@@ -65,12 +65,12 @@ if [ ! -d "$script_dir/zz9k-headers/zz9k" ]; then
   exit 1
 fi
 # Fail with a clear message instead of a compile error when the staged SDK
-# predates the audio-playback API this driver is built on.
-if ! grep -q "ZZ9K_LIBRARY_MIN_REVISION_AUDIO_PLAYBACK" \
+# predates the resumable audio-stream drain API this driver is built on.
+if ! grep -q "ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_DRAIN" \
     "$script_dir/zz9k-headers/zz9k/library_vectors.h"; then
-  echo "ERROR: the staged zz9000-sdk headers lack audio-playback support" >&2
-  echo "       (ZZ9K_LIBRARY_MIN_REVISION_AUDIO_PLAYBACK). Point ZZ9000_SDK" >&2
-  echo "       at a checkout that includes the audio-playback-op changes." >&2
+  echo "ERROR: the staged zz9000-sdk headers lack audio-stream drain support" >&2
+  echo "       (ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_DRAIN). Point ZZ9000_SDK" >&2
+  echo "       at a checkout that includes the resumable-drain changes." >&2
   exit 1
 fi
 

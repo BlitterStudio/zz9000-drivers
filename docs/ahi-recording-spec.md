@@ -86,6 +86,11 @@ Writes become a control mask:
 All other bits are reserved and ignored. A legacy write of zero or one
 therefore keeps its original behavior.
 
+Reads have separate semantics. Bit 0 remains codec presence and bit 1
+advertises the packed transmit-period status at `ZZ_REG_AUDIO_TX_STATUS`.
+Requiring this read capability prevents a new driver from mistaking bit 15 of
+an older firmware's raw 16-bit sequence for the new status marker.
+
 ### `ZZ_REG_AUDIO_RX_STATUS` (`0xF6`)
 
 This new read-only register publishes the completed capture period:
@@ -102,11 +107,25 @@ bit before advertising recording.
 
 ### `ZZ_REG_AUDIO_TX_STATUS` (`0xF8`)
 
-This read-only 16-bit sequence increments modulo 65536 after every transmit
-period completes and before firmware asserts the shared audio interrupt. The
-driver samples it when playback starts and advances the player/mixer only when
-the value changes. The register is required whenever `CAPABLE` is set in the
-receive status; legacy firmware remains on the original playback-only path.
+This read-only status publishes the completed playback period:
+
+| Bits | Name | Meaning |
+| --- | --- | --- |
+| 15 | `CAPABLE` | Firmware publishes the transmit-period cursor. |
+| 14:12 | `PERIOD` | Index, 0 through 7, of the most recently completed period. |
+| 11:0 | `SEQUENCE` | Completion counter, incremented modulo 4096. |
+
+Firmware publishes it before asserting the shared audio interrupt. The driver
+samples the sequence when playback starts and advances the player/mixer only
+when the sequence changes. It writes the new mix into `PERIOD`, which is safely
+behind the formatter's active MM2S cursor, instead of assuming playback began
+at ring offset zero. This prevents the startup collision that could emit the
+first sample once while it was being written and again after the ring wrapped.
+
+The driver uses this layout only when both the `ZZ_REG_AUDIO_CONFIG` read
+capability and TX `CAPABLE` are set. With older firmware it retains the legacy
+sequential cursor. Older drivers also remain compatible because the complete
+16-bit status still changes on each period.
 
 The sequence value is the publication boundary. Firmware shall not change it
 until the period named by `PERIOD` has been converted, flushed from the ARM

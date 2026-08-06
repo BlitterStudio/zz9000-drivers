@@ -25,11 +25,19 @@
 #define ZZ_AX_AUDIO_CONFIG_PLAY   0x0001
 #define ZZ_AX_AUDIO_CONFIG_RECORD 0x0002
 #define ZZ_AX_AUDIO_CONFIG_MASK   0x0003
+/* ZZ_REG_AUDIO_CONFIG read bit 1 advertises packed TX period status.
+ * Writes use the same bit position for record interrupt enable. */
+#define ZZ_AX_AUDIO_CONFIG_TX_STATUS_CAPABLE 0x0002
 
 #define ZZ_AX_AUDIO_RX_STATUS_CAPABLE       0x8000
 #define ZZ_AX_AUDIO_RX_STATUS_PERIOD_SHIFT  12
 #define ZZ_AX_AUDIO_RX_STATUS_PERIOD_MASK   0x7000
 #define ZZ_AX_AUDIO_RX_STATUS_SEQUENCE_MASK 0x0fff
+
+#define ZZ_AX_AUDIO_TX_STATUS_CAPABLE       0x8000
+#define ZZ_AX_AUDIO_TX_STATUS_PERIOD_SHIFT  12
+#define ZZ_AX_AUDIO_TX_STATUS_PERIOD_MASK   0x7000
+#define ZZ_AX_AUDIO_TX_STATUS_SEQUENCE_MASK 0x0fff
 
 static inline uint8_t zz_ax_audio_rx_status_period(uint16_t status)
 {
@@ -46,6 +54,17 @@ static inline uint16_t zz_ax_audio_rx_sequence_distance(uint16_t newer,
                                                          uint16_t older)
 {
     return (newer - older) & ZZ_AX_AUDIO_RX_STATUS_SEQUENCE_MASK;
+}
+
+static inline uint8_t zz_ax_audio_tx_status_period(uint16_t status)
+{
+    return (uint8_t)((status & ZZ_AX_AUDIO_TX_STATUS_PERIOD_MASK) >>
+                     ZZ_AX_AUDIO_TX_STATUS_PERIOD_SHIFT);
+}
+
+static inline uint16_t zz_ax_audio_tx_status_sequence(uint16_t status)
+{
+    return status & ZZ_AX_AUDIO_TX_STATUS_SEQUENCE_MASK;
 }
 
 #define ZZ_AX_DECODER_FIFO_SIZE (1152 * 4)

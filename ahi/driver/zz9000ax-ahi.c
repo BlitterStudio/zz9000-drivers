@@ -344,7 +344,8 @@ static void process_recording(struct z9ax *ahi_data,
 #endif
 }
 
-static BOOL playback_period_ready(struct z9ax *ahi_data)
+static BOOL playback_period_ready(struct z9ax *ahi_data,
+                                  uint32_t *period_offset)
 {
   if (ahi_data->play_stop) return FALSE;
 
@@ -352,11 +353,27 @@ static BOOL playback_period_ready(struct z9ax *ahi_data)
   /* Capture-capable firmware publishes a TX sequence so a capture-only
    * assertion of the shared audio interrupt cannot advance playback. */
   if (ahi_data->record_capable) {
-    uint16_t sequence = read_reg(ahi_data->hw_addr,
-                                 ZZ_REG_AUDIO_TX_STATUS);
+    uint16_t status = read_reg(ahi_data->hw_addr,
+                               ZZ_REG_AUDIO_TX_STATUS);
+    uint16_t sequence =
+        (ahi_data->tx_status_capable &&
+         (status & ZZ_AX_AUDIO_TX_STATUS_CAPABLE)) ?
+            zz_ax_audio_tx_status_sequence(status) : status;
 
     if (sequence == ahi_data->play_sequence) return FALSE;
     ahi_data->play_sequence = sequence;
+    if (ahi_data->tx_status_capable &&
+        (status & ZZ_AX_AUDIO_TX_STATUS_CAPABLE)) {
+      /*
+       * New firmware publishes the period MM2S most recently completed.
+       * Refill that slot instead of assuming DMA began at ring offset zero:
+       * the old startup guess could overwrite the active period, emit part
+       * of the first sample immediately, then play it again after wrap.
+       */
+      *period_offset =
+          (uint32_t)zz_ax_audio_tx_status_period(status) *
+          ZZ_AX_BYTES_PER_PERIOD;
+    }
   }
 #endif
 
@@ -400,7 +417,9 @@ void WorkerProcess() {
     // Stop()/teardown updating the direction flags and this wake-up.
     if (ahi_data->play_stop && ahi_data->record_stop) continue;
 
-    if (playback_period_ready(ahi_data)) {
+    uint32_t period_offset = ahi_data->buf_offset;
+
+    if (playback_period_ready(ahi_data, &period_offset)) {
       CallHookPkt(AudioCtrl->ahiac_PlayerFunc, AudioCtrl, NULL);
 
       if (!(*AudioCtrl->ahiac_PreTimer)()) {
@@ -437,18 +456,19 @@ void WorkerProcess() {
 
         // def. the faster way
         CopyMem((void*)ahi_data->audio_buf_addr,
-                (void*)(ahi_data->audio_hw_buf_addr + ahi_data->buf_offset),
+                (void*)(ahi_data->audio_hw_buf_addr + period_offset),
                 bytes);
         // byteswap, resample and play buffer
         write_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_SWAB,
-                  ahi_data->buf_offset>>8);
+                  period_offset>>8);
         overrun = read_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_SWAB);
 #endif
 
         if (overrun == 1) {
           ahi_data->buf_offset = 0;
         } else {
-          ahi_data->buf_offset += ZZ_AX_BYTES_PER_PERIOD;
+          ahi_data->buf_offset =
+              period_offset + ZZ_AX_BYTES_PER_PERIOD;
         }
 
         if (ahi_data->buf_offset >= ZZ_AX_AUDIO_BUFSZ) {
@@ -660,7 +680,8 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
 
   // ZZ_REG_AUDIO_CONFIG bit 0 is the "AX present" strap; mask explicitly so
   // other status bits can't ever make this look like detection succeeded.
-  int ax_present = read_reg(hw_addr, ZZ_REG_AUDIO_CONFIG) & 1;
+  uint16_t audio_config = read_reg(hw_addr, ZZ_REG_AUDIO_CONFIG);
+  int ax_present = audio_config & 1;
   if (!ax_present) {
     const char *alert = "\x00\x14\x14ZZ9000AX not detected. AHI driver will exit.\x00\x00";
     if (!IntuitionBase) {
@@ -698,6 +719,8 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
   ahi_data->play_stop = 1;
   ahi_data->record_stop = 1;
   ahi_data->record_capable = record_capable;
+  ahi_data->tx_status_capable =
+      (audio_config & ZZ_AX_AUDIO_CONFIG_TX_STATUS_CAPABLE) != 0;
   ahi_data->flags = Z9AXBase->flags;
   ahi_data->audio_buf_addr = (uint32_t)audio_buf;
   ahi_data->record_buf_addr = (uint32_t)record_buf;
@@ -954,8 +977,14 @@ static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), 
     zero_hw_audio_ring(ahi_data);
 
     if (ahi_data->record_capable)
-      play_sequence = read_reg(ahi_data->hw_addr,
-                               ZZ_REG_AUDIO_TX_STATUS);
+    {
+      uint16_t status = read_reg(ahi_data->hw_addr,
+                                 ZZ_REG_AUDIO_TX_STATUS);
+      play_sequence =
+          (ahi_data->tx_status_capable &&
+           (status & ZZ_AX_AUDIO_TX_STATUS_CAPABLE)) ?
+              zz_ax_audio_tx_status_sequence(status) : status;
+    }
 
     Forbid();
     ahi_data->buf_offset = 0;

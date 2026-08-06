@@ -59,6 +59,7 @@ static void test_source_validation(void)
 	CHECK(!zz_overlay_source_valid(4097, 240, 14)); /* too wide */
 	CHECK(!zz_overlay_source_valid(320, 4097, 14)); /* too tall */
 	CHECK(!zz_overlay_source_valid(320, 240, 9));   /* RGB source */
+	CHECK(!zz_overlay_source_valid(319, 240, 14));  /* incomplete YUV pair */
 	CHECK(!zz_overlay_source_valid(0, 0, 14));
 }
 
@@ -86,6 +87,8 @@ static void test_friend_allocation_width(void)
 
 static void test_source_pitch(void)
 {
+	uint16_t pitch;
+
 	/* The producer and firmware must advance by the same exact stride. */
 	CHECK(zz_overlay_pitch_valid(640, 1280));
 	CHECK(!zz_overlay_pitch_valid(640, 1276)); /* undersized */
@@ -94,6 +97,28 @@ static void test_source_pitch(void)
 	CHECK(!zz_overlay_pitch_valid(319, 644));  /* padded odd width */
 	CHECK(!zz_overlay_pitch_valid(0, 0));
 	CHECK(!zz_overlay_pitch_valid(4097, 8194));
+
+	/* P96 may pad its managed allocation, but the public bitmap stride can
+	 * be tightened so packed-YUV producers and firmware still agree. */
+	pitch = 640;
+	CHECK(zz_overlay_tighten_pitch(318, &pitch));
+	CHECK(pitch == 636);
+	pitch = 1472;
+	CHECK(zz_overlay_tighten_pitch(720, &pitch));
+	CHECK(pitch == 1440);
+	pitch = 1280;
+	CHECK(zz_overlay_tighten_pitch(640, &pitch));
+	CHECK(pitch == 1280);
+	pitch = 632;
+	CHECK(!zz_overlay_tighten_pitch(318, &pitch));
+	CHECK(pitch == 632);
+	pitch = 640;
+	CHECK(!zz_overlay_tighten_pitch(0, &pitch));
+	CHECK(pitch == 640);
+	pitch = 8194;
+	CHECK(!zz_overlay_tighten_pitch(4097, &pitch));
+	CHECK(pitch == 8194);
+	CHECK(!zz_overlay_tighten_pitch(318, NULL));
 }
 
 static void test_apply_tags(void)
