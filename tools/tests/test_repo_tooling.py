@@ -252,12 +252,116 @@ class RepoToolingTests(unittest.TestCase):
         start = source.index("intAHIsub_Start")
         self.assertLess(assign, start)
 
-    def test_mhi_queue_rejects_empty_buffers(self):
+    def test_mhi_zero_length_buffer_announces_eof(self):
         source = self.read("mhi/mhizz9000.c")
-        self.assertIn("!mhi_buffer", source)
-        self.assertIn("mhi_size == 0", source)
-        self.assertLess(source.index("!mhi_buffer"),
-                        source.index("AllocVec(sizeof(struct ListNode)"))
+        body = source[
+            source.index("BOOL i_MHIQueueBuffer"):
+            source.index("APTR i_MHIGetEmpty")
+        ]
+        self.assertIn("static BOOL mhi_stream_eof", source)
+        self.assertIn("ZZ9K_AUDIO_STREAM_FEED_EOF", source)
+        feed_body = source[
+            source.index("static BOOL mhi_stream_feed_eof_locked"):
+            source.index("static BOOL mhi_stream_eof")
+        ]
+        self.assertIn("ZZ9K_AUDIO_STREAM_FEED_EOF", feed_body)
+        eof_body = source[
+            source.index("static BOOL mhi_stream_eof"):
+            source.index("static BOOL mhi_stream_service_drain")
+        ]
+        self.assertIn("old_status == MHIF_OUT_OF_DATA", eof_body)
+        self.assertIn("mp->Status = MHIF_PLAYING;", eof_body)
+        self.assertLess(eof_body.index("mp->Status = MHIF_PLAYING;"),
+                        eof_body.index("mhi_stream_feed_eof_locked(mp)"))
+        self.assertIn("if(accepted) mhi_wake_feeder(mp);", eof_body)
+        self.assertIn("if(mhi_size == 0)", body)
+        self.assertIn("return mhi_stream_eof(mp);", body)
+        self.assertIn("!mhi_buffer", body)
+        self.assertLess(body.index("if(mhi_size == 0)"),
+                        body.index("!mhi_buffer"))
+        self.assertLess(body.index("!mhi_buffer"),
+                        body.index("AllocVec(sizeof(struct ListNode)"))
+
+    def test_mhi_queue_exhaustion_requests_resumable_drain(self):
+        source = self.read("mhi/mhizz9000.c")
+        header = self.read("mhi/mhilib.h")
+        self.assertIn("#define ZZ_MHI_DRAIN_IDLE_POLLS", source)
+        self.assertIn("static BOOL mhi_stream_service_drain", source)
+        drain = source[
+            source.index("static BOOL mhi_stream_service_drain"):
+            source.index("/* ********************* */\n/*  BEGIN feeder process */")
+        ]
+        self.assertIn("ZZ9K_AUDIO_STREAM_RESULT_NEED_INPUT", drain)
+        self.assertIn("mhi_stream_feed_drain_locked(mp)", drain)
+        self.assertIn("ZZ9K_AUDIO_STREAM_RESULT_DRAINED", drain)
+        self.assertNotIn("mhi_stream_feed_eof_locked(mp)", drain)
+        self.assertIn("mp->Status = MHIF_OUT_OF_DATA", drain)
+        self.assertIn("mhi_signal_app(mp)", drain)
+        feeder = source[
+            source.index("static void mhi_feeder(void)"):
+            source.index("/* ******************* */\n/*  END feeder process */")
+        ]
+        self.assertIn("drain_busy = mhi_stream_service_drain(mp);", feeder)
+        self.assertIn("mp->play_pending || drain_busy", feeder)
+        status = source[
+            source.index("UBYTE i_MHIGetStatus"):
+            source.index("void i_MHIPlay")
+        ]
+        self.assertIn("return mp->Status;", status)
+        self.assertNotIn("ZZ9KAudioStream", status)
+        self.assertIn("UBYTE eof_announced", header)
+        self.assertIn("UBYTE drain_requested", header)
+        self.assertIn("UBYTE starvation_polls", header)
+        retry = source[
+            source.index("static BOOL mhi_stream_status_retryable"):
+            source.index("static BOOL mhi_stream_service_drain")
+        ]
+        self.assertIn("ZZ9K_STATUS_BUSY", retry)
+        self.assertIn("ZZ9K_STATUS_TIMEOUT", retry)
+        self.assertIn("mhi_stream_status_retryable(rc)", drain)
+        self.assertIn("mp->Status = MHIF_STOPPED", drain)
+        build = self.read("mhi/build.sh")
+        self.assertIn("ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_DRAIN", build)
+
+    def test_mhi_buffer_completion_tracks_decoder_consumption(self):
+        source = self.read("mhi/mhizz9000.c")
+        header = self.read("mhi/mhilib.h")
+        self.assertIn("ULONG submitted_bytes", header)
+        self.assertRegex(header, r"ULONG\s+StreamEnd")
+        self.assertRegex(header, r"UBYTE\s+StreamEndValid")
+        self.assertNotIn("HoldUntilDrain", header)
+        complete = source[
+            source.index("static void mhi_complete_consumed"):
+            source.index("static void mhi_feed_pending")
+        ]
+        self.assertIn("node->StreamEnd", complete)
+        self.assertIn("node->StreamEndValid", complete)
+        self.assertNotIn("node->StreamEnd == 0", complete)
+        self.assertIn("mp->result.bytes_consumed", complete)
+        self.assertIn("node->Played = TRUE", complete)
+        self.assertIn("mhi_signal_app(mp)", complete)
+        feed = source[
+            source.index("static void mhi_feed_pending"):
+            source.index("static BOOL mhi_stream_open")
+        ]
+        self.assertIn("it->Index < it->Size", feed)
+        self.assertIn("mp->submitted_bytes += chunk", feed)
+        self.assertIn("node->StreamEnd = mp->submitted_bytes", feed)
+        self.assertIn("node->StreamEndValid = TRUE", feed)
+        self.assertIn("mp->drain_requested = FALSE", feed)
+        self.assertIn("mhi_complete_consumed(mp", feed)
+        self.assertNotIn("Fully handed to the card: the app may reclaim it", feed)
+        get_empty = source[
+            source.index("APTR i_MHIGetEmpty"):
+            source.index("UBYTE i_MHIGetStatus")
+        ]
+        self.assertNotIn("wake_eof", get_empty)
+        self.assertNotIn("mhi_signal_app(mp);", get_empty)
+        queue = source[
+            source.index("BOOL i_MHIQueueBuffer"):
+            source.index("APTR i_MHIGetEmpty")
+        ]
+        self.assertIn("BufferNode->StreamEndValid = FALSE", queue)
 
     def test_mhi_get_empty_returns_one_buffer_per_call(self):
         source = self.read("mhi/mhizz9000.c")

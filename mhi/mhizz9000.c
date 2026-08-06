@@ -59,12 +59,10 @@
 // allocation (there is at most one decoder).
 struct Library *ZZ9KBase;
 
-// 68k -> card transport chunk (one FEED per chunk). Small on purpose:
-// an app buffer completes (and is signalled/reclaimable) only when its
-// LAST byte is accepted, so the acceptance quantum bounds how far a
-// completion can land from its real-time position. 4K at 128 kbit/s is
-// ~250 ms; a 32K quantum bunched completions into multi-second jumps
-// of the player's time display.
+// 68k -> card transport chunk (one FEED per chunk). Small on purpose so
+// the card-side input ring refills smoothly. Application buffers are not
+// completed here: the cumulative firmware decoder cursor retires them only
+// after their compressed bytes have actually been consumed.
 #define ZZ_MHI_STAGING_BYTES   (4UL * 1024UL)
 // Card-side compressed ring. Pure tuning, NOT a liveness constraint:
 // the feeder process makes feed progress on its own, so playback works
@@ -83,6 +81,12 @@ struct Library *ZZ9KBase;
 #define ZZ_MHI_PCM_RING_BYTES  (61440UL)
 // Pump refill threshold: half the PCM ring.
 #define ZZ_MHI_PCM_LOW_WATER   (ZZ_MHI_PCM_RING_BYTES / 2UL)
+// Public MHI has no EOF call. Sustained queue starvation therefore requests
+// a RESUMABLE drain: firmware decodes every complete frame, retains a partial
+// compressed frame, drains the real AX tail, and reports OUT_OF_DATA while
+// remaining ready for later buffers. With the feeder's adaptive backoff four
+// probes allow roughly 350 ms for a normal client to refill first.
+#define ZZ_MHI_DRAIN_IDLE_POLLS  4U
 
 /* ******************************** */
 /*  BEGIN ZZ9000AX parameter access */
@@ -250,6 +254,35 @@ static void mhi_signal_app(struct MhiPlayer *mp) {
 	if(mp->MhiTask && mp->MhiMask) Signal(mp->MhiTask, mp->MhiMask);
 }
 
+static void mhi_wake_feeder(struct MhiPlayer *mp);
+
+// Mark fully-submitted application buffers reusable only when the firmware's
+// cumulative decoder cursor has reached their end. A completed resumable
+// drain may release the accepted boundary as a whole: any incomplete frame
+// is retained card-side, so the application's source memory is no longer
+// needed even though those final bytes are intentionally not discarded.
+static void mhi_complete_consumed(struct MhiPlayer *mp, BOOL drain_all) {
+	struct ListNode *node;
+	BOOL notify = FALSE;
+
+	if(!mp || !mp->BufferList) return;
+	Forbid();
+	for(node = (struct ListNode *)mp->BufferList->mlh_Head;
+	    node->Header.mln_Succ;
+	    node = (struct ListNode *)node->Header.mln_Succ) {
+		if(node->Played != FALSE)
+			continue;
+		if(node->Index < node->Size || !node->StreamEndValid ||
+		   (!drain_all &&
+		    (LONG)(mp->result.bytes_consumed - node->StreamEnd) < 0))
+			break;
+		node->Played = TRUE;
+		notify = TRUE;
+	}
+	Permit();
+	if(notify) mhi_signal_app(mp);
+}
+
 // Feed queued application data to the card's compressed ring. TASK
 // CONTEXT ONLY: ZZ9KAudioStreamFeed blocks on the mailbox completion, so
 // this must never run under Forbid() or from an interrupt. The buffer
@@ -273,7 +306,7 @@ static void mhi_feed_pending(struct MhiPlayer *mp) {
 		for(it = (struct ListNode *)mp->BufferList->mlh_Head;
 		    it->Header.mln_Succ;
 		    it = (struct ListNode *)it->Header.mln_Succ) {
-			if(it->Played == FALSE) {
+			if(it->Index < it->Size) {
 				node = it;
 				index = node->Index;
 				src = node->Buffer + index;
@@ -324,6 +357,7 @@ static void mhi_feed_pending(struct MhiPlayer *mp) {
 			return;
 
 		if(mp->result.flags & ZZ9K_AUDIO_STREAM_RESULT_BACKPRESSURE) {
+			mhi_complete_consumed(mp, FALSE);
 			// Card ring full; nothing was consumed. A later entry
 			// point retries from task context (the staged memo above
 			// makes that retry cheap).
@@ -343,17 +377,21 @@ static void mhi_feed_pending(struct MhiPlayer *mp) {
 
 		Forbid();
 		if(gen == mp->list_gen) {
+			/* Any accepted non-empty FEED cancels firmware drain state.
+			 * Mirror that transition locally even when QueueBuffer raced an
+			 * in-flight DRAIN response. */
+			mp->drain_requested = FALSE;
+			mp->starvation_polls = 0;
 			node->Index += chunk;
+			mp->submitted_bytes += chunk;
 			if(node->Index >= node->Size) {
-				// Fully handed to the card: the app may reclaim it
-				// via MHIGetEmpty (same semantics as the legacy
-				// FIFO copy completion).
-				node->Played = TRUE;
-				mhi_signal_app(mp);
+				node->StreamEnd = mp->submitted_bytes;
+				node->StreamEndValid = TRUE;
 			}
 		}
 		Permit();
 		if(gen != mp->list_gen) return;   // drained under us: stop
+		mhi_complete_consumed(mp, FALSE);
 	}
 }
 
@@ -415,6 +453,11 @@ static BOOL mhi_stream_open(struct MhiPlayer *mp) {
 
 	mp->session = mp->result.session;
 	mp->backpressure = FALSE;
+	mp->eof_announced = FALSE;
+	mp->drain_requested = FALSE;
+	mp->starvation_polls = 0;
+	mp->submitted_bytes = 0;
+	mp->feeds_accepted = 0;
 	KPrintF("stream_open: session=%lu\n", (ULONG)mp->session);
 	return TRUE;
 }
@@ -441,6 +484,10 @@ static void mhi_stream_close(struct MhiPlayer *mp) {
 	mp->session = 0;
 	mp->staged_valid = FALSE;
 	mp->play_pending = FALSE;
+	mp->eof_announced = FALSE;
+	mp->drain_requested = FALSE;
+	mp->starvation_polls = 0;
+	mp->submitted_bytes = 0;
 	if(rc != ZZ9K_STATUS_OK && rc != ZZ9K_STATUS_BAD_HANDLE) {
 		// The close was NOT confirmed: either BUSY never drained (a
 		// wedged card) or the transport failed (TIMEOUT/IO_ERROR/...).
@@ -481,8 +528,8 @@ static void mhi_try_bind(struct MhiPlayer *mp) {
 		// forever (MHIF_PLAYING reported, no audio). Probe the live
 		// state with a zero-length READ -- it consumes no PCM and does
 		// not bind, but re-runs the decoder and returns fresh
-		// flags/sample_rate. (A zero-length FEED is not an option: the
-		// SDK builder rejects it unless EOF is set.)
+		// flags/sample_rate. (A plain zero-length FEED is not an option:
+		// the SDK builder accepts one only for explicit EOF or drain.)
 		if(ZZ9KAudioStreamRead(mp->session, 0, 0, &mp->result)
 		   != ZZ9K_STATUS_OK)
 			return;
@@ -498,6 +545,190 @@ static void mhi_try_bind(struct MhiPlayer *mp) {
 	// the session card-side; nothing to undo here.
 	mp->play_pending = FALSE;
 	KPrintF("mhi_try_bind: session bound to AX output.\n");
+}
+
+// io_lock must be held. Only the explicit zero-length zzplay extension ends
+// the stream permanently; public MHI starvation uses the resumable path below.
+static BOOL mhi_stream_feed_eof_locked(struct MhiPlayer *mp) {
+	ZZ9KAudioStreamFeedDesc feed;
+
+	if(!mp || mp->session == 0 || mp->have_unfed ||
+	   mp->feeds_accepted == 0)
+		return FALSE;
+	if(mp->eof_announced)
+		return TRUE;
+	if(!zz9k_audio_build_stream_feed_desc(
+	       &feed, mp->session, 0, 0, 0,
+	       ZZ9K_AUDIO_STREAM_FEED_EOF) ||
+	   ZZ9KAudioStreamFeed(&feed, &mp->result) != ZZ9K_STATUS_OK ||
+	   (mp->result.flags &
+	    ZZ9K_AUDIO_STREAM_RESULT_BACKPRESSURE) != 0)
+		return FALSE;
+
+	mp->eof_announced = TRUE;
+	mp->drain_requested = FALSE;
+	mp->starvation_polls = 0;
+	mhi_complete_consumed(mp, FALSE);
+	// A short file may not have produced enough PCM to complete the deferred
+	// bind until EOF relaxed the decoder's minimum-input gate.
+	mhi_try_bind(mp);
+	KPrintF("MHI: EOF accepted\n");
+	return TRUE;
+}
+
+// mhizz9000 EOF extension: a zero-length MHIQueueBuffer call means that the
+// client has reclaimed every real buffer and will not queue more data for
+// this play. The BOOL return makes it self-detecting: an older driver rejects
+// the request. Standard MHI clients remain resumable through queue starvation.
+static BOOL mhi_stream_eof(struct MhiPlayer *mp) {
+	BOOL accepted = FALSE;
+	BOOL can_feed = FALSE;
+	UBYTE old_status = MHIF_STOPPED;
+	ULONG transport_gen = 0;
+
+	if(!mp) return FALSE;
+	ObtainSemaphore(&mp->io_lock);
+	Forbid();
+	old_status = mp->Status;
+	if(mp->session != 0 && !mp->have_unfed &&
+	   (old_status == MHIF_PLAYING || old_status == MHIF_OUT_OF_DATA)) {
+		transport_gen = mp->transport_gen;
+		// A preceding status poll may have latched a temporary starvation
+		// before the client reclaimed its final buffer. Re-enter PLAYING so
+		// the explicit EOF can decode/drain that tail and be polled again.
+		if(old_status == MHIF_OUT_OF_DATA)
+			mp->Status = MHIF_PLAYING;
+		can_feed = TRUE;
+	}
+	Permit();
+	if(can_feed)
+		accepted = mhi_stream_feed_eof_locked(mp);
+	if(!accepted && old_status == MHIF_OUT_OF_DATA) {
+		// Restore the pre-call status only if Stop/Free did not win while
+		// the mailbox call was in flight.
+		Forbid();
+		if(mp->transport_gen == transport_gen &&
+		   mp->Status == MHIF_PLAYING)
+			mp->Status = MHIF_OUT_OF_DATA;
+		Permit();
+	}
+	ReleaseSemaphore(&mp->io_lock);
+	if(accepted) mhi_wake_feeder(mp);
+	return accepted;
+}
+
+// io_lock must be held. Request a resumable starvation drain, never permanent
+// EOF: the firmware retains any incomplete compressed frame and clears the
+// drain automatically when later input is accepted.
+static BOOL mhi_stream_feed_drain_locked(struct MhiPlayer *mp) {
+	ZZ9KAudioStreamFeedDesc feed;
+	BOOL accepted = FALSE;
+
+	if(!mp || mp->session == 0 || mp->have_unfed ||
+	   mp->feeds_accepted == 0)
+		return FALSE;
+	if(mp->drain_requested)
+		return TRUE;
+	if(!zz9k_audio_build_stream_feed_desc(
+	       &feed, mp->session, 0, 0, 0,
+	       ZZ9K_AUDIO_STREAM_FEED_DRAIN) ||
+	   ZZ9KAudioStreamFeed(&feed, &mp->result) != ZZ9K_STATUS_OK ||
+	   (mp->result.flags &
+	    ZZ9K_AUDIO_STREAM_RESULT_BACKPRESSURE) != 0)
+		return FALSE;
+
+	/* QueueBuffer can run while the mailbox call blocks. Do not overwrite
+	 * its cancellation of local drain state: the queued non-empty FEED will
+	 * clear the firmware drain and then mirror that state in mhi_feed_pending. */
+	Forbid();
+	if(!mp->have_unfed) {
+		mp->drain_requested = TRUE;
+		mp->starvation_polls = 0;
+		accepted = TRUE;
+	}
+	Permit();
+	mhi_complete_consumed(mp, FALSE);
+	mhi_try_bind(mp);
+	if(accepted) {
+		KPrintF("MHI: resumable drain accepted\n");
+	}
+	return accepted;
+}
+
+static BOOL mhi_stream_status_retryable(int rc) {
+	return rc == ZZ9K_STATUS_BUSY || rc == ZZ9K_STATUS_TIMEOUT;
+}
+
+// io_lock must be held. Once every queued byte is accepted, probe the live
+// stream. Decoder consumption completes application buffers. Sustained
+// NEED_INPUT requests a resumable drain; DRAINED means decoded PCM and the
+// real AX DMA tail have retired, so public MHI may report OUT_OF_DATA while
+// remaining ready to resume. Only zzplay's explicit extension waits for DONE.
+static BOOL mhi_stream_service_drain(struct MhiPlayer *mp) {
+	int rc;
+	BOOL notify = FALSE;
+
+	if(!mp || mp->session == 0 || mp->Status != MHIF_PLAYING ||
+	   mp->have_unfed || mp->feeds_accepted == 0) {
+		if(mp) mp->starvation_polls = 0;
+		return FALSE;
+	}
+
+	if(mp->play_pending)
+		rc = ZZ9KAudioStreamRead(mp->session, 0, 0, &mp->result);
+	else
+		rc = ZZ9KAudioStreamPlay(mp->session, 0, &mp->result);
+	if(rc != ZZ9K_STATUS_OK) {
+		if(mhi_stream_status_retryable(rc))
+			return TRUE;
+		/* BAD_HANDLE/BAD_REQUEST/UNSUPPORTED/IO_ERROR/INTERNAL_ERROR and
+		 * other terminal replies cannot make progress by polling forever. */
+		Forbid();
+		if(mp->Status == MHIF_PLAYING) {
+			mp->Status = MHIF_STOPPED;
+			mp->play_pending = FALSE;
+			notify = TRUE;
+		}
+		Permit();
+		KPrintF("MHI: stream status failed (rc=%ld)\n", (LONG)rc);
+		if(notify) mhi_signal_app(mp);
+		return FALSE;
+	}
+	mhi_complete_consumed(mp, FALSE);
+
+	if(mp->eof_announced) {
+		if((mp->result.flags & ZZ9K_AUDIO_STREAM_RESULT_DONE) == 0)
+			return TRUE;
+	} else {
+		if(!mp->drain_requested) {
+			if((mp->result.flags &
+			    ZZ9K_AUDIO_STREAM_RESULT_NEED_INPUT) == 0) {
+				mp->starvation_polls = 0;
+				return TRUE;   // data/PCM still draining toward NEED_INPUT
+			}
+			if(mp->starvation_polls < ZZ_MHI_DRAIN_IDLE_POLLS)
+				mp->starvation_polls++;
+			if(mp->starvation_polls < ZZ_MHI_DRAIN_IDLE_POLLS)
+				return TRUE;
+			if(!mhi_stream_feed_drain_locked(mp))
+				return TRUE;
+		}
+		if((mp->result.flags & ZZ9K_AUDIO_STREAM_RESULT_DRAINED) == 0)
+			return TRUE;
+		mhi_complete_consumed(mp, TRUE);
+	}
+
+	Forbid();
+	if(mp->Status == MHIF_PLAYING && !mp->have_unfed) {
+		mp->Status = MHIF_OUT_OF_DATA;
+		notify = TRUE;
+	}
+	Permit();
+	if(notify) {
+		KPrintF("MHI: OUT_OF_DATA\n");
+		mhi_signal_app(mp);
+	}
+	return FALSE;
 }
 
 /* ********************* */
@@ -563,6 +794,7 @@ static void mhi_feeder(void) {
 
 	for(;;) {
 		BOOL busy = FALSE;
+		BOOL drain_busy = FALSE;
 		ULONG accepted_before = mp->feeds_accepted;
 		ULONG sigs;
 
@@ -579,8 +811,9 @@ static void mhi_feeder(void) {
 		   mp->Status == MHIF_PLAYING) {
 			mhi_feed_pending(mp);
 			mhi_try_bind(mp);
+			drain_busy = mhi_stream_service_drain(mp);
 			busy = mp->have_unfed || mp->backpressure ||
-			       mp->play_pending;
+			       mp->play_pending || drain_busy;
 		}
 		ReleaseSemaphore(&mp->io_lock);
 
@@ -653,19 +886,11 @@ out:
 
 extern ULONG dev_sisr(struct MhiPlayer *mp asm("a1"));
 ULONG cdev_sisr(struct MhiPlayer *mp asm("a1")) {
-	// Deliberately inert. The signal contract is STRICT (same as the
-	// legacy driver): the application is signalled exactly when a
-	// buffer COMPLETES, from the feed engine in task context, at real
-	// playback pace. MHI applications account playback time by those
-	// signals, so ANY extra signal -- a pacing storm or even a
-	// throttled keep-alive -- inflates their elapsed/total time
-	// display (bench: 50 Hz signals made the counter race; a ~1.3 s
-	// keep-alive still overshot a 4:06 track to 4:42). Feeding is
-	// driven entirely by the app's own entry points
-	// (GetStatus/QueueBuffer/GetEmpty all run the feed engine); the
-	// card holds enough audio to bridge normal polling gaps. The
-	// interrupt machinery itself stays installed: the ISR node on the
-	// shared server list is the MHI-vs-AHI ownership token.
+	// Deliberately inert: mailbox feed/drain calls block and therefore belong
+	// to the dedicated feeder process, which also publishes completion and
+	// OUT_OF_DATA signals at the appropriate state transitions. The interrupt
+	// machinery remains installed because its shared-server-list node is the
+	// MHI-vs-AHI ownership token.
 	return 0;
 }
 
@@ -713,12 +938,11 @@ static void install_irq_server_locked(struct MhiPlayer *mp) {
 	}
 }
 
-// Keep the HW-side audio interrupt OFF. This driver never enables it:
-// the signal contract is buffer-completion-only (see cdev_sisr), and
-// on the firmware side flipping this bit also silences/clears the TX
-// ring -- a needless dropout. The disable is kept as hygiene on
-// Stop/Pause/Free so an earlier AHI session can't leave the interrupt
-// armed while MHI owns the card.
+// Keep the HW-side audio interrupt OFF. Feed/drain progress belongs to the
+// feeder process, and on the firmware side flipping this bit also
+// silences/clears the TX ring -- a needless dropout. The disable is kept as
+// hygiene on Stop/Pause/Free so an earlier AHI session cannot leave the
+// interrupt armed while MHI owns the card.
 static void disable_hw_audio(struct MhiPlayer *mp) {
 	setRegister(mp, ZZ_REG_AUDIO_CONFIG, 0);
 }
@@ -761,13 +985,16 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 		KPrintF("Can't open zz9k.library.\n");
 		return NULL;
 	}
-	// ALLOC_FLAGS (rev 26) rather than AUDIO_PLAYBACK (rev 25): this
+	// AUDIO_STREAM_DRAIN (rev 27) subsumes ALLOC_FLAGS (rev 26): this
 	// driver passes ZZ9K_ALLOC_HOST_WINDOW/CARD_ONLY, and it is the
 	// LIBRARY that strips HOST_WINDOW on Zorro 3. An older library
 	// forwards the bit verbatim and new firmware would then place the
 	// staging buffer inside Z3 P96 VRAM -- refuse the skew instead.
-	if(base->lib_Revision < ZZ9K_LIBRARY_MIN_REVISION_ALLOC_FLAGS) {
-		KPrintF("zz9k.library too old for alloc flags.\n");
+	// Revision 27 also accepts the resumable DRAIN request flag locally;
+	// revision 26 would reject every starvation drain as BAD_REQUEST.
+	if(base->lib_Revision <
+	   ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_DRAIN) {
+		KPrintF("zz9k.library too old for audio-stream drain.\n");
 		CloseLibrary(base);
 		return NULL;
 	}
@@ -842,9 +1069,11 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 	// it must run after the claim Permit, never under Forbid.
 	{
 		ZZ9KCaps caps;
+		const ULONG required_caps =
+			ZZ9K_CAP_AUDIO_PLAYBACK | ZZ9K_CAP_AUDIO_STREAM_DRAIN;
 		if(ZZ9KQueryCaps(&caps) != ZZ9K_STATUS_OK ||
-		   !(caps.capability_bits & ZZ9K_CAP_AUDIO_PLAYBACK)) {
-			KPrintF("Firmware lacks audio-playback capability.\n");
+		   (caps.capability_bits & required_caps) != required_caps) {
+			KPrintF("Firmware lacks matched MHI drain capability.\n");
 			Forbid();
 			unclaim_ownership_locked(mp, MHI_LibBase);
 			Permit();
@@ -1024,9 +1253,13 @@ BOOL i_MHIQueueBuffer(REGA3(APTR mhi_handle), REGA0(APTR mhi_buffer), REGD0(ULON
 	struct MhiPlayer *mp = (struct MhiPlayer *)mhi_handle;
 	struct ListNode *BufferNode;
 
-	if(mp == NULL || mp->BufferList == NULL || !mhi_buffer || mhi_size == 0) {
+	if(mp == NULL || mp->BufferList == NULL) {
 		return FALSE;
 	}
+	if(mhi_size == 0)
+		return mhi_stream_eof(mp);
+	if(!mhi_buffer)
+		return FALSE;
 
 	BufferNode = AllocVec(sizeof(struct ListNode), MEMF_PUBLIC|MEMF_CLEAR);
 	if(!BufferNode) {
@@ -1038,6 +1271,8 @@ BOOL i_MHIQueueBuffer(REGA3(APTR mhi_handle), REGA0(APTR mhi_buffer), REGD0(ULON
 	BufferNode->Buffer = mhi_buffer;
 	BufferNode->Size   = mhi_size;
 	BufferNode->Index  = 0;
+	BufferNode->StreamEnd = 0;
+	BufferNode->StreamEndValid = FALSE;
 	BufferNode->Played = FALSE;
 
 	// Forbid() while linking: a feed snapshot in another task must not
@@ -1045,6 +1280,8 @@ BOOL i_MHIQueueBuffer(REGA3(APTR mhi_handle), REGA0(APTR mhi_buffer), REGD0(ULON
 	Forbid();
 	AddTail((struct List *)mp->BufferList, (struct Node *)BufferNode);
 	mp->have_unfed = TRUE;
+	mp->drain_requested = FALSE;
+	mp->starvation_polls = 0;
 	// Auto-resume: new data after a drain (GetStatus recorded
 	// MHIF_OUT_OF_DATA) returns the stream to PLAYING so the feeder --
 	// gated on PLAYING -- picks it up and the still-bound pump plays it,
@@ -1108,49 +1345,6 @@ UBYTE i_MHIGetStatus(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBa
 
 	if(!mp) return MHIF_STOPPED;
 
-	if(mp->Status == MHIF_PLAYING && mp->session != 0) {
-#ifdef ZZ_MHI_TRACE
-		static ULONG status_calls;
-		if((++status_calls & 63) == 0)
-			KPrintF("MHIGetStatus: #%lu unfed=%ld bp=%ld pend=%ld\n",
-			        status_calls, (LONG)mp->have_unfed,
-			        (LONG)mp->backpressure, (LONG)mp->play_pending);
-#endif
-		if(!mp->have_unfed && !mp->play_pending) {
-			// Everything is on the card; probe it. PLAY on the
-			// already-bound session is idempotent and returns fresh
-			// stream state: no PCM left and nothing queued means the
-			// stream has drained. (Skipped while a deferred Play is
-			// still waiting for data -- an empty new session must not
-			// read as end-of-stream.) io_lock serializes the probe
-			// with the feeder.
-			ZZ9KAudioStreamResult r;
-			UBYTE drained = FALSE;
-			ObtainSemaphore(&mp->io_lock);
-			if(mp->session != 0 && !mp->play_pending &&
-			   !mp->have_unfed &&
-			   ZZ9KAudioStreamPlay(mp->session, 0, &r) == ZZ9K_STATUS_OK &&
-			   (r.flags & ZZ9K_AUDIO_STREAM_RESULT_PCM_READY) == 0) {
-				drained = TRUE;
-			}
-			ReleaseSemaphore(&mp->io_lock);
-			if(drained) {
-				// Record the drained state, not just report it: leaving
-				// Status at PLAYING makes the MHIF_OUT_OF_DATA case in
-				// MHIPlay unreachable, so a client that restarts from the
-				// reported OUT_OF_DATA (without an explicit Stop) would
-				// hit no case at all. Guard on still-PLAYING so a Stop or
-				// Pause that raced the probe is not clobbered. A later
-				// QueueBuffer flips it back to PLAYING (auto-resume).
-				Forbid();
-				if(mp->Status == MHIF_PLAYING)
-					mp->Status = MHIF_OUT_OF_DATA;
-				Permit();
-				KPrintF("MHIGetStatus: OUT_OF_DATA\n");
-				return MHIF_OUT_OF_DATA;
-			}
-		}
-	}
 	return mp->Status;
 }
 
@@ -1306,6 +1500,8 @@ void i_MHIStop(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 	mp->transport_gen++;   // a Play blocked in session open must yield
 	drain_buffer_list_locked(mp);
 	mp->backpressure = FALSE;
+	mp->drain_requested = FALSE;
+	mp->starvation_polls = 0;
 	Permit();
 
 	if(old != MHIF_STOPPED) {
