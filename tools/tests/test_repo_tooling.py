@@ -138,8 +138,14 @@ class RepoToolingTests(unittest.TestCase):
     def test_shell_scripts_avoid_ci_shellcheck_patterns(self):
         bad_cdpath = []
         bad_path_export = []
-        for path in ROOT.rglob("*.sh"):
-            relpath = path.relative_to(ROOT).as_posix()
+        # Enumerate tracked files rather than walking the tree: CI checks the
+        # firmware repo out inside this workspace (check-cfg-keys.sh needs it),
+        # and rglob would lint that repo's scripts against this repo's rules.
+        tracked = subprocess.check_output(
+            ["git", "ls-files", "*.sh"], cwd=ROOT, text=True
+        ).splitlines()
+        for relpath in tracked:
+            path = ROOT / relpath
             text = path.read_text(encoding="utf-8")
             if "CDPATH= cd" in text:
                 bad_cdpath.append(relpath)
