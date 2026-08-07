@@ -116,7 +116,8 @@ Zorro 2.
 | SDK services | `zz9k.library` | `Libs:` | AmigaOS gateway to the SDK v2 firmware services (image/video decode, audio, compression, crypto). Built from the pinned [zz9000-sdk](https://github.com/BlitterStudio/zz9000-sdk) ref by `sdk/build.sh`. |
 | MP3 decode | `mpega.library` | `Libs:` | ARM-accelerated drop-in MPEGA replacement (from zz9000-sdk). |
 | Picture datatype | `zz9k-picture.datatype` | `SYS:Classes/DataTypes/` | Hardware-accelerated picture datatype; JPEG/PNG descriptors staged inactive in `SYS:Storage/DataTypes` (from zz9000-sdk). |
-| SDK tools | `zz9k-info`, `zz9k-services`, `zz9k-view`, `zzplay`, `zz9k-mp3`, `zz9k-cryptobench`, `zz9k-archive` | `C:` | Board/service introspection and release smoke check, plus accelerated image/video players, MP3 player, crypto-offload benchmark, and archive extractor (from zz9000-sdk). |
+| SDK tools | `zz9k-info`, `zz9k-services`, `zz9k-view`, `zz9k-mp3`, `zz9k-cryptobench`, `zz9k-archive` | `C:` | Board/service introspection and release smoke check, plus accelerated image viewer, MP3 player, crypto-offload benchmark, and archive extractor (from zz9000-sdk). |
+| ZZPlay | `ZZPlay` + `ZZPlay.info` | `SYS:Utilities` | MPEG-1 video and MP3 media player. A Workbench application with an icon rather than a CLI tool, so it installs alongside the other Workbench utilities; CLI arguments still work from a Shell (from zz9000-sdk). |
 | TLS offload | `amissl_v362.library` | `Libs:AmiSSL/` | AmiSSL 5.27 core with the ZZ9000 crypto-offload provider compiled in; accelerates supported TLS handshake and record crypto for all AmiSSL applications. Built per CPU (`68020-40` for 68020/030/040 and `68060`); the installer auto-detects the CPU and installs the matching build. Requires an existing AmiSSL 5.27 install. |
 | Installer | `ZZ9000Installer` | Release zip root | Commodore Installer drawer used for end-user deployment. |
 

@@ -39,7 +39,8 @@ installer/ZZ9000Installer/Tools/ZZDiag
 installer/ZZ9000Installer/Tools/zz9k-info
 installer/ZZ9000Installer/Tools/zz9k-services
 installer/ZZ9000Installer/Tools/zz9k-view
-installer/ZZ9000Installer/Tools/zzplay
+installer/ZZ9000Installer/Tools/ZZPlay
+installer/ZZ9000Installer/Tools/ZZPlay.info
 installer/ZZ9000Installer/Tools/zz9k-mp3
 installer/ZZ9000Installer/Tools/zz9k-cryptobench
 installer/ZZ9000Installer/Tools/zz9k-archive

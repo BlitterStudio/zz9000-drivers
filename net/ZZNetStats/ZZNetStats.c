@@ -47,8 +47,8 @@
 
 #include "zz9000_hw.h"
 
-#define ZZNETSTATS_VERSION "2.3"
-#define ZZNETSTATS_DATE    "01.07.2026"
+#define ZZNETSTATS_VERSION "2.4"
+#define ZZNETSTATS_DATE    "07.08.2026"
 
 static const char version[] __attribute__((used)) =
     "$VER: ZZNetStats " ZZNETSTATS_VERSION " (" ZZNETSTATS_DATE ")\r\n";

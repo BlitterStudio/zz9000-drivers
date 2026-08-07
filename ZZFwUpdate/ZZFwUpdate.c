@@ -37,8 +37,8 @@
 #include "fwup_client.h"
 #include "fwup_amiga.h"
 
-#define ZZFWUPDATE_VERSION "2.2"
-#define ZZFWUPDATE_DATE    "28.06.2026"
+#define ZZFWUPDATE_VERSION "2.3"
+#define ZZFWUPDATE_DATE    "07.08.2026"
 
 static const char version[] __attribute__((used)) =
     "$VER: ZZFwUpdate " ZZFWUPDATE_VERSION " (" ZZFWUPDATE_DATE ")\r\n";

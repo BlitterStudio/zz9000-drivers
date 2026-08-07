@@ -19,8 +19,8 @@
 
 #include "zz9000_hw.h"
 
-#define ZZDIAG_VERSION "1.0"
-#define ZZDIAG_DATE    "19.05.2026"
+#define ZZDIAG_VERSION "1.1"
+#define ZZDIAG_DATE    "07.08.2026"
 
 static const char version[] __attribute__((used)) =
     "$VER: ZZDiag " ZZDIAG_VERSION " (" ZZDIAG_DATE ")\r\n";

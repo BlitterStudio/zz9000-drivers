@@ -26,7 +26,7 @@
 #define FRAME_BYTES 4UL
 
 static const char version[] __attribute__((used)) =
-    "\0$VER: ZZAXDuplexTest 1.0 (28.07.2026)";
+    "\0$VER: ZZAXDuplexTest 1.1 (07.08.2026)";
 
 struct Library *AHIBase;
 

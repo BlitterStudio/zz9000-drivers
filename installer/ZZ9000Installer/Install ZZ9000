@@ -418,10 +418,18 @@
 
          (copyfiles
             (prompt "Install the ZZ9000 SDK command-line tools into C:")
-            (help "Diagnostics: zz9k-info (board/firmware details) and zz9k-services (firmware services + capability flags; zz9k-services --check-release runs the release smoke check). Feature tools: zz9k-view (ZZ9000-accelerated JPEG/PNG image viewer), zzplay (MPEG-1 P96 video player), zz9k-mp3 (ARM MP3 player), zz9k-cryptobench (crypto-offload benchmark) and zz9k-archive (accelerated archive extraction). All require zz9k.library and the SDK-service firmware.")
+            (help "Diagnostics: zz9k-info (board/firmware details) and zz9k-services (firmware services + capability flags; zz9k-services --check-release runs the release smoke check). Feature tools: zz9k-view (ZZ9000-accelerated JPEG/PNG image viewer), zz9k-mp3 (ARM MP3 player), zz9k-cryptobench (crypto-offload benchmark) and zz9k-archive (accelerated archive extraction). All require zz9k.library and the SDK-service firmware. ZZPlay is installed separately into SYS:Utilities because it is a Workbench application.")
             (source "Tools")
-            (pattern "(zz9k-#?|zzplay)")
+            (pattern "zz9k-#?")
             (dest "C:")
+            (confirm))
+
+         (copyfiles
+            (prompt "Install ZZPlay into SYS:Utilities/")
+            (help "ZZPlay is the ZZ9000 media player: MPEG-1 video through the P96 video window or a dedicated fullscreen screen, and MP3 audio through MHI or AHI. Unlike the zz9k-* command-line tools it has a Workbench interface and an icon, so it is installed into SYS:Utilities where you can double-click it. It still accepts the same CLI arguments if you prefer running it from a Shell. Requires zz9k.library and the SDK-service firmware.")
+            (source "Tools")
+            (pattern "ZZPlay#?")
+            (dest "SYS:Utilities")
             (confirm))
       )
    )

@@ -60,9 +60,13 @@ cp -R "$pkg/Storage/DataTypes/."                  "$out/Storage/DataTypes/"
 # archive).
 # The remaining SDK C/ tools are developer-oriented and ship with the SDK
 # package instead.
-for tool in zz9k-info zz9k-services zz9k-view zzplay zz9k-mp3 zz9k-cryptobench zz9k-archive; do
+for tool in zz9k-info zz9k-services zz9k-view zz9k-mp3 zz9k-cryptobench zz9k-archive; do
     cp "$pkg/C/$tool" "$out/C/"
 done
+# ZZPlay is a Workbench application, not a CLI tool: it ships capitalised and
+# with an icon, and the installer puts it in SYS:Utilities rather than C:.
+cp "$pkg/C/ZZPlay"      "$out/C/"
+cp "$pkg/C/ZZPlay.info" "$out/C/"
 
 echo ">> SDK payloads collected:"
 find "$out" -type f | sort
