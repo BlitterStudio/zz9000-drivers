@@ -37,8 +37,12 @@ and SDK stack:
 - Native `BT_MNT_ZZ9000` Picasso96 identity, RTG fixes, 1920x1080x32
   settings for Zorro III, monitor DPMS power management, and clearer
   Zorro II/Zorro III profiles.
+- The P96 video window (picture-in-picture), composited and scaled on the
+  card, which `ZZPlay` uses for MPEG-1 playback. Zorro III only; the
+  `video_overlay` config key and `ENV:ZZ9000-NO-PIP` turn it off.
 - `ZZTop` as the configuration GUI for firmware readback, FWUP
-  update/restore, and SD-card `ZZ9000.CFG` editing.
+  update/restore, and SD-card `ZZ9000.CFG` editing, sharing a Workbench
+  drawer with the SDK's `ZZPlay` media player.
 - Poseidon USB hardware driver, SD-card boot support, firmware-file
   update/restore tooling, and board/network diagnostics.
 - SDK runtime payloads (`zz9k.library`, picture datatype, `mpega.library`,
