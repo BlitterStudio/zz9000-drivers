@@ -388,7 +388,7 @@ jobs:
           # manual tells people to copy the project icon out of Docs/ - so
           # both have to be here, not just in the SDK's own package.
           install -Dm644 artifacts/sdk-payloads/Docs/zzplay.md          "$INST/Docs/zzplay.md"
-          install -Dm644 "artifacts/sdk-payloads/Docs/ZZPlay-project.info" \n                                                                       "$INST/Docs/ZZPlay-project.info"
+          install -Dm644 artifacts/sdk-payloads/Docs/ZZPlay-project.info "$INST/Docs/ZZPlay-project.info"
           # Accelerated amissl.library, per CPU (Libs/AmiSSL/<cpu>/) — laid out
           # like AmiSSL's own release so the installer installs the CPU-matched
           # build. Mirrors tools/package-local.sh.
