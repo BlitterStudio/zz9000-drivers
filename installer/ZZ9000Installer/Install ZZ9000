@@ -459,6 +459,15 @@
             (dest #zz-drawer)
             (confirm))
          (set #zz-drawer-used 1)
+
+         ; The manual goes on the machine next to the player, not just in
+         ; the installer drawer people unpack and then delete.
+         (copyfiles
+            (prompt ("Install the ZZPlay manual into %s/" #zz-drawer))
+            (help "zzplay.md documents the controls, the audio backends, fullscreen behaviour, ToolTypes and the command-line arguments. Docs/ZZPlay-project.info in this installer drawer is a project icon you can copy next to a media file so double-clicking it plays through ZZPlay.")
+            (source "Docs/zzplay.md")
+            (dest #zz-drawer)
+            (confirm))
       )
    )
 )

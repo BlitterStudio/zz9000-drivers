@@ -57,6 +57,10 @@ if [ "$quick" -eq 0 ]; then
     check_file sdk/out/C/zz9k-view
     check_file sdk/out/C/ZZPlay
     check_file sdk/out/C/ZZPlay.info
+    # ZZPlay's manual and project icon reached RC-1 only on GitHub: the
+    # release job copied sdk/README.md and nothing else out of the payload.
+    check_file sdk/out/Docs/zzplay.md
+    check_file sdk/out/Docs/ZZPlay-project.info
     check_file sdk/out/C/zz9k-mp3
     check_file sdk/out/C/zz9k-cryptobench
     check_file sdk/out/C/zz9k-archive

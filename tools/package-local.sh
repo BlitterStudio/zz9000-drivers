@@ -42,6 +42,10 @@ done
 install -Dm755 sdk/out/C/ZZPlay      "$inst/Tools/ZZPlay"
 install -Dm644 sdk/out/C/ZZPlay.info "$inst/Tools/ZZPlay.info"
 install -Dm644 sdk/README.md                    "$inst/Docs/sdk-README.md"
+# ZZPlay ships an end-user manual; the manual also tells people to copy
+# the project icon out of Docs/.
+install -Dm644 sdk/out/Docs/zzplay.md           "$inst/Docs/zzplay.md"
+install -Dm644 sdk/out/Docs/ZZPlay-project.info "$inst/Docs/ZZPlay-project.info"
 
 # Accelerated amissl.library, per CPU (optional: built by amissl/build.sh,
 # slow). Laid out exactly like AmiSSL's own release — Libs/AmiSSL/<cpu>/ — so

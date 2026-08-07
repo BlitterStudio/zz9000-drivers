@@ -49,7 +49,7 @@ fi
 pkg="$src/build/package/amigaos3"
 out="$here/out"
 rm -rf "$out"
-mkdir -p "$out/Libs" "$out/Classes/DataTypes" "$out/Storage/DataTypes" "$out/C"
+mkdir -p "$out/Libs" "$out/Classes/DataTypes" "$out/Storage/DataTypes" "$out/C" "$out/Docs"
 
 cp "$pkg/Libs/zz9k.library"                       "$out/Libs/"
 cp "$pkg/Libs/mpega.library"                      "$out/Libs/"
@@ -67,6 +67,11 @@ done
 # with an icon, and the installer puts it in SYS:Utilities rather than C:.
 cp "$pkg/C/ZZPlay"      "$out/C/"
 cp "$pkg/C/ZZPlay.info" "$out/C/"
+# ZZPlay's manual, and the project icon the manual tells people to copy next
+# to a media file. The SDK stages several developer references into Docs/ too;
+# only these two are end-user material and belong in the installer.
+cp "$pkg/Docs/zzplay.md"           "$out/Docs/"
+cp "$pkg/Docs/ZZPlay-project.info" "$out/Docs/"
 
 echo ">> SDK payloads collected:"
 find "$out" -type f | sort
