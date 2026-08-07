@@ -160,6 +160,18 @@ void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v)
             else if (zzcfg_str_eq_ci(value, "off") ||
                      zzcfg_str_eq_ci(value, "0"))
                 v->int2 = 0;
+        } else if (zzcfg_str_eq_ci(key, "offscreen_bitmaps")) {
+            if (zzcfg_str_eq_ci(value, "on") || zzcfg_str_eq_ci(value, "1"))
+                v->offscreen_bitmaps = 1;
+            else if (zzcfg_str_eq_ci(value, "off") ||
+                     zzcfg_str_eq_ci(value, "0"))
+                v->offscreen_bitmaps = 0;
+        } else if (zzcfg_str_eq_ci(key, "video_overlay")) {
+            if (zzcfg_str_eq_ci(value, "on") || zzcfg_str_eq_ci(value, "1"))
+                v->video_overlay = 1;
+            else if (zzcfg_str_eq_ci(value, "off") ||
+                     zzcfg_str_eq_ci(value, "0"))
+                v->video_overlay = 0;
         } else if (zzcfg_str_eq_ci(key, "mac")) {
             if (strlen(value) < sizeof(v->mac))
                 strcpy(v->mac, value);
@@ -195,6 +207,12 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
         "# on = drivers use INT2 instead of INT6 (replaces ENV:ZZ9K_INT2)\n"
         "int2 = %s\n"
         "\n"
+        "# Accelerated P96 off-screen bitmaps (replaces ENV:ZZ9000-NO-OFFSCREEN)\n"
+        "offscreen_bitmaps = %s\n"
+        "\n"
+        "# P96 video window / picture-in-picture (replaces ENV:ZZ9000-NO-PIP)\n"
+        "video_overlay = %s\n"
+        "\n"
         "# Ethernet MAC override (replaces ENV:ZZ9K_MAC)\n"
         "%smac = %s\n"
         "\n"
@@ -205,6 +223,8 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
         (unsigned)(v->scanline_mode & 3),
         (unsigned)(v->scanline_parity & 1),
         v->int2 ? "on" : "off",
+        v->offscreen_bitmaps ? "on" : "off",
+        v->video_overlay ? "on" : "off",
         v->mac[0] ? "" : "#", v->mac[0] ? v->mac : "68:82:F2:00:00:01",
         v->hdf[0] ? "" : "#", v->hdf[0] ? v->hdf : "zz9000.hdf");
 

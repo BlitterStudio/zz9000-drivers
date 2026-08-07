@@ -30,6 +30,12 @@ struct zzcfg_values {
     UWORD scanline_mode;     /* 0-3 */
     UWORD scanline_parity;   /* 0-1 */
     UWORD int2;              /* 0-1 */
+    /* Feature kill-switches. Both default ON in ZZ9000.card when the key is
+     * absent, so these must default to 1 here too: ZZTop writes every
+     * supported key on save, and defaulting them to 0 would silently
+     * disable accelerated paths for anyone who opens Settings. */
+    UWORD offscreen_bitmaps; /* 0-1, default 1 */
+    UWORD video_overlay;     /* 0-1, default 1 */
     char  mac[ZZCFG_MAC_CHARS + 3];
     char  hdf[ZZCFG_HDF_CHARS + 5];
 };

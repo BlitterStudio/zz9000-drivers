@@ -362,6 +362,28 @@
 
 
 ; --------------------------------------------------------------------
+; Where the ZZ9000 Workbench tools live
+; --------------------------------------------------------------------
+;
+; ZZTop and ZZPlay are the two ZZ9000 tools with a Workbench interface, so
+; they share one drawer instead of being scattered between SYS:Tools and
+; SYS:Utilities. Asked once here because either of the two sections below
+; can be chosen on its own, and both need the answer.
+
+(set #zz-drawer-parent "SYS:Utilities")
+
+(if (>= @user-level 2)
+    (set #zz-drawer-parent
+       (askdir
+          (prompt "Where should the ZZ9000 drawer be created?")
+          (help "A new drawer named ZZ9000 will be created inside the location you pick, and ZZTop and ZZPlay installed into it. Choose the parent, not the drawer itself: picking SYS:Utilities creates SYS:Utilities/ZZ9000/.\n\nThe default is SYS:Utilities, where Workbench applications normally live.")
+          (default #zz-drawer-parent))))
+
+(set #zz-drawer (tackon #zz-drawer-parent "ZZ9000"))
+(set #zz-drawer-used 0)
+
+
+; --------------------------------------------------------------------
 ; SDK runtime (zz9k.library, accelerated mpega.library, picture datatype)
 ; --------------------------------------------------------------------
 
@@ -418,19 +440,25 @@
 
          (copyfiles
             (prompt "Install the ZZ9000 SDK command-line tools into C:")
-            (help "Diagnostics: zz9k-info (board/firmware details) and zz9k-services (firmware services + capability flags; zz9k-services --check-release runs the release smoke check). Feature tools: zz9k-view (ZZ9000-accelerated JPEG/PNG image viewer), zz9k-mp3 (ARM MP3 player), zz9k-cryptobench (crypto-offload benchmark) and zz9k-archive (accelerated archive extraction). All require zz9k.library and the SDK-service firmware. ZZPlay is installed separately into SYS:Utilities because it is a Workbench application.")
+            (help "Diagnostics: zz9k-info (board/firmware details) and zz9k-services (firmware services + capability flags; zz9k-services --check-release runs the release smoke check). Feature tools: zz9k-view (ZZ9000-accelerated JPEG/PNG image viewer), zz9k-mp3 (ARM MP3 player), zz9k-cryptobench (crypto-offload benchmark) and zz9k-archive (accelerated archive extraction). All require zz9k.library and the SDK-service firmware. ZZPlay is installed separately into the ZZ9000 drawer because it is a Workbench application.")
             (source "Tools")
             (pattern "zz9k-#?")
             (dest "C:")
             (confirm))
 
+         ; (infos) gives the new drawer the system default drawer icon, so
+         ; it matches whatever icon set is installed rather than shipping a
+         ; ZZ9000-branded one that would clash with MagicWB or NewIcons.
+         (makedir #zz-drawer (infos))
+
          (copyfiles
-            (prompt "Install ZZPlay into SYS:Utilities/")
-            (help "ZZPlay is the ZZ9000 media player: MPEG-1 video through the P96 video window or a dedicated fullscreen screen, and MP3 audio through MHI or AHI. Unlike the zz9k-* command-line tools it has a Workbench interface and an icon, so it is installed into SYS:Utilities where you can double-click it. It still accepts the same CLI arguments if you prefer running it from a Shell. Requires zz9k.library and the SDK-service firmware.")
+            (prompt ("Install ZZPlay into %s/" #zz-drawer))
+            (help "ZZPlay is the ZZ9000 media player: MPEG-1 video through the P96 video window or a dedicated fullscreen screen, and MP3 audio through MHI or AHI. Unlike the zz9k-* command-line tools it has a Workbench interface and an icon, so it goes in the ZZ9000 drawer with ZZTop where you can double-click it. It still accepts the same CLI arguments if you prefer running it from a Shell. Requires zz9k.library and the SDK-service firmware.")
             (source "Tools")
             (pattern "ZZPlay#?")
-            (dest "SYS:Utilities")
+            (dest #zz-drawer)
             (confirm))
+         (set #zz-drawer-used 1)
       )
    )
 )
@@ -496,15 +524,28 @@
 ; --------------------------------------------------------------------
 
 (if (askbool (prompt "Install the ZZ9000 command-line utilities and ZZTop configuration GUI?")
-             (help "Installs ZZTop (configuration GUI) to SYS:Tools/, and the ZZScanlines, ZZFwUpdate, ZZNetStats and ZZDiag CLI tools to C:."))
+             (help "Installs ZZTop (configuration GUI) into the ZZ9000 drawer alongside ZZPlay, and the ZZScanlines, ZZFwUpdate, ZZNetStats and ZZDiag CLI tools to C:."))
    (
+      ; Repeated from the ZZPlay section: either can be chosen on its own.
+      (makedir #zz-drawer (infos))
+
       (copyfiles
-         (prompt "Install ZZTop into SYS:Tools/")
+         (prompt ("Install ZZTop into %s/" #zz-drawer))
          (help "Configuration GUI - resolution, scanlines, hardware toggles, and firmware status readback.")
          (source "Tools/ZZTop")
          (infos)
-         (dest "SYS:Tools")
+         (dest #zz-drawer)
          (confirm))
+      (set #zz-drawer-used 1)
+
+      ; Earlier releases put ZZTop in SYS:Tools/. Offer to remove that copy,
+      ; otherwise an upgrade silently leaves two ZZTops on the system and the
+      ; older one keeps working from the old location.
+      (if (exists "SYS:Tools/ZZTop")
+          (delete "SYS:Tools/ZZTop"
+             (prompt ("Remove the old SYS:Tools/ZZTop? It has moved to %s/." #zz-drawer))
+             (help "Previous ZZ9000 releases installed ZZTop into SYS:Tools. Leaving it there means you have two copies and the stale one will not match this release.")
+             (infos)))
 
       (copyfiles
          (prompt "Install ZZScanlines into C:")
@@ -535,6 +576,27 @@
          (confirm))
    )
 )
+
+; --------------------------------------------------------------------
+; Command path for the ZZ9000 drawer
+; --------------------------------------------------------------------
+;
+; The default AmigaOS path covers SYS:Utilities and SYS:Tools, but path
+; entries are not recursive, so a drawer inside them is not searched.
+; ZZTop used to be reachable from a Shell and ZZPlay has a real CLI
+; (ZZPlay --fps file.mpg), so offer to put the drawer back on the path.
+; (startup) writes a named ;BEGIN/;END ZZ9000 block into S:User-Startup,
+; which re-running the installer replaces instead of duplicating.
+
+(if #zz-drawer-used
+    (if (askbool
+           (prompt ("Add %s to the command path?" #zz-drawer))
+           (help ("ZZTop and ZZPlay were installed into %s. Workbench can start them by double-clicking either way, but a Shell will not find them by name unless that drawer is on the command path - path entries do not search sub-drawers.\n\nAnswering yes adds a Path command to S:User-Startup. It takes effect for Shells opened after the next reboot.\n\nAnswer no if you prefer to manage your own path, or only ever launch them from Workbench." #zz-drawer))
+           (default 1))
+        (startup "ZZ9000"
+           (prompt ("Add %s to the command path in S:User-Startup" #zz-drawer))
+           (help "Appends a Path ... ADD command inside a ;BEGIN ZZ9000 / ;END ZZ9000 block, so it can be found and removed later, and re-running this installer updates it in place.")
+           (command ("Path %s ADD" #zz-drawer)))))
 
 (complete 100)
 

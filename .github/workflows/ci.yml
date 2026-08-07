@@ -41,11 +41,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      # ZZTop rewrites ZZ9000.CFG from the keys it knows, so it has to know
+      # every key the firmware parses. check-cfg-keys.sh compares the two
+      # repos; without this checkout it would skip silently.
+      - name: Checkout firmware (for its ZZ9000.CFG key set)
+        uses: actions/checkout@v6
+        with:
+          repository: BlitterStudio/zz9000-firmware
+          path: zz9000-firmware
+          fetch-depth: 1
       - name: Run host-side tests and repository checks
+        env:
+          ZZ9K_FIRMWARE_DIR: ${{ github.workspace }}/zz9000-firmware
         run: |
           make rtg-tests
           make -C common/tests test
           python3 -m unittest tools/tests/test_repo_tooling.py
+          tools/check-cfg-keys.sh "$ZZ9K_FIRMWARE_DIR"
           tools/check-quality.sh
           tools/check-release.sh --quick
 

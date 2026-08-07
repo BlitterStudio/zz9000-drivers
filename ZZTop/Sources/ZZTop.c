@@ -72,14 +72,18 @@ static const char version[] __attribute__((used)) =
 #define SGAD_INT2          (4)
 #define SGAD_MAC           (5)
 #define SGAD_HDF           (6)
-#define SGAD_CFG_STATUS    (7)
-#define SGAD_BTN_SAVE      (8)
-#define SGAD_BTN_RELOAD    (9)
-#define SGAD_COUNT         (10)
+#define SGAD_OFFSCREEN     (7)
+#define SGAD_OVERLAY       (8)
+#define SGAD_CFG_STATUS    (9)
+#define SGAD_BTN_SAVE      (10)
+#define SGAD_BTN_RELOAD    (11)
+#define SGAD_COUNT         (12)
 
 /* Project menu userdata values. */
 #define MENU_ID_SETTINGS   (1)
 #define MENU_ID_QUIT       (2)
+#define MENU_ID_FWUPDATE   (3)
+#define MENU_ID_FWRESTORE  (4)
 
 #define LABEL_ZORROVER     "Zorro Version"
 #define LABEL_FWVER        "Firmware ABI"
@@ -98,6 +102,8 @@ static const char version[] __attribute__((used)) =
 #define LABEL_VCAPMODE     "Native Video"
 #define LABEL_NSVSYNC      "Exact Refresh"
 #define LABEL_INT2         "Interrupt"
+#define LABEL_OFFSCREEN    "Offscreen BMs"
+#define LABEL_OVERLAY      "Video overlay"
 #define LABEL_MAC          "MAC Address"
 #define LABEL_HDF          "SD HDF Image"
 #define LABEL_BTN_SAVE     "Save"
@@ -269,6 +275,12 @@ static struct NewMenu zztop_newmenus[] = {
 	{ NM_TITLE, (STRPTR)"Project",     NULL, 0, 0, NULL },
 	{ NM_ITEM,  (STRPTR)"Settings...", (STRPTR)"S", 0, 0, (APTR)MENU_ID_SETTINGS },
 	{ NM_ITEM,  NM_BARLABEL,           NULL, 0, 0, NULL },
+	/* Also on buttons near the bottom of the window. Duplicated here so
+	 * they stay reachable on a short screen (PAL HighRes) where the
+	 * button row can be below the visible area. */
+	{ NM_ITEM,  (STRPTR)"Update Firmware...", (STRPTR)"U", 0, 0, (APTR)MENU_ID_FWUPDATE },
+	{ NM_ITEM,  (STRPTR)"Restore Backup...",  (STRPTR)"R", 0, 0, (APTR)MENU_ID_FWRESTORE },
+	{ NM_ITEM,  NM_BARLABEL,           NULL, 0, 0, NULL },
 	{ NM_ITEM,  (STRPTR)"Quit",        (STRPTR)"Q", 0, 0, (APTR)MENU_ID_QUIT },
 	{ NM_END,   NULL,                  NULL, 0, 0, NULL }
 };
@@ -320,6 +332,64 @@ static void zztop_set_text_display(struct Window *win, UWORD gadget_id, const ch
 		TAG_END);
 }
 
+/* Height a window may occupy on this screen, excluding its own title bar.
+ * WA_InnerHeight is measured below that bar, so the comparison has to be
+ * against the same thing the caller passes. */
+static WORD zztop_usable_height(struct Screen *screen)
+{
+	WORD h = screen ? screen->Height : 256;
+	WORD bar = screen ? (WORD)(screen->BarHeight + 1) : 11;
+
+	return (WORD)(h - bar);
+}
+
+/* All the vertical spacing in one place, in two flavours. `compact` keeps
+ * gadget_height (GadTools needs it for a usable cycle/string gadget) and
+ * takes the reduction out of the padding between things. */
+static void zztop_set_vertical_metrics(struct ZZTopLayout *layout, WORD font_y,
+	BOOL compact)
+{
+	layout->margin_y = compact
+		? zztop_max_word(6, font_y - 2)
+		: zztop_max_word(20, font_y + 12);
+	layout->gadget_height = zztop_max_word(14, font_y + 6);
+	layout->row_step = layout->gadget_height + (compact
+		? zztop_max_word(2, font_y / 4)
+		: zztop_max_word(6, font_y / 2));
+	layout->section_gap = compact
+		? zztop_max_word(2, font_y / 4)
+		: zztop_max_word(5, font_y / 2);
+	layout->slider_step = layout->gadget_height + font_y + (compact
+		? zztop_max_word(6, font_y / 2)
+		: zztop_max_word(13, (font_y / 2) + 8));
+	layout->control_step = layout->row_step + layout->section_gap;
+}
+
+/* Walk the main window's rows and derive its height. Split out so the
+ * compact retry can re-run it without duplicating the row list. */
+static void zztop_place_rows(struct ZZTopLayout *layout)
+{
+	WORD y = layout->topborder + layout->margin_y;
+
+	y += layout->row_step * 10;
+	y += layout->section_gap;
+	y += layout->slider_step;
+	y += layout->control_step;
+	y += layout->section_gap;
+	y += layout->row_step;
+	y += layout->section_gap;
+	layout->button_top = y;
+	/* Second button row (firmware update/restore) + a status line below it. */
+	layout->fw_button_top = layout->button_top + layout->row_step;
+	layout->fw_status_top = layout->fw_button_top + layout->row_step;
+	/* Gadget coordinates are window-relative and start below the title
+	 * bar, so the content spans topborder..bottom. This value is passed as
+	 * WA_InnerHeight, which excludes that bar - leaving topborder in would
+	 * add exactly that much dead space under the last row. */
+	layout->window_height = layout->fw_status_top + layout->gadget_height
+		+ (layout->margin_y / 2) - layout->topborder;
+}
+
 static void zztop_init_layout(struct ZZTopLayout *layout, struct Screen *screen)
 {
 	struct RastPort *rp = screen ? &screen->RastPort : NULL;
@@ -332,7 +402,6 @@ static void zztop_init_layout(struct ZZTopLayout *layout, struct Screen *screen)
 	WORD text_padding;
 	WORD button_gap;
 	WORD button_window_width;
-	WORD y;
 
 	if (font_x < 1) font_x = 8;
 	if (font_y < 1) font_y = 8;
@@ -340,13 +409,8 @@ static void zztop_init_layout(struct ZZTopLayout *layout, struct Screen *screen)
 	layout->text_attr = text_attr;
 	layout->topborder = screen ? (UWORD)(screen->WBorTop + font_y + 1) : (UWORD)(font_y + 2);
 	layout->margin_x = zztop_max_word(20, font_x * 2 + 4);
-	layout->margin_y = zztop_max_word(20, font_y + 12);
 	layout->label_gap = zztop_max_word(16, font_x * 2);
-	layout->gadget_height = zztop_max_word(14, font_y + 6);
-	layout->row_step = layout->gadget_height + zztop_max_word(6, font_y / 2);
-	layout->section_gap = zztop_max_word(5, font_y / 2);
-	layout->slider_step = layout->gadget_height + font_y + zztop_max_word(13, (font_y / 2) + 8);
-	layout->control_step = layout->row_step + layout->section_gap;
+	zztop_set_vertical_metrics(layout, font_y, FALSE);
 
 	text_padding = zztop_max_word(32, font_x * 4);
 	label_width = zztop_max_text_width(rp, zztop_label_samples, font_x);
@@ -367,19 +431,17 @@ static void zztop_init_layout(struct ZZTopLayout *layout, struct Screen *screen)
 		layout->gadget_left + layout->gadget_width + layout->margin_x,
 		button_window_width);
 
-	y = layout->topborder + layout->margin_y;
-	y += layout->row_step * 10;
-	y += layout->section_gap;
-	y += layout->slider_step;
-	y += layout->control_step;
-	y += layout->section_gap;
-	y += layout->row_step;
-	y += layout->section_gap;
-	layout->button_top = y;
-	/* Second button row (firmware update/restore) + a status line below it. */
-	layout->fw_button_top = layout->button_top + layout->row_step;
-	layout->fw_status_top = layout->fw_button_top + layout->row_step;
-	layout->window_height = layout->fw_status_top + layout->gadget_height + (layout->margin_y / 2);
+	zztop_place_rows(layout);
+
+	/* PAL HighRes (640x256) is a real target: it is what you get with no
+	 * startup-sequence, or when the RTG driver has not come up. The roomy
+	 * spacing above does not fit there, so fall back to compact metrics
+	 * rather than opening a window taller than the screen. Large screens
+	 * keep the comfortable layout. */
+	if (screen && layout->window_height > zztop_usable_height(screen)) {
+		zztop_set_vertical_metrics(layout, font_y, TRUE);
+		zztop_place_rows(layout);
+	}
 }
 
 void errorMessage(const char* error)
@@ -791,6 +853,14 @@ static STRPTR nsvsync_labels[] = {
 	NULL
 };
 
+/* Feature kill-switches: index == the config value, so 1 is enabled -
+ * which is also what ZZ9000.card assumes when the key is absent. */
+static STRPTR enable_labels[] = {
+	(STRPTR)"Disabled",
+	(STRPTR)"Enabled",
+	NULL
+};
+
 /* Explicit INT6/INT2 choice: index == the config `int2` value. */
 static STRPTR interrupt_labels[] = {
 	(STRPTR)"INT6 (default)",
@@ -815,6 +885,8 @@ static CONST_STRPTR settings_label_samples[] = {
 	(CONST_STRPTR)LABEL_INT2,
 	(CONST_STRPTR)LABEL_MAC,
 	(CONST_STRPTR)LABEL_HDF,
+	(CONST_STRPTR)LABEL_OFFSCREEN,
+	(CONST_STRPTR)LABEL_OVERLAY,
 	NULL
 };
 
@@ -977,6 +1049,12 @@ static void settings_populate(struct Window *win)
 	memset(sv, 0, sizeof(*sv));
 	sv->scanline_mode = zz_get_scanline_mode();
 	sv->scanline_parity = zz_get_scanline_parity();
+	/* ZZ9000.card enables both of these when the key is absent, so the
+	 * editor must default to on as well. Save writes every supported key,
+	 * so a zeroed default here would disable off-screen bitmaps and PIP
+	 * for anyone who merely opened the window and pressed Save. */
+	sv->offscreen_bitmaps = 1;
+	sv->video_overlay = 1;
 
 	if (settings_have_cfg) {
 		int env_active;
@@ -1035,6 +1113,10 @@ static void settings_populate(struct Window *win)
 		GTST_String, sv->mac, TAG_END);
 	GT_SetGadgetAttrs(sgads[SGAD_HDF], win, NULL,
 		GTST_String, sv->hdf, TAG_END);
+	GT_SetGadgetAttrs(sgads[SGAD_OFFSCREEN], win, NULL,
+		GTCY_Active, sv->offscreen_bitmaps ? 1 : 0, TAG_END);
+	GT_SetGadgetAttrs(sgads[SGAD_OVERLAY], win, NULL,
+		GTCY_Active, sv->video_overlay ? 1 : 0, TAG_END);
 	settings_set_status(win, settings_status_buf);
 }
 
@@ -1177,6 +1259,20 @@ static struct Gadget *settings_create_gadgets(struct Gadget **glistptr,
 	ng.ng_GadgetText = (STRPTR)LABEL_HDF;
 	sgads[SGAD_HDF] = gad = CreateGadget(STRING_KIND, gad, &ng,
 		GTST_MaxChars, ZZCFG_HDF_CHARS + 1, GTST_String, "", TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge    = y;
+	ng.ng_GadgetID   = SGAD_OFFSCREEN;
+	ng.ng_GadgetText = (STRPTR)LABEL_OFFSCREEN;
+	sgads[SGAD_OFFSCREEN] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+		GTCY_Labels, enable_labels, GTCY_Active, 1, TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge    = y;
+	ng.ng_GadgetID   = SGAD_OVERLAY;
+	ng.ng_GadgetText = (STRPTR)LABEL_OVERLAY;
+	sgads[SGAD_OVERLAY] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+		GTCY_Labels, enable_labels, GTCY_Active, 1, TAG_END);
 	y += l.row_step + l.section_gap;
 
 	/* The status line spans the whole row (no side label) so messages
@@ -1207,7 +1303,9 @@ static struct Gadget *settings_create_gadgets(struct Gadget **glistptr,
 
 	*out_w = zztop_max_word(content_right + l.margin_x,
 		l.margin_x + button_width + button_gap + button_width + l.margin_x);
-	*out_h = y + l.gadget_height + (l.margin_y / 2);
+	/* Same WA_InnerHeight convention as the main window: gadget positions
+	 * include the title bar, the inner height does not. */
+	*out_h = y + l.gadget_height + (l.margin_y / 2) - l.topborder;
 
 	for (i = 0; i < SGAD_COUNT; i++) {
 		if (!sgads[i]) return NULL;
@@ -1262,7 +1360,8 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 		 * needs the config-file interface is greyed out. */
 		static const UWORD cfg_only_gadgets[] = {
 			SGAD_VIDEOCAP, SGAD_NSVSYNC, SGAD_INT2,
-			SGAD_MAC, SGAD_HDF, SGAD_BTN_SAVE, SGAD_BTN_RELOAD
+			SGAD_MAC, SGAD_HDF, SGAD_OFFSCREEN, SGAD_OVERLAY,
+			SGAD_BTN_SAVE, SGAD_BTN_RELOAD
 		};
 		size_t i;
 		for (i = 0; i < sizeof(cfg_only_gadgets) / sizeof(cfg_only_gadgets[0]); i++) {
@@ -1303,6 +1402,12 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 							break;
 						case SGAD_INT2:
 							settings_vals.int2 = imsgCode;
+							break;
+						case SGAD_OFFSCREEN:
+							settings_vals.offscreen_bitmaps = imsgCode;
+							break;
+						case SGAD_OVERLAY:
+							settings_vals.video_overlay = imsgCode;
 							break;
 						case SGAD_BTN_SAVE:
 							settings_save(win);
@@ -1596,6 +1701,12 @@ VOID process_window_events(struct Window *mywin)
 						switch ((ULONG)GTMENUITEM_USERDATA(item)) {
 							case MENU_ID_SETTINGS:
 								settings_window(zztop_screen, zztop_vi, &zztop_layout);
+								break;
+							case MENU_ID_FWUPDATE:
+								do_fw_update(mywin);
+								break;
+							case MENU_ID_FWRESTORE:
+								do_fw_restore(mywin);
 								break;
 							case MENU_ID_QUIT:
 								terminated = TRUE;

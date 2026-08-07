@@ -11,7 +11,7 @@ their headers, test suite, and hardware smoke procedures are):
 | `zz9k-picture.datatype` | `Classes/DataTypes/` | Hardware-accelerated picture datatype; JPEG/PNG descriptors are staged inactive under `Storage/DataTypes` for explicit opt-in. |
 | `zz9k-info`, `zz9k-services` | `C:` | Board/service diagnostics. |
 | `zz9k-view`, `zz9k-mp3`, `zz9k-cryptobench`, `zz9k-archive` | `C:` | Feature tools: accelerated image viewer, MP3 player, crypto-offload benchmark, and archive extractor/tester with LHA/LZH offload where firmware supports it. |
-| `ZZPlay` (+ `ZZPlay.info`) | `SYS:Utilities` | MPEG-1/P96 video and MP3 media player. Ships capitalised and with a Workbench icon, so it installs as a Workbench application rather than a CLI tool. |
+| `ZZPlay` (+ `ZZPlay.info`) | `SYS:Utilities/ZZ9000/` | MPEG-1/P96 video and MP3 media player. Ships capitalised and with a Workbench icon, so it installs as a Workbench application rather than a CLI tool, sharing the ZZ9000 drawer with ZZTop. |
 
 `build.sh` pulls the SDK at the commit pinned in `SDK_REF` (or uses a
 `ZZ9000_SDK`/sibling checkout), drives the SDK's own Docker build and package
