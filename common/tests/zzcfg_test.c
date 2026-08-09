@@ -23,8 +23,9 @@ static void check(int cond, const char *what)
 
 /* Every key the firmware's zz_config.c parses, post-v2.8. */
 static const char *firmware_keys[] = {
-    "videocap_mode", "nonstandard_vsync", "scanline_mode", "scanline_parity",
-    "int2", "mac", "offscreen_bitmaps", "video_overlay", "hdf", NULL
+    "videocap_mode", "videocap_sample", "nonstandard_vsync",
+    "scanline_mode", "scanline_parity", "int2", "mac",
+    "offscreen_bitmaps", "video_overlay", "hdf", NULL
 };
 
 static void defaults(struct zzcfg_values *v)
@@ -60,7 +61,8 @@ int main(void)
 
     /* 3. non-default values survive generate -> parse */
     defaults(&a);
-    a.videocap_pal = 1; a.vsync = 2; a.scanline_mode = 3;
+    a.videocap_pal = 1; a.videocap_sample = 2;
+    a.vsync = 2; a.scanline_mode = 3;
     a.scanline_parity = 1; a.int2 = 1;
     a.offscreen_bitmaps = 0; a.video_overlay = 0;
     strcpy(a.mac, "68:82:F2:12:34:56");
@@ -71,6 +73,7 @@ int main(void)
     zzcfg_parse_text(text, n, &b);
 
     check(b.videocap_pal == 1, "videocap_pal round-trips");
+    check(b.videocap_sample == 2, "videocap_sample=odd round-trips");
     check(b.vsync == 2, "vsync round-trips");
     check(b.scanline_mode == 3, "scanline_mode round-trips");
     check(b.scanline_parity == 1, "scanline_parity round-trips");
@@ -89,7 +92,21 @@ int main(void)
     check(b.offscreen_bitmaps == 1, "offscreen_bitmaps=on round-trips");
     check(b.video_overlay == 1, "video_overlay=on round-trips");
 
-    /* 5. a file that still contains the retired key parses without
+    /* 5. all capture sample spellings parse, case-insensitively, and an
+     * invalid value leaves the previous selection untouched. */
+    defaults(&b);
+    b.videocap_sample = 2;
+    {
+        const char *samples =
+            "videocap_sample = average\n"
+            "videocap_sample = ODD\n"
+            "videocap_sample = EvEn\n"
+            "videocap_sample = sideways\n";
+        zzcfg_parse_text(samples, (UWORD)strlen(samples), &b);
+    }
+    check(b.videocap_sample == 1, "videocap_sample values parse safely");
+
+    /* 6. a file that still contains the retired key parses without
      * disturbing anything else */
     defaults(&b);
     {

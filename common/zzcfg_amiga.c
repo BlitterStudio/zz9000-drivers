@@ -143,6 +143,13 @@ void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v)
                 v->videocap_pal = 1;
             else if (zzcfg_str_eq_ci(value, "800x600"))
                 v->videocap_pal = 0;
+        } else if (zzcfg_str_eq_ci(key, "videocap_sample")) {
+            if (zzcfg_str_eq_ci(value, "average"))
+                v->videocap_sample = 0;
+            else if (zzcfg_str_eq_ci(value, "even"))
+                v->videocap_sample = 1;
+            else if (zzcfg_str_eq_ci(value, "odd"))
+                v->videocap_sample = 2;
         } else if (zzcfg_str_eq_ci(key, "nonstandard_vsync")) {
             if (zzcfg_str_eq_ci(value, "off")) v->vsync = 0;
             else if (zzcfg_str_eq_ci(value, "pal") ||
@@ -184,7 +191,9 @@ void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v)
 
 UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
 {
+    static const char *sample_names[] = { "average", "even", "odd" };
     static const char *vsync_names[] = { "off", "pal", "ntsc" };
+    UWORD sample = (v->videocap_sample <= 2) ? v->videocap_sample : 0;
     UWORD vsync = (v->vsync <= 2) ? v->vsync : 0;
     int n;
 
@@ -196,6 +205,9 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
         "\n"
         "# HDMI output for Amiga native video: 800x600 or pal (720x576 50Hz)\n"
         "videocap_mode = %s\n"
+        "\n"
+        "# Native capture sampling: average (default), even or odd\n"
+        "videocap_sample = %s\n"
         "\n"
         "# Match the exact Amiga chipset refresh rate: off, pal or ntsc\n"
         "nonstandard_vsync = %s\n"
@@ -219,6 +231,7 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
         "# SD-card boot HDF image in the root of the card (default zz9000.hdf)\n"
         "%shdf = %s\n",
         v->videocap_pal ? "pal" : "800x600",
+        sample_names[sample],
         vsync_names[vsync],
         (unsigned)(v->scanline_mode & 3),
         (unsigned)(v->scanline_parity & 1),

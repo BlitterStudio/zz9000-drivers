@@ -37,8 +37,8 @@
 #include "fwup_amiga.h"
 #include "zzcfg_amiga.h"
 
-#define ZZTOP_RELEASE "2.4"
-#define ZZTOP_DATE    "07.08.2026"
+#define ZZTOP_RELEASE "2.5"
+#define ZZTOP_DATE    "09.08.2026"
 
 static const char version[] __attribute__((used)) =
 	"$VER: ZZTop " ZZTOP_RELEASE " (" ZZTOP_DATE ")\r\n";
@@ -74,10 +74,11 @@ static const char version[] __attribute__((used)) =
 #define SGAD_HDF           (6)
 #define SGAD_OFFSCREEN     (7)
 #define SGAD_OVERLAY       (8)
-#define SGAD_CFG_STATUS    (9)
-#define SGAD_BTN_SAVE      (10)
-#define SGAD_BTN_RELOAD    (11)
-#define SGAD_COUNT         (12)
+#define SGAD_VCAP_SAMPLE   (9)
+#define SGAD_CFG_STATUS    (10)
+#define SGAD_BTN_SAVE      (11)
+#define SGAD_BTN_RELOAD    (12)
+#define SGAD_COUNT         (13)
 
 /* Project menu userdata values. */
 #define MENU_ID_SETTINGS   (1)
@@ -100,6 +101,7 @@ static const char version[] __attribute__((used)) =
 #define LABEL_PARITY       "Parity"
 #define LABEL_REFRESHMODE  "Auto Refresh"
 #define LABEL_VCAPMODE     "Native Video"
+#define LABEL_VCAP_SAMPLE  "Capture Sample"
 #define LABEL_NSVSYNC      "Exact Refresh"
 #define LABEL_INT2         "Interrupt"
 #define LABEL_OFFSCREEN    "Offscreen BMs"
@@ -846,6 +848,13 @@ static STRPTR vcapmode_labels[] = {
 	NULL
 };
 
+static STRPTR vcapsample_labels[] = {
+	(STRPTR)"Average",
+	(STRPTR)"Even",
+	(STRPTR)"Odd",
+	NULL
+};
+
 static STRPTR nsvsync_labels[] = {
 	(STRPTR)"Off",
 	(STRPTR)"PAL ~49.92Hz",
@@ -879,6 +888,7 @@ static BOOL settings_have_cfg;
 
 static CONST_STRPTR settings_label_samples[] = {
 	(CONST_STRPTR)LABEL_VCAPMODE,
+	(CONST_STRPTR)LABEL_VCAP_SAMPLE,
 	(CONST_STRPTR)LABEL_NSVSYNC,
 	(CONST_STRPTR)LABEL_SCANLINES,
 	(CONST_STRPTR)LABEL_PARITY,
@@ -1101,6 +1111,8 @@ static void settings_populate(struct Window *win)
 
 	GT_SetGadgetAttrs(sgads[SGAD_VIDEOCAP], win, NULL,
 		GTCY_Active, sv->videocap_pal, TAG_END);
+	GT_SetGadgetAttrs(sgads[SGAD_VCAP_SAMPLE], win, NULL,
+		GTCY_Active, sv->videocap_sample, TAG_END);
 	GT_SetGadgetAttrs(sgads[SGAD_NSVSYNC], win, NULL,
 		GTCY_Active, sv->vsync, TAG_END);
 	GT_SetGadgetAttrs(sgads[SGAD_SCANMODE], win, NULL,
@@ -1215,6 +1227,13 @@ static struct Gadget *settings_create_gadgets(struct Gadget **glistptr,
 	ng.ng_GadgetText = (STRPTR)LABEL_VCAPMODE;
 	sgads[SGAD_VIDEOCAP] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
 		GTCY_Labels, vcapmode_labels, GTCY_Active, 0, TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge    = y;
+	ng.ng_GadgetID   = SGAD_VCAP_SAMPLE;
+	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_SAMPLE;
+	sgads[SGAD_VCAP_SAMPLE] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+		GTCY_Labels, vcapsample_labels, GTCY_Active, 0, TAG_END);
 	y += l.row_step;
 
 	ng.ng_TopEdge    = y;
@@ -1359,7 +1378,7 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 		 * (they were on the main window before); everything that
 		 * needs the config-file interface is greyed out. */
 		static const UWORD cfg_only_gadgets[] = {
-			SGAD_VIDEOCAP, SGAD_NSVSYNC, SGAD_INT2,
+			SGAD_VIDEOCAP, SGAD_VCAP_SAMPLE, SGAD_NSVSYNC, SGAD_INT2,
 			SGAD_MAC, SGAD_HDF, SGAD_OFFSCREEN, SGAD_OVERLAY,
 			SGAD_BTN_SAVE, SGAD_BTN_RELOAD
 		};
@@ -1387,6 +1406,9 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 					switch (gad->GadgetID) {
 						case SGAD_VIDEOCAP:
 							settings_vals.videocap_pal = imsgCode;
+							break;
+						case SGAD_VCAP_SAMPLE:
+							settings_vals.videocap_sample = imsgCode;
 							break;
 						case SGAD_NSVSYNC:
 							settings_vals.vsync = imsgCode;

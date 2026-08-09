@@ -26,6 +26,7 @@
  * commented-out example line. */
 struct zzcfg_values {
     UWORD videocap_pal;      /* 0 = 800x600 60Hz, 1 = PAL 720x576 50Hz */
+    UWORD videocap_sample;   /* 0 = average, 1 = even, 2 = odd */
     UWORD vsync;             /* 0 = off, 1 = pal, 2 = ntsc */
     UWORD scanline_mode;     /* 0-3 */
     UWORD scanline_parity;   /* 0-1 */
