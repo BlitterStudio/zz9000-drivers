@@ -20,20 +20,30 @@
 #define ZZCFG_MAX_SIZE   4096
 #define ZZCFG_MAC_CHARS  17          /* aa:bb:cc:dd:ee:ff */
 #define ZZCFG_HDF_CHARS  63
-#define ZZCFG_VIDEOCAP_FULL_DEFAULT 1
 #define ZZCFG_VIDEOCAP_CROP_H_DEFAULT 188
 #define ZZCFG_VIDEOCAP_CROP_V_DEFAULT 26
+
+enum zzcfg_videocap_profile {
+    ZZCFG_VCAP_FULL_60 = 0,
+    ZZCFG_VCAP_FULL_EXACT,
+    ZZCFG_VCAP_FILTERED_60,
+    ZZCFG_VCAP_FILTERED_PAL,
+    ZZCFG_VCAP_FILTERED_PAL_EXACT,
+    ZZCFG_VCAP_FILTERED_NTSC_EXACT,
+    ZZCFG_VCAP_PROFILE_COUNT
+};
 
 /* Everything ZZTop's Settings window edits. mac/hdf are C strings;
  * an empty string means "not configured" and is emitted as a
  * commented-out example line. */
 struct zzcfg_values {
-    UWORD videocap_pal;      /* 0 = 800x600 60Hz, 1 = PAL 720x576 50Hz */
+    UWORD videocap_profile;  /* enum zzcfg_videocap_profile */
     UWORD videocap_sample;   /* 0 = average, 1 = even, 2 = odd */
-    UWORD videocap_full;     /* 0 = filtered legacy width, 1 = 1280-wide */
     UWORD videocap_crop_h;   /* 0-4095, 28 MHz samples */
     UWORD videocap_crop_v;   /* 0-4095, captured lines */
-    UWORD vsync;             /* 0 = off, 1 = pal, 2 = ntsc */
+    /* Firmware 2.9+ accepts the atomic profile key. ZZTop sets this from
+     * the live ABI; older firmware gets an equivalent legacy key trio. */
+    UWORD use_videocap_profile_key;
     UWORD scanline_mode;     /* 0-3 */
     UWORD scanline_parity;   /* 0-1 */
     UWORD int2;              /* 0-1 */
@@ -46,6 +56,11 @@ struct zzcfg_values {
     char  mac[ZZCFG_MAC_CHARS + 3];
     char  hdf[ZZCFG_HDF_CHARS + 5];
 };
+
+/* Convert old three-key files and ENV overrides to/from the atomic profile. */
+UWORD zzcfg_profile_from_legacy(UWORD pal_mode, UWORD full, UWORD vsync);
+void zzcfg_profile_to_legacy(UWORD profile, UWORD *pal_mode, UWORD *full,
+    UWORD *vsync);
 
 /* Fetch the raw file contents into out (NUL-terminated, maxlen must be
  * >= 1). Returns a ZZ_CFG_FILE_* status; *outlen is the byte count.

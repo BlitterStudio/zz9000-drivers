@@ -49,6 +49,17 @@ trap 'rm -rf "$work"' EXIT
 # The parser is the source of truth: every token_eq(key, "...") branch.
 sed -n 's/.*token_eq(key, "\([a-z_0-9]*\)").*/\1/p' "$parser" | sort -u > "$work/parser"
 
+# These three keys remain accepted only to load existing hand-written files.
+# New firmware/ZZTop writes the atomic videocap_profile instead, so requiring
+# the legacy trio in the sample and README would recreate the confusing
+# independent controls the profile was introduced to remove.
+cat > "$work/legacy" <<'EOF'
+nonstandard_vsync
+videocap_mode
+videocap_shres
+EOF
+comm -23 "$work/parser" "$work/legacy" > "$work/canonical"
+
 # The sample documents a key as a commented-out assignment.
 sed -n 's/^#\{0,1\}\([a-z_0-9]\{1,\}\) = .*/\1/p' "$sample" | sort -u > "$work/sample"
 
@@ -64,9 +75,10 @@ sed -n 's/.*zzcfg_str_eq_ci(key, "\([a-z_0-9]*\)").*/\1/p' "$editor" | sort -u >
 status=0
 report() {
     label=$1
-    file=$2
-    missing=$(comm -23 "$work/parser" "$file")
-    extra=$(comm -13 "$work/parser" "$file")
+    expected=$2
+    file=$3
+    missing=$(comm -23 "$expected" "$file")
+    extra=$(comm -13 "$expected" "$file")
     if [ -n "$missing" ]; then
         status=1
         echo "  MISSING from $label:" $missing
@@ -78,9 +90,9 @@ report() {
 }
 
 echo "check-cfg-keys: firmware parser = $(wc -l < "$work/parser" | tr -d ' ') key(s)"
-report "the sample ZZ9000.CFG" "$work/sample"
-report "the firmware README table" "$work/readme"
-report "ZZTop's editor (zzcfg_amiga.c)" "$work/editor"
+report "the sample ZZ9000.CFG" "$work/canonical" "$work/sample"
+report "the firmware README table" "$work/canonical" "$work/readme"
+report "ZZTop's editor (zzcfg_amiga.c)" "$work/parser" "$work/editor"
 
 if [ "$status" -eq 0 ]; then
     echo "check-cfg-keys: OK - all four agree"

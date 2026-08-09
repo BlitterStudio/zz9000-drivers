@@ -37,7 +37,7 @@
 #include "fwup_amiga.h"
 #include "zzcfg_amiga.h"
 
-#define ZZTOP_RELEASE "2.6"
+#define ZZTOP_RELEASE "2.7"
 #define ZZTOP_DATE    "09.08.2026"
 
 static const char version[] __attribute__((used)) =
@@ -66,7 +66,7 @@ static const char version[] __attribute__((used)) =
 
 /* Settings window gadgets (own id space, own window). */
 #define SGAD_VIDEOCAP      (0)
-#define SGAD_NSVSYNC       (1)
+#define SGAD_VCAP_ADVANCED (1)
 #define SGAD_SCANMODE      (2)
 #define SGAD_PARITY        (3)
 #define SGAD_INT2          (4)
@@ -74,13 +74,19 @@ static const char version[] __attribute__((used)) =
 #define SGAD_HDF           (6)
 #define SGAD_OFFSCREEN     (7)
 #define SGAD_OVERLAY       (8)
-#define SGAD_VCAP_SAMPLE   (9)
-#define SGAD_VCAP_CROP_H   (10)
-#define SGAD_VCAP_CROP_V   (11)
-#define SGAD_CFG_STATUS    (12)
-#define SGAD_BTN_SAVE      (13)
-#define SGAD_BTN_RELOAD    (14)
-#define SGAD_COUNT         (15)
+#define SGAD_CFG_STATUS    (9)
+#define SGAD_BTN_SAVE      (10)
+#define SGAD_BTN_RELOAD    (11)
+#define SGAD_COUNT         (12)
+
+/* Advanced native-video window gadgets. */
+#define AGAD_VCAP_SAMPLE   (0)
+#define AGAD_VCAP_CROP_H   (1)
+#define AGAD_VCAP_CROP_V   (2)
+#define AGAD_STATUS        (3)
+#define AGAD_BTN_DONE      (4)
+#define AGAD_BTN_CANCEL    (5)
+#define AGAD_COUNT         (6)
 
 /* Project menu userdata values. */
 #define MENU_ID_SETTINGS   (1)
@@ -102,10 +108,10 @@ static const char version[] __attribute__((used)) =
 #define LABEL_SCANLINES    "Scanlines"
 #define LABEL_PARITY       "Parity"
 #define LABEL_REFRESHMODE  "Auto Refresh"
-#define LABEL_VCAPMODE     "Native Video"
+#define LABEL_VCAPMODE     "Native Output"
 #define LABEL_VCAP_SAMPLE  "Capture Sample"
 #define LABEL_VCAP_CROP    "Crop H / V"
-#define LABEL_NSVSYNC      "Exact Refresh"
+#define LABEL_VCAP_ADVANCED "Advanced Video..."
 #define LABEL_INT2         "Interrupt"
 #define LABEL_OFFSCREEN    "Offscreen BMs"
 #define LABEL_OVERLAY      "Video overlay"
@@ -846,23 +852,19 @@ static void do_fw_restore(struct Window *win)
 /* ------------------------------------------------------------------ */
 
 static STRPTR vcapmode_labels[] = {
-	(STRPTR)"800x600 60Hz",
-	(STRPTR)"PAL 720x576 50Hz",
-	(STRPTR)"1280x1024 1:1",
+	(STRPTR)"1280x1024 60Hz (Full)",
+	(STRPTR)"1280x1024 Exact (Full)",
+	(STRPTR)"800x600 60Hz (Filtered)",
+	(STRPTR)"720x576 50Hz (Filtered)",
+	(STRPTR)"Exact PAL Amiga (Filtered)",
+	(STRPTR)"Exact NTSC Amiga (Filtered)",
 	NULL
 };
 
 static STRPTR vcapsample_labels[] = {
-	(STRPTR)"Average",
-	(STRPTR)"Even",
-	(STRPTR)"Odd",
-	NULL
-};
-
-static STRPTR nsvsync_labels[] = {
-	(STRPTR)"Off",
-	(STRPTR)"PAL ~49.92Hz",
-	(STRPTR)"NTSC",
+	(STRPTR)"Average (recommended)",
+	(STRPTR)"Even (diagnostic)",
+	(STRPTR)"Odd (diagnostic)",
 	NULL
 };
 
@@ -885,8 +887,6 @@ static struct Gadget *sgads[SGAD_COUNT];
 static struct zzcfg_values settings_vals;
 static char settings_status_buf[64];
 static char settings_cfg_text[ZZCFG_MAX_SIZE];
-static char settings_crop_h_buf[6];
-static char settings_crop_v_buf[6];
 /* ZZ9000.CFG needs firmware ABI 2.3+. On older firmware the window
  * still opens for the live scanline controls; the config-file fields
  * and Save/Reload are disabled. */
@@ -894,9 +894,6 @@ static BOOL settings_have_cfg;
 
 static CONST_STRPTR settings_label_samples[] = {
 	(CONST_STRPTR)LABEL_VCAPMODE,
-	(CONST_STRPTR)LABEL_VCAP_SAMPLE,
-	(CONST_STRPTR)LABEL_VCAP_CROP,
-	(CONST_STRPTR)LABEL_NSVSYNC,
 	(CONST_STRPTR)LABEL_SCANLINES,
 	(CONST_STRPTR)LABEL_PARITY,
 	(CONST_STRPTR)LABEL_INT2,
@@ -911,7 +908,7 @@ static CONST_STRPTR settings_label_samples[] = {
  * spans the full row instead, so long messages don't inflate the
  * control column (and with it the whole window). */
 static CONST_STRPTR settings_value_samples[] = {
-	(CONST_STRPTR)"1280x1024 1:1",
+	(CONST_STRPTR)"Exact NTSC Amiga (Filtered)",
 	(CONST_STRPTR)"INT6 (default)",
 	(CONST_STRPTR)"aa:bb:cc:dd:ee:ff",
 	NULL
@@ -997,20 +994,23 @@ static int settings_env_read_mac(char *out, int outsz)
 static int settings_apply_env_overrides(struct zzcfg_values *sv)
 {
 	char envmac[ZZCFG_MAC_CHARS + 3];
+	UWORD pal_mode, full, vsync;
 	int any = 0;
 
+	zzcfg_profile_to_legacy(sv->videocap_profile, &pal_mode, &full, &vsync);
 	if (settings_env_exists("ENV:ZZ9000-VCAP-800x600")) {
-		sv->videocap_pal = 0;
-		sv->videocap_full = 0;
+		pal_mode = 0;
+		full = 0;
 		any = 1;
 	}
 	if (settings_env_exists("ENV:ZZ9000-NS-VSYNC")) {
-		sv->vsync = 1;
+		vsync = 1;
 		any = 1;
 	} else if (settings_env_exists("ENV:ZZ9000-NS-VSYNC-NTSC")) {
-		sv->vsync = 2;
+		vsync = 2;
 		any = 1;
 	}
+	sv->videocap_profile = zzcfg_profile_from_legacy(pal_mode, full, vsync);
 	if (settings_env_exists("ENV:ZZ9K_INT2")) {
 		sv->int2 = 1;
 		any = 1;
@@ -1069,7 +1069,7 @@ static void settings_offer_env_cleanup(void)
 }
 
 /* Populate settings_vals from the board and push into the gadgets. */
-static void settings_populate(struct Window *win)
+static void settings_populate(struct Window *win, UWORD fw_version)
 {
 	ULONG board = (ULONG)zz_regs;
 	struct zzcfg_values *sv = &settings_vals;
@@ -1080,7 +1080,8 @@ static void settings_populate(struct Window *win)
 	 * it at cold boot and this tool/ZZScanlines may have changed it
 	 * since. */
 	memset(sv, 0, sizeof(*sv));
-	sv->videocap_full = ZZCFG_VIDEOCAP_FULL_DEFAULT;
+	sv->videocap_profile = ZZCFG_VCAP_FULL_60;
+	sv->use_videocap_profile_key = (fw_version >= 0x0209);
 	sv->videocap_crop_h = ZZCFG_VIDEOCAP_CROP_H_DEFAULT;
 	sv->videocap_crop_v = ZZCFG_VIDEOCAP_CROP_V_DEFAULT;
 	sv->scanline_mode = zz_get_scanline_mode();
@@ -1136,19 +1137,7 @@ static void settings_populate(struct Window *win)
 	if (!win) return;
 
 	GT_SetGadgetAttrs(sgads[SGAD_VIDEOCAP], win, NULL,
-		GTCY_Active, sv->videocap_full ? 2 : sv->videocap_pal, TAG_END);
-	GT_SetGadgetAttrs(sgads[SGAD_VCAP_SAMPLE], win, NULL,
-		GTCY_Active, sv->videocap_sample, TAG_END);
-	snprintf(settings_crop_h_buf, sizeof(settings_crop_h_buf), "%u",
-		(unsigned)sv->videocap_crop_h);
-	snprintf(settings_crop_v_buf, sizeof(settings_crop_v_buf), "%u",
-		(unsigned)sv->videocap_crop_v);
-	GT_SetGadgetAttrs(sgads[SGAD_VCAP_CROP_H], win, NULL,
-		GTST_String, settings_crop_h_buf, TAG_END);
-	GT_SetGadgetAttrs(sgads[SGAD_VCAP_CROP_V], win, NULL,
-		GTST_String, settings_crop_v_buf, TAG_END);
-	GT_SetGadgetAttrs(sgads[SGAD_NSVSYNC], win, NULL,
-		GTCY_Active, sv->vsync, TAG_END);
+		GTCY_Active, sv->videocap_profile, TAG_END);
 	GT_SetGadgetAttrs(sgads[SGAD_SCANMODE], win, NULL,
 		GTCY_Active, sv->scanline_mode, TAG_END);
 	GT_SetGadgetAttrs(sgads[SGAD_PARITY], win, NULL,
@@ -1174,17 +1163,6 @@ static void settings_save(struct Window *win)
 
 	if (!settings_have_cfg) {
 		settings_set_status(win, "Config needs firmware 2.3+");
-		return;
-	}
-
-	si = (struct StringInfo *)sgads[SGAD_VCAP_CROP_H]->SpecialInfo;
-	if (!settings_parse_u12((const char *)si->Buffer, &sv->videocap_crop_h)) {
-		settings_set_status(win, "Bad Crop H - use 0..4095");
-		return;
-	}
-	si = (struct StringInfo *)sgads[SGAD_VCAP_CROP_V]->SpecialInfo;
-	if (!settings_parse_u12((const char *)si->Buffer, &sv->videocap_crop_v)) {
-		settings_set_status(win, "Bad Crop V - use 0..4095");
 		return;
 	}
 
@@ -1237,7 +1215,7 @@ static struct Gadget *settings_create_gadgets(struct Gadget **glistptr,
 	struct Gadget *gad;
 	struct ZZTopLayout l = *mainlayout;
 	WORD label_width, value_width, button_width, y, i;
-	WORD content_right, button_gap, crop_width, crop_gap;
+	WORD content_right, button_gap;
 
 	/* Same font metrics as the main window, own column widths (the
 	 * main window's are sized for its wider content, e.g. the
@@ -1253,8 +1231,6 @@ static struct Gadget *settings_create_gadgets(struct Gadget **glistptr,
 	l.gadget_width = zztop_max_word(160, value_width + 48);
 	content_right = l.gadget_left + l.gadget_width;
 	button_gap = 16;
-	crop_gap = 8;
-	crop_width = (l.gadget_width - crop_gap) / 2;
 
 	gad = CreateContext(glistptr);
 
@@ -1277,36 +1253,12 @@ static struct Gadget *settings_create_gadgets(struct Gadget **glistptr,
 	y += l.row_step;
 
 	ng.ng_TopEdge    = y;
-	ng.ng_GadgetID   = SGAD_VCAP_SAMPLE;
-	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_SAMPLE;
-	sgads[SGAD_VCAP_SAMPLE] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
-		GTCY_Labels, vcapsample_labels, GTCY_Active, 0, TAG_END);
-	y += l.row_step;
-
-	/* Horizontal and vertical origin share a row so the Settings window
-	 * still fits a 256-line PAL Workbench screen. The label states the
-	 * left-to-right field order. */
-	ng.ng_TopEdge    = y;
-	ng.ng_Width      = crop_width;
-	ng.ng_GadgetID   = SGAD_VCAP_CROP_H;
-	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_CROP;
-	sgads[SGAD_VCAP_CROP_H] = gad = CreateGadget(STRING_KIND, gad, &ng,
-		GTST_MaxChars, 5, GTST_String, "188", TAG_END);
-
-	ng.ng_LeftEdge   = l.gadget_left + crop_width + crop_gap;
-	ng.ng_GadgetID   = SGAD_VCAP_CROP_V;
-	ng.ng_GadgetText = NULL;
-	sgads[SGAD_VCAP_CROP_V] = gad = CreateGadget(STRING_KIND, gad, &ng,
-		GTST_MaxChars, 5, GTST_String, "26", TAG_END);
-	ng.ng_LeftEdge   = l.gadget_left;
-	ng.ng_Width      = l.gadget_width;
-	y += l.row_step;
-
-	ng.ng_TopEdge    = y;
-	ng.ng_GadgetID   = SGAD_NSVSYNC;
-	ng.ng_GadgetText = (STRPTR)LABEL_NSVSYNC;
-	sgads[SGAD_NSVSYNC] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
-		GTCY_Labels, nsvsync_labels, GTCY_Active, 0, TAG_END);
+	ng.ng_GadgetID   = SGAD_VCAP_ADVANCED;
+	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_ADVANCED;
+	ng.ng_Flags      = PLACETEXT_IN;
+	sgads[SGAD_VCAP_ADVANCED] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		TAG_END);
+	ng.ng_Flags      = PLACETEXT_LEFT;
 	y += l.row_step;
 
 	ng.ng_TopEdge    = y;
@@ -1399,6 +1351,207 @@ static struct Gadget *settings_create_gadgets(struct Gadget **glistptr,
 	return gad;
 }
 
+static BOOL settings_video_advanced_commit(struct Window *win,
+	struct Gadget **agads, UWORD sample, char *status, UWORD status_size,
+	BOOL *changed)
+{
+	struct StringInfo *hsi =
+		(struct StringInfo *)agads[AGAD_VCAP_CROP_H]->SpecialInfo;
+	struct StringInfo *vsi =
+		(struct StringInfo *)agads[AGAD_VCAP_CROP_V]->SpecialInfo;
+	UWORD crop_h, crop_v;
+
+	if (!settings_parse_u12((const char *)hsi->Buffer, &crop_h)) {
+		snprintf(status, status_size, "Bad Crop H - use 0..4095");
+		GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL,
+			GTTX_Text, status, TAG_END);
+		return FALSE;
+	}
+	if (!settings_parse_u12((const char *)vsi->Buffer, &crop_v)) {
+		snprintf(status, status_size, "Bad Crop V - use 0..4095");
+		GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL,
+			GTTX_Text, status, TAG_END);
+		return FALSE;
+	}
+
+	*changed = sample != settings_vals.videocap_sample ||
+		crop_h != settings_vals.videocap_crop_h ||
+		crop_v != settings_vals.videocap_crop_v;
+	settings_vals.videocap_sample = sample;
+	settings_vals.videocap_crop_h = crop_h;
+	settings_vals.videocap_crop_v = crop_v;
+	return TRUE;
+}
+
+/* Sampling phase and capture origin are calibration/diagnostic controls, not
+ * independent output-mode choices. Keeping them in a small secondary window
+ * makes the normal Settings path describe outcomes instead of implementation
+ * details. Values are committed to settings_vals only by Done; the main
+ * window's Save button still writes the card. */
+static BOOL settings_video_advanced_window(struct Screen *mysc, void *vi,
+	const struct ZZTopLayout *mainlayout)
+{
+	static CONST_STRPTR label_samples[] = {
+		(CONST_STRPTR)LABEL_VCAP_SAMPLE,
+		(CONST_STRPTR)LABEL_VCAP_CROP,
+		NULL
+	};
+	static CONST_STRPTR value_samples[] = {
+		(CONST_STRPTR)"Average (recommended)",
+		(CONST_STRPTR)"Even (diagnostic)",
+		NULL
+	};
+	struct ZZTopLayout l = *mainlayout;
+	struct NewGadget ng;
+	struct Gadget *glist = NULL;
+	struct Gadget *gad;
+	struct Gadget *agads[AGAD_COUNT];
+	struct Window *win;
+	struct IntuiMessage *imsg;
+	UWORD sample = settings_vals.videocap_sample;
+	ULONG imsg_class;
+	UWORD imsg_code;
+	WORD label_width, value_width, y, content_right;
+	WORD crop_width, crop_gap, button_width, button_gap;
+	WORD w, h;
+	BOOL done = FALSE;
+	BOOL changed = FALSE;
+	char crop_h_buf[6];
+	char crop_v_buf[6];
+	char status[64] = "Average is normal; Even/Odd diagnose sampling";
+	int i;
+
+	label_width = zztop_max_text_width(
+		zztop_screen ? &zztop_screen->RastPort : NULL, label_samples, 8);
+	value_width = zztop_max_text_width(
+		zztop_screen ? &zztop_screen->RastPort : NULL, value_samples, 8);
+	l.gadget_left = l.margin_x + label_width + l.label_gap;
+	l.gadget_width = zztop_max_word(184, value_width + 48);
+	content_right = l.gadget_left + l.gadget_width;
+	crop_gap = 8;
+	crop_width = (l.gadget_width - crop_gap) / 2;
+	button_gap = 16;
+	button_width = 88;
+
+	snprintf(crop_h_buf, sizeof(crop_h_buf), "%u",
+		(unsigned)settings_vals.videocap_crop_h);
+	snprintf(crop_v_buf, sizeof(crop_v_buf), "%u",
+		(unsigned)settings_vals.videocap_crop_v);
+
+	gad = CreateContext(&glist);
+	for (i = 0; i < AGAD_COUNT; i++) agads[i] = NULL;
+	y = l.topborder + l.margin_y;
+
+	ng.ng_LeftEdge = l.gadget_left;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = l.gadget_width;
+	ng.ng_Height = l.gadget_height;
+	ng.ng_TextAttr = l.text_attr;
+	ng.ng_VisualInfo = vi;
+	ng.ng_Flags = PLACETEXT_LEFT;
+	ng.ng_GadgetID = AGAD_VCAP_SAMPLE;
+	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_SAMPLE;
+	agads[AGAD_VCAP_SAMPLE] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+		GTCY_Labels, vcapsample_labels, GTCY_Active, sample, TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge = y;
+	ng.ng_Width = crop_width;
+	ng.ng_GadgetID = AGAD_VCAP_CROP_H;
+	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_CROP;
+	agads[AGAD_VCAP_CROP_H] = gad = CreateGadget(STRING_KIND, gad, &ng,
+		GTST_MaxChars, 5, GTST_String, crop_h_buf, TAG_END);
+	ng.ng_LeftEdge = l.gadget_left + crop_width + crop_gap;
+	ng.ng_GadgetID = AGAD_VCAP_CROP_V;
+	ng.ng_GadgetText = NULL;
+	agads[AGAD_VCAP_CROP_V] = gad = CreateGadget(STRING_KIND, gad, &ng,
+		GTST_MaxChars, 5, GTST_String, crop_v_buf, TAG_END);
+	y += l.row_step + l.section_gap;
+
+	ng.ng_LeftEdge = l.margin_x;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = content_right - l.margin_x;
+	ng.ng_GadgetID = AGAD_STATUS;
+	ng.ng_GadgetText = NULL;
+	agads[AGAD_STATUS] = gad = CreateGadget(TEXT_KIND, gad, &ng,
+		GTTX_Text, status, GTTX_Border, TRUE, TAG_END);
+	y += l.row_step + l.section_gap;
+
+	ng.ng_LeftEdge = l.margin_x;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = button_width;
+	ng.ng_GadgetID = AGAD_BTN_DONE;
+	ng.ng_GadgetText = (STRPTR)"Done";
+	ng.ng_Flags = PLACETEXT_IN;
+	agads[AGAD_BTN_DONE] = gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_END);
+	ng.ng_LeftEdge = l.margin_x + button_width + button_gap;
+	ng.ng_GadgetID = AGAD_BTN_CANCEL;
+	ng.ng_GadgetText = (STRPTR)"Cancel";
+	agads[AGAD_BTN_CANCEL] = gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_END);
+	y += l.row_step;
+
+	for (i = 0; i < AGAD_COUNT; i++) {
+		if (!agads[i]) {
+			if (glist) FreeGadgets(glist);
+			errorMessage("Advanced Video: gadget creation failed");
+			return FALSE;
+		}
+	}
+
+	w = zztop_max_word(content_right + l.margin_x,
+		l.margin_x + button_width + button_gap + button_width + l.margin_x);
+	h = y + l.gadget_height + (l.margin_y / 2) - l.topborder;
+	win = OpenWindowTags(NULL,
+		WA_Title, "Advanced Native Video",
+		WA_Gadgets, glist, WA_AutoAdjust, TRUE,
+		WA_Width, w, WA_MinWidth, w,
+		WA_InnerHeight, h, WA_MinHeight, h,
+		WA_DragBar, TRUE, WA_DepthGadget, TRUE,
+		WA_Activate, TRUE, WA_CloseGadget, TRUE,
+		WA_SizeGadget, FALSE, WA_SimpleRefresh, TRUE,
+		WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
+			BUTTONIDCMP | CYCLEIDCMP | STRINGIDCMP,
+		WA_PubScreen, mysc,
+		TAG_END);
+	if (!win) {
+		FreeGadgets(glist);
+		errorMessage("Advanced Video: OpenWindow() failed");
+		return FALSE;
+	}
+
+	GT_RefreshWindow(win, NULL);
+	while (!done) {
+		Wait(1UL << win->UserPort->mp_SigBit);
+		while ((imsg = GT_GetIMsg(win->UserPort))) {
+			gad = (struct Gadget *)imsg->IAddress;
+			imsg_class = imsg->Class;
+			imsg_code = imsg->Code;
+			GT_ReplyIMsg(imsg);
+
+			if (imsg_class == IDCMP_CLOSEWINDOW) {
+				done = TRUE;
+			} else if (imsg_class == IDCMP_REFRESHWINDOW) {
+				GT_BeginRefresh(win);
+				GT_EndRefresh(win, TRUE);
+			} else if (imsg_class == IDCMP_GADGETUP && gad) {
+				if (gad->GadgetID == AGAD_VCAP_SAMPLE) {
+					sample = imsg_code;
+				} else if (gad->GadgetID == AGAD_BTN_CANCEL) {
+					done = TRUE;
+				} else if (gad->GadgetID == AGAD_BTN_DONE) {
+					if (settings_video_advanced_commit(win, agads, sample,
+						status, sizeof(status), &changed))
+						done = TRUE;
+				}
+			}
+		}
+	}
+
+	CloseWindow(win);
+	FreeGadgets(glist);
+	return changed;
+}
+
 static VOID settings_window(struct Screen *mysc, void *vi,
 	const struct ZZTopLayout *mainlayout)
 {
@@ -1408,10 +1561,12 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 	struct Gadget *gad;
 	ULONG imsgClass;
 	UWORD imsgCode;
+	UWORD fw_version;
 	BOOL done = FALSE;
 	WORD w = 0, h = 0;
 
-	settings_have_cfg = (zz_get_reg16(REG_ZZ_FW_VERSION) >= 0x0203);
+	fw_version = zz_get_reg16(REG_ZZ_FW_VERSION);
+	settings_have_cfg = (fw_version >= 0x0203);
 
 	if (NULL == settings_create_gadgets(&glist, vi, mainlayout, &w, &h)) {
 		if (glist) FreeGadgets(glist);
@@ -1437,15 +1592,14 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 		return;
 	}
 
-	settings_populate(win);
+	settings_populate(win, fw_version);
 
 	if (!settings_have_cfg) {
 		/* Live scanline controls stay usable on 2.0-2.2 firmware
 		 * (they were on the main window before); everything that
 		 * needs the config-file interface is greyed out. */
 		static const UWORD cfg_only_gadgets[] = {
-			SGAD_VIDEOCAP, SGAD_VCAP_SAMPLE, SGAD_VCAP_CROP_H,
-			SGAD_VCAP_CROP_V, SGAD_NSVSYNC, SGAD_INT2,
+			SGAD_VIDEOCAP, SGAD_VCAP_ADVANCED, SGAD_INT2,
 			SGAD_MAC, SGAD_HDF, SGAD_OFFSCREEN, SGAD_OVERLAY,
 			SGAD_BTN_SAVE, SGAD_BTN_RELOAD
 		};
@@ -1472,18 +1626,16 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 					if (!gad) break;
 					switch (gad->GadgetID) {
 						case SGAD_VIDEOCAP:
-							if (imsgCode == 2) {
-								settings_vals.videocap_full = 1;
-							} else {
-								settings_vals.videocap_full = 0;
-								settings_vals.videocap_pal = imsgCode;
+							if (imsgCode < ZZCFG_VCAP_PROFILE_COUNT) {
+								settings_vals.videocap_profile = imsgCode;
+								settings_set_status(win,
+									"Native output changed - Save, then power-cycle");
 							}
 							break;
-						case SGAD_VCAP_SAMPLE:
-							settings_vals.videocap_sample = imsgCode;
-							break;
-						case SGAD_NSVSYNC:
-							settings_vals.vsync = imsgCode;
+						case SGAD_VCAP_ADVANCED:
+							if (settings_video_advanced_window(mysc, vi, mainlayout))
+								settings_set_status(win,
+									"Advanced video changed - Save, then power-cycle");
 							break;
 						case SGAD_SCANMODE:
 							/* live, like the old main-window control */
@@ -1507,7 +1659,7 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 							settings_save(win);
 							break;
 						case SGAD_BTN_RELOAD:
-							settings_populate(win);
+							settings_populate(win, fw_version);
 							break;
 					}
 					break;

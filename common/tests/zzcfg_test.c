@@ -21,10 +21,10 @@ static void check(int cond, const char *what)
     if (!cond) { printf("FAIL: %s\n", what); failures++; }
 }
 
-/* Every key the firmware's zz_config.c parses, post-v2.8. */
+/* Every canonical key ZZTop writes for firmware ABI 2.9+. */
 static const char *firmware_keys[] = {
-    "videocap_mode", "videocap_sample", "videocap_shres",
-    "videocap_crop_h", "videocap_crop_v", "nonstandard_vsync",
+    "videocap_profile", "videocap_sample", "videocap_crop_h",
+    "videocap_crop_v",
     "scanline_mode", "scanline_parity", "int2", "mac",
     "offscreen_bitmaps", "video_overlay", "hdf", NULL
 };
@@ -32,7 +32,8 @@ static const char *firmware_keys[] = {
 static void defaults(struct zzcfg_values *v)
 {
     memset(v, 0, sizeof(*v));
-    v->videocap_full = 1;
+    v->videocap_profile = ZZCFG_VCAP_FULL_60;
+    v->use_videocap_profile_key = 1;
     v->videocap_crop_h = 188;
     v->videocap_crop_v = 26;
     v->offscreen_bitmaps = 1;
@@ -65,10 +66,10 @@ int main(void)
 
     /* 3. non-default values survive generate -> parse */
     defaults(&a);
-    a.videocap_pal = 1; a.videocap_sample = 2;
-    a.videocap_full = 0; a.videocap_crop_h = 200;
+    a.videocap_profile = ZZCFG_VCAP_FILTERED_NTSC_EXACT;
+    a.videocap_sample = 2; a.videocap_crop_h = 200;
     a.videocap_crop_v = 30;
-    a.vsync = 2; a.scanline_mode = 3;
+    a.scanline_mode = 3;
     a.scanline_parity = 1; a.int2 = 1;
     a.offscreen_bitmaps = 0; a.video_overlay = 0;
     strcpy(a.mac, "68:82:F2:12:34:56");
@@ -78,12 +79,11 @@ int main(void)
     defaults(&b);
     zzcfg_parse_text(text, n, &b);
 
-    check(b.videocap_pal == 1, "videocap_pal round-trips");
+    check(b.videocap_profile == ZZCFG_VCAP_FILTERED_NTSC_EXACT,
+          "videocap_profile round-trips");
     check(b.videocap_sample == 2, "videocap_sample=odd round-trips");
-    check(b.videocap_full == 0, "videocap_shres=filter round-trips");
     check(b.videocap_crop_h == 200, "videocap_crop_h round-trips");
     check(b.videocap_crop_v == 30, "videocap_crop_v round-trips");
-    check(b.vsync == 2, "vsync round-trips");
     check(b.scanline_mode == 3, "scanline_mode round-trips");
     check(b.scanline_parity == 1, "scanline_parity round-trips");
     check(b.int2 == 1, "int2 round-trips");
@@ -115,11 +115,13 @@ int main(void)
     }
     check(b.videocap_sample == 1, "videocap_sample values parse safely");
 
-    /* 6. full/filter and 12-bit crop values parse strictly. Invalid
-     * values leave the previous valid selection untouched. */
+    /* 6. New profiles, legacy profile components, and 12-bit crop values
+     * parse strictly. Invalid values leave the previous selection alone. */
     defaults(&b);
     {
         const char *capture =
+            "videocap_profile = FILTERED_PAL_EXACT\n"
+            "videocap_profile = unclear\n"
             "videocap_shres = FILTER\n"
             "videocap_shres = full\n"
             "videocap_shres = maybe\n"
@@ -129,7 +131,8 @@ int main(void)
             "videocap_crop_v = -1\n";
         zzcfg_parse_text(capture, (UWORD)strlen(capture), &b);
     }
-    check(b.videocap_full == 1, "videocap_shres values parse safely");
+    check(b.videocap_profile == ZZCFG_VCAP_FULL_EXACT,
+          "new and legacy videocap values parse safely");
     check(b.videocap_crop_h == 4095, "videocap_crop_h rejects overflow");
     check(b.videocap_crop_v == 0, "videocap_crop_v rejects negative values");
 
@@ -143,6 +146,20 @@ int main(void)
         zzcfg_parse_text(legacy, (UWORD)strlen(legacy), &b);
     }
     check(b.video_overlay == 0, "retired key does not block later keys");
+
+    /* 8. ZZTop can still save coherent settings for pre-2.9 firmware. */
+    defaults(&a);
+    a.use_videocap_profile_key = 0;
+    a.videocap_profile = ZZCFG_VCAP_FILTERED_PAL_EXACT;
+    n = zzcfg_generate(&a, text, sizeof(text));
+    check(strstr(text, "videocap_profile = ") == NULL,
+          "legacy firmware does not receive the new key");
+    check(strstr(text, "videocap_mode = pal") != NULL,
+          "legacy mode is emitted");
+    check(strstr(text, "videocap_shres = filter") != NULL,
+          "legacy width is emitted");
+    check(strstr(text, "nonstandard_vsync = pal") != NULL,
+          "legacy refresh is emitted");
 
     if (failures) { printf("%d failure(s)\n", failures); return 1; }
     printf("zzcfg round-trip: all checks passed\n");
