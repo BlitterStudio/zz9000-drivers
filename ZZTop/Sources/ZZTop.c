@@ -37,7 +37,7 @@
 #include "fwup_amiga.h"
 #include "zzcfg_amiga.h"
 
-#define ZZTOP_RELEASE "2.5"
+#define ZZTOP_RELEASE "2.6"
 #define ZZTOP_DATE    "09.08.2026"
 
 static const char version[] __attribute__((used)) =
@@ -75,10 +75,12 @@ static const char version[] __attribute__((used)) =
 #define SGAD_OFFSCREEN     (7)
 #define SGAD_OVERLAY       (8)
 #define SGAD_VCAP_SAMPLE   (9)
-#define SGAD_CFG_STATUS    (10)
-#define SGAD_BTN_SAVE      (11)
-#define SGAD_BTN_RELOAD    (12)
-#define SGAD_COUNT         (13)
+#define SGAD_VCAP_CROP_H   (10)
+#define SGAD_VCAP_CROP_V   (11)
+#define SGAD_CFG_STATUS    (12)
+#define SGAD_BTN_SAVE      (13)
+#define SGAD_BTN_RELOAD    (14)
+#define SGAD_COUNT         (15)
 
 /* Project menu userdata values. */
 #define MENU_ID_SETTINGS   (1)
@@ -102,6 +104,7 @@ static const char version[] __attribute__((used)) =
 #define LABEL_REFRESHMODE  "Auto Refresh"
 #define LABEL_VCAPMODE     "Native Video"
 #define LABEL_VCAP_SAMPLE  "Capture Sample"
+#define LABEL_VCAP_CROP    "Crop H / V"
 #define LABEL_NSVSYNC      "Exact Refresh"
 #define LABEL_INT2         "Interrupt"
 #define LABEL_OFFSCREEN    "Offscreen BMs"
@@ -845,6 +848,7 @@ static void do_fw_restore(struct Window *win)
 static STRPTR vcapmode_labels[] = {
 	(STRPTR)"800x600 60Hz",
 	(STRPTR)"PAL 720x576 50Hz",
+	(STRPTR)"1280x1024 1:1",
 	NULL
 };
 
@@ -881,6 +885,8 @@ static struct Gadget *sgads[SGAD_COUNT];
 static struct zzcfg_values settings_vals;
 static char settings_status_buf[64];
 static char settings_cfg_text[ZZCFG_MAX_SIZE];
+static char settings_crop_h_buf[6];
+static char settings_crop_v_buf[6];
 /* ZZ9000.CFG needs firmware ABI 2.3+. On older firmware the window
  * still opens for the live scanline controls; the config-file fields
  * and Save/Reload are disabled. */
@@ -889,6 +895,7 @@ static BOOL settings_have_cfg;
 static CONST_STRPTR settings_label_samples[] = {
 	(CONST_STRPTR)LABEL_VCAPMODE,
 	(CONST_STRPTR)LABEL_VCAP_SAMPLE,
+	(CONST_STRPTR)LABEL_VCAP_CROP,
 	(CONST_STRPTR)LABEL_NSVSYNC,
 	(CONST_STRPTR)LABEL_SCANLINES,
 	(CONST_STRPTR)LABEL_PARITY,
@@ -904,7 +911,7 @@ static CONST_STRPTR settings_label_samples[] = {
  * spans the full row instead, so long messages don't inflate the
  * control column (and with it the whole window). */
 static CONST_STRPTR settings_value_samples[] = {
-	(CONST_STRPTR)"PAL 720x576 50Hz",
+	(CONST_STRPTR)"1280x1024 1:1",
 	(CONST_STRPTR)"INT6 (default)",
 	(CONST_STRPTR)"aa:bb:cc:dd:ee:ff",
 	NULL
@@ -946,6 +953,21 @@ static int settings_parse_mac(const char *s)
 	return s[ZZCFG_MAC_CHARS] == '\0';
 }
 
+static int settings_parse_u12(const char *s, UWORD *out)
+{
+	ULONG value = 0;
+
+	if (!s || !*s) return 0;
+	while (*s) {
+		if (*s < '0' || *s > '9') return 0;
+		value = value * 10 + (ULONG)(*s - '0');
+		if (value > 4095) return 0;
+		s++;
+	}
+	*out = (UWORD)value;
+	return 1;
+}
+
 static int settings_env_exists(const char *path)
 {
 	BPTR f = Open((CONST_STRPTR)path, MODE_OLDFILE);
@@ -979,6 +1001,7 @@ static int settings_apply_env_overrides(struct zzcfg_values *sv)
 
 	if (settings_env_exists("ENV:ZZ9000-VCAP-800x600")) {
 		sv->videocap_pal = 0;
+		sv->videocap_full = 0;
 		any = 1;
 	}
 	if (settings_env_exists("ENV:ZZ9000-NS-VSYNC")) {
@@ -1057,6 +1080,9 @@ static void settings_populate(struct Window *win)
 	 * it at cold boot and this tool/ZZScanlines may have changed it
 	 * since. */
 	memset(sv, 0, sizeof(*sv));
+	sv->videocap_full = ZZCFG_VIDEOCAP_FULL_DEFAULT;
+	sv->videocap_crop_h = ZZCFG_VIDEOCAP_CROP_H_DEFAULT;
+	sv->videocap_crop_v = ZZCFG_VIDEOCAP_CROP_V_DEFAULT;
 	sv->scanline_mode = zz_get_scanline_mode();
 	sv->scanline_parity = zz_get_scanline_parity();
 	/* ZZ9000.card enables both of these when the key is absent, so the
@@ -1110,9 +1136,17 @@ static void settings_populate(struct Window *win)
 	if (!win) return;
 
 	GT_SetGadgetAttrs(sgads[SGAD_VIDEOCAP], win, NULL,
-		GTCY_Active, sv->videocap_pal, TAG_END);
+		GTCY_Active, sv->videocap_full ? 2 : sv->videocap_pal, TAG_END);
 	GT_SetGadgetAttrs(sgads[SGAD_VCAP_SAMPLE], win, NULL,
 		GTCY_Active, sv->videocap_sample, TAG_END);
+	snprintf(settings_crop_h_buf, sizeof(settings_crop_h_buf), "%u",
+		(unsigned)sv->videocap_crop_h);
+	snprintf(settings_crop_v_buf, sizeof(settings_crop_v_buf), "%u",
+		(unsigned)sv->videocap_crop_v);
+	GT_SetGadgetAttrs(sgads[SGAD_VCAP_CROP_H], win, NULL,
+		GTST_String, settings_crop_h_buf, TAG_END);
+	GT_SetGadgetAttrs(sgads[SGAD_VCAP_CROP_V], win, NULL,
+		GTST_String, settings_crop_v_buf, TAG_END);
 	GT_SetGadgetAttrs(sgads[SGAD_NSVSYNC], win, NULL,
 		GTCY_Active, sv->vsync, TAG_END);
 	GT_SetGadgetAttrs(sgads[SGAD_SCANMODE], win, NULL,
@@ -1140,6 +1174,17 @@ static void settings_save(struct Window *win)
 
 	if (!settings_have_cfg) {
 		settings_set_status(win, "Config needs firmware 2.3+");
+		return;
+	}
+
+	si = (struct StringInfo *)sgads[SGAD_VCAP_CROP_H]->SpecialInfo;
+	if (!settings_parse_u12((const char *)si->Buffer, &sv->videocap_crop_h)) {
+		settings_set_status(win, "Bad Crop H - use 0..4095");
+		return;
+	}
+	si = (struct StringInfo *)sgads[SGAD_VCAP_CROP_V]->SpecialInfo;
+	if (!settings_parse_u12((const char *)si->Buffer, &sv->videocap_crop_v)) {
+		settings_set_status(win, "Bad Crop V - use 0..4095");
 		return;
 	}
 
@@ -1192,7 +1237,7 @@ static struct Gadget *settings_create_gadgets(struct Gadget **glistptr,
 	struct Gadget *gad;
 	struct ZZTopLayout l = *mainlayout;
 	WORD label_width, value_width, button_width, y, i;
-	WORD content_right, button_gap;
+	WORD content_right, button_gap, crop_width, crop_gap;
 
 	/* Same font metrics as the main window, own column widths (the
 	 * main window's are sized for its wider content, e.g. the
@@ -1208,6 +1253,8 @@ static struct Gadget *settings_create_gadgets(struct Gadget **glistptr,
 	l.gadget_width = zztop_max_word(160, value_width + 48);
 	content_right = l.gadget_left + l.gadget_width;
 	button_gap = 16;
+	crop_gap = 8;
+	crop_width = (l.gadget_width - crop_gap) / 2;
 
 	gad = CreateContext(glistptr);
 
@@ -1234,6 +1281,25 @@ static struct Gadget *settings_create_gadgets(struct Gadget **glistptr,
 	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_SAMPLE;
 	sgads[SGAD_VCAP_SAMPLE] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
 		GTCY_Labels, vcapsample_labels, GTCY_Active, 0, TAG_END);
+	y += l.row_step;
+
+	/* Horizontal and vertical origin share a row so the Settings window
+	 * still fits a 256-line PAL Workbench screen. The label states the
+	 * left-to-right field order. */
+	ng.ng_TopEdge    = y;
+	ng.ng_Width      = crop_width;
+	ng.ng_GadgetID   = SGAD_VCAP_CROP_H;
+	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_CROP;
+	sgads[SGAD_VCAP_CROP_H] = gad = CreateGadget(STRING_KIND, gad, &ng,
+		GTST_MaxChars, 5, GTST_String, "188", TAG_END);
+
+	ng.ng_LeftEdge   = l.gadget_left + crop_width + crop_gap;
+	ng.ng_GadgetID   = SGAD_VCAP_CROP_V;
+	ng.ng_GadgetText = NULL;
+	sgads[SGAD_VCAP_CROP_V] = gad = CreateGadget(STRING_KIND, gad, &ng,
+		GTST_MaxChars, 5, GTST_String, "26", TAG_END);
+	ng.ng_LeftEdge   = l.gadget_left;
+	ng.ng_Width      = l.gadget_width;
 	y += l.row_step;
 
 	ng.ng_TopEdge    = y;
@@ -1378,7 +1444,8 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 		 * (they were on the main window before); everything that
 		 * needs the config-file interface is greyed out. */
 		static const UWORD cfg_only_gadgets[] = {
-			SGAD_VIDEOCAP, SGAD_VCAP_SAMPLE, SGAD_NSVSYNC, SGAD_INT2,
+			SGAD_VIDEOCAP, SGAD_VCAP_SAMPLE, SGAD_VCAP_CROP_H,
+			SGAD_VCAP_CROP_V, SGAD_NSVSYNC, SGAD_INT2,
 			SGAD_MAC, SGAD_HDF, SGAD_OFFSCREEN, SGAD_OVERLAY,
 			SGAD_BTN_SAVE, SGAD_BTN_RELOAD
 		};
@@ -1405,7 +1472,12 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 					if (!gad) break;
 					switch (gad->GadgetID) {
 						case SGAD_VIDEOCAP:
-							settings_vals.videocap_pal = imsgCode;
+							if (imsgCode == 2) {
+								settings_vals.videocap_full = 1;
+							} else {
+								settings_vals.videocap_full = 0;
+								settings_vals.videocap_pal = imsgCode;
+							}
 							break;
 						case SGAD_VCAP_SAMPLE:
 							settings_vals.videocap_sample = imsgCode;

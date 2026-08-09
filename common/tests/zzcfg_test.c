@@ -23,7 +23,8 @@ static void check(int cond, const char *what)
 
 /* Every key the firmware's zz_config.c parses, post-v2.8. */
 static const char *firmware_keys[] = {
-    "videocap_mode", "videocap_sample", "nonstandard_vsync",
+    "videocap_mode", "videocap_sample", "videocap_shres",
+    "videocap_crop_h", "videocap_crop_v", "nonstandard_vsync",
     "scanline_mode", "scanline_parity", "int2", "mac",
     "offscreen_bitmaps", "video_overlay", "hdf", NULL
 };
@@ -31,6 +32,9 @@ static const char *firmware_keys[] = {
 static void defaults(struct zzcfg_values *v)
 {
     memset(v, 0, sizeof(*v));
+    v->videocap_full = 1;
+    v->videocap_crop_h = 188;
+    v->videocap_crop_v = 26;
     v->offscreen_bitmaps = 1;
     v->video_overlay = 1;
 }
@@ -62,6 +66,8 @@ int main(void)
     /* 3. non-default values survive generate -> parse */
     defaults(&a);
     a.videocap_pal = 1; a.videocap_sample = 2;
+    a.videocap_full = 0; a.videocap_crop_h = 200;
+    a.videocap_crop_v = 30;
     a.vsync = 2; a.scanline_mode = 3;
     a.scanline_parity = 1; a.int2 = 1;
     a.offscreen_bitmaps = 0; a.video_overlay = 0;
@@ -74,6 +80,9 @@ int main(void)
 
     check(b.videocap_pal == 1, "videocap_pal round-trips");
     check(b.videocap_sample == 2, "videocap_sample=odd round-trips");
+    check(b.videocap_full == 0, "videocap_shres=filter round-trips");
+    check(b.videocap_crop_h == 200, "videocap_crop_h round-trips");
+    check(b.videocap_crop_v == 30, "videocap_crop_v round-trips");
     check(b.vsync == 2, "vsync round-trips");
     check(b.scanline_mode == 3, "scanline_mode round-trips");
     check(b.scanline_parity == 1, "scanline_parity round-trips");
@@ -106,7 +115,25 @@ int main(void)
     }
     check(b.videocap_sample == 1, "videocap_sample values parse safely");
 
-    /* 6. a file that still contains the retired key parses without
+    /* 6. full/filter and 12-bit crop values parse strictly. Invalid
+     * values leave the previous valid selection untouched. */
+    defaults(&b);
+    {
+        const char *capture =
+            "videocap_shres = FILTER\n"
+            "videocap_shres = full\n"
+            "videocap_shres = maybe\n"
+            "videocap_crop_h = 4095\n"
+            "videocap_crop_h = 4096\n"
+            "videocap_crop_v = 0\n"
+            "videocap_crop_v = -1\n";
+        zzcfg_parse_text(capture, (UWORD)strlen(capture), &b);
+    }
+    check(b.videocap_full == 1, "videocap_shres values parse safely");
+    check(b.videocap_crop_h == 4095, "videocap_crop_h rejects overflow");
+    check(b.videocap_crop_v == 0, "videocap_crop_v rejects negative values");
+
+    /* 7. a file that still contains the retired key parses without
      * disturbing anything else */
     defaults(&b);
     {

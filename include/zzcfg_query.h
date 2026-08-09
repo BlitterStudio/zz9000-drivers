@@ -35,6 +35,9 @@
 #define ZZ_CFG_KEY_YUV_RECT          10
 #define ZZ_CFG_KEY_VIDEO_OVERLAY     11
 #define ZZ_CFG_KEY_VIDEOCAP_SAMPLE   12
+#define ZZ_CFG_KEY_VIDEOCAP_SHRES    13
+#define ZZ_CFG_KEY_VIDEOCAP_CROP_H   14
+#define ZZ_CFG_KEY_VIDEOCAP_CROP_V   15
 
 /* ZZ_REG_CONFIG_FILE statuses (mirror firmware zz_config_file_status). */
 #define ZZ_CFG_FILE_OK           0

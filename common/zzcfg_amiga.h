@@ -20,6 +20,9 @@
 #define ZZCFG_MAX_SIZE   4096
 #define ZZCFG_MAC_CHARS  17          /* aa:bb:cc:dd:ee:ff */
 #define ZZCFG_HDF_CHARS  63
+#define ZZCFG_VIDEOCAP_FULL_DEFAULT 1
+#define ZZCFG_VIDEOCAP_CROP_H_DEFAULT 188
+#define ZZCFG_VIDEOCAP_CROP_V_DEFAULT 26
 
 /* Everything ZZTop's Settings window edits. mac/hdf are C strings;
  * an empty string means "not configured" and is emitted as a
@@ -27,6 +30,9 @@
 struct zzcfg_values {
     UWORD videocap_pal;      /* 0 = 800x600 60Hz, 1 = PAL 720x576 50Hz */
     UWORD videocap_sample;   /* 0 = average, 1 = even, 2 = odd */
+    UWORD videocap_full;     /* 0 = filtered legacy width, 1 = 1280-wide */
+    UWORD videocap_crop_h;   /* 0-4095, 28 MHz samples */
+    UWORD videocap_crop_v;   /* 0-4095, captured lines */
     UWORD vsync;             /* 0 = off, 1 = pal, 2 = ntsc */
     UWORD scanline_mode;     /* 0-3 */
     UWORD scanline_parity;   /* 0-1 */

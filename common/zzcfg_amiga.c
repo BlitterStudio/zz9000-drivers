@@ -91,6 +91,21 @@ static int zzcfg_str_eq_ci(const char *a, const char *b)
     return *a == *b;
 }
 
+static int zzcfg_parse_u12(const char *s, UWORD *out)
+{
+    ULONG value = 0;
+
+    if (!*s) return 0;
+    while (*s) {
+        if (*s < '0' || *s > '9') return 0;
+        value = value * 10 + (ULONG)(*s - '0');
+        if (value > 4095) return 0;
+        s++;
+    }
+    *out = (UWORD)value;
+    return 1;
+}
+
 /* Mirrors the firmware parser's line rules: `key = value`, `#`/`;`
  * comments, case-insensitive keys and keyword values, last value
  * wins. Only the keys ZZTop edits are decoded; anything else is
@@ -150,6 +165,17 @@ void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v)
                 v->videocap_sample = 1;
             else if (zzcfg_str_eq_ci(value, "odd"))
                 v->videocap_sample = 2;
+        } else if (zzcfg_str_eq_ci(key, "videocap_shres")) {
+            if (zzcfg_str_eq_ci(value, "filter"))
+                v->videocap_full = 0;
+            else if (zzcfg_str_eq_ci(value, "full"))
+                v->videocap_full = 1;
+        } else if (zzcfg_str_eq_ci(key, "videocap_crop_h")) {
+            UWORD crop;
+            if (zzcfg_parse_u12(value, &crop)) v->videocap_crop_h = crop;
+        } else if (zzcfg_str_eq_ci(key, "videocap_crop_v")) {
+            UWORD crop;
+            if (zzcfg_parse_u12(value, &crop)) v->videocap_crop_v = crop;
         } else if (zzcfg_str_eq_ci(key, "nonstandard_vsync")) {
             if (zzcfg_str_eq_ci(value, "off")) v->vsync = 0;
             else if (zzcfg_str_eq_ci(value, "pal") ||
@@ -192,6 +218,7 @@ void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v)
 UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
 {
     static const char *sample_names[] = { "average", "even", "odd" };
+    static const char *shres_names[] = { "filter", "full" };
     static const char *vsync_names[] = { "off", "pal", "ntsc" };
     UWORD sample = (v->videocap_sample <= 2) ? v->videocap_sample : 0;
     UWORD vsync = (v->vsync <= 2) ? v->vsync : 0;
@@ -208,6 +235,12 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
         "\n"
         "# Native capture sampling: average (default), even or odd\n"
         "videocap_sample = %s\n"
+        "\n"
+        "# Capture/output width: full=1280x1024 1:1, filter=legacy 720/800 wide\n"
+        "videocap_shres = %s\n"
+        "# Capture origin: horizontal 28 MHz samples, then captured lines\n"
+        "videocap_crop_h = %u\n"
+        "videocap_crop_v = %u\n"
         "\n"
         "# Match the exact Amiga chipset refresh rate: off, pal or ntsc\n"
         "nonstandard_vsync = %s\n"
@@ -232,6 +265,9 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
         "%shdf = %s\n",
         v->videocap_pal ? "pal" : "800x600",
         sample_names[sample],
+        shres_names[v->videocap_full ? 1 : 0],
+        (unsigned)(v->videocap_crop_h & 4095),
+        (unsigned)(v->videocap_crop_v & 4095),
         vsync_names[vsync],
         (unsigned)(v->scanline_mode & 3),
         (unsigned)(v->scanline_parity & 1),

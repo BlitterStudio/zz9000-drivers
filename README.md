@@ -156,15 +156,13 @@ from AmigaOS, so the card never needs to leave the slot.
 
 The drivers in this repo consult it too:
 
-- `ZZ9000.card` takes its videocap mode and non-standard-vsync
-  defaults from `videocap_mode` / `nonstandard_vsync`. With neither
-  ENV nor config set, native video now defaults to 800x600 @ 60 Hz —
-  the mode most monitors accept, and what the firmware and ZZTop
-  default to (older `ZZ9000.card` versions forced 720x576 @ 50 Hz).
-  PAL-capable setups select `videocap_mode = pal` in ZZTop's Settings
-  window. ZZTop 2.5 also exposes `videocap_sample` as Average, Even, or
-  Odd, so native-video capture sampling can be changed without removing
-  the SD card.
+- `ZZ9000.card` takes its legacy filtered videocap mode and
+  non-standard-vsync defaults from `videocap_mode` /
+  `nonstandard_vsync`. ZZTop 2.6 adds **1280x1024 1:1** as the default
+  Native Video choice alongside the filtered 800x600 and PAL 720x576
+  choices. It also exposes Average/Even/Odd capture sampling and the
+  horizontal/vertical crop origin, so all native-video settings can be
+  changed without removing the SD card.
 - `ZZ9000Net.device`, `zz9000ax.audio` and `mhizz9000.library` honor
   `int2 = on`; `ZZ9000Net.device` adopts the firmware's `mac`.
 - `ZZ9000.card` also reads `offscreen_bitmaps` and `video_overlay`,
