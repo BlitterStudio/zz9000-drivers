@@ -65,6 +65,15 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("Seek(file, 0, OFFSET_END)", text)
         self.assertNotIn('sprintf(header, "P6', text)
 
+    def test_zzdiag_compares_pre_ddr_probe_with_capture_memory(self):
+        text = self.read("ZZDiag/ZZDiag.c")
+        header = self.read("include/zz9000_hw.h")
+        self.assertIn("ZZ_REG_VCAP_PROBE_DATA_BASE", header)
+        self.assertIn("ZZ_REG_VCAP_PROBE_CONTROL", header)
+        self.assertIn("arm_videocap_probe", text)
+        self.assertIn("print_videocap_probe_comparison", text)
+        self.assertIn("VideoCapProbeMatch", text)
+
     def test_build_scripts_have_shebangs_and_use_common_docker_image(self):
         scripts = (
             "tools/amiga-docker.sh",

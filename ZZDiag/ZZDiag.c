@@ -19,7 +19,7 @@
 
 #include "zz9000_hw.h"
 
-#define ZZDIAG_VERSION "1.3"
+#define ZZDIAG_VERSION "1.4"
 #define ZZDIAG_DATE    "10.08.2026"
 
 #define ZZDIAG_CAPTURE_ROWS 320U
@@ -112,6 +112,104 @@ static void print_videocap(ULONG board_addr)
     } else {
         printf("VideoCapDiagMagic      = unsupported (0x%04x)\n", (unsigned)magic);
     }
+}
+
+static ULONG read_reg32(ULONG board_addr, ULONG offset)
+{
+    ULONG high = zz9000_read_reg16(board_addr, offset);
+    ULONG low = zz9000_read_reg16(board_addr, offset + 2UL);
+
+    return (high << 16) | low;
+}
+
+static int arm_videocap_probe(ULONG board_addr)
+{
+    UWORD magic = zz9000_read_reg16(board_addr, ZZ_REG_VCAP_PROBE_META);
+    unsigned i;
+
+    if (magic != ZZ_VCAP_PROBE_MAGIC) {
+        printf("VideoCapProbe          = unsupported (0x%04x)\n",
+            (unsigned)magic);
+        return 0;
+    }
+
+    zz9000_write_reg16(board_addr, ZZ_REG_VCAP_PROBE_CONTROL, 1);
+    for (i = 0; i < 25U; i++) {
+        UWORD control = zz9000_read_reg16(board_addr,
+            ZZ_REG_VCAP_PROBE_CONTROL + 2UL);
+
+        if (((control >> 1) & 1U) == (control & 1U))
+            return 1;
+        Delay(1);
+    }
+    printf("VideoCapProbe          = re-arm acknowledgement timed out\n");
+    return 0;
+}
+
+/* The capture AXI master writes 0x00RRGGBB. The big-endian Amiga sees that
+ * little-endian DDR word as 0xBBGGRR00, so normalize the aperture value back
+ * to the AXI representation before making the decisive word-for-word test. */
+static ULONG normalize_capture_word(ULONG host_word)
+{
+    return ((host_word & 0x0000ff00UL) << 8) |
+           ((host_word & 0x00ff0000UL) >> 8) |
+           ((host_word & 0xff000000UL) >> 24);
+}
+
+static void print_videocap_probe_comparison(const struct ZZ9000Board *board)
+{
+    volatile const ULONG *capture;
+    UWORD flags = 0;
+    ULONG target;
+    ULONG awaddr;
+    unsigned matched = 0;
+    unsigned i;
+
+    for (i = 0; i < 25U; i++) {
+        flags = zz9000_read_reg16(board->address,
+            ZZ_REG_VCAP_PROBE_META + 2UL);
+        if (flags & ZZ_VCAP_PROBE_VALID)
+            break;
+        Delay(1);
+    }
+
+    printf("VideoCapProbeFlags     = 0x%04x\n", (unsigned)flags);
+    if (!(flags & ZZ_VCAP_PROBE_VALID)) {
+        printf("VideoCapProbe          = timed out waiting for target burst\n");
+        return;
+    }
+
+    target = read_reg32(board->address, ZZ_REG_VCAP_PROBE_TARGET);
+    awaddr = read_reg32(board->address, ZZ_REG_VCAP_PROBE_AWADDR);
+    printf("VideoCapProbeTarget    = line %lu, x %lu\n",
+        (unsigned long)(target >> 16),
+        (unsigned long)(target & 0xffffUL));
+    printf("VideoCapProbeAWAddr    = 0x%08lx\n", (unsigned long)awaddr);
+
+    capture = (volatile const ULONG *)(board->address +
+        ZZ_VIDEOCAP_BOARD_OFFSET);
+    for (i = 0; i < ZZ_VCAP_PROBE_WORDS; i++) {
+        ULONG axi_word = read_reg32(board->address,
+            ZZ_REG_VCAP_PROBE_DATA_BASE + (ULONG)i * 4UL);
+        ULONG ddr_word = normalize_capture_word(capture[
+            ZZ_VCAP_PROBE_TARGET_LINE * ZZ_VIDEOCAP_FULL_WIDTH +
+            ZZ_VCAP_PROBE_TARGET_X + i]);
+        const char *result = "DIFF";
+
+        if (axi_word == ddr_word) {
+            matched++;
+            result = "MATCH";
+        }
+        printf("VideoCapProbe[%2u]     = AXI 0x%08lx DDR 0x%08lx %s\n",
+            i, (unsigned long)axi_word, (unsigned long)ddr_word, result);
+    }
+
+    printf("VideoCapProbeMatch     = %u/%u\n", matched,
+        (unsigned)ZZ_VCAP_PROBE_WORDS);
+    if (matched == ZZ_VCAP_PROBE_WORDS)
+        printf("VideoCapProbeResult    = seam data existed before DDR\n");
+    else
+        printf("VideoCapProbeResult    = DDR differs from accepted AXI data\n");
 }
 
 static void dump_sample(ULONG board_addr, int sample)
@@ -269,6 +367,8 @@ int main(int argc, char **argv)
                 delay_ticks);
             Delay(delay_ticks);
         }
+        if (arm_videocap_probe(board.address))
+            print_videocap_probe_comparison(&board);
         if (!dump_videocap_ppm(&board, capture_path))
             return 20;
     }

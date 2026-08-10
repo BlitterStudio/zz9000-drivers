@@ -96,6 +96,18 @@
 #define ZZ_SCANLINE_MODE_REG     0x100C
 #define ZZ_SCANLINE_PARITY_REG   0x100E
 
+/* Diagnostic FPGA registers: one explicitly armed snapshot of the accepted
+ * AXI WDATA burst for native-capture row 120, destination x=1248..1263. */
+#define ZZ_REG_VCAP_PROBE_DATA_BASE  0x1120
+#define ZZ_REG_VCAP_PROBE_META       0x1160
+#define ZZ_REG_VCAP_PROBE_TARGET     0x1164
+#define ZZ_REG_VCAP_PROBE_AWADDR     0x1168
+#define ZZ_REG_VCAP_PROBE_CONTROL    0x116C
+#define ZZ_VCAP_PROBE_MAGIC          0x5650
+#define ZZ_VCAP_PROBE_VALID          0x8000
+#define ZZ_VCAP_PROBE_ACTIVE         0x4000
+#define ZZ_VCAP_PROBE_WORDS          16U
+
 #define ZZ_BUFFER_OFFSET         0xA000
 
 /* Host-visible graphics aperture. P96's MemoryBase begins 64 KiB into the
@@ -106,6 +118,8 @@
 #define ZZ_VIDEOCAP_BOARD_OFFSET \
     (ZZ_FRAMEBUFFER_BOARD_OFFSET + ZZ_VIDEOCAP_FRAMEBUFFER_OFFSET)
 #define ZZ_VIDEOCAP_FULL_WIDTH           1280U
+#define ZZ_VCAP_PROBE_TARGET_LINE         120U
+#define ZZ_VCAP_PROBE_TARGET_X            1248U
 
 #define ZZ_VCAP_LINES_MASK        0x03ff
 #define ZZ_VCAP_PW_MAX_TIER_SHIFT 10
