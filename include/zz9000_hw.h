@@ -98,6 +98,15 @@
 
 #define ZZ_BUFFER_OFFSET         0xA000
 
+/* Host-visible graphics aperture. P96's MemoryBase begins 64 KiB into the
+ * board window and maps firmware FRAMEBUFFER_ADDRESS. Native video capture
+ * is written 14 MiB beyond that base. */
+#define ZZ_FRAMEBUFFER_BOARD_OFFSET      0x00010000UL
+#define ZZ_VIDEOCAP_FRAMEBUFFER_OFFSET   0x00E00000UL
+#define ZZ_VIDEOCAP_BOARD_OFFSET \
+    (ZZ_FRAMEBUFFER_BOARD_OFFSET + ZZ_VIDEOCAP_FRAMEBUFFER_OFFSET)
+#define ZZ_VIDEOCAP_FULL_WIDTH           1280U
+
 #define ZZ_VCAP_LINES_MASK        0x03ff
 #define ZZ_VCAP_PW_MAX_TIER_SHIFT 10
 #define ZZ_VCAP_PW_MIN_TIER_SHIFT 12

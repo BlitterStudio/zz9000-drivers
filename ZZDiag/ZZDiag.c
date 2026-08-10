@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
  * Usage:
- *   ZZDiag [samples] [delay_ticks]
+ *   ZZDiag [samples] [delay_ticks] [capture.ppm]
  *
  * VideoCap decoding is adapted from the ZZVCapDiag branch used during
  * Video Toaster/genlock investigation.
@@ -19,8 +19,10 @@
 
 #include "zz9000_hw.h"
 
-#define ZZDIAG_VERSION "1.1"
-#define ZZDIAG_DATE    "07.08.2026"
+#define ZZDIAG_VERSION "1.2"
+#define ZZDIAG_DATE    "10.08.2026"
+
+#define ZZDIAG_CAPTURE_ROWS 320U
 
 static const char version[] __attribute__((used)) =
     "$VER: ZZDiag " ZZDIAG_VERSION " (" ZZDIAG_DATE ")\r\n";
@@ -136,11 +138,77 @@ static void dump_sample(ULONG board_addr, int sample)
     print_videocap(board_addr);
 }
 
+/* Dump the captured source rows before formatter scaling. A P6 PPM keeps the
+ * diagnostic dependency-free and preserves every 24-bit capture sample.
+ * Zorro III presents the little-endian DDR word 0x00RRGGBB to the big-endian
+ * host as 0xBBGGRR00 (Picasso96 B8G8R8A8), hence the byte extraction below. */
+static int dump_videocap_ppm(const struct ZZ9000Board *board, const char *path)
+{
+    const ULONG row_bytes = ZZ_VIDEOCAP_FULL_WIDTH * 3UL;
+    volatile const ULONG *src;
+    UBYTE *row;
+    BPTR file;
+    char header[64];
+    int header_len;
+    ULONG x, y;
+    int ok = 1;
+
+    if (board->zorro_version != 3) {
+        printf("ERROR: capture dump requires the Zorro III aperture\n");
+        return 0;
+    }
+
+    file = Open((CONST_STRPTR)path, MODE_NEWFILE);
+    if (!file) {
+        printf("ERROR: cannot create %s (IoErr=%ld)\n", path, (long)IoErr());
+        return 0;
+    }
+
+    row = AllocMem(row_bytes, MEMF_PUBLIC);
+    if (!row) {
+        printf("ERROR: cannot allocate capture row buffer\n");
+        Close(file);
+        return 0;
+    }
+
+    header_len = sprintf(header, "P6\n%u %u\n255\n",
+        (unsigned)ZZ_VIDEOCAP_FULL_WIDTH,
+        (unsigned)ZZDIAG_CAPTURE_ROWS);
+    if (Write(file, header, header_len) != header_len)
+        ok = 0;
+
+    src = (volatile const ULONG *)(board->address + ZZ_VIDEOCAP_BOARD_OFFSET);
+    for (y = 0; ok && y < ZZDIAG_CAPTURE_ROWS; y++) {
+        for (x = 0; x < ZZ_VIDEOCAP_FULL_WIDTH; x++) {
+            ULONG pixel = src[y * ZZ_VIDEOCAP_FULL_WIDTH + x];
+            row[x * 3UL + 0] = (UBYTE)(pixel >> 8);  /* red */
+            row[x * 3UL + 1] = (UBYTE)(pixel >> 16); /* green */
+            row[x * 3UL + 2] = (UBYTE)(pixel >> 24); /* blue */
+        }
+        if (Write(file, row, row_bytes) != (LONG)row_bytes)
+            ok = 0;
+    }
+
+    FreeMem(row, row_bytes);
+    Close(file);
+
+    if (!ok) {
+        printf("ERROR: capture dump write failed (IoErr=%ld)\n", (long)IoErr());
+        return 0;
+    }
+
+    printf("CapturePPM             = %s (%ux%u)\n", path,
+        (unsigned)ZZ_VIDEOCAP_FULL_WIDTH,
+        (unsigned)ZZDIAG_CAPTURE_ROWS);
+    return 1;
+}
+
 static void usage(const char *name)
 {
-    printf("Usage: %s [samples] [delay_ticks]\n", name);
+    printf("Usage: %s [samples] [delay_ticks] [capture.ppm]\n", name);
     printf("  samples     : number of dumps, default 1\n");
-    printf("  delay_ticks : AmigaDOS ticks between samples, default 50\n");
+    printf("  delay_ticks : ticks between samples and before capture, default 50\n");
+    printf("  capture.ppm : optional 1280x320 native-capture framebuffer dump\n");
 }
 
 int main(int argc, char **argv)
@@ -148,15 +216,17 @@ int main(int argc, char **argv)
     struct ZZ9000Board board;
     int samples = 1;
     int delay_ticks = 50;
+    const char *capture_path = NULL;
     int i;
 
-    if (argc > 3 || (argc > 1 && argv[1][0] == '?')) {
+    if (argc > 4 || (argc > 1 && argv[1][0] == '?')) {
         usage(argv[0]);
         return 0;
     }
 
     if (argc > 1) samples = atoi(argv[1]);
     if (argc > 2) delay_ticks = atoi(argv[2]);
+    if (argc > 3) capture_path = argv[3];
     if (samples < 1) samples = 1;
     if (delay_ticks < 0) delay_ticks = 0;
 
@@ -175,6 +245,16 @@ int main(int argc, char **argv)
     for (i = 0; i < samples; i++) {
         dump_sample(board.address, i + 1);
         if (i + 1 < samples && delay_ticks > 0) Delay(delay_ticks);
+    }
+
+    if (capture_path) {
+        if (delay_ticks > 0) {
+            printf("CaptureDelayTicks      = %d (switch to native screen now)\n",
+                delay_ticks);
+            Delay(delay_ticks);
+        }
+        if (!dump_videocap_ppm(&board, capture_path))
+            return 20;
     }
 
     return 0;
