@@ -115,18 +115,17 @@
 #define ZZ_VCAP_PROBE_SAMPLER_ARMED  0x1000
 #define ZZ_VCAP_PROBE_WORDS          16U
 
-/* Sampler-only snapshot of the 64 raw words immediately following the
- * published 1280-word native-capture row. It shares the probe arm control. */
-#define ZZ_REG_VCAP_TAIL_PROBE_META       0x12E0
-#define ZZ_REG_VCAP_TAIL_PROBE_TARGET     0x12E4
-#define ZZ_REG_VCAP_TAIL_PROBE_CONTEXT    0x12E8
-#define ZZ_REG_VCAP_TAIL_PROBE_CONFIG     0x12EC
-#define ZZ_REG_VCAP_TAIL_PROBE_DATA_BASE  0x1300
-#define ZZ_VCAP_TAIL_PROBE_MAGIC          0x5654
-#define ZZ_VCAP_TAIL_PROBE_VALID          0x8000
-#define ZZ_VCAP_TAIL_PROBE_ARMED          0x4000
-#define ZZ_VCAP_TAIL_PROBE_WORDS          64U
-#define ZZ_VCAP_TAIL_PROBE_SOURCE_X       1280U
+/* Sampler-only snapshot of the 64 raw words immediately preceding the
+ * configured horizontal crop. It shares the probe arm control. */
+#define ZZ_REG_VCAP_PRE_CROP_PROBE_META       0x12E0
+#define ZZ_REG_VCAP_PRE_CROP_PROBE_TARGET     0x12E4
+#define ZZ_REG_VCAP_PRE_CROP_PROBE_CONTEXT    0x12E8
+#define ZZ_REG_VCAP_PRE_CROP_PROBE_CONFIG     0x12EC
+#define ZZ_REG_VCAP_PRE_CROP_PROBE_DATA_BASE  0x1300
+#define ZZ_VCAP_PRE_CROP_PROBE_MAGIC          0x5652
+#define ZZ_VCAP_PRE_CROP_PROBE_VALID          0x8000
+#define ZZ_VCAP_PRE_CROP_PROBE_ARMED          0x4000
+#define ZZ_VCAP_PRE_CROP_PROBE_WORDS          64U
 
 #define ZZ_BUFFER_OFFSET         0xA000
 

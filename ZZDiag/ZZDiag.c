@@ -19,7 +19,7 @@
 
 #include "zz9000_hw.h"
 
-#define ZZDIAG_VERSION "1.8"
+#define ZZDIAG_VERSION "1.9"
 #define ZZDIAG_DATE    "10.08.2026"
 
 #define ZZDIAG_CAPTURE_ROWS 320U
@@ -354,10 +354,10 @@ static void print_videocap_probe_comparison(const struct ZZ9000Board *board)
     }
 }
 
-static void print_videocap_tail_probe(const struct ZZ9000Board *board)
+static void print_videocap_precrop_probe(const struct ZZ9000Board *board)
 {
     UWORD magic = zz9000_read_reg16(board->address,
-        ZZ_REG_VCAP_TAIL_PROBE_META);
+        ZZ_REG_VCAP_PRE_CROP_PROBE_META);
     UWORD flags = 0;
     ULONG target;
     ULONG context;
@@ -368,48 +368,48 @@ static void print_videocap_tail_probe(const struct ZZ9000Board *board)
     unsigned black = 0;
     unsigned i;
 
-    if (magic != ZZ_VCAP_TAIL_PROBE_MAGIC) {
-        printf("VideoCapTail           = unsupported (0x%04x)\n",
+    if (magic != ZZ_VCAP_PRE_CROP_PROBE_MAGIC) {
+        printf("VideoCapPreCrop        = unsupported (0x%04x)\n",
             (unsigned)magic);
         return;
     }
 
     for (i = 0; i < 25U; i++) {
         flags = zz9000_read_reg16(board->address,
-            ZZ_REG_VCAP_TAIL_PROBE_META + 2UL);
-        if (flags & ZZ_VCAP_TAIL_PROBE_VALID)
+            ZZ_REG_VCAP_PRE_CROP_PROBE_META + 2UL);
+        if (flags & ZZ_VCAP_PRE_CROP_PROBE_VALID)
             break;
         Delay(1);
     }
 
-    printf("VideoCapTailFlags      = 0x%04x\n", (unsigned)flags);
-    if (!(flags & ZZ_VCAP_TAIL_PROBE_VALID)) {
-        printf("VideoCapTail           = timed out waiting for post-window samples\n");
+    printf("VideoCapPreCropFlags   = 0x%04x\n", (unsigned)flags);
+    if (!(flags & ZZ_VCAP_PRE_CROP_PROBE_VALID)) {
+        printf("VideoCapPreCrop        = timed out waiting for pre-crop samples\n");
         return;
     }
-    if (!(flags & ZZ_VCAP_TAIL_PROBE_ARMED)) {
-        printf("VideoCapTail           = snapshot arm was not acknowledged\n");
+    if (!(flags & ZZ_VCAP_PRE_CROP_PROBE_ARMED)) {
+        printf("VideoCapPreCrop        = snapshot arm was not acknowledged\n");
         return;
     }
 
-    target = read_reg32(board->address, ZZ_REG_VCAP_TAIL_PROBE_TARGET);
-    context = read_reg32(board->address, ZZ_REG_VCAP_TAIL_PROBE_CONTEXT);
-    config = read_reg32(board->address, ZZ_REG_VCAP_TAIL_PROBE_CONFIG);
-    printf("VideoCapTailTarget     = line %lu, source x %lu\n",
+    target = read_reg32(board->address, ZZ_REG_VCAP_PRE_CROP_PROBE_TARGET);
+    context = read_reg32(board->address, ZZ_REG_VCAP_PRE_CROP_PROBE_CONTEXT);
+    config = read_reg32(board->address, ZZ_REG_VCAP_PRE_CROP_PROBE_CONFIG);
+    printf("VideoCapPreCropTarget  = line %lu, raw sample x %lu\n",
         (unsigned long)(target >> 16),
         (unsigned long)(target & 0xffffUL));
-    printf("VideoCapTailContext    = sample x %lu, raw y %lu, bank %lu\n",
+    printf("VideoCapPreCropContext = sample x %lu, raw y %lu, bank %lu\n",
         (unsigned long)(context & 0x7ffUL),
         (unsigned long)((context >> 11) & 0x7ffUL),
         (unsigned long)((context >> 22) & 1UL));
-    printf("VideoCapTailConfig     = full %lu, crop h %lu, crop v %lu\n",
+    printf("VideoCapPreCropConfig  = full %lu, crop h %lu, crop v %lu\n",
         (unsigned long)((config >> 24) & 1UL),
         (unsigned long)(config & 0x0fffUL),
         (unsigned long)((config >> 12) & 0x0fffUL));
 
-    for (i = 0; i < ZZ_VCAP_TAIL_PROBE_WORDS; i++) {
+    for (i = 0; i < ZZ_VCAP_PRE_CROP_PROBE_WORDS; i++) {
         ULONG word = read_reg32(board->address,
-            ZZ_REG_VCAP_TAIL_PROBE_DATA_BASE + (ULONG)i * 4UL);
+            ZZ_REG_VCAP_PRE_CROP_PROBE_DATA_BASE + (ULONG)i * 4UL);
 
         if (i > 0 && word != previous)
             transitions++;
@@ -418,17 +418,17 @@ static void print_videocap_tail_probe(const struct ZZ9000Board *board)
         if (word == 0x00000000UL)
             black++;
         previous = word;
-        printf("VideoCapTail[%2u]      = 0x%08lx\n", i,
+        printf("VideoCapPreCrop[%2u]   = 0x%08lx\n", i,
             (unsigned long)word);
     }
 
-    printf("VideoCapTailTransitions = %u/%u\n", transitions,
-        (unsigned)(ZZ_VCAP_TAIL_PROBE_WORDS - 1U));
-    printf("VideoCapTailWhite      = %u/%u\n", white,
-        (unsigned)ZZ_VCAP_TAIL_PROBE_WORDS);
-    printf("VideoCapTailBlack      = %u/%u\n", black,
-        (unsigned)ZZ_VCAP_TAIL_PROBE_WORDS);
-    printf("VideoCapTailResult     = captured 64 post-window samples\n");
+    printf("VideoCapPreCropTransitions = %u/%u\n", transitions,
+        (unsigned)(ZZ_VCAP_PRE_CROP_PROBE_WORDS - 1U));
+    printf("VideoCapPreCropWhite   = %u/%u\n", white,
+        (unsigned)ZZ_VCAP_PRE_CROP_PROBE_WORDS);
+    printf("VideoCapPreCropBlack   = %u/%u\n", black,
+        (unsigned)ZZ_VCAP_PRE_CROP_PROBE_WORDS);
+    printf("VideoCapPreCropResult  = captured 64 samples before crop\n");
 }
 
 static void dump_sample(ULONG board_addr, int sample)
@@ -588,7 +588,7 @@ int main(int argc, char **argv)
         }
         if (arm_videocap_probe(board.address)) {
             print_videocap_probe_comparison(&board);
-            print_videocap_tail_probe(&board);
+            print_videocap_precrop_probe(&board);
         }
         if (!dump_videocap_ppm(&board, capture_path))
             return 20;
