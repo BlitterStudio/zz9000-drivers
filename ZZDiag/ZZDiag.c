@@ -19,7 +19,7 @@
 
 #include "zz9000_hw.h"
 
-#define ZZDIAG_VERSION "1.5"
+#define ZZDIAG_VERSION "1.6"
 #define ZZDIAG_DATE    "10.08.2026"
 
 #define ZZDIAG_CAPTURE_ROWS 320U
@@ -166,8 +166,12 @@ static void print_videocap_probe_comparison(const struct ZZ9000Board *board)
     ULONG sampler_context;
     ULONG sampler_config;
     ULONG first_owner = 0;
+    ULONG previous_axi = 0;
+    ULONG previous_sampler = 0;
     unsigned axi_ddr_matched = 0;
     unsigned sampler_axi_matched = 0;
+    unsigned sampler_shift_plus_one = 0;
+    unsigned sampler_shift_minus_one = 0;
     unsigned sampler_white = 0;
     unsigned sampler_line;
     unsigned sampler_source_x;
@@ -252,6 +256,14 @@ static void print_videocap_probe_comparison(const struct ZZ9000Board *board)
         }
         if (sampler_word == 0x00ffffffUL)
             sampler_white++;
+        if (i > 0) {
+            if (previous_axi == sampler_word)
+                sampler_shift_plus_one++;
+            if (axi_word == previous_sampler)
+                sampler_shift_minus_one++;
+        }
+        previous_axi = axi_word;
+        previous_sampler = sampler_word;
 
         if (i == 0) {
             first_owner = owner;
@@ -291,6 +303,10 @@ static void print_videocap_probe_comparison(const struct ZZ9000Board *board)
 
     printf("VideoCapSamplerMatch   = %u/%u\n", sampler_axi_matched,
         (unsigned)ZZ_VCAP_PROBE_WORDS);
+    printf("VideoCapSamplerShift+1 = %u/%u\n", sampler_shift_plus_one,
+        (unsigned)(ZZ_VCAP_PROBE_WORDS - 1U));
+    printf("VideoCapSamplerShift-1 = %u/%u\n", sampler_shift_minus_one,
+        (unsigned)(ZZ_VCAP_PROBE_WORDS - 1U));
     printf("VideoCapSamplerWhite   = %u/%u\n", sampler_white,
         (unsigned)ZZ_VCAP_PROBE_WORDS);
     printf("VideoCapProbeMatch     = %u/%u\n", axi_ddr_matched,

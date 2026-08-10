@@ -76,7 +76,13 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("print_videocap_probe_comparison", text)
         self.assertIn("VideoCapProbeMatch", text)
         self.assertIn("VideoCapSamplerMatch", text)
+        self.assertIn("VideoCapSamplerShift+1", text)
+        self.assertIn("VideoCapSamplerShift-1", text)
         self.assertIn("VideoCapOwnerStable", text)
+        self.assertIn("ZZ_VCAP_PROBE_TARGET_X", header)
+        self.assertIn("928U", header)
+        self.assertIn("ZZ_VCAP_PROBE_SOURCE_X", header)
+        self.assertIn("864U", header)
 
     def test_build_scripts_have_shebangs_and_use_common_docker_image(self):
         scripts = (
