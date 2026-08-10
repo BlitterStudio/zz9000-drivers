@@ -19,7 +19,7 @@
 
 #include "zz9000_hw.h"
 
-#define ZZDIAG_VERSION "1.9"
+#define ZZDIAG_VERSION "1.10"
 #define ZZDIAG_DATE    "10.08.2026"
 
 #define ZZDIAG_CAPTURE_ROWS 320U

@@ -139,7 +139,7 @@
 #define ZZ_VIDEOCAP_FULL_WIDTH           1280U
 #define ZZ_VCAP_PROBE_TARGET_LINE         120U
 #define ZZ_VCAP_PROBE_TARGET_X             928U
-#define ZZ_VCAP_PROBE_SOURCE_X              864U
+#define ZZ_VCAP_PROBE_SOURCE_X              928U
 
 #define ZZ_VCAP_LINES_MASK        0x03ff
 #define ZZ_VCAP_PW_MAX_TIER_SHIFT 10
