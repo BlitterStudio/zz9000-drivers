@@ -19,7 +19,7 @@
 
 #include "zz9000_hw.h"
 
-#define ZZDIAG_VERSION "1.4"
+#define ZZDIAG_VERSION "1.5"
 #define ZZDIAG_DATE    "10.08.2026"
 
 #define ZZDIAG_CAPTURE_ROWS 320U
@@ -162,7 +162,18 @@ static void print_videocap_probe_comparison(const struct ZZ9000Board *board)
     UWORD flags = 0;
     ULONG target;
     ULONG awaddr;
-    unsigned matched = 0;
+    ULONG sampler_target;
+    ULONG sampler_context;
+    ULONG sampler_config;
+    ULONG first_owner = 0;
+    unsigned axi_ddr_matched = 0;
+    unsigned sampler_axi_matched = 0;
+    unsigned sampler_white = 0;
+    unsigned sampler_line;
+    unsigned sampler_source_x;
+    unsigned sampler_bank;
+    unsigned owner_stable = 1;
+    unsigned published_stable = 1;
     unsigned i;
 
     for (i = 0; i < 25U; i++) {
@@ -178,38 +189,127 @@ static void print_videocap_probe_comparison(const struct ZZ9000Board *board)
         printf("VideoCapProbe          = timed out waiting for target burst\n");
         return;
     }
+    if ((flags & (ZZ_VCAP_PROBE_SAMPLER_VALID |
+                  ZZ_VCAP_PROBE_SAMPLER_ARMED)) !=
+            (ZZ_VCAP_PROBE_SAMPLER_VALID | ZZ_VCAP_PROBE_SAMPLER_ARMED)) {
+        printf("VideoCapProbe          = sampler snapshot was not ready\n");
+        return;
+    }
 
     target = read_reg32(board->address, ZZ_REG_VCAP_PROBE_TARGET);
     awaddr = read_reg32(board->address, ZZ_REG_VCAP_PROBE_AWADDR);
+    sampler_target = read_reg32(board->address,
+        ZZ_REG_VCAP_PROBE_SAMPLER_TARGET);
+    sampler_context = read_reg32(board->address,
+        ZZ_REG_VCAP_PROBE_SAMPLER_CONTEXT);
+    sampler_config = read_reg32(board->address,
+        ZZ_REG_VCAP_PROBE_SAMPLER_CONFIG);
+    sampler_line = (unsigned)(sampler_target >> 16);
+    sampler_source_x = (unsigned)(sampler_target & 0xffffUL);
+    sampler_bank = (unsigned)((sampler_context >> 22) & 1UL);
     printf("VideoCapProbeTarget    = line %lu, x %lu\n",
         (unsigned long)(target >> 16),
         (unsigned long)(target & 0xffffUL));
     printf("VideoCapProbeAWAddr    = 0x%08lx\n", (unsigned long)awaddr);
+    printf("VideoCapSamplerTarget  = line %lu, source x %lu\n",
+        (unsigned long)sampler_line, (unsigned long)sampler_source_x);
+    printf("VideoCapSamplerContext = sample x %lu, raw y %lu, bank %lu\n",
+        (unsigned long)(sampler_context & 0x7ffUL),
+        (unsigned long)((sampler_context >> 11) & 0x7ffUL),
+        (unsigned long)((sampler_context >> 22) & 1UL));
+    printf("VideoCapSamplerConfig  = full %lu, crop h %lu, crop v %lu\n",
+        (unsigned long)((sampler_config >> 24) & 1UL),
+        (unsigned long)(sampler_config & 0x0fffUL),
+        (unsigned long)((sampler_config >> 12) & 0x0fffUL));
 
     capture = (volatile const ULONG *)(board->address +
         ZZ_VIDEOCAP_BOARD_OFFSET);
     for (i = 0; i < ZZ_VCAP_PROBE_WORDS; i++) {
+        ULONG sampler_word = read_reg32(board->address,
+            ZZ_REG_VCAP_PROBE_SAMPLER_DATA_BASE + (ULONG)i * 4UL);
         ULONG axi_word = read_reg32(board->address,
             ZZ_REG_VCAP_PROBE_DATA_BASE + (ULONG)i * 4UL);
         ULONG ddr_word = normalize_capture_word(capture[
             ZZ_VCAP_PROBE_TARGET_LINE * ZZ_VIDEOCAP_FULL_WIDTH +
             ZZ_VCAP_PROBE_TARGET_X + i]);
-        const char *result = "DIFF";
+        ULONG owner = read_reg32(board->address,
+            ZZ_REG_VCAP_PROBE_OWNER_BASE + (ULONG)i * 4UL);
+        unsigned save_line = (unsigned)((owner >> 22) & 0x03ffUL);
+        unsigned published_line = (unsigned)((owner >> 13) & 0x01ffUL);
+        unsigned save_bank = (unsigned)((owner >> 12) & 1UL);
+        unsigned published_bank = (unsigned)((owner >> 11) & 1UL);
+        unsigned source_x = (unsigned)(owner & 0x07ffUL);
+        const char *sampler_result = "DIFF";
+        const char *ddr_result = "DIFF";
 
-        if (axi_word == ddr_word) {
-            matched++;
-            result = "MATCH";
+        if (sampler_word == axi_word) {
+            sampler_axi_matched++;
+            sampler_result = "MATCH";
         }
-        printf("VideoCapProbe[%2u]     = AXI 0x%08lx DDR 0x%08lx %s\n",
-            i, (unsigned long)axi_word, (unsigned long)ddr_word, result);
+        if (axi_word == ddr_word) {
+            axi_ddr_matched++;
+            ddr_result = "MATCH";
+        }
+        if (sampler_word == 0x00ffffffUL)
+            sampler_white++;
+
+        if (i == 0) {
+            first_owner = owner;
+            if (save_line != ZZ_VCAP_PROBE_TARGET_LINE ||
+                    source_x != ZZ_VCAP_PROBE_SOURCE_X ||
+                    save_bank != sampler_bank ||
+                    sampler_line != ZZ_VCAP_PROBE_TARGET_LINE ||
+                    sampler_source_x != ZZ_VCAP_PROBE_SOURCE_X)
+                owner_stable = 0;
+        } else {
+            unsigned first_save_line =
+                (unsigned)((first_owner >> 22) & 0x03ffUL);
+            unsigned first_published_line =
+                (unsigned)((first_owner >> 13) & 0x01ffUL);
+            unsigned first_save_bank =
+                (unsigned)((first_owner >> 12) & 1UL);
+            unsigned first_published_bank =
+                (unsigned)((first_owner >> 11) & 1UL);
+
+            if (save_line != first_save_line ||
+                    save_bank != first_save_bank ||
+                    source_x != ZZ_VCAP_PROBE_SOURCE_X + i)
+                owner_stable = 0;
+            if (published_line != first_published_line ||
+                    published_bank != first_published_bank)
+                published_stable = 0;
+        }
+
+        printf("VideoCapProbe[%2u]     = SAM 0x%08lx AXI 0x%08lx %s "
+               "DDR 0x%08lx %s\n", i, (unsigned long)sampler_word,
+            (unsigned long)axi_word, sampler_result,
+            (unsigned long)ddr_word, ddr_result);
+        printf("VideoCapOwner[%2u]     = source %u save %u/%u "
+               "published %u/%u\n", i, source_x, save_line, save_bank,
+            published_line, published_bank);
     }
 
-    printf("VideoCapProbeMatch     = %u/%u\n", matched,
+    printf("VideoCapSamplerMatch   = %u/%u\n", sampler_axi_matched,
         (unsigned)ZZ_VCAP_PROBE_WORDS);
-    if (matched == ZZ_VCAP_PROBE_WORDS)
-        printf("VideoCapProbeResult    = seam data existed before DDR\n");
-    else
+    printf("VideoCapSamplerWhite   = %u/%u\n", sampler_white,
+        (unsigned)ZZ_VCAP_PROBE_WORDS);
+    printf("VideoCapProbeMatch     = %u/%u\n", axi_ddr_matched,
+        (unsigned)ZZ_VCAP_PROBE_WORDS);
+    printf("VideoCapOwnerStable    = %s\n", owner_stable ? "yes" : "NO");
+    printf("VideoCapPublishedStable = %s\n",
+        published_stable ? "yes" : "NO");
+
+    if (axi_ddr_matched != ZZ_VCAP_PROBE_WORDS) {
         printf("VideoCapProbeResult    = DDR differs from accepted AXI data\n");
+    } else if (!owner_stable) {
+        printf("VideoCapProbeResult    = line-buffer owner changed in burst\n");
+    } else if (sampler_axi_matched != ZZ_VCAP_PROBE_WORDS) {
+        printf("VideoCapProbeResult    = line-buffer read differs from sampler\n");
+    } else if (!published_stable) {
+        printf("VideoCapProbeResult    = completed-line token changed in burst\n");
+    } else {
+        printf("VideoCapProbeResult    = sampler data reached DDR unchanged\n");
+    }
 }
 
 static void dump_sample(ULONG board_addr, int sample)
