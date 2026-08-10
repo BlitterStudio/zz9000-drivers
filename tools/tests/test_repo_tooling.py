@@ -58,6 +58,13 @@ class RepoToolingTests(unittest.TestCase):
         ):
             self.assertIn('#include "zz9000_hw.h"', self.read(relpath))
 
+    def test_zzdiag_capture_dump_has_fixed_header_and_size_gate(self):
+        text = self.read("ZZDiag/ZZDiag.c")
+        self.assertIn('"P6\\n1280 320\\n255\\n"', text)
+        self.assertIn("DeleteFile((CONST_STRPTR)path)", text)
+        self.assertIn("Seek(file, 0, OFFSET_END)", text)
+        self.assertNotIn('sprintf(header, "P6', text)
+
     def test_build_scripts_have_shebangs_and_use_common_docker_image(self):
         scripts = (
             "tools/amiga-docker.sh",

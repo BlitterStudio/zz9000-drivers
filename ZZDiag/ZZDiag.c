@@ -19,10 +19,13 @@
 
 #include "zz9000_hw.h"
 
-#define ZZDIAG_VERSION "1.2"
+#define ZZDIAG_VERSION "1.3"
 #define ZZDIAG_DATE    "10.08.2026"
 
 #define ZZDIAG_CAPTURE_ROWS 320U
+
+static const char zzdiag_capture_ppm_header[] =
+    "P6\n1280 320\n255\n";
 
 static const char version[] __attribute__((used)) =
     "$VER: ZZDiag " ZZDIAG_VERSION " (" ZZDIAG_DATE ")\r\n";
@@ -148,9 +151,9 @@ static int dump_videocap_ppm(const struct ZZ9000Board *board, const char *path)
     volatile const ULONG *src;
     UBYTE *row;
     BPTR file;
-    char header[64];
-    int header_len;
     ULONG x, y;
+    LONG seek_result;
+    LONG final_pos;
     int ok = 1;
 
     if (board->zorro_version != 3) {
@@ -158,6 +161,10 @@ static int dump_videocap_ppm(const struct ZZ9000Board *board, const char *path)
         return 0;
     }
 
+    /* Some AmigaDOS handlers preserve an existing file's tail when it is
+     * reopened with MODE_NEWFILE. Remove it first so a shorter retry cannot
+     * masquerade as a giant PPM. A missing file is harmless here. */
+    DeleteFile((CONST_STRPTR)path);
     file = Open((CONST_STRPTR)path, MODE_NEWFILE);
     if (!file) {
         printf("ERROR: cannot create %s (IoErr=%ld)\n", path, (long)IoErr());
@@ -171,10 +178,12 @@ static int dump_videocap_ppm(const struct ZZ9000Board *board, const char *path)
         return 0;
     }
 
-    header_len = sprintf(header, "P6\n%u %u\n255\n",
-        (unsigned)ZZ_VIDEOCAP_FULL_WIDTH,
-        (unsigned)ZZDIAG_CAPTURE_ROWS);
-    if (Write(file, header, header_len) != header_len)
+    /* Keep this header literal. The no-ixemul Amiga formatter used by this
+     * tool interpreted the two %u arguments with legacy word semantics and
+     * produced "0 1280" instead of "1280 320" on real hardware. */
+    if (Write(file, (APTR)zzdiag_capture_ppm_header,
+            (LONG)(sizeof(zzdiag_capture_ppm_header) - 1)) !=
+            (LONG)(sizeof(zzdiag_capture_ppm_header) - 1))
         ok = 0;
 
     src = (volatile const ULONG *)(board->address + ZZ_VIDEOCAP_BOARD_OFFSET);
@@ -189,6 +198,14 @@ static int dump_videocap_ppm(const struct ZZ9000Board *board, const char *path)
             ok = 0;
     }
 
+    seek_result = Seek(file, 0, OFFSET_END);
+    final_pos = Seek(file, 0, OFFSET_CURRENT);
+    if (seek_result == -1 || final_pos == -1)
+        ok = 0;
+    if (final_pos != (LONG)((sizeof(zzdiag_capture_ppm_header) - 1) +
+            ZZDIAG_CAPTURE_ROWS * row_bytes))
+        ok = 0;
+
     FreeMem(row, row_bytes);
     Close(file);
 
@@ -197,9 +214,8 @@ static int dump_videocap_ppm(const struct ZZ9000Board *board, const char *path)
         return 0;
     }
 
-    printf("CapturePPM             = %s (%ux%u)\n", path,
-        (unsigned)ZZ_VIDEOCAP_FULL_WIDTH,
-        (unsigned)ZZDIAG_CAPTURE_ROWS);
+    printf("CapturePPM             = %s (1280x320, %ld bytes)\n", path,
+        (long)final_pos);
     return 1;
 }
 
