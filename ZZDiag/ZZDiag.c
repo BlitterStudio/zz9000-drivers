@@ -19,7 +19,7 @@
 
 #include "zz9000_hw.h"
 
-#define ZZDIAG_VERSION "1.6"
+#define ZZDIAG_VERSION "1.7"
 #define ZZDIAG_DATE    "10.08.2026"
 
 #define ZZDIAG_CAPTURE_ROWS 320U
@@ -148,7 +148,8 @@ static int arm_videocap_probe(ULONG board_addr)
 
 /* The capture AXI master writes 0x00RRGGBB. The big-endian Amiga sees that
  * little-endian DDR word as 0xBBGGRR00, so normalize the aperture value back
- * to the AXI representation before making the decisive word-for-word test. */
+ * to the AXI representation. Capture remains live after the AXI snapshot, so
+ * this later DDR comparison is advisory rather than frame-exact. */
 static ULONG normalize_capture_word(ULONG host_word)
 {
     return ((host_word & 0x0000ff00UL) << 8) |
@@ -168,6 +169,10 @@ static void print_videocap_probe_comparison(const struct ZZ9000Board *board)
     ULONG first_owner = 0;
     ULONG previous_axi = 0;
     ULONG previous_sampler = 0;
+    ULONG sampler_word_zero = 0;
+    ULONG sampler_word_one = 0;
+    ULONG axi_word_zero = 0;
+    ULONG axi_word_one = 0;
     unsigned axi_ddr_matched = 0;
     unsigned sampler_axi_matched = 0;
     unsigned sampler_shift_plus_one = 0;
@@ -266,6 +271,14 @@ static void print_videocap_probe_comparison(const struct ZZ9000Board *board)
         previous_sampler = sampler_word;
 
         if (i == 0) {
+            sampler_word_zero = sampler_word;
+            axi_word_zero = axi_word;
+        } else if (i == 1) {
+            sampler_word_one = sampler_word;
+            axi_word_one = axi_word;
+        }
+
+        if (i == 0) {
             first_owner = owner;
             if (save_line != ZZ_VCAP_PROBE_TARGET_LINE ||
                     source_x != ZZ_VCAP_PROBE_SOURCE_X ||
@@ -303,6 +316,14 @@ static void print_videocap_probe_comparison(const struct ZZ9000Board *board)
 
     printf("VideoCapSamplerMatch   = %u/%u\n", sampler_axi_matched,
         (unsigned)ZZ_VCAP_PROBE_WORDS);
+    if (sampler_word_zero == axi_word_zero) {
+        printf("VideoCapSamplerFirst   = MATCH\n");
+    } else if (axi_word_zero == sampler_word_one &&
+            axi_word_one == sampler_word_one) {
+        printf("VideoCapSamplerFirst   = AXI word 1 duplicated\n");
+    } else {
+        printf("VideoCapSamplerFirst   = DIFF\n");
+    }
     printf("VideoCapSamplerShift+1 = %u/%u\n", sampler_shift_plus_one,
         (unsigned)(ZZ_VCAP_PROBE_WORDS - 1U));
     printf("VideoCapSamplerShift-1 = %u/%u\n", sampler_shift_minus_one,
@@ -315,14 +336,19 @@ static void print_videocap_probe_comparison(const struct ZZ9000Board *board)
     printf("VideoCapPublishedStable = %s\n",
         published_stable ? "yes" : "NO");
 
-    if (axi_ddr_matched != ZZ_VCAP_PROBE_WORDS) {
-        printf("VideoCapProbeResult    = DDR differs from accepted AXI data\n");
-    } else if (!owner_stable) {
+    if (!owner_stable) {
         printf("VideoCapProbeResult    = line-buffer owner changed in burst\n");
     } else if (sampler_axi_matched != ZZ_VCAP_PROBE_WORDS) {
-        printf("VideoCapProbeResult    = line-buffer read differs from sampler\n");
+        if (sampler_axi_matched == ZZ_VCAP_PROBE_WORDS - 1U &&
+                axi_word_zero == sampler_word_one &&
+                axi_word_one == sampler_word_one)
+            printf("VideoCapProbeResult    = first sampler word replaced by word 1\n");
+        else
+            printf("VideoCapProbeResult    = line-buffer read differs from sampler\n");
     } else if (!published_stable) {
         printf("VideoCapProbeResult    = completed-line token changed in burst\n");
+    } else if (axi_ddr_matched != ZZ_VCAP_PROBE_WORDS) {
+        printf("VideoCapProbeResult    = sampler reached AXI; later live DDR differs (advisory)\n");
     } else {
         printf("VideoCapProbeResult    = sampler data reached DDR unchanged\n");
     }
