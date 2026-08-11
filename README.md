@@ -160,7 +160,10 @@ The drivers in this repo consult it too:
   configuration. ZZTop 2.7 presents one explicit **Native Output** profile
   instead of independent width, resolution, and refresh controls. Normal
   choices state the resulting resolution and refresh directly; capture
-  sampling and crop calibration live in **Advanced Video**. Firmware 2.9+
+  sampling and framing live in **Advanced Video**. Framing defaults to
+  **Automatic**: full-rate/full-width capture uses `279/40`, while filtered
+  and Denise-adapter paths retain `188/26`. **Custom** values remain literal
+  per-machine overrides. Firmware 2.9+
   stores this as `videocap_profile`; ZZTop transparently writes the equivalent
   legacy key combination for older firmware.
 - `ZZ9000Net.device`, `zz9000ax.audio` and `mhizz9000.library` honor

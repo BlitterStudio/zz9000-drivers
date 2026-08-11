@@ -81,12 +81,13 @@ static const char version[] __attribute__((used)) =
 
 /* Advanced native-video window gadgets. */
 #define AGAD_VCAP_SAMPLE   (0)
-#define AGAD_VCAP_CROP_H   (1)
-#define AGAD_VCAP_CROP_V   (2)
-#define AGAD_STATUS        (3)
-#define AGAD_BTN_DONE      (4)
-#define AGAD_BTN_CANCEL    (5)
-#define AGAD_COUNT         (6)
+#define AGAD_VCAP_FRAMING  (1)
+#define AGAD_VCAP_CROP_H   (2)
+#define AGAD_VCAP_CROP_V   (3)
+#define AGAD_STATUS        (4)
+#define AGAD_BTN_DONE      (5)
+#define AGAD_BTN_CANCEL    (6)
+#define AGAD_COUNT         (7)
 
 /* Project menu userdata values. */
 #define MENU_ID_SETTINGS   (1)
@@ -110,6 +111,7 @@ static const char version[] __attribute__((used)) =
 #define LABEL_REFRESHMODE  "Auto Refresh"
 #define LABEL_VCAPMODE     "Native Output"
 #define LABEL_VCAP_SAMPLE  "Capture Sample"
+#define LABEL_VCAP_FRAMING "Framing"
 #define LABEL_VCAP_CROP    "Crop H / V"
 #define LABEL_VCAP_ADVANCED "Advanced Video..."
 #define LABEL_INT2         "Interrupt"
@@ -868,6 +870,12 @@ static STRPTR vcapsample_labels[] = {
 	NULL
 };
 
+static STRPTR vcapframing_labels[] = {
+	(STRPTR)"Automatic (recommended)",
+	(STRPTR)"Custom",
+	NULL
+};
+
 /* Feature kill-switches: index == the config value, so 1 is enabled -
  * which is also what ZZ9000.card assumes when the key is absent. */
 static STRPTR enable_labels[] = {
@@ -1082,8 +1090,8 @@ static void settings_populate(struct Window *win, UWORD fw_version)
 	memset(sv, 0, sizeof(*sv));
 	sv->videocap_profile = ZZCFG_VCAP_FULL_60;
 	sv->use_videocap_profile_key = (fw_version >= 0x0209);
-	sv->videocap_crop_h = ZZCFG_VIDEOCAP_CROP_H_DEFAULT;
-	sv->videocap_crop_v = ZZCFG_VIDEOCAP_CROP_V_DEFAULT;
+	sv->videocap_crop_h = ZZCFG_VIDEOCAP_CROP_H_COMPAT;
+	sv->videocap_crop_v = ZZCFG_VIDEOCAP_CROP_V_COMPAT;
 	sv->scanline_mode = zz_get_scanline_mode();
 	sv->scanline_parity = zz_get_scanline_parity();
 	/* ZZ9000.card enables both of these when the key is absent, so the
@@ -1352,14 +1360,25 @@ static struct Gadget *settings_create_gadgets(struct Gadget **glistptr,
 }
 
 static BOOL settings_video_advanced_commit(struct Window *win,
-	struct Gadget **agads, UWORD sample, char *status, UWORD status_size,
-	BOOL *changed)
+	struct Gadget **agads, UWORD sample, UWORD framing,
+	BOOL framing_changed, char *status, UWORD status_size, BOOL *changed)
 {
 	struct StringInfo *hsi =
 		(struct StringInfo *)agads[AGAD_VCAP_CROP_H]->SpecialInfo;
 	struct StringInfo *vsi =
 		(struct StringInfo *)agads[AGAD_VCAP_CROP_V]->SpecialInfo;
 	UWORD crop_h, crop_v;
+	UWORD crop_h_present, crop_v_present;
+
+	if (framing == 0) {
+		*changed = sample != settings_vals.videocap_sample ||
+			settings_vals.videocap_crop_h_present ||
+			settings_vals.videocap_crop_v_present;
+		settings_vals.videocap_sample = sample;
+		settings_vals.videocap_crop_h_present = 0;
+		settings_vals.videocap_crop_v_present = 0;
+		return TRUE;
+	}
 
 	if (!settings_parse_u12((const char *)hsi->Buffer, &crop_h)) {
 		snprintf(status, status_size, "Bad Crop H - use 0..4095");
@@ -1374,12 +1393,29 @@ static BOOL settings_video_advanced_commit(struct Window *win,
 		return FALSE;
 	}
 
+	/* A one-axis hand-edited file opens as Custom. Merely pressing Done must
+	 * not materialize its missing axis; changing that field does. A deliberate
+	 * framing cycle (including Automatic -> Custom) makes both axes explicit. */
+	if (framing_changed) {
+		crop_h_present = 1;
+		crop_v_present = 1;
+	} else {
+		crop_h_present = settings_vals.videocap_crop_h_present ||
+			crop_h != settings_vals.videocap_crop_h;
+		crop_v_present = settings_vals.videocap_crop_v_present ||
+			crop_v != settings_vals.videocap_crop_v;
+	}
+
 	*changed = sample != settings_vals.videocap_sample ||
 		crop_h != settings_vals.videocap_crop_h ||
-		crop_v != settings_vals.videocap_crop_v;
+		crop_v != settings_vals.videocap_crop_v ||
+		crop_h_present != settings_vals.videocap_crop_h_present ||
+		crop_v_present != settings_vals.videocap_crop_v_present;
 	settings_vals.videocap_sample = sample;
 	settings_vals.videocap_crop_h = crop_h;
 	settings_vals.videocap_crop_v = crop_v;
+	settings_vals.videocap_crop_h_present = crop_h_present;
+	settings_vals.videocap_crop_v_present = crop_v_present;
 	return TRUE;
 }
 
@@ -1393,10 +1429,12 @@ static BOOL settings_video_advanced_window(struct Screen *mysc, void *vi,
 {
 	static CONST_STRPTR label_samples[] = {
 		(CONST_STRPTR)LABEL_VCAP_SAMPLE,
+		(CONST_STRPTR)LABEL_VCAP_FRAMING,
 		(CONST_STRPTR)LABEL_VCAP_CROP,
 		NULL
 	};
 	static CONST_STRPTR value_samples[] = {
+		(CONST_STRPTR)"Automatic (recommended)",
 		(CONST_STRPTR)"Average (recommended)",
 		(CONST_STRPTR)"Even (diagnostic)",
 		NULL
@@ -1409,6 +1447,8 @@ static BOOL settings_video_advanced_window(struct Screen *mysc, void *vi,
 	struct Window *win;
 	struct IntuiMessage *imsg;
 	UWORD sample = settings_vals.videocap_sample;
+	UWORD framing = (settings_vals.videocap_crop_h_present ||
+		settings_vals.videocap_crop_v_present) ? 1 : 0;
 	ULONG imsg_class;
 	UWORD imsg_code;
 	WORD label_width, value_width, y, content_right;
@@ -1416,6 +1456,7 @@ static BOOL settings_video_advanced_window(struct Screen *mysc, void *vi,
 	WORD w, h;
 	BOOL done = FALSE;
 	BOOL changed = FALSE;
+	BOOL framing_changed = FALSE;
 	char crop_h_buf[6];
 	char crop_v_buf[6];
 	char status[64] = "Average is normal; Even/Odd diagnose sampling";
@@ -1456,16 +1497,25 @@ static BOOL settings_video_advanced_window(struct Screen *mysc, void *vi,
 	y += l.row_step;
 
 	ng.ng_TopEdge = y;
+	ng.ng_GadgetID = AGAD_VCAP_FRAMING;
+	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_FRAMING;
+	agads[AGAD_VCAP_FRAMING] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+		GTCY_Labels, vcapframing_labels, GTCY_Active, framing, TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge = y;
 	ng.ng_Width = crop_width;
 	ng.ng_GadgetID = AGAD_VCAP_CROP_H;
 	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_CROP;
 	agads[AGAD_VCAP_CROP_H] = gad = CreateGadget(STRING_KIND, gad, &ng,
-		GTST_MaxChars, 5, GTST_String, crop_h_buf, TAG_END);
+		GTST_MaxChars, 5, GTST_String, crop_h_buf,
+		GA_Disabled, framing == 0, TAG_END);
 	ng.ng_LeftEdge = l.gadget_left + crop_width + crop_gap;
 	ng.ng_GadgetID = AGAD_VCAP_CROP_V;
 	ng.ng_GadgetText = NULL;
 	agads[AGAD_VCAP_CROP_V] = gad = CreateGadget(STRING_KIND, gad, &ng,
-		GTST_MaxChars, 5, GTST_String, crop_v_buf, TAG_END);
+		GTST_MaxChars, 5, GTST_String, crop_v_buf,
+		GA_Disabled, framing == 0, TAG_END);
 	y += l.row_step + l.section_gap;
 
 	ng.ng_LeftEdge = l.margin_x;
@@ -1536,11 +1586,21 @@ static BOOL settings_video_advanced_window(struct Screen *mysc, void *vi,
 			} else if (imsg_class == IDCMP_GADGETUP && gad) {
 				if (gad->GadgetID == AGAD_VCAP_SAMPLE) {
 					sample = imsg_code;
+				} else if (gad->GadgetID == AGAD_VCAP_FRAMING) {
+					if (imsg_code != framing) {
+						framing_changed = TRUE;
+						framing = imsg_code ? 1 : 0;
+						GT_SetGadgetAttrs(agads[AGAD_VCAP_CROP_H], win, NULL,
+							GA_Disabled, framing == 0, TAG_END);
+						GT_SetGadgetAttrs(agads[AGAD_VCAP_CROP_V], win, NULL,
+							GA_Disabled, framing == 0, TAG_END);
+					}
 				} else if (gad->GadgetID == AGAD_BTN_CANCEL) {
 					done = TRUE;
 				} else if (gad->GadgetID == AGAD_BTN_DONE) {
 					if (settings_video_advanced_commit(win, agads, sample,
-						status, sizeof(status), &changed))
+						framing, framing_changed, status, sizeof(status),
+						&changed))
 						done = TRUE;
 				}
 			}

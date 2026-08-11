@@ -256,10 +256,16 @@ void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v)
             }
         } else if (zzcfg_str_eq_ci(key, "videocap_crop_h")) {
             UWORD crop;
-            if (zzcfg_parse_u12(value, &crop)) v->videocap_crop_h = crop;
+            if (zzcfg_parse_u12(value, &crop)) {
+                v->videocap_crop_h = crop;
+                v->videocap_crop_h_present = 1;
+            }
         } else if (zzcfg_str_eq_ci(key, "videocap_crop_v")) {
             UWORD crop;
-            if (zzcfg_parse_u12(value, &crop)) v->videocap_crop_v = crop;
+            if (zzcfg_parse_u12(value, &crop)) {
+                v->videocap_crop_v = crop;
+                v->videocap_crop_v_present = 1;
+            }
         } else if (zzcfg_str_eq_ci(key, "nonstandard_vsync")) {
             if (zzcfg_str_eq_ci(value, "off")) legacy_vsync = 0;
             else if (zzcfg_str_eq_ci(value, "pal") ||
@@ -338,9 +344,9 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
         "%s\n"
         "# Native capture sampling: average (default), even or odd\n"
         "videocap_sample = %s\n"
-        "# Capture origin: horizontal 28 MHz samples, then captured lines\n"
-        "videocap_crop_h = %u\n"
-        "videocap_crop_v = %u\n"
+        "# Capture framing: commented axes use the automatic board/profile baseline\n"
+        "%svideocap_crop_h = %u\n"
+        "%svideocap_crop_v = %u\n"
         "\n"
         "# Scanlines: 0=off 1=classic 2=soft 3=gradient; parity 0/1\n"
         "scanline_mode = %u\n"
@@ -362,7 +368,9 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
         "%shdf = %s\n",
         video_config,
         sample_names[sample],
+        v->videocap_crop_h_present ? "" : "#",
         (unsigned)(v->videocap_crop_h & 4095),
+        v->videocap_crop_v_present ? "" : "#",
         (unsigned)(v->videocap_crop_v & 4095),
         (unsigned)(v->scanline_mode & 3),
         (unsigned)(v->scanline_parity & 1),
