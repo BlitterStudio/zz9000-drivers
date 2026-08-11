@@ -96,6 +96,31 @@
 #define ZZ_SCANLINE_MODE_REG     0x100C
 #define ZZ_SCANLINE_PARITY_REG   0x100E
 
+/* Native-video live calibration ABI (firmware 2.10 plus protocol 1 RTL).
+ * All host accesses are ordered 16-bit Zorro reads/writes. */
+#define ZZ_VCAP_LIVE_CAPABILITY       0x1400
+#define ZZ_VCAP_LIVE_STATUS           0x1404
+#define ZZ_VCAP_LIVE_APPLIED_RAW      0x1408
+#define ZZ_VCAP_LIVE_EFFECTIVE_CROP   0x140c
+#define ZZ_VCAP_LIVE_STAGED_RAW_HI    0x1410
+#define ZZ_VCAP_LIVE_STAGED_RAW_LO    0x1412
+#define ZZ_VCAP_LIVE_COMMIT           0x1414
+#define ZZ_VCAP_LIVE_CAPABILITY_VALUE 0x564c010fUL
+#define ZZ_VCAP_LIVE_COMMIT_TOKEN     0xca1b
+
+#define ZZ_VCAP_STATUS_REQUEST_SHIFT  24
+#define ZZ_VCAP_STATUS_APPLIED_SHIFT  16
+#define ZZ_VCAP_STATUS_STANDARD_VALID (1UL << 15)
+#define ZZ_VCAP_STATUS_NTSC           (1UL << 14)
+#define ZZ_VCAP_STATUS_REJECTED       (1UL << 13)
+#define ZZ_VCAP_STATUS_APPLIED_VALID  (1UL << 1)
+#define ZZ_VCAP_STATUS_BUSY           (1UL << 0)
+
+#define ZZ_VCAP_CROP_H_COMPAT         188UL
+#define ZZ_VCAP_CROP_V_COMPAT         26UL
+#define ZZ_VCAP_CROP_H_AUTO_FLAG      (1UL << 28)
+#define ZZ_VCAP_CROP_V_AUTO_FLAG      (1UL << 29)
+
 /* Diagnostic FPGA registers: one explicitly armed snapshot of the accepted
  * AXI WDATA burst for native-capture row 120, destination x=1248..1263. */
 #define ZZ_REG_VCAP_PROBE_DATA_BASE  0x1120

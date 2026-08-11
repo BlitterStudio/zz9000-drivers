@@ -58,6 +58,26 @@ class RepoToolingTests(unittest.TestCase):
         ):
             self.assertIn('#include "zz9000_hw.h"', self.read(relpath))
 
+    def test_live_videocap_contract_has_one_shared_definition(self):
+        header = self.read("include/zz9000_hw.h")
+        model = self.read("common/zz_vcap_live.c")
+        test_stub = self.read("common/tests/stubs/zz9000_hw.h")
+
+        for token in (
+            "ZZ_VCAP_LIVE_CAPABILITY",
+            "ZZ_VCAP_LIVE_STATUS",
+            "ZZ_VCAP_LIVE_APPLIED_RAW",
+            "ZZ_VCAP_LIVE_EFFECTIVE_CROP",
+            "ZZ_VCAP_LIVE_STAGED_RAW_HI",
+            "ZZ_VCAP_LIVE_STAGED_RAW_LO",
+            "ZZ_VCAP_LIVE_COMMIT",
+            "ZZ_VCAP_LIVE_CAPABILITY_VALUE",
+            "ZZ_VCAP_LIVE_COMMIT_TOKEN",
+        ):
+            self.assertIn(token, header)
+            self.assertIn(token, test_stub)
+            self.assertNotIn(f"#define {token}", model)
+
     def test_zzdiag_capture_dump_has_fixed_header_and_size_gate(self):
         text = self.read("ZZDiag/ZZDiag.c")
         self.assertIn('"P6\\n1280 320\\n255\\n"', text)
