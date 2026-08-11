@@ -78,6 +78,33 @@ class RepoToolingTests(unittest.TestCase):
             self.assertIn(token, test_stub)
             self.assertNotIn(f"#define {token}", model)
 
+    def test_zztop_live_calibration_uses_native_v37_contract(self):
+        source = self.read("ZZTop/Sources/ZZTop.c")
+        build = self.read("ZZTop/build-gcc.sh")
+
+        for token in (
+            '#include "zz_vcap_live.h"',
+            "AGAD_BTN_CALIBRATE",
+            "PAL_MONITOR_ID | HIRES_KEY",
+            "NTSC_MONITOR_ID | HIRES_KEY",
+            "ModeNotAvailable(display_id)",
+            "SA_Overscan, OSCAN_TEXT",
+            "WA_IDCMP, IDCMP_RAWKEY",
+            "IECODE_UP_PREFIX",
+            "IEQUALIFIER_LSHIFT | IEQUALIFIER_RSHIFT",
+            "ZZ_VCAP_LIVE_COMMIT_TOKEN",
+            "ZZ_VCAP_ANCHOR_SETTINGS",
+            "ZZ_VCAP_ANCHOR_ADVANCED",
+            "ZZ_VCAP_ANCHOR_CALIBRATION",
+            "ZZ_VCAP_ANCHOR_PREVIEW",
+            "static BOOL settings_save",
+        ):
+            self.assertIn(token, source)
+        self.assertNotIn("DEFAULT_MONITOR_ID", source)
+        self.assertNotIn("SA_Draggable", source)
+        self.assertNotIn("SA_Exclusive", source)
+        self.assertIn("../common/zz_vcap_live.c", build)
+
     def test_zzdiag_capture_dump_has_fixed_header_and_size_gate(self):
         text = self.read("ZZDiag/ZZDiag.c")
         self.assertIn('"P6\\n1280 320\\n255\\n"', text)

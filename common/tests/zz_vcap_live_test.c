@@ -106,6 +106,9 @@ static void test_status_and_sequences(void)
         "wrong applied sequence cannot complete");
     CHECK(zz_vcap_snapshot_status_valid(raw, raw),
         "stable valid idle status accepts a snapshot");
+    CHECK(zz_vcap_snapshot_status_valid(raw | ZZ_VCAP_STATUS_REJECTED,
+        raw | ZZ_VCAP_STATUS_REJECTED),
+        "a rejected prior commit does not invalidate applied state");
     CHECK(!zz_vcap_snapshot_status_valid(raw, raw | ZZ_VCAP_STATUS_NTSC),
         "outer status change rejects a snapshot");
     CHECK(!zz_vcap_snapshot_status_valid(raw | ZZ_VCAP_STATUS_BUSY,

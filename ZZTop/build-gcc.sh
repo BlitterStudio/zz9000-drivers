@@ -9,6 +9,6 @@ fi
 export PATH=/opt/amiga/bin:"$PATH"
 
 m68k-amigaos-gcc Sources/ZZTop.c ../common/fwup_amiga.c ../common/fwup_client.c \
-  ../common/zzcfg_amiga.c \
+  ../common/zzcfg_amiga.c ../common/zz_vcap_live.c \
   -m68030 -O2 -I../common -I../include -o ZZTop \
   -Wall -Wextra -Wno-unused-parameter -lamiga -noixemul -lm

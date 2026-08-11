@@ -106,7 +106,6 @@ int zz_vcap_snapshot_status_valid(ULONG before, ULONG after)
         return 0;
     zz_vcap_status_unpack(before, &status);
     return status.applied_valid && status.standard_valid && !status.busy &&
-        !status.rejected &&
         status.request_sequence == status.applied_sequence;
 }
 
