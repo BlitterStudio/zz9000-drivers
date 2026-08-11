@@ -42,8 +42,8 @@
 #include "zzcfg_amiga.h"
 #include "zz_vcap_live.h"
 
-#define ZZTOP_RELEASE "2.7"
-#define ZZTOP_DATE    "09.08.2026"
+#define ZZTOP_RELEASE "2.8"
+#define ZZTOP_DATE    "11.08.2026"
 
 static const char version[] __attribute__((used)) =
 	"$VER: ZZTop " ZZTOP_RELEASE " (" ZZTOP_DATE ")\r\n";
