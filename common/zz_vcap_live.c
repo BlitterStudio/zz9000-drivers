@@ -93,9 +93,21 @@ int zz_vcap_request_complete(ULONG raw, UBYTE expected_sequence)
     struct zz_vcap_status status;
 
     zz_vcap_status_unpack(raw, &status);
+    /* Rejected is sticky and may describe a competing event observed while
+     * this request was in flight. Sequence identity plus applied raw state
+     * decides whether the expected request actually won the arbitration. */
     return status.request_sequence == expected_sequence &&
         status.applied_sequence == expected_sequence &&
-        status.applied_valid && !status.busy && !status.rejected;
+        status.applied_valid && !status.busy;
+}
+
+int zz_vcap_request_result(ULONG status, UBYTE expected_sequence,
+    ULONG applied_raw, ULONG expected_raw)
+{
+    if (!zz_vcap_request_complete(status, expected_sequence))
+        return ZZ_VCAP_REQUEST_PENDING;
+    return applied_raw == expected_raw ? ZZ_VCAP_REQUEST_APPLIED :
+        ZZ_VCAP_REQUEST_CONFLICT;
 }
 
 int zz_vcap_snapshot_status_valid(ULONG before, ULONG after)

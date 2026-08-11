@@ -19,6 +19,12 @@ enum zz_vcap_move {
     ZZ_VCAP_MOVE_DOWN
 };
 
+enum zz_vcap_request_result {
+    ZZ_VCAP_REQUEST_CONFLICT = -1,
+    ZZ_VCAP_REQUEST_PENDING = 0,
+    ZZ_VCAP_REQUEST_APPLIED = 1
+};
+
 enum zz_vcap_anchor_owner {
     ZZ_VCAP_ANCHOR_SETTINGS = 0,
     ZZ_VCAP_ANCHOR_ADVANCED,
@@ -77,6 +83,8 @@ void zz_vcap_effective_unpack(ULONG raw, UWORD *crop_h, UWORD *crop_v);
 void zz_vcap_status_unpack(ULONG raw, struct zz_vcap_status *status);
 UBYTE zz_vcap_next_sequence(UBYTE request_sequence);
 int zz_vcap_request_complete(ULONG status, UBYTE expected_sequence);
+int zz_vcap_request_result(ULONG status, UBYTE expected_sequence,
+    ULONG applied_raw, ULONG expected_raw);
 int zz_vcap_snapshot_status_valid(ULONG before, ULONG after);
 int zz_vcap_adjust(struct zz_vcap_working *working, UWORD move,
     UWORD coarse);

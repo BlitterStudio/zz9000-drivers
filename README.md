@@ -202,11 +202,13 @@ Advanced Cancel, Settings Reload, and closing Settings restore their owning
 live snapshots before discarding an unsaved preview. If an acknowledgement
 times out, ZZTop keeps the relevant window open and reports that the state is
 unknown; retry the restore when native frames return, or cold-boot to recover
-the persisted CFG state. A Custom pair is tied to the applied capture-path
-signature (sample mode plus full-width state). If staged settings select a
-different path, Calibrate and Custom Save remain unavailable until the path is
-restored, or framing is set to Automatic, saved, cold-booted, and calibrated on
-the newly active path.
+the persisted CFG state. If another live writer wins the same request
+sequence, ZZTop detects the different applied raw word and asks for a retry or
+exact restore rather than claiming success. A Custom pair is tied to the
+applied capture-path signature (sample mode plus full-width state). If staged
+settings select a different path, Calibrate and Custom Save remain unavailable
+until the path is restored, or framing is set to Automatic, saved,
+cold-booted, and calibrated on the newly active path.
 
 Precedence is always: `ENV:` variable (and RTG tooltypes) first, then
 the config file, then the built-in default — so existing setups keep

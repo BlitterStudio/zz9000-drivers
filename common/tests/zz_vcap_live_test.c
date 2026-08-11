@@ -98,8 +98,17 @@ static void test_status_and_sequences(void)
     CHECK(!zz_vcap_request_complete(raw, 255), "busy request is incomplete");
     raw = ZZ_VCAP_STATUS_STANDARD_VALID | ZZ_VCAP_STATUS_APPLIED_VALID;
     CHECK(zz_vcap_request_complete(raw, 0), "wrapped idle request completes");
-    CHECK(!zz_vcap_request_complete(raw | ZZ_VCAP_STATUS_REJECTED, 0),
-        "rejected request cannot complete");
+    CHECK(zz_vcap_request_complete(raw | ZZ_VCAP_STATUS_REJECTED, 0),
+        "sticky rejection does not hide a completed request");
+    CHECK(zz_vcap_request_result(raw | ZZ_VCAP_STATUS_REJECTED, 0,
+        0x12345678UL, 0x12345678UL) == ZZ_VCAP_REQUEST_APPLIED,
+        "matching acknowledged raw wins over sticky rejection");
+    CHECK(zz_vcap_request_result(raw | ZZ_VCAP_STATUS_REJECTED, 0,
+        0x87654321UL, 0x12345678UL) == ZZ_VCAP_REQUEST_CONFLICT,
+        "matching sequence with another raw value is a conflict");
+    CHECK(zz_vcap_request_result(raw | (1UL << 24), 0,
+        0x12345678UL, 0x12345678UL) == ZZ_VCAP_REQUEST_PENDING,
+        "a different sequence remains pending");
     CHECK(!zz_vcap_request_complete(raw | (1UL << 24), 0),
         "wrong request sequence cannot complete");
     CHECK(!zz_vcap_request_complete(raw | (1UL << 16), 0),

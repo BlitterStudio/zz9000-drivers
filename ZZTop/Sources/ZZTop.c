@@ -915,16 +915,14 @@ static char settings_cfg_text[ZZCFG_MAX_SIZE];
 static BOOL settings_have_cfg;
 
 enum vcap_apply_result {
-	VCAP_APPLY_ERROR = -1,
+	VCAP_APPLY_ERROR = -2,
+	VCAP_APPLY_CONFLICT = -1,
 	VCAP_APPLY_TIMEOUT = 0,
 	VCAP_APPLY_OK = 1
 };
 
 struct settings_live_session {
-	UWORD firmware_revision;
-	ULONG capability;
 	BOOL supported;
-	BOOL current_valid;
 	struct zz_vcap_snapshot current;
 	struct zz_vcap_anchors anchors;
 	struct zz_vcap_control preview_control;
@@ -997,13 +995,15 @@ static int vcap_poll_apply(UBYTE expected_sequence, ULONG expected_raw,
 		ULONG status;
 
 		if (vcap_read_stable_status(&status)) {
-			struct zz_vcap_status decoded;
-
-			zz_vcap_status_unpack(status, &decoded);
 			if (zz_vcap_request_complete(status, expected_sequence)) {
-				if (!vcap_capture_snapshot(applied) ||
-					applied->raw != expected_raw)
+				int request_result;
+
+				if (!vcap_capture_snapshot(applied))
 					return VCAP_APPLY_ERROR;
+				request_result = zz_vcap_request_result(status,
+					expected_sequence, applied->raw, expected_raw);
+				if (request_result == ZZ_VCAP_REQUEST_CONFLICT)
+					return VCAP_APPLY_CONFLICT;
 				return VCAP_APPLY_OK;
 			}
 		}
@@ -1025,11 +1025,12 @@ static int vcap_apply_raw(ULONG raw, struct zz_vcap_snapshot *applied,
 static void settings_live_init(struct settings_live_session *session,
 	UWORD firmware_revision)
 {
+	ULONG capability;
+
 	memset(session, 0, sizeof(*session));
-	session->firmware_revision = firmware_revision;
-	session->capability = vcap_read32(ZZ_VCAP_LIVE_CAPABILITY);
+	capability = vcap_read32(ZZ_VCAP_LIVE_CAPABILITY);
 	session->supported = zz_vcap_live_supported(firmware_revision,
-		session->capability);
+		capability);
 	zz_vcap_anchors_init(&session->anchors);
 }
 
@@ -1040,7 +1041,6 @@ static BOOL settings_live_refresh(struct settings_live_session *session)
 	if (!session->supported || !vcap_capture_snapshot(&snapshot))
 		return FALSE;
 	session->current = snapshot;
-	session->current_valid = TRUE;
 	if (!session->anchors.valid[ZZ_VCAP_ANCHOR_SETTINGS])
 		zz_vcap_anchor_store(&session->anchors, ZZ_VCAP_ANCHOR_SETTINGS,
 			&snapshot);
@@ -1062,7 +1062,6 @@ static BOOL settings_live_restore(struct settings_live_session *session,
 	result = vcap_apply_raw(anchor.raw, &applied, NULL);
 	if (result != VCAP_APPLY_OK) return FALSE;
 	session->current = applied;
-	session->current_valid = TRUE;
 	return TRUE;
 }
 
@@ -1077,39 +1076,33 @@ static void settings_path_for(struct zz_vcap_path *path, UWORD profile,
 	path->full_width = full_width;
 }
 
-static BOOL settings_applied_path(struct settings_live_session *session,
-	struct zz_vcap_path *path)
+static BOOL settings_current_path_matches(
+	const struct settings_live_session *session, UWORD profile, UWORD sample)
 {
 	struct zz_vcap_control control;
-
-	if (!settings_live_refresh(session) ||
-		!zz_vcap_control_unpack(session->current.raw, &control))
-		return FALSE;
-	path->sample = control.sample;
-	path->full_width = control.full_width;
-	return TRUE;
-}
-
-static BOOL settings_path_matches(struct settings_live_session *session,
-	UWORD sample)
-{
 	struct zz_vcap_path staged;
 	struct zz_vcap_path applied;
 
-	settings_path_for(&staged, settings_vals.videocap_profile, sample);
-	return settings_applied_path(session, &applied) &&
-		zz_vcap_path_equal(&staged, &applied);
+	if (!zz_vcap_control_unpack(session->current.raw, &control))
+		return FALSE;
+	settings_path_for(&staged, profile, sample);
+	applied.sample = control.sample;
+	applied.full_width = control.full_width;
+	return zz_vcap_path_equal(&staged, &applied);
 }
 
 static BOOL settings_profile_matches(struct settings_live_session *session,
 	UWORD profile, UWORD sample)
 {
-	struct zz_vcap_path staged;
-	struct zz_vcap_path applied;
+	return settings_live_refresh(session) &&
+		settings_current_path_matches(session, profile, sample);
+}
 
-	settings_path_for(&staged, profile, sample);
-	return settings_applied_path(session, &applied) &&
-		zz_vcap_path_equal(&staged, &applied);
+static BOOL settings_path_matches(struct settings_live_session *session,
+	UWORD sample)
+{
+	return settings_profile_matches(session,
+		settings_vals.videocap_profile, sample);
 }
 
 static BOOL settings_custom_framing(void)
@@ -1237,6 +1230,10 @@ static int vcap_calibration_start_apply(struct vcap_calibration *calibration,
 		if (candidate) calibration->pending_working = *candidate;
 		snprintf(calibration->message, sizeof(calibration->message),
 			"No frame acknowledgement; Esc restores when frames return");
+	} else if (result == VCAP_APPLY_CONFLICT) {
+		calibration->current = applied;
+		snprintf(calibration->message, sizeof(calibration->message),
+			"Another writer won the request; retry or Esc to restore");
 	} else {
 		snprintf(calibration->message, sizeof(calibration->message),
 			"Request not accepted; retry or Esc to restore");
@@ -1254,6 +1251,20 @@ static void vcap_calibration_reconcile(struct vcap_calibration *calibration)
 	if (calibration->pending_action == VCAP_PENDING_NONE) return;
 	result = vcap_poll_apply(calibration->pending_sequence,
 		calibration->pending_raw, 1, &applied);
+	if (result == VCAP_APPLY_CONFLICT) {
+		UWORD conflict_action = calibration->pending_action;
+
+		calibration->current = applied;
+		calibration->pending_action = VCAP_PENDING_NONE;
+		if (calibration->cancel_requested ||
+			conflict_action == VCAP_PENDING_RESTORE)
+			vcap_calibration_start_apply(calibration, NULL,
+				VCAP_PENDING_RESTORE);
+		else
+			snprintf(calibration->message, sizeof(calibration->message),
+				"Another writer won the request; press the key again");
+		return;
+	}
 	if (result != VCAP_APPLY_OK) {
 		/* A valid live request can lose an idle-arbiter race to a firmware
 		 * or legacy operation-16 event. Rejected means that payload never
@@ -1456,7 +1467,6 @@ static int vcap_calibration_run(struct Screen *return_screen,
 	ActivateWindow(return_window);
 
 	session->current = calibration.current;
-	session->current_valid = TRUE;
 	if (!calibration.accepted) return 0;
 	*accepted_control = calibration.working.control;
 	zz_vcap_anchor_store(&session->anchors, ZZ_VCAP_ANCHOR_PREVIEW,
@@ -1991,40 +2001,50 @@ static BOOL settings_video_advanced_candidate(struct Window *win,
 static void settings_control_from_values(const struct zzcfg_values *values,
 	struct zz_vcap_control *control)
 {
-	UWORD pal_mode, full_width, vsync;
+	struct zz_vcap_path path;
 
-	zzcfg_profile_to_legacy(values->videocap_profile, &pal_mode,
-		&full_width, &vsync);
-	control->sample = values->videocap_sample;
-	control->full_width = full_width;
+	settings_path_for(&path, values->videocap_profile,
+		values->videocap_sample);
+	control->sample = path.sample;
+	control->full_width = path.full_width;
 	control->crop_h = values->videocap_crop_h;
 	control->crop_v = values->videocap_crop_v;
 	control->crop_h_present = values->videocap_crop_h_present;
 	control->crop_v_present = values->videocap_crop_v_present;
 }
 
-static int settings_video_calibration_availability(
+enum vcap_calibration_availability {
+	VCAP_CALIBRATION_UNKNOWN = -1,
+	VCAP_CALIBRATION_UNSUPPORTED = 0,
+	VCAP_CALIBRATION_WAITING,
+	VCAP_CALIBRATION_PATH_MISMATCH,
+	VCAP_CALIBRATION_READY
+};
+
+static enum vcap_calibration_availability
+settings_video_calibration_availability(
 	struct settings_live_session *session, UWORD sample, char *status,
 	UWORD status_size)
 {
 	if (!session->supported) {
 		snprintf(status, status_size,
 			"Calibrate needs matched firmware 2.10 and protocol-1 bitstream");
-		return 0;
+		return VCAP_CALIBRATION_UNSUPPORTED;
 	}
 	if (!settings_live_refresh(session)) {
 		snprintf(status, status_size,
 			"Calibrate waiting for stable native video frames");
-		return 1;
+		return VCAP_CALIBRATION_WAITING;
 	}
-	if (!settings_path_matches(session, sample)) {
+	if (!settings_current_path_matches(session,
+		settings_vals.videocap_profile, sample)) {
 		snprintf(status, status_size,
 			"Staged capture path differs; restore it or Save Automatic + reboot");
-		return 2;
+		return VCAP_CALIBRATION_PATH_MISMATCH;
 	}
 	snprintf(status, status_size,
 		"Calibrate is ready on the currently applied capture path");
-	return 3;
+	return VCAP_CALIBRATION_READY;
 }
 
 /* Sampling phase and capture origin are calibration/diagnostic controls, not
@@ -2074,7 +2094,8 @@ static BOOL settings_video_advanced_window(struct Screen *mysc, void *vi,
 	char crop_h_buf[6];
 	char crop_v_buf[6];
 	char status[128] = "Checking live calibration support...";
-	int availability = -1;
+	enum vcap_calibration_availability availability =
+		VCAP_CALIBRATION_UNKNOWN;
 	int i;
 
 	zz_vcap_anchor_clear(&live_session->anchors, ZZ_VCAP_ANCHOR_ADVANCED);
@@ -2204,17 +2225,18 @@ static BOOL settings_video_advanced_window(struct Screen *mysc, void *vi,
 
 	GT_RefreshWindow(win, NULL);
 	while (!done) {
-		int now_available = settings_video_calibration_availability(
+		enum vcap_calibration_availability now_available =
+			settings_video_calibration_availability(
 			live_session, sample, status, sizeof(status));
 
-		if (now_available == 3 &&
+		if (now_available == VCAP_CALIBRATION_READY &&
 			!live_session->anchors.valid[ZZ_VCAP_ANCHOR_ADVANCED])
 			zz_vcap_anchor_store(&live_session->anchors,
 				ZZ_VCAP_ANCHOR_ADVANCED, &live_session->current);
 		if (now_available != availability) {
 			availability = now_available;
 			GT_SetGadgetAttrs(agads[AGAD_BTN_CALIBRATE], win, NULL,
-				GA_Disabled, availability != 3, TAG_END);
+				GA_Disabled, availability != VCAP_CALIBRATION_READY, TAG_END);
 			GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL,
 				GTTX_Text, status, TAG_END);
 		}
@@ -2233,7 +2255,7 @@ static BOOL settings_video_advanced_window(struct Screen *mysc, void *vi,
 			} else if (imsg_class == IDCMP_GADGETUP && gad) {
 				if (gad->GadgetID == AGAD_VCAP_SAMPLE) {
 					sample = imsg_code;
-					availability = -1;
+					availability = VCAP_CALIBRATION_UNKNOWN;
 				} else if (gad->GadgetID == AGAD_VCAP_FRAMING) {
 					if (imsg_code != framing) {
 						framing_changed = TRUE;
@@ -2244,7 +2266,7 @@ static BOOL settings_video_advanced_window(struct Screen *mysc, void *vi,
 							GA_Disabled, framing == 0, TAG_END);
 					}
 				} else if (gad->GadgetID == AGAD_BTN_CALIBRATE &&
-					availability == 3) {
+					availability == VCAP_CALIBRATION_READY) {
 					int result = vcap_calibration_run(mysc, win, live_session,
 						&accepted_control);
 
@@ -2324,7 +2346,7 @@ static BOOL settings_video_advanced_window(struct Screen *mysc, void *vi,
 	return changed;
 }
 
-static void settings_update_save_gate(struct Window *win,
+static BOOL settings_update_save_gate(struct Window *win,
 	struct settings_live_session *live_session, BOOL explain)
 {
 	BOOL allowed = settings_have_cfg &&
@@ -2335,6 +2357,7 @@ static void settings_update_save_gate(struct Window *win,
 	if (!allowed && settings_have_cfg && explain)
 		settings_set_status(win,
 			"Custom crop belongs to another capture path; use Automatic, Save and reboot");
+	return allowed;
 }
 
 static VOID settings_window(struct Screen *mysc, void *vi,
@@ -2431,8 +2454,8 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 									live_session.preview_valid = FALSE;
 								}
 								settings_vals.videocap_profile = imsgCode;
-								settings_update_save_gate(win, &live_session, TRUE);
-								if (settings_custom_save_allowed(&live_session))
+								if (settings_update_save_gate(win,
+									&live_session, TRUE))
 									settings_set_status(win,
 										"Native output changed - Save, then power-cycle");
 							}
@@ -2466,10 +2489,16 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 							if (!settings_custom_save_allowed(&live_session)) {
 								settings_update_save_gate(win, &live_session, TRUE);
 							} else if (settings_save(win)) {
-								if (settings_live_refresh(&live_session))
+								if (live_session.preview_valid) {
+									settings_live_refresh(&live_session);
 									zz_vcap_anchor_store(&live_session.anchors,
 										ZZ_VCAP_ANCHOR_SETTINGS,
 										&live_session.current);
+								} else if (settings_live_refresh(&live_session)) {
+									zz_vcap_anchor_store(&live_session.anchors,
+										ZZ_VCAP_ANCHOR_SETTINGS,
+										&live_session.current);
+								}
 								live_session.preview_valid = FALSE;
 							}
 							break;

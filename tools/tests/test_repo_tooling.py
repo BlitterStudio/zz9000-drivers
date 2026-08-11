@@ -97,12 +97,14 @@ class RepoToolingTests(unittest.TestCase):
             "ZZ_VCAP_ANCHOR_ADVANCED",
             "ZZ_VCAP_ANCHOR_CALIBRATION",
             "ZZ_VCAP_ANCHOR_PREVIEW",
+            "VCAP_APPLY_CONFLICT",
             "static BOOL settings_save",
         ):
             self.assertIn(token, source)
         self.assertNotIn("DEFAULT_MONITOR_ID", source)
         self.assertNotIn("SA_Draggable", source)
         self.assertNotIn("SA_Exclusive", source)
+        self.assertIn("if (live_session.preview_valid) {", source)
         self.assertIn("../common/zz_vcap_live.c", build)
 
     def test_zzdiag_capture_dump_has_fixed_header_and_size_gate(self):
