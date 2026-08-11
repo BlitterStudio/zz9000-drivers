@@ -118,12 +118,32 @@ static void test_status_and_sequences(void)
     CHECK(zz_vcap_snapshot_status_valid(raw | ZZ_VCAP_STATUS_REJECTED,
         raw | ZZ_VCAP_STATUS_REJECTED),
         "a rejected prior commit does not invalidate applied state");
+    CHECK(zz_vcap_snapshot_status_valid(ZZ_VCAP_STATUS_APPLIED_VALID,
+        ZZ_VCAP_STATUS_APPLIED_VALID),
+        "an idle applied snapshot does not require active native frames");
     CHECK(!zz_vcap_snapshot_status_valid(raw, raw | ZZ_VCAP_STATUS_NTSC),
         "outer status change rejects a snapshot");
     CHECK(!zz_vcap_snapshot_status_valid(raw | ZZ_VCAP_STATUS_BUSY,
         raw | ZZ_VCAP_STATUS_BUSY), "busy snapshot is rejected");
     CHECK(!zz_vcap_snapshot_status_valid(0, 0),
-        "invalid applied and standard state is rejected");
+        "invalid applied state is rejected");
+    CHECK(zz_vcap_detect_standard(raw | ZZ_VCAP_STATUS_NTSC, 0) ==
+        ZZ_VCAP_STANDARD_UNKNOWN,
+        "zero native lines ignore a stale NTSC status");
+    CHECK(zz_vcap_detect_standard(raw | ZZ_VCAP_STATUS_NTSC, 262) ==
+        ZZ_VCAP_STANDARD_NTSC,
+        "active NTSC lines preserve the detected standard");
+    CHECK(zz_vcap_detect_standard(raw, 312) == ZZ_VCAP_STANDARD_PAL,
+        "active PAL lines preserve the detected standard");
+    CHECK(zz_vcap_detect_standard(ZZ_VCAP_STATUS_APPLIED_VALID, 312) ==
+        ZZ_VCAP_STANDARD_UNKNOWN,
+        "active lines without a stable standard remain unknown");
+    CHECK(zz_vcap_calibration_standard(raw | ZZ_VCAP_STATUS_NTSC, 262, 1) ==
+        ZZ_VCAP_STANDARD_UNKNOWN,
+        "an RTG caller ignores an active or background NTSC capture");
+    CHECK(zz_vcap_calibration_standard(raw | ZZ_VCAP_STATUS_NTSC, 262, 0) ==
+        ZZ_VCAP_STANDARD_NTSC,
+        "a native caller preserves its active NTSC capture");
 }
 
 static void test_movement(void)

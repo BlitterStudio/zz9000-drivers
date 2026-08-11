@@ -161,7 +161,7 @@ The drivers in this repo consult it too:
   instead of independent width, resolution, and refresh controls. Normal
   choices state the resulting resolution and refresh directly; capture
   sampling and framing live in **Advanced Video**. Framing defaults to
-  **Automatic**: full-rate/full-width capture uses `279/40`, while filtered
+  **Automatic**: full-rate/full-width capture uses `280/40`, while filtered
   and Denise-adapter paths retain `188/26`. **Custom** values remain literal
   per-machine overrides. Firmware 2.9+
   stores this as `videocap_profile`; ZZTop transparently writes the equivalent

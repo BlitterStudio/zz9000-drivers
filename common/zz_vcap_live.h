@@ -25,6 +25,12 @@ enum zz_vcap_request_result {
     ZZ_VCAP_REQUEST_APPLIED = 1
 };
 
+enum zz_vcap_standard {
+    ZZ_VCAP_STANDARD_UNKNOWN = 0,
+    ZZ_VCAP_STANDARD_PAL,
+    ZZ_VCAP_STANDARD_NTSC
+};
+
 enum zz_vcap_anchor_owner {
     ZZ_VCAP_ANCHOR_SETTINGS = 0,
     ZZ_VCAP_ANCHOR_ADVANCED,
@@ -86,6 +92,9 @@ int zz_vcap_request_complete(ULONG status, UBYTE expected_sequence);
 int zz_vcap_request_result(ULONG status, UBYTE expected_sequence,
     ULONG applied_raw, ULONG expected_raw);
 int zz_vcap_snapshot_status_valid(ULONG before, ULONG after);
+UWORD zz_vcap_detect_standard(ULONG status, UWORD lines);
+UWORD zz_vcap_calibration_standard(ULONG status, UWORD lines,
+    UWORD caller_is_foreign);
 int zz_vcap_adjust(struct zz_vcap_working *working, UWORD move,
     UWORD coarse);
 void zz_vcap_accept(struct zz_vcap_working *working);

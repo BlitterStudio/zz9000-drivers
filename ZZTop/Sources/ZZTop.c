@@ -1371,9 +1371,76 @@ static void vcap_calibration_key(struct vcap_calibration *calibration,
 		VCAP_PENDING_ADJUST);
 }
 
+/* PAL.monitor and NTSC.monitor are optional virtual monitors. If native
+ * frames are active, preserve their detected standard. If RTG Workbench has
+ * left the native input idle, bootstrap from default.monitor instead of the
+ * protocol's necessarily stale last-detected standard. HIRES_KEY cannot
+ * select an RTG monitor. */
+static ULONG vcap_calibration_display_id(UWORD detected_standard,
+	UWORD *display_standard, ULONG *mode_error)
+{
+	struct DisplayInfo display_info;
+	ULONG display_id;
+	ULONG error;
+	ULONG default_error = ModeNotAvailable(HIRES_KEY);
+	UWORD default_standard = ZZ_VCAP_STANDARD_UNKNOWN;
+
+	memset(&display_info, 0, sizeof(display_info));
+	if (default_error == 0 &&
+		GetDisplayInfoData(NULL, (UBYTE *)&display_info,
+			sizeof(display_info), DTAG_DISP, HIRES_KEY) != 0 &&
+		(display_info.PropertyFlags & DIPF_IS_FOREIGN) == 0) {
+		default_standard =
+			(display_info.PropertyFlags & DIPF_IS_PAL) ?
+			ZZ_VCAP_STANDARD_PAL : ZZ_VCAP_STANDARD_NTSC;
+	}
+
+	if (detected_standard == ZZ_VCAP_STANDARD_UNKNOWN) {
+		if (default_standard == ZZ_VCAP_STANDARD_UNKNOWN) {
+			*mode_error = default_error;
+			return (ULONG)INVALID_ID;
+		}
+		*display_standard = default_standard;
+		*mode_error = 0;
+		return HIRES_KEY;
+	}
+
+	display_id = detected_standard == ZZ_VCAP_STANDARD_NTSC ?
+		(NTSC_MONITOR_ID | HIRES_KEY) : (PAL_MONITOR_ID | HIRES_KEY);
+	error = ModeNotAvailable(display_id);
+	if (error == 0) {
+		*display_standard = detected_standard;
+		*mode_error = 0;
+		return display_id;
+	}
+	if (default_standard == detected_standard) {
+		*display_standard = default_standard;
+		*mode_error = 0;
+		return HIRES_KEY;
+	}
+
+	*mode_error = error;
+	return (ULONG)INVALID_ID;
+}
+
+static BOOL vcap_screen_is_foreign(struct Screen *screen)
+{
+	struct DisplayInfo display_info;
+	ULONG display_id;
+
+	if (!screen) return FALSE;
+	display_id = GetVPModeID(&screen->ViewPort);
+	if (display_id == (ULONG)INVALID_ID) return FALSE;
+	memset(&display_info, 0, sizeof(display_info));
+	return GetDisplayInfoData(NULL, (UBYTE *)&display_info,
+		sizeof(display_info), DTAG_DISP, display_id) != 0 &&
+		(display_info.PropertyFlags & DIPF_IS_FOREIGN) != 0;
+}
+
 static int vcap_calibration_run(struct Screen *return_screen,
 	struct Window *return_window, struct settings_live_session *session,
-	struct zz_vcap_control *accepted_control)
+	struct zz_vcap_control *accepted_control, char *failure,
+	UWORD failure_size)
 {
 	static struct ColorSpec colors[] = {
 		{ 0, 0, 0, 0 }, { 1, 15, 15, 15 },
@@ -1381,27 +1448,58 @@ static int vcap_calibration_run(struct Screen *return_screen,
 	};
 	struct vcap_calibration calibration;
 	ULONG display_id;
+	ULONG mode_error;
 	ULONG screen_error = 0;
 	struct IntuiMessage *message;
 	char last_message[96];
 	UWORD last_h;
 	UWORD last_v;
+	UWORD detected_standard;
+	UWORD display_standard;
+	UWORD lines;
+	BOOL caller_is_foreign;
+	BOOL want_ntsc;
 
 	memset(&calibration, 0, sizeof(calibration));
-	if (!settings_live_refresh(session)) return -1;
+	if (!settings_live_refresh(session)) {
+		snprintf(failure, failure_size,
+			"Live calibration state became unavailable");
+		return -1;
+	}
 	calibration.entry = session->current;
 	calibration.current = session->current;
 	zz_vcap_anchor_store(&session->anchors, ZZ_VCAP_ANCHOR_CALIBRATION,
 		&calibration.entry);
 	if (!zz_vcap_control_unpack(calibration.entry.raw,
-		&calibration.working.control)) return -1;
+		&calibration.working.control)) {
+		snprintf(failure, failure_size,
+			"Live calibration control word is invalid");
+		return -1;
+	}
 	calibration.working.crop_h = calibration.entry.effective_h;
 	calibration.working.crop_v = calibration.entry.effective_v;
 	snprintf(calibration.message, sizeof(calibration.message),
 		"Adjust until the boxes are centred");
-	display_id = (calibration.entry.status & ZZ_VCAP_STATUS_NTSC) ?
-		(NTSC_MONITOR_ID | HIRES_KEY) : (PAL_MONITOR_ID | HIRES_KEY);
-	if (ModeNotAvailable(display_id)) return -2;
+	lines = zz_get_reg16(REG_ZZ_VIDEOCAP_STATS) & VCAP_LINES_MASK;
+	caller_is_foreign = vcap_screen_is_foreign(return_screen);
+	detected_standard = zz_vcap_calibration_standard(
+		calibration.entry.status, lines, caller_is_foreign);
+	display_id = vcap_calibration_display_id(detected_standard,
+		&display_standard, &mode_error);
+	if (display_id == (ULONG)INVALID_ID) {
+		if (detected_standard == ZZ_VCAP_STANDARD_UNKNOWN)
+			snprintf(failure, failure_size,
+				"Native default Hires unavailable (mode error %lu)",
+				(unsigned long)mode_error);
+		else
+			snprintf(failure, failure_size,
+				"Native %s Hires unavailable (error %lu, %s, lines %u)",
+				detected_standard == ZZ_VCAP_STANDARD_NTSC ?
+				"NTSC" : "PAL", (unsigned long)mode_error,
+				caller_is_foreign ? "RTG" : "native", (unsigned)lines);
+		return -2;
+	}
+	want_ntsc = display_standard == ZZ_VCAP_STANDARD_NTSC;
 
 	calibration.screen = OpenScreenTags(NULL,
 		SA_Type, CUSTOMSCREEN, SA_DisplayID, display_id,
@@ -1409,7 +1507,12 @@ static int vcap_calibration_run(struct Screen *return_screen,
 		SA_SysFont, 0, SA_Quiet, TRUE, SA_ShowTitle, FALSE,
 		SA_Behind, TRUE, SA_AutoScroll, FALSE,
 		SA_ErrorCode, &screen_error, TAG_END);
-	if (!calibration.screen) return -3;
+	if (!calibration.screen) {
+		snprintf(failure, failure_size,
+			"Native %s screen open failed (Intuition error %lu)",
+			want_ntsc ? "NTSC" : "PAL", (unsigned long)screen_error);
+		return -3;
+	}
 	calibration.window = OpenWindowTags(NULL,
 		WA_CustomScreen, calibration.screen,
 		WA_Left, 0, WA_Top, 0,
@@ -1420,6 +1523,8 @@ static int vcap_calibration_run(struct Screen *return_screen,
 		WA_RptQueue, 16, WA_IDCMP, IDCMP_RAWKEY, TAG_END);
 	if (!calibration.window) {
 		CloseScreen(calibration.screen);
+		snprintf(failure, failure_size,
+			"Native calibration window could not be opened");
 		return -4;
 	}
 
@@ -2268,7 +2373,7 @@ static BOOL settings_video_advanced_window(struct Screen *mysc, void *vi,
 				} else if (gad->GadgetID == AGAD_BTN_CALIBRATE &&
 					availability == VCAP_CALIBRATION_READY) {
 					int result = vcap_calibration_run(mysc, win, live_session,
-						&accepted_control);
+						&accepted_control, status, sizeof(status));
 
 					if (result == 1) {
 						sample = accepted_control.sample;
@@ -2291,8 +2396,6 @@ static BOOL settings_video_advanced_window(struct Screen *mysc, void *vi,
 						GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL,
 							GTTX_Text, status, TAG_END);
 					} else if (result < 0) {
-						snprintf(status, sizeof(status),
-							"Native PAL/NTSC calibration screen is unavailable");
 						GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL,
 							GTTX_Text, status, TAG_END);
 					}

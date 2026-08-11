@@ -117,8 +117,26 @@ int zz_vcap_snapshot_status_valid(ULONG before, ULONG after)
     if (before != after)
         return 0;
     zz_vcap_status_unpack(before, &status);
-    return status.applied_valid && status.standard_valid && !status.busy &&
+    return status.applied_valid && !status.busy &&
         status.request_sequence == status.applied_sequence;
+}
+
+UWORD zz_vcap_detect_standard(ULONG raw, UWORD lines)
+{
+    struct zz_vcap_status status;
+
+    zz_vcap_status_unpack(raw, &status);
+    if (lines == 0 || !status.standard_valid)
+        return ZZ_VCAP_STANDARD_UNKNOWN;
+    return status.ntsc ? ZZ_VCAP_STANDARD_NTSC : ZZ_VCAP_STANDARD_PAL;
+}
+
+UWORD zz_vcap_calibration_standard(ULONG status, UWORD lines,
+    UWORD caller_is_foreign)
+{
+    if (caller_is_foreign)
+        return ZZ_VCAP_STANDARD_UNKNOWN;
+    return zz_vcap_detect_standard(status, lines);
 }
 
 static UWORD zz_vcap_add_clamped(UWORD value, UWORD amount)
