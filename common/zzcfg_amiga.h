@@ -20,13 +20,35 @@
 #define ZZCFG_MAX_SIZE   4096
 #define ZZCFG_MAC_CHARS  17          /* aa:bb:cc:dd:ee:ff */
 #define ZZCFG_HDF_CHARS  63
+#define ZZCFG_VIDEOCAP_CROP_H_COMPAT 188
+#define ZZCFG_VIDEOCAP_CROP_V_COMPAT 26
+
+enum zzcfg_videocap_profile {
+    ZZCFG_VCAP_FULL_60 = 0,
+    ZZCFG_VCAP_FULL_EXACT,
+    ZZCFG_VCAP_FILTERED_60,
+    ZZCFG_VCAP_FILTERED_PAL,
+    ZZCFG_VCAP_FILTERED_PAL_EXACT,
+    ZZCFG_VCAP_FILTERED_NTSC_EXACT,
+    ZZCFG_VCAP_PROFILE_COUNT
+};
 
 /* Everything ZZTop's Settings window edits. mac/hdf are C strings;
  * an empty string means "not configured" and is emitted as a
  * commented-out example line. */
 struct zzcfg_values {
-    UWORD videocap_pal;      /* 0 = 800x600 60Hz, 1 = PAL 720x576 50Hz */
-    UWORD vsync;             /* 0 = off, 1 = pal, 2 = ntsc */
+    UWORD videocap_profile;  /* enum zzcfg_videocap_profile */
+    UWORD videocap_sample;   /* 0 = average, 1 = even, 2 = odd */
+    UWORD videocap_crop_h;   /* 0-4095, 28 MHz samples */
+    UWORD videocap_crop_v;   /* 0-4095, captured lines */
+    /* Presence is independent per axis. A missing key means Automatic;
+     * an explicit value, including 0, 4095 or the old 188/26 defaults,
+     * is a literal Custom override. */
+    UWORD videocap_crop_h_present;
+    UWORD videocap_crop_v_present;
+    /* Firmware 2.9+ accepts the atomic profile key. ZZTop sets this from
+     * the live ABI; older firmware gets an equivalent legacy key trio. */
+    UWORD use_videocap_profile_key;
     UWORD scanline_mode;     /* 0-3 */
     UWORD scanline_parity;   /* 0-1 */
     UWORD int2;              /* 0-1 */
@@ -39,6 +61,11 @@ struct zzcfg_values {
     char  mac[ZZCFG_MAC_CHARS + 3];
     char  hdf[ZZCFG_HDF_CHARS + 5];
 };
+
+/* Convert old three-key files and ENV overrides to/from the atomic profile. */
+UWORD zzcfg_profile_from_legacy(UWORD pal_mode, UWORD full, UWORD vsync);
+void zzcfg_profile_to_legacy(UWORD profile, UWORD *pal_mode, UWORD *full,
+    UWORD *vsync);
 
 /* Fetch the raw file contents into out (NUL-terminated, maxlen must be
  * >= 1). Returns a ZZ_CFG_FILE_* status; *outlen is the byte count.
@@ -56,8 +83,10 @@ int zzcfg_hdf_name_valid(const char *name);
 
 /* Decode the ZZTop-editable keys from raw config text into v, using
  * the firmware parser's line rules (comments, case-insensitive keys,
- * last value wins). Keys absent from the text leave v untouched, so
- * pre-fill v with the desired defaults. This is what makes the raw
+ * last value wins). Keys absent from the text leave v untouched; valid
+ * crop keys additionally set their axis's *_present flag. Pre-fill v
+ * with the desired defaults and clear those flags before parsing a new
+ * file. This is what makes the raw
  * SD file — not the firmware's boot-time parse — the editor's source
  * of truth: values saved or externally edited after boot survive a
  * Reload instead of being reverted to the cold-boot state. */

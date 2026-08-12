@@ -96,7 +96,75 @@
 #define ZZ_SCANLINE_MODE_REG     0x100C
 #define ZZ_SCANLINE_PARITY_REG   0x100E
 
+/* Native-video live calibration ABI (firmware 2.10 plus protocol 1 RTL).
+ * All host accesses are ordered 16-bit Zorro reads/writes. */
+#define ZZ_VCAP_LIVE_CAPABILITY       0x1400
+#define ZZ_VCAP_LIVE_STATUS           0x1404
+#define ZZ_VCAP_LIVE_APPLIED_RAW      0x1408
+#define ZZ_VCAP_LIVE_EFFECTIVE_CROP   0x140c
+#define ZZ_VCAP_LIVE_STAGED_RAW_HI    0x1410
+#define ZZ_VCAP_LIVE_STAGED_RAW_LO    0x1412
+#define ZZ_VCAP_LIVE_COMMIT           0x1414
+#define ZZ_VCAP_LIVE_CAPABILITY_VALUE 0x564c010fUL
+#define ZZ_VCAP_LIVE_COMMIT_TOKEN     0xca1b
+
+#define ZZ_VCAP_STATUS_REQUEST_SHIFT  24
+#define ZZ_VCAP_STATUS_APPLIED_SHIFT  16
+#define ZZ_VCAP_STATUS_STANDARD_VALID (1UL << 15)
+#define ZZ_VCAP_STATUS_NTSC           (1UL << 14)
+#define ZZ_VCAP_STATUS_REJECTED       (1UL << 13)
+#define ZZ_VCAP_STATUS_APPLIED_VALID  (1UL << 1)
+#define ZZ_VCAP_STATUS_BUSY           (1UL << 0)
+
+#define ZZ_VCAP_CROP_H_COMPAT         188UL
+#define ZZ_VCAP_CROP_V_COMPAT         26UL
+#define ZZ_VCAP_CROP_H_AUTO_FLAG      (1UL << 28)
+#define ZZ_VCAP_CROP_V_AUTO_FLAG      (1UL << 29)
+
+/* Diagnostic FPGA registers: one explicitly armed snapshot of the accepted
+ * AXI WDATA burst for native-capture row 120, destination x=1248..1263. */
+#define ZZ_REG_VCAP_PROBE_DATA_BASE  0x1120
+#define ZZ_REG_VCAP_PROBE_META       0x1160
+#define ZZ_REG_VCAP_PROBE_TARGET     0x1164
+#define ZZ_REG_VCAP_PROBE_AWADDR     0x1168
+#define ZZ_REG_VCAP_PROBE_CONTROL    0x116C
+#define ZZ_REG_VCAP_PROBE_SAMPLER_DATA_BASE 0x1170
+#define ZZ_REG_VCAP_PROBE_SAMPLER_TARGET    0x11B0
+#define ZZ_REG_VCAP_PROBE_SAMPLER_CONTEXT   0x11B4
+#define ZZ_REG_VCAP_PROBE_SAMPLER_CONFIG    0x11B8
+#define ZZ_REG_VCAP_PROBE_OWNER_BASE        0x11C0
+#define ZZ_VCAP_PROBE_MAGIC          0x5650
+#define ZZ_VCAP_PROBE_VALID          0x8000
+#define ZZ_VCAP_PROBE_ACTIVE         0x4000
+#define ZZ_VCAP_PROBE_SAMPLER_VALID  0x2000
+#define ZZ_VCAP_PROBE_SAMPLER_ARMED  0x1000
+#define ZZ_VCAP_PROBE_WORDS          16U
+
+/* Sampler-only snapshot of the 64 raw words immediately preceding the
+ * configured horizontal crop. It shares the probe arm control. */
+#define ZZ_REG_VCAP_PRE_CROP_PROBE_META       0x12E0
+#define ZZ_REG_VCAP_PRE_CROP_PROBE_TARGET     0x12E4
+#define ZZ_REG_VCAP_PRE_CROP_PROBE_CONTEXT    0x12E8
+#define ZZ_REG_VCAP_PRE_CROP_PROBE_CONFIG     0x12EC
+#define ZZ_REG_VCAP_PRE_CROP_PROBE_DATA_BASE  0x1300
+#define ZZ_VCAP_PRE_CROP_PROBE_MAGIC          0x5652
+#define ZZ_VCAP_PRE_CROP_PROBE_VALID          0x8000
+#define ZZ_VCAP_PRE_CROP_PROBE_ARMED          0x4000
+#define ZZ_VCAP_PRE_CROP_PROBE_WORDS          64U
+
 #define ZZ_BUFFER_OFFSET         0xA000
+
+/* Host-visible graphics aperture. P96's MemoryBase begins 64 KiB into the
+ * board window and maps firmware FRAMEBUFFER_ADDRESS. Native video capture
+ * is written 14 MiB beyond that base. */
+#define ZZ_FRAMEBUFFER_BOARD_OFFSET      0x00010000UL
+#define ZZ_VIDEOCAP_FRAMEBUFFER_OFFSET   0x00E00000UL
+#define ZZ_VIDEOCAP_BOARD_OFFSET \
+    (ZZ_FRAMEBUFFER_BOARD_OFFSET + ZZ_VIDEOCAP_FRAMEBUFFER_OFFSET)
+#define ZZ_VIDEOCAP_FULL_WIDTH           1280U
+#define ZZ_VCAP_PROBE_TARGET_LINE         120U
+#define ZZ_VCAP_PROBE_TARGET_X             928U
+#define ZZ_VCAP_PROBE_SOURCE_X              928U
 
 #define ZZ_VCAP_LINES_MASK        0x03ff
 #define ZZ_VCAP_PW_MAX_TIER_SHIFT 10

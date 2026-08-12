@@ -5,6 +5,7 @@ COMMON_DIR := ..
 BUILD_DIR := build
 TARGET := $(BUILD_DIR)/fwup_client_test
 CFG_TARGET := $(BUILD_DIR)/zzcfg_test
+VCAP_TARGET := $(BUILD_DIR)/zz_vcap_live_test
 
 CPPFLAGS += -I$(COMMON_DIR)
 
@@ -16,12 +17,16 @@ DEPS := $(COMMON_DIR)/fwup_client.h
 CFG_SOURCES := zzcfg_test.c $(COMMON_DIR)/zzcfg_amiga.c stubs/fwup_stub.c
 CFG_DEPS := $(COMMON_DIR)/zzcfg_amiga.h $(COMMON_DIR)/../include/zzcfg_query.h
 CFG_CPPFLAGS := -Istubs -I$(COMMON_DIR) -I$(COMMON_DIR)/../include
+VCAP_SOURCES := zz_vcap_live_test.c $(COMMON_DIR)/zz_vcap_live.c
+VCAP_DEPS := $(COMMON_DIR)/zz_vcap_live.h $(COMMON_DIR)/../include/zz9000_hw.h
+VCAP_CPPFLAGS := -Istubs -I$(COMMON_DIR) -I$(COMMON_DIR)/../include
 
 .PHONY: test clean
 
-test: $(TARGET) $(CFG_TARGET)
+test: $(TARGET) $(CFG_TARGET) $(VCAP_TARGET)
 	$(TARGET)
 	$(CFG_TARGET)
+	$(VCAP_TARGET)
 
 $(TARGET): $(SOURCES) $(DEPS)
 	@mkdir -p $(BUILD_DIR)
@@ -32,6 +37,10 @@ $(TARGET): $(SOURCES) $(DEPS)
 $(CFG_TARGET): $(CFG_SOURCES) $(CFG_DEPS)
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFG_CPPFLAGS) $(CFLAGS) -w -o $@ $(CFG_SOURCES)
+
+$(VCAP_TARGET): $(VCAP_SOURCES) $(VCAP_DEPS)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(VCAP_CPPFLAGS) $(CFLAGS) -o $@ $(VCAP_SOURCES)
 
 clean:
 	rm -rf $(BUILD_DIR)

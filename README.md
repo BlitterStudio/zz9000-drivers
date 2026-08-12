@@ -156,18 +156,59 @@ from AmigaOS, so the card never needs to leave the slot.
 
 The drivers in this repo consult it too:
 
-- `ZZ9000.card` takes its videocap mode and non-standard-vsync
-  defaults from `videocap_mode` / `nonstandard_vsync`. With neither
-  ENV nor config set, native video now defaults to 800x600 @ 60 Hz —
-  the mode most monitors accept, and what the firmware and ZZTop
-  default to (older `ZZ9000.card` versions forced 720x576 @ 50 Hz).
-  PAL-capable setups select `videocap_mode = pal` in ZZTop's Settings
-  window.
+- `ZZ9000.card` takes its native-video defaults from the firmware's parsed
+  configuration. ZZTop 2.8 presents one explicit **Native Output** profile
+  instead of independent width, resolution, and refresh controls. Normal
+  choices state the resulting resolution and refresh directly; capture
+  sampling and framing live in **Advanced Video**. Framing defaults to
+  **Automatic**: full-rate/full-width capture uses `280/40`, while filtered
+  and Denise-adapter paths retain `188/26`. **Custom** values remain literal
+  per-machine overrides. Firmware 2.9+
+  stores this as `videocap_profile`; ZZTop transparently writes the equivalent
+  legacy key combination for older firmware.
 - `ZZ9000Net.device`, `zz9000ax.audio` and `mhizz9000.library` honor
   `int2 = on`; `ZZ9000Net.device` adopts the firmware's `mac`.
 - `ZZ9000.card` also reads `offscreen_bitmaps` and `video_overlay`,
   the kill switches for card-side off-screen bitmaps and the P96 video
   window. Both default to on; ZZTop's Settings window edits them.
+
+### Live native-video calibration
+
+ZZTop 2.8 can calibrate Custom native-video framing without the old
+guess/save/power-cycle loop. It requires a matched firmware 2.10-or-newer and
+protocol-1 live-calibration bitstream; either half of an older/mixed install
+leaves the existing Automatic and numeric Custom controls available but keeps
+**Calibrate** disabled.
+
+In **Project → Settings… → Advanced Video…**, leave the staged Native Output
+path matching the currently applied path and choose **Calibrate…**. ZZTop opens
+an explicit native PAL or NTSC Hires screen—never an RTG fallback—so its edge,
+safe-area, and centre guides pass through the physical capture path being
+adjusted.
+
+- Arrow keys move the visible picture in the named direction, one crop unit at
+  a time. Hold either Shift key for 16-unit steps.
+- Values change on screen only after the FPGA applies the complete H/V control
+  word at a capture-frame boundary and acknowledges it.
+- **Enter** accepts the displayed pair as explicit Custom values and returns to
+  Advanced Video. It does not write the SD card.
+- **Escape** restores and acknowledges the exact state from calibration entry,
+  including independent per-axis Automatic flags, before the native screen
+  closes.
+- **Done** stages an accepted preview in Settings; **Save** is the only action
+  that writes `ZZ9000.CFG`. A cold boot later reproduces the saved pair.
+
+Advanced Cancel, Settings Reload, and closing Settings restore their owning
+live snapshots before discarding an unsaved preview. If an acknowledgement
+times out, ZZTop keeps the relevant window open and reports that the state is
+unknown; retry the restore when native frames return, or cold-boot to recover
+the persisted CFG state. If another live writer wins the same request
+sequence, ZZTop detects the different applied raw word and asks for a retry or
+exact restore rather than claiming success. A Custom pair is tied to the
+applied capture-path signature (sample mode plus full-width state). If staged
+settings select a different path, Calibrate and Custom Save remain unavailable
+until the path is restored, or framing is set to Automatic, saved,
+cold-booted, and calibrated on the newly active path.
 
 Precedence is always: `ENV:` variable (and RTG tooltypes) first, then
 the config file, then the built-in default — so existing setups keep

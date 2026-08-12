@@ -58,6 +58,107 @@ class RepoToolingTests(unittest.TestCase):
         ):
             self.assertIn('#include "zz9000_hw.h"', self.read(relpath))
 
+    def test_live_videocap_contract_has_one_shared_definition(self):
+        header = self.read("include/zz9000_hw.h")
+        model = self.read("common/zz_vcap_live.c")
+        test_stub = self.read("common/tests/stubs/zz9000_hw.h")
+
+        for token in (
+            "ZZ_VCAP_LIVE_CAPABILITY",
+            "ZZ_VCAP_LIVE_STATUS",
+            "ZZ_VCAP_LIVE_APPLIED_RAW",
+            "ZZ_VCAP_LIVE_EFFECTIVE_CROP",
+            "ZZ_VCAP_LIVE_STAGED_RAW_HI",
+            "ZZ_VCAP_LIVE_STAGED_RAW_LO",
+            "ZZ_VCAP_LIVE_COMMIT",
+            "ZZ_VCAP_LIVE_CAPABILITY_VALUE",
+            "ZZ_VCAP_LIVE_COMMIT_TOKEN",
+        ):
+            self.assertIn(token, header)
+            self.assertIn(token, test_stub)
+            self.assertNotIn(f"#define {token}", model)
+
+    def test_zztop_live_calibration_uses_native_v37_contract(self):
+        source = self.read("ZZTop/Sources/ZZTop.c")
+        build = self.read("ZZTop/build-gcc.sh")
+
+        for token in (
+            '#include "zz_vcap_live.h"',
+            "AGAD_BTN_CALIBRATE",
+            "PAL_MONITOR_ID | HIRES_KEY",
+            "NTSC_MONITOR_ID | HIRES_KEY",
+            "ModeNotAvailable(display_id)",
+            "ModeNotAvailable(HIRES_KEY)",
+            "DTAG_DISP, HIRES_KEY",
+            "DIPF_IS_PAL",
+            "DIPF_IS_FOREIGN",
+            "zz_vcap_calibration_standard(",
+            "vcap_screen_is_foreign(return_screen)",
+            "GetVPModeID(&screen->ViewPort)",
+            "detected_standard == ZZ_VCAP_STANDARD_UNKNOWN",
+            "Native default Hires unavailable (mode error %lu)",
+            "Native %s Hires unavailable (error %lu, %s, lines %u)",
+            "Native %s screen open failed (Intuition error %lu)",
+            "SA_Overscan, OSCAN_TEXT",
+            "WA_IDCMP, IDCMP_RAWKEY",
+            "IECODE_UP_PREFIX",
+            "IEQUALIFIER_LSHIFT | IEQUALIFIER_RSHIFT",
+            "ZZ_VCAP_LIVE_COMMIT_TOKEN",
+            "ZZ_VCAP_ANCHOR_SETTINGS",
+            "ZZ_VCAP_ANCHOR_ADVANCED",
+            "ZZ_VCAP_ANCHOR_CALIBRATION",
+            "ZZ_VCAP_ANCHOR_PREVIEW",
+            "VCAP_APPLY_CONFLICT",
+            "static BOOL settings_save",
+        ):
+            self.assertIn(token, source)
+        self.assertNotIn("DEFAULT_MONITOR_ID", source)
+        self.assertNotIn("SA_Draggable", source)
+        self.assertNotIn("SA_Exclusive", source)
+        self.assertIn("if (live_session.preview_valid) {", source)
+        self.assertIn("../common/zz_vcap_live.c", build)
+
+    def test_zzdiag_capture_dump_has_fixed_header_and_size_gate(self):
+        text = self.read("ZZDiag/ZZDiag.c")
+        self.assertIn('"P6\\n1280 320\\n255\\n"', text)
+        self.assertIn("DeleteFile((CONST_STRPTR)path)", text)
+        self.assertIn("Seek(file, 0, OFFSET_END)", text)
+        self.assertNotIn('sprintf(header, "P6', text)
+
+        capture_block = text.index("if (capture_path) {")
+        aperture_guard = text.index("if (board.zorro_version != 3)",
+                                    capture_block)
+        probe = text.index("arm_videocap_probe(board.address)",
+                           capture_block)
+        self.assertLess(aperture_guard, probe)
+
+    def test_zzdiag_compares_pre_ddr_probe_with_capture_memory(self):
+        text = self.read("ZZDiag/ZZDiag.c")
+        header = self.read("include/zz9000_hw.h")
+        self.assertIn("ZZ_REG_VCAP_PROBE_DATA_BASE", header)
+        self.assertIn("ZZ_REG_VCAP_PROBE_SAMPLER_DATA_BASE", header)
+        self.assertIn("ZZ_REG_VCAP_PROBE_OWNER_BASE", header)
+        self.assertIn("ZZ_REG_VCAP_PRE_CROP_PROBE_DATA_BASE", header)
+        self.assertIn("ZZ_REG_VCAP_PRE_CROP_PROBE_META", header)
+        self.assertIn("ZZ_REG_VCAP_PROBE_CONTROL", header)
+        self.assertIn("arm_videocap_probe", text)
+        self.assertIn("print_videocap_probe_comparison", text)
+        self.assertIn("VideoCapProbeMatch", text)
+        self.assertIn("VideoCapSamplerMatch", text)
+        self.assertIn("VideoCapSamplerFirst", text)
+        self.assertIn("VideoCapSamplerShift+1", text)
+        self.assertIn("VideoCapSamplerShift-1", text)
+        self.assertIn("later live DDR differs (advisory)", text)
+        self.assertIn("VideoCapPreCropTarget", text)
+        self.assertIn("VideoCapPreCropTransitions", text)
+        self.assertIn("VideoCapPreCrop[", text)
+        self.assertIn('#define ZZDIAG_VERSION "1.10"', text)
+        self.assertIn("VideoCapOwnerStable", text)
+        self.assertIn("ZZ_VCAP_PROBE_TARGET_X", header)
+        self.assertIn("928U", header)
+        self.assertIn("ZZ_VCAP_PROBE_SOURCE_X", header)
+        self.assertIn("928U", header)
+
     def test_build_scripts_have_shebangs_and_use_common_docker_image(self):
         scripts = (
             "tools/amiga-docker.sh",

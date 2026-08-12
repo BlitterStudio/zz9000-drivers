@@ -15,9 +15,13 @@
 #include <exec/types.h>
 #include <intuition/intuition.h>
 #include <intuition/gadgetclass.h>
+#include <intuition/screens.h>
+#include <graphics/displayinfo.h>
+#include <graphics/rastport.h>
 #include <libraries/gadtools.h>
 #include <libraries/asl.h>
 #include <devices/timer.h>
+#include <devices/inputevent.h>
 
 #include <clib/exec_protos.h>
 #include <clib/graphics_protos.h>
@@ -36,9 +40,10 @@
 #include "zz9000.h"
 #include "fwup_amiga.h"
 #include "zzcfg_amiga.h"
+#include "zz_vcap_live.h"
 
-#define ZZTOP_RELEASE "2.4"
-#define ZZTOP_DATE    "07.08.2026"
+#define ZZTOP_RELEASE "2.8"
+#define ZZTOP_DATE    "11.08.2026"
 
 static const char version[] __attribute__((used)) =
 	"$VER: ZZTop " ZZTOP_RELEASE " (" ZZTOP_DATE ")\r\n";
@@ -66,7 +71,7 @@ static const char version[] __attribute__((used)) =
 
 /* Settings window gadgets (own id space, own window). */
 #define SGAD_VIDEOCAP      (0)
-#define SGAD_NSVSYNC       (1)
+#define SGAD_VCAP_ADVANCED (1)
 #define SGAD_SCANMODE      (2)
 #define SGAD_PARITY        (3)
 #define SGAD_INT2          (4)
@@ -78,6 +83,26 @@ static const char version[] __attribute__((used)) =
 #define SGAD_BTN_SAVE      (10)
 #define SGAD_BTN_RELOAD    (11)
 #define SGAD_COUNT         (12)
+
+/* Advanced native-video window gadgets. */
+#define AGAD_VCAP_SAMPLE   (0)
+#define AGAD_VCAP_FRAMING  (1)
+#define AGAD_VCAP_CROP_H   (2)
+#define AGAD_VCAP_CROP_V   (3)
+#define AGAD_BTN_CALIBRATE (4)
+#define AGAD_STATUS        (5)
+#define AGAD_BTN_DONE      (6)
+#define AGAD_BTN_CANCEL    (7)
+#define AGAD_COUNT         (8)
+
+#define VCAP_RAWKEY_KEYPAD_ENTER 0x43
+#define VCAP_RAWKEY_RETURN       0x44
+#define VCAP_RAWKEY_ESCAPE       0x45
+#define VCAP_RAWKEY_UP           0x4c
+#define VCAP_RAWKEY_DOWN         0x4d
+#define VCAP_RAWKEY_RIGHT        0x4e
+#define VCAP_RAWKEY_LEFT         0x4f
+#define VCAP_APPLY_TIMEOUT_TICKS 100
 
 /* Project menu userdata values. */
 #define MENU_ID_SETTINGS   (1)
@@ -99,8 +124,11 @@ static const char version[] __attribute__((used)) =
 #define LABEL_SCANLINES    "Scanlines"
 #define LABEL_PARITY       "Parity"
 #define LABEL_REFRESHMODE  "Auto Refresh"
-#define LABEL_VCAPMODE     "Native Video"
-#define LABEL_NSVSYNC      "Exact Refresh"
+#define LABEL_VCAPMODE     "Native Output"
+#define LABEL_VCAP_SAMPLE  "Capture Sample"
+#define LABEL_VCAP_FRAMING "Framing"
+#define LABEL_VCAP_CROP    "Crop H / V"
+#define LABEL_VCAP_ADVANCED "Advanced Video..."
 #define LABEL_INT2         "Interrupt"
 #define LABEL_OFFSCREEN    "Offscreen BMs"
 #define LABEL_OVERLAY      "Video overlay"
@@ -247,7 +275,6 @@ static CONST_STRPTR zztop_button_samples[] = {
 struct Library* IntuitionBase;
 struct Library* GfxBase;
 struct Library* GadToolsBase;
-struct Library* ExpansionBase;
 struct Library* AslBase;
 
 struct ConfigDev* zz_cd;
@@ -841,15 +868,25 @@ static void do_fw_restore(struct Window *win)
 /* ------------------------------------------------------------------ */
 
 static STRPTR vcapmode_labels[] = {
-	(STRPTR)"800x600 60Hz",
-	(STRPTR)"PAL 720x576 50Hz",
+	(STRPTR)"1280x1024 60Hz (Full)",
+	(STRPTR)"1280x1024 Exact (Full)",
+	(STRPTR)"800x600 60Hz (Filtered)",
+	(STRPTR)"720x576 50Hz (Filtered)",
+	(STRPTR)"Exact PAL Amiga (Filtered)",
+	(STRPTR)"Exact NTSC Amiga (Filtered)",
 	NULL
 };
 
-static STRPTR nsvsync_labels[] = {
-	(STRPTR)"Off",
-	(STRPTR)"PAL ~49.92Hz",
-	(STRPTR)"NTSC",
+static STRPTR vcapsample_labels[] = {
+	(STRPTR)"Average (recommended)",
+	(STRPTR)"Even (diagnostic)",
+	(STRPTR)"Odd (diagnostic)",
+	NULL
+};
+
+static STRPTR vcapframing_labels[] = {
+	(STRPTR)"Automatic (recommended)",
+	(STRPTR)"Custom",
 	NULL
 };
 
@@ -877,9 +914,675 @@ static char settings_cfg_text[ZZCFG_MAX_SIZE];
  * and Save/Reload are disabled. */
 static BOOL settings_have_cfg;
 
+enum vcap_apply_result {
+	VCAP_APPLY_ERROR = -2,
+	VCAP_APPLY_CONFLICT = -1,
+	VCAP_APPLY_TIMEOUT = 0,
+	VCAP_APPLY_OK = 1
+};
+
+struct settings_live_session {
+	BOOL supported;
+	struct zz_vcap_snapshot current;
+	struct zz_vcap_anchors anchors;
+	struct zz_vcap_control preview_control;
+	BOOL preview_valid;
+};
+
+static ULONG vcap_read32(ULONG offset)
+{
+	ULONG high = zz_get_reg16(offset);
+	ULONG low = zz_get_reg16(offset + 2);
+
+	return (high << 16) | low;
+}
+
+static BOOL vcap_read_stable_status(ULONG *status)
+{
+	ULONG first = vcap_read32(ZZ_VCAP_LIVE_STATUS);
+	ULONG second = vcap_read32(ZZ_VCAP_LIVE_STATUS);
+
+	if (first != second) return FALSE;
+	*status = first;
+	return TRUE;
+}
+
+static BOOL vcap_capture_snapshot(struct zz_vcap_snapshot *snapshot)
+{
+	int tries;
+
+	for (tries = 0; tries < 8; tries++) {
+		ULONG before = vcap_read32(ZZ_VCAP_LIVE_STATUS);
+		ULONG raw = vcap_read32(ZZ_VCAP_LIVE_APPLIED_RAW);
+		ULONG effective = vcap_read32(ZZ_VCAP_LIVE_EFFECTIVE_CROP);
+		ULONG after = vcap_read32(ZZ_VCAP_LIVE_STATUS);
+
+		if (zz_vcap_snapshot_status_valid(before, after)) {
+			snapshot->status = after;
+			snapshot->raw = raw;
+			zz_vcap_effective_unpack(effective, &snapshot->effective_h,
+				&snapshot->effective_v);
+			return TRUE;
+		}
+	}
+	return FALSE;
+}
+
+static BOOL vcap_begin_apply(ULONG raw, UBYTE *expected_sequence)
+{
+	ULONG status_raw;
+	struct zz_vcap_status status;
+
+	if (!vcap_read_stable_status(&status_raw)) return FALSE;
+	zz_vcap_status_unpack(status_raw, &status);
+	if (!status.applied_valid || status.busy ||
+		status.request_sequence != status.applied_sequence)
+		return FALSE;
+
+	*expected_sequence = zz_vcap_next_sequence(status.request_sequence);
+	zz_set_reg(ZZ_VCAP_LIVE_STAGED_RAW_HI, (UWORD)(raw >> 16));
+	zz_set_reg(ZZ_VCAP_LIVE_STAGED_RAW_LO, (UWORD)raw);
+	zz_set_reg(ZZ_VCAP_LIVE_COMMIT, ZZ_VCAP_LIVE_COMMIT_TOKEN);
+	return TRUE;
+}
+
+static int vcap_poll_apply(UBYTE expected_sequence, ULONG expected_raw,
+	UWORD ticks, struct zz_vcap_snapshot *applied)
+{
+	UWORD elapsed;
+
+	for (elapsed = 0; elapsed < ticks; elapsed++) {
+		ULONG status;
+
+		if (vcap_read_stable_status(&status)) {
+			if (zz_vcap_request_complete(status, expected_sequence)) {
+				int request_result;
+
+				if (!vcap_capture_snapshot(applied))
+					return VCAP_APPLY_ERROR;
+				request_result = zz_vcap_request_result(status,
+					expected_sequence, applied->raw, expected_raw);
+				if (request_result == ZZ_VCAP_REQUEST_CONFLICT)
+					return VCAP_APPLY_CONFLICT;
+				return VCAP_APPLY_OK;
+			}
+		}
+		Delay(1);
+	}
+	return VCAP_APPLY_TIMEOUT;
+}
+
+static int vcap_apply_raw(ULONG raw, struct zz_vcap_snapshot *applied,
+	UBYTE *pending_sequence)
+{
+	UBYTE expected;
+
+	if (!vcap_begin_apply(raw, &expected)) return VCAP_APPLY_ERROR;
+	if (pending_sequence) *pending_sequence = expected;
+	return vcap_poll_apply(expected, raw, VCAP_APPLY_TIMEOUT_TICKS, applied);
+}
+
+static void settings_live_init(struct settings_live_session *session,
+	UWORD firmware_revision)
+{
+	ULONG capability;
+
+	memset(session, 0, sizeof(*session));
+	capability = vcap_read32(ZZ_VCAP_LIVE_CAPABILITY);
+	session->supported = zz_vcap_live_supported(firmware_revision,
+		capability);
+	zz_vcap_anchors_init(&session->anchors);
+}
+
+static BOOL settings_live_refresh(struct settings_live_session *session)
+{
+	struct zz_vcap_snapshot snapshot;
+
+	if (!session->supported || !vcap_capture_snapshot(&snapshot))
+		return FALSE;
+	session->current = snapshot;
+	if (!session->anchors.valid[ZZ_VCAP_ANCHOR_SETTINGS])
+		zz_vcap_anchor_store(&session->anchors, ZZ_VCAP_ANCHOR_SETTINGS,
+			&snapshot);
+	return TRUE;
+}
+
+static BOOL settings_live_restore(struct settings_live_session *session,
+	UWORD owner)
+{
+	struct zz_vcap_snapshot anchor;
+	struct zz_vcap_snapshot applied;
+	int result;
+
+	if (!session->supported ||
+		!zz_vcap_anchor_load(&session->anchors, owner, &anchor))
+		return TRUE;
+	if (settings_live_refresh(session) && session->current.raw == anchor.raw)
+		return TRUE;
+	result = vcap_apply_raw(anchor.raw, &applied, NULL);
+	if (result != VCAP_APPLY_OK) return FALSE;
+	session->current = applied;
+	return TRUE;
+}
+
+static void settings_path_for(struct zz_vcap_path *path, UWORD profile,
+	UWORD sample)
+{
+	UWORD pal_mode, full_width, vsync;
+
+	zzcfg_profile_to_legacy(profile, &pal_mode,
+		&full_width, &vsync);
+	path->sample = sample;
+	path->full_width = full_width;
+}
+
+static BOOL settings_current_path_matches(
+	const struct settings_live_session *session, UWORD profile, UWORD sample)
+{
+	struct zz_vcap_control control;
+	struct zz_vcap_path staged;
+	struct zz_vcap_path applied;
+
+	if (!zz_vcap_control_unpack(session->current.raw, &control))
+		return FALSE;
+	settings_path_for(&staged, profile, sample);
+	applied.sample = control.sample;
+	applied.full_width = control.full_width;
+	return zz_vcap_path_equal(&staged, &applied);
+}
+
+static BOOL settings_profile_matches(struct settings_live_session *session,
+	UWORD profile, UWORD sample)
+{
+	return settings_live_refresh(session) &&
+		settings_current_path_matches(session, profile, sample);
+}
+
+static BOOL settings_path_matches(struct settings_live_session *session,
+	UWORD sample)
+{
+	return settings_profile_matches(session,
+		settings_vals.videocap_profile, sample);
+}
+
+static BOOL settings_custom_framing(void)
+{
+	return settings_vals.videocap_crop_h_present ||
+		settings_vals.videocap_crop_v_present;
+}
+
+static BOOL settings_custom_save_allowed(struct settings_live_session *session)
+{
+	if (!session->supported || !settings_custom_framing()) return TRUE;
+	return settings_path_matches(session, settings_vals.videocap_sample);
+}
+
+enum vcap_pending_action {
+	VCAP_PENDING_NONE = 0,
+	VCAP_PENDING_ADJUST,
+	VCAP_PENDING_ACCEPT,
+	VCAP_PENDING_RESTORE
+};
+
+struct vcap_calibration {
+	struct Screen *screen;
+	struct Window *window;
+	struct zz_vcap_snapshot entry;
+	struct zz_vcap_snapshot current;
+	struct zz_vcap_working working;
+	struct zz_vcap_working pending_working;
+	ULONG pending_raw;
+	UBYTE pending_sequence;
+	UWORD pending_action;
+	BOOL cancel_requested;
+	BOOL accepted;
+	BOOL done;
+	char message[96];
+};
+
+static void vcap_draw_line(struct RastPort *rp, WORD x1, WORD y1,
+	WORD x2, WORD y2, UWORD pen)
+{
+	SetAPen(rp, pen);
+	Move(rp, x1, y1);
+	Draw(rp, x2, y2);
+}
+
+static void vcap_draw_calibration(struct vcap_calibration *calibration)
+{
+	struct RastPort *rp = calibration->window->RPort;
+	WORD width = calibration->screen->Width;
+	WORD height = calibration->screen->Height;
+	WORD safe_x = width / 10;
+	WORD safe_y = height / 10;
+	char line[96];
+	const char *legend =
+		"Arrows adjust  Shift+Arrows coarse  Enter accept  Esc cancel";
+
+	SetDrMd(rp, JAM1);
+	SetRast(rp, 0);
+	/* Outer edge, a conservative safe-area box, and an unobscured centre
+	 * cross make both overscan loss and framing asymmetry obvious. */
+	vcap_draw_line(rp, 0, 0, width - 1, 0, 2);
+	vcap_draw_line(rp, width - 1, 0, width - 1, height - 1, 2);
+	vcap_draw_line(rp, width - 1, height - 1, 0, height - 1, 2);
+	vcap_draw_line(rp, 0, height - 1, 0, 0, 2);
+	vcap_draw_line(rp, safe_x, safe_y, width - safe_x - 1, safe_y, 3);
+	vcap_draw_line(rp, width - safe_x - 1, safe_y,
+		width - safe_x - 1, height - safe_y - 1, 3);
+	vcap_draw_line(rp, width - safe_x - 1, height - safe_y - 1,
+		safe_x, height - safe_y - 1, 3);
+	vcap_draw_line(rp, safe_x, height - safe_y - 1, safe_x, safe_y, 3);
+	vcap_draw_line(rp, width / 2 - 24, height / 2,
+		width / 2 + 24, height / 2, 1);
+	vcap_draw_line(rp, width / 2, height / 2 - 24,
+		width / 2, height / 2 + 24, 1);
+
+	SetAPen(rp, 1);
+	snprintf(line, sizeof(line), "Live Custom H:%u  V:%u",
+		(unsigned)calibration->working.crop_h,
+		(unsigned)calibration->working.crop_v);
+	Move(rp, 8, 12);
+	Text(rp, (CONST_STRPTR)line, strlen(line));
+	Move(rp, 8, 24);
+	Text(rp, (CONST_STRPTR)calibration->message,
+		strlen(calibration->message));
+	Move(rp, 8, height - 8);
+	Text(rp, (CONST_STRPTR)legend, strlen(legend));
+}
+
+static int vcap_calibration_start_apply(struct vcap_calibration *calibration,
+	const struct zz_vcap_working *candidate, UWORD action)
+{
+	struct zz_vcap_snapshot applied;
+	ULONG raw = action == VCAP_PENDING_RESTORE ? calibration->entry.raw :
+		zz_vcap_control_pack(&candidate->control);
+	int result;
+
+	if (raw == calibration->current.raw) {
+		if (action == VCAP_PENDING_ACCEPT) {
+			calibration->working = *candidate;
+			calibration->accepted = TRUE;
+			calibration->done = TRUE;
+		} else if (action == VCAP_PENDING_RESTORE) {
+			calibration->done = TRUE;
+		}
+		return VCAP_APPLY_OK;
+	}
+
+	result = vcap_apply_raw(raw, &applied, &calibration->pending_sequence);
+	if (result == VCAP_APPLY_OK) {
+		calibration->current = applied;
+		if (action == VCAP_PENDING_RESTORE) {
+			calibration->done = TRUE;
+		} else {
+			calibration->working = *candidate;
+			if (action == VCAP_PENDING_ACCEPT) {
+				calibration->accepted = TRUE;
+				calibration->done = TRUE;
+			}
+		}
+		return result;
+	}
+	if (result == VCAP_APPLY_TIMEOUT) {
+		calibration->pending_raw = raw;
+		calibration->pending_action = action;
+		if (candidate) calibration->pending_working = *candidate;
+		snprintf(calibration->message, sizeof(calibration->message),
+			"No frame acknowledgement; Esc restores when frames return");
+	} else if (result == VCAP_APPLY_CONFLICT) {
+		calibration->current = applied;
+		snprintf(calibration->message, sizeof(calibration->message),
+			"Another writer won the request; retry or Esc to restore");
+	} else {
+		snprintf(calibration->message, sizeof(calibration->message),
+			"Request not accepted; retry or Esc to restore");
+	}
+	return result;
+}
+
+static void vcap_calibration_reconcile(struct vcap_calibration *calibration)
+{
+	struct zz_vcap_snapshot applied;
+	struct zz_vcap_status status;
+	ULONG status_raw;
+	int result;
+
+	if (calibration->pending_action == VCAP_PENDING_NONE) return;
+	result = vcap_poll_apply(calibration->pending_sequence,
+		calibration->pending_raw, 1, &applied);
+	if (result == VCAP_APPLY_CONFLICT) {
+		UWORD conflict_action = calibration->pending_action;
+
+		calibration->current = applied;
+		calibration->pending_action = VCAP_PENDING_NONE;
+		if (calibration->cancel_requested ||
+			conflict_action == VCAP_PENDING_RESTORE)
+			vcap_calibration_start_apply(calibration, NULL,
+				VCAP_PENDING_RESTORE);
+		else
+			snprintf(calibration->message, sizeof(calibration->message),
+				"Another writer won the request; press the key again");
+		return;
+	}
+	if (result != VCAP_APPLY_OK) {
+		/* A valid live request can lose an idle-arbiter race to a firmware
+		 * or legacy operation-16 event. Rejected means that payload never
+		 * became pending, so the last acknowledged state is still exact. */
+		if (vcap_read_stable_status(&status_raw)) {
+			zz_vcap_status_unpack(status_raw, &status);
+			if (status.rejected && !status.busy &&
+				status.request_sequence == status.applied_sequence &&
+				status.request_sequence != calibration->pending_sequence) {
+				UWORD rejected_action = calibration->pending_action;
+
+				calibration->pending_action = VCAP_PENDING_NONE;
+				if (calibration->cancel_requested ||
+					rejected_action == VCAP_PENDING_RESTORE)
+					vcap_calibration_start_apply(calibration, NULL,
+						VCAP_PENDING_RESTORE);
+				else
+					snprintf(calibration->message,
+						sizeof(calibration->message),
+						"Request lost an arbiter race; press the key again");
+			}
+		}
+		return;
+	}
+
+	calibration->current = applied;
+	if (calibration->pending_action == VCAP_PENDING_RESTORE) {
+		calibration->pending_action = VCAP_PENDING_NONE;
+		calibration->done = TRUE;
+		return;
+	}
+	calibration->working = calibration->pending_working;
+	result = calibration->pending_action;
+	calibration->pending_action = VCAP_PENDING_NONE;
+	if (calibration->cancel_requested) {
+		vcap_calibration_start_apply(calibration, NULL,
+			VCAP_PENDING_RESTORE);
+	} else if (result == VCAP_PENDING_ACCEPT) {
+		calibration->accepted = TRUE;
+		calibration->done = TRUE;
+	} else {
+		snprintf(calibration->message, sizeof(calibration->message),
+			"Applied at capture-frame boundary");
+	}
+}
+
+static void vcap_calibration_cancel(struct vcap_calibration *calibration)
+{
+	calibration->cancel_requested = TRUE;
+	if (calibration->pending_action != VCAP_PENDING_NONE) {
+		snprintf(calibration->message, sizeof(calibration->message),
+			"Cancel pending; waiting to restore the entry state");
+		return;
+	}
+	vcap_calibration_start_apply(calibration, NULL, VCAP_PENDING_RESTORE);
+}
+
+static void vcap_calibration_key(struct vcap_calibration *calibration,
+	UWORD code, UWORD qualifier)
+{
+	struct zz_vcap_working candidate;
+	UWORD move;
+
+	if (code & IECODE_UP_PREFIX) return;
+	if (calibration->done) {
+		if (calibration->accepted && code == VCAP_RAWKEY_ESCAPE) {
+			calibration->done = FALSE;
+			calibration->accepted = FALSE;
+			vcap_calibration_cancel(calibration);
+		}
+		return;
+	}
+	if (code == VCAP_RAWKEY_ESCAPE) {
+		vcap_calibration_cancel(calibration);
+		return;
+	}
+	if (calibration->pending_action != VCAP_PENDING_NONE ||
+		calibration->cancel_requested)
+		return;
+
+	if (code == VCAP_RAWKEY_RETURN || code == VCAP_RAWKEY_KEYPAD_ENTER) {
+		candidate = calibration->working;
+		zz_vcap_accept(&candidate);
+		vcap_calibration_start_apply(calibration, &candidate,
+			VCAP_PENDING_ACCEPT);
+		return;
+	}
+	switch (code) {
+	case VCAP_RAWKEY_LEFT:  move = ZZ_VCAP_MOVE_LEFT; break;
+	case VCAP_RAWKEY_RIGHT: move = ZZ_VCAP_MOVE_RIGHT; break;
+	case VCAP_RAWKEY_UP:    move = ZZ_VCAP_MOVE_UP; break;
+	case VCAP_RAWKEY_DOWN:  move = ZZ_VCAP_MOVE_DOWN; break;
+	default: return;
+	}
+
+	candidate = calibration->working;
+	if (!zz_vcap_adjust(&candidate, move,
+		(qualifier & (IEQUALIFIER_LSHIFT | IEQUALIFIER_RSHIFT)) != 0)) {
+		snprintf(calibration->message, sizeof(calibration->message),
+			"At 0..4095 limit; no hardware request sent");
+		return;
+	}
+	vcap_calibration_start_apply(calibration, &candidate,
+		VCAP_PENDING_ADJUST);
+}
+
+/* PAL.monitor and NTSC.monitor are optional virtual monitors. If native
+ * frames are active, preserve their detected standard. If RTG Workbench has
+ * left the native input idle, bootstrap from default.monitor instead of the
+ * protocol's necessarily stale last-detected standard. HIRES_KEY cannot
+ * select an RTG monitor. */
+static ULONG vcap_calibration_display_id(UWORD detected_standard,
+	UWORD *display_standard, ULONG *mode_error)
+{
+	struct DisplayInfo display_info;
+	ULONG display_id;
+	ULONG error;
+	ULONG default_error = ModeNotAvailable(HIRES_KEY);
+	UWORD default_standard = ZZ_VCAP_STANDARD_UNKNOWN;
+
+	memset(&display_info, 0, sizeof(display_info));
+	if (default_error == 0 &&
+		GetDisplayInfoData(NULL, (UBYTE *)&display_info,
+			sizeof(display_info), DTAG_DISP, HIRES_KEY) != 0 &&
+		(display_info.PropertyFlags & DIPF_IS_FOREIGN) == 0) {
+		default_standard =
+			(display_info.PropertyFlags & DIPF_IS_PAL) ?
+			ZZ_VCAP_STANDARD_PAL : ZZ_VCAP_STANDARD_NTSC;
+	}
+
+	if (detected_standard == ZZ_VCAP_STANDARD_UNKNOWN) {
+		if (default_standard == ZZ_VCAP_STANDARD_UNKNOWN) {
+			*mode_error = default_error;
+			return (ULONG)INVALID_ID;
+		}
+		*display_standard = default_standard;
+		*mode_error = 0;
+		return HIRES_KEY;
+	}
+
+	display_id = detected_standard == ZZ_VCAP_STANDARD_NTSC ?
+		(NTSC_MONITOR_ID | HIRES_KEY) : (PAL_MONITOR_ID | HIRES_KEY);
+	error = ModeNotAvailable(display_id);
+	if (error == 0) {
+		*display_standard = detected_standard;
+		*mode_error = 0;
+		return display_id;
+	}
+	if (default_standard == detected_standard) {
+		*display_standard = default_standard;
+		*mode_error = 0;
+		return HIRES_KEY;
+	}
+
+	*mode_error = error;
+	return (ULONG)INVALID_ID;
+}
+
+static BOOL vcap_screen_is_foreign(struct Screen *screen)
+{
+	struct DisplayInfo display_info;
+	ULONG display_id;
+
+	if (!screen) return FALSE;
+	display_id = GetVPModeID(&screen->ViewPort);
+	if (display_id == (ULONG)INVALID_ID) return FALSE;
+	memset(&display_info, 0, sizeof(display_info));
+	return GetDisplayInfoData(NULL, (UBYTE *)&display_info,
+		sizeof(display_info), DTAG_DISP, display_id) != 0 &&
+		(display_info.PropertyFlags & DIPF_IS_FOREIGN) != 0;
+}
+
+static int vcap_calibration_run(struct Screen *return_screen,
+	struct Window *return_window, struct settings_live_session *session,
+	struct zz_vcap_control *accepted_control, char *failure,
+	UWORD failure_size)
+{
+	static struct ColorSpec colors[] = {
+		{ 0, 0, 0, 0 }, { 1, 15, 15, 15 },
+		{ 2, 15, 3, 3 }, { 3, 3, 8, 15 }, { -1, 0, 0, 0 }
+	};
+	struct vcap_calibration calibration;
+	ULONG display_id;
+	ULONG mode_error;
+	ULONG screen_error = 0;
+	struct IntuiMessage *message;
+	char last_message[96];
+	UWORD last_h;
+	UWORD last_v;
+	UWORD detected_standard;
+	UWORD display_standard;
+	UWORD lines;
+	BOOL caller_is_foreign;
+	BOOL want_ntsc;
+
+	memset(&calibration, 0, sizeof(calibration));
+	if (!settings_live_refresh(session)) {
+		snprintf(failure, failure_size,
+			"Live calibration state became unavailable");
+		return -1;
+	}
+	calibration.entry = session->current;
+	calibration.current = session->current;
+	zz_vcap_anchor_store(&session->anchors, ZZ_VCAP_ANCHOR_CALIBRATION,
+		&calibration.entry);
+	if (!zz_vcap_control_unpack(calibration.entry.raw,
+		&calibration.working.control)) {
+		snprintf(failure, failure_size,
+			"Live calibration control word is invalid");
+		return -1;
+	}
+	calibration.working.crop_h = calibration.entry.effective_h;
+	calibration.working.crop_v = calibration.entry.effective_v;
+	snprintf(calibration.message, sizeof(calibration.message),
+		"Adjust until the boxes are centred");
+	lines = zz_get_reg16(REG_ZZ_VIDEOCAP_STATS) & VCAP_LINES_MASK;
+	caller_is_foreign = vcap_screen_is_foreign(return_screen);
+	detected_standard = zz_vcap_calibration_standard(
+		calibration.entry.status, lines, caller_is_foreign);
+	display_id = vcap_calibration_display_id(detected_standard,
+		&display_standard, &mode_error);
+	if (display_id == (ULONG)INVALID_ID) {
+		if (detected_standard == ZZ_VCAP_STANDARD_UNKNOWN)
+			snprintf(failure, failure_size,
+				"Native default Hires unavailable (mode error %lu)",
+				(unsigned long)mode_error);
+		else
+			snprintf(failure, failure_size,
+				"Native %s Hires unavailable (error %lu, %s, lines %u)",
+				detected_standard == ZZ_VCAP_STANDARD_NTSC ?
+				"NTSC" : "PAL", (unsigned long)mode_error,
+				caller_is_foreign ? "RTG" : "native", (unsigned)lines);
+		return -2;
+	}
+	want_ntsc = display_standard == ZZ_VCAP_STANDARD_NTSC;
+
+	calibration.screen = OpenScreenTags(NULL,
+		SA_Type, CUSTOMSCREEN, SA_DisplayID, display_id,
+		SA_Depth, 2, SA_Overscan, OSCAN_TEXT, SA_Colors, colors,
+		SA_SysFont, 0, SA_Quiet, TRUE, SA_ShowTitle, FALSE,
+		SA_Behind, TRUE, SA_AutoScroll, FALSE,
+		SA_ErrorCode, &screen_error, TAG_END);
+	if (!calibration.screen) {
+		snprintf(failure, failure_size,
+			"Native %s screen open failed (Intuition error %lu)",
+			want_ntsc ? "NTSC" : "PAL", (unsigned long)screen_error);
+		return -3;
+	}
+	calibration.window = OpenWindowTags(NULL,
+		WA_CustomScreen, calibration.screen,
+		WA_Left, 0, WA_Top, 0,
+		WA_Width, calibration.screen->Width,
+		WA_Height, calibration.screen->Height,
+		WA_Borderless, TRUE, WA_Backdrop, TRUE, WA_RMBTrap, TRUE,
+		WA_NoCareRefresh, TRUE, WA_Activate, FALSE,
+		WA_RptQueue, 16, WA_IDCMP, IDCMP_RAWKEY, TAG_END);
+	if (!calibration.window) {
+		CloseScreen(calibration.screen);
+		snprintf(failure, failure_size,
+			"Native calibration window could not be opened");
+		return -4;
+	}
+
+	vcap_draw_calibration(&calibration);
+	snprintf(last_message, sizeof(last_message), "%s", calibration.message);
+	last_h = calibration.working.crop_h;
+	last_v = calibration.working.crop_v;
+	ScreenToFront(calibration.screen);
+	ActivateWindow(calibration.window);
+	while (!calibration.done) {
+		ULONG signal = 1UL << calibration.window->UserPort->mp_SigBit;
+
+		if (calibration.pending_action == VCAP_PENDING_NONE)
+			Wait(signal);
+		else
+			Delay(1);
+		while ((message = (struct IntuiMessage *)
+			GetMsg(calibration.window->UserPort))) {
+			ULONG message_class = message->Class;
+			UWORD code = message->Code;
+			UWORD qualifier = message->Qualifier;
+
+			ReplyMsg((struct Message *)message);
+			if (message_class == IDCMP_RAWKEY)
+				vcap_calibration_key(&calibration, code, qualifier);
+		}
+		vcap_calibration_reconcile(&calibration);
+		if (last_h != calibration.working.crop_h ||
+			last_v != calibration.working.crop_v ||
+			strcmp(last_message, calibration.message) != 0) {
+			vcap_draw_calibration(&calibration);
+			last_h = calibration.working.crop_h;
+			last_v = calibration.working.crop_v;
+			snprintf(last_message, sizeof(last_message), "%s",
+				calibration.message);
+		}
+	}
+
+	while ((message = (struct IntuiMessage *)
+		GetMsg(calibration.window->UserPort)))
+		ReplyMsg((struct Message *)message);
+	CloseWindow(calibration.window);
+	CloseScreen(calibration.screen);
+	ScreenToFront(return_screen);
+	ActivateWindow(return_window);
+
+	session->current = calibration.current;
+	if (!calibration.accepted) return 0;
+	*accepted_control = calibration.working.control;
+	zz_vcap_anchor_store(&session->anchors, ZZ_VCAP_ANCHOR_PREVIEW,
+		&calibration.current);
+	session->preview_control = calibration.working.control;
+	session->preview_valid = TRUE;
+	return 1;
+}
+
 static CONST_STRPTR settings_label_samples[] = {
 	(CONST_STRPTR)LABEL_VCAPMODE,
-	(CONST_STRPTR)LABEL_NSVSYNC,
 	(CONST_STRPTR)LABEL_SCANLINES,
 	(CONST_STRPTR)LABEL_PARITY,
 	(CONST_STRPTR)LABEL_INT2,
@@ -894,7 +1597,7 @@ static CONST_STRPTR settings_label_samples[] = {
  * spans the full row instead, so long messages don't inflate the
  * control column (and with it the whole window). */
 static CONST_STRPTR settings_value_samples[] = {
-	(CONST_STRPTR)"PAL 720x576 50Hz",
+	(CONST_STRPTR)"Exact NTSC Amiga (Filtered)",
 	(CONST_STRPTR)"INT6 (default)",
 	(CONST_STRPTR)"aa:bb:cc:dd:ee:ff",
 	NULL
@@ -936,6 +1639,21 @@ static int settings_parse_mac(const char *s)
 	return s[ZZCFG_MAC_CHARS] == '\0';
 }
 
+static int settings_parse_u12(const char *s, UWORD *out)
+{
+	ULONG value = 0;
+
+	if (!s || !*s) return 0;
+	while (*s) {
+		if (*s < '0' || *s > '9') return 0;
+		value = value * 10 + (ULONG)(*s - '0');
+		if (value > 4095) return 0;
+		s++;
+	}
+	*out = (UWORD)value;
+	return 1;
+}
+
 static int settings_env_exists(const char *path)
 {
 	BPTR f = Open((CONST_STRPTR)path, MODE_OLDFILE);
@@ -965,19 +1683,23 @@ static int settings_env_read_mac(char *out, int outsz)
 static int settings_apply_env_overrides(struct zzcfg_values *sv)
 {
 	char envmac[ZZCFG_MAC_CHARS + 3];
+	UWORD pal_mode, full, vsync;
 	int any = 0;
 
+	zzcfg_profile_to_legacy(sv->videocap_profile, &pal_mode, &full, &vsync);
 	if (settings_env_exists("ENV:ZZ9000-VCAP-800x600")) {
-		sv->videocap_pal = 0;
+		pal_mode = 0;
+		full = 0;
 		any = 1;
 	}
 	if (settings_env_exists("ENV:ZZ9000-NS-VSYNC")) {
-		sv->vsync = 1;
+		vsync = 1;
 		any = 1;
 	} else if (settings_env_exists("ENV:ZZ9000-NS-VSYNC-NTSC")) {
-		sv->vsync = 2;
+		vsync = 2;
 		any = 1;
 	}
+	sv->videocap_profile = zzcfg_profile_from_legacy(pal_mode, full, vsync);
 	if (settings_env_exists("ENV:ZZ9K_INT2")) {
 		sv->int2 = 1;
 		any = 1;
@@ -1036,7 +1758,7 @@ static void settings_offer_env_cleanup(void)
 }
 
 /* Populate settings_vals from the board and push into the gadgets. */
-static void settings_populate(struct Window *win)
+static void settings_populate(struct Window *win, UWORD fw_version)
 {
 	ULONG board = (ULONG)zz_regs;
 	struct zzcfg_values *sv = &settings_vals;
@@ -1047,6 +1769,10 @@ static void settings_populate(struct Window *win)
 	 * it at cold boot and this tool/ZZScanlines may have changed it
 	 * since. */
 	memset(sv, 0, sizeof(*sv));
+	sv->videocap_profile = ZZCFG_VCAP_FULL_60;
+	sv->use_videocap_profile_key = (fw_version >= 0x0209);
+	sv->videocap_crop_h = ZZCFG_VIDEOCAP_CROP_H_COMPAT;
+	sv->videocap_crop_v = ZZCFG_VIDEOCAP_CROP_V_COMPAT;
 	sv->scanline_mode = zz_get_scanline_mode();
 	sv->scanline_parity = zz_get_scanline_parity();
 	/* ZZ9000.card enables both of these when the key is absent, so the
@@ -1100,9 +1826,7 @@ static void settings_populate(struct Window *win)
 	if (!win) return;
 
 	GT_SetGadgetAttrs(sgads[SGAD_VIDEOCAP], win, NULL,
-		GTCY_Active, sv->videocap_pal, TAG_END);
-	GT_SetGadgetAttrs(sgads[SGAD_NSVSYNC], win, NULL,
-		GTCY_Active, sv->vsync, TAG_END);
+		GTCY_Active, sv->videocap_profile, TAG_END);
 	GT_SetGadgetAttrs(sgads[SGAD_SCANMODE], win, NULL,
 		GTCY_Active, sv->scanline_mode, TAG_END);
 	GT_SetGadgetAttrs(sgads[SGAD_PARITY], win, NULL,
@@ -1120,7 +1844,7 @@ static void settings_populate(struct Window *win)
 	settings_set_status(win, settings_status_buf);
 }
 
-static void settings_save(struct Window *win)
+static BOOL settings_save(struct Window *win)
 {
 	struct zzcfg_values *sv = &settings_vals;
 	struct StringInfo *si;
@@ -1128,7 +1852,7 @@ static void settings_save(struct Window *win)
 
 	if (!settings_have_cfg) {
 		settings_set_status(win, "Config needs firmware 2.3+");
-		return;
+		return FALSE;
 	}
 
 	si = (struct StringInfo *)sgads[SGAD_MAC]->SpecialInfo;
@@ -1138,14 +1862,14 @@ static void settings_save(struct Window *win)
 
 	if (sv->mac[0] && !settings_parse_mac(sv->mac)) {
 		settings_set_status(win, "Bad MAC - use aa:bb:cc:dd:ee:ff");
-		return;
+		return FALSE;
 	}
 	/* Firmware hdf rules, not the FWUP name rules: they differ (no
 	 * leading '.', 63-char cap), and the firmware silently ignores a
 	 * name it rejects at the next cold boot. */
 	if (sv->hdf[0] && !zzcfg_hdf_name_valid(sv->hdf)) {
 		settings_set_status(win, "Bad HDF name (flat root file)");
-		return;
+		return FALSE;
 	}
 
 	settings_set_status(win, "Saving...");
@@ -1166,11 +1890,13 @@ static void settings_save(struct Window *win)
 		} else {
 			settings_set_status(win, "Saved - power-cycle to apply");
 		}
+		return TRUE;
 	} else {
 		snprintf(settings_status_buf, sizeof(settings_status_buf),
 			"Save failed: %s", fwup_strerror(st));
 		settings_set_status(win, settings_status_buf);
 	}
+	return FALSE;
 }
 
 static struct Gadget *settings_create_gadgets(struct Gadget **glistptr,
@@ -1218,10 +1944,12 @@ static struct Gadget *settings_create_gadgets(struct Gadget **glistptr,
 	y += l.row_step;
 
 	ng.ng_TopEdge    = y;
-	ng.ng_GadgetID   = SGAD_NSVSYNC;
-	ng.ng_GadgetText = (STRPTR)LABEL_NSVSYNC;
-	sgads[SGAD_NSVSYNC] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
-		GTCY_Labels, nsvsync_labels, GTCY_Active, 0, TAG_END);
+	ng.ng_GadgetID   = SGAD_VCAP_ADVANCED;
+	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_ADVANCED;
+	ng.ng_Flags      = PLACETEXT_IN;
+	sgads[SGAD_VCAP_ADVANCED] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		TAG_END);
+	ng.ng_Flags      = PLACETEXT_LEFT;
 	y += l.row_step;
 
 	ng.ng_TopEdge    = y;
@@ -1314,6 +2042,427 @@ static struct Gadget *settings_create_gadgets(struct Gadget **glistptr,
 	return gad;
 }
 
+static BOOL settings_video_advanced_candidate(struct Window *win,
+	struct Gadget **agads, UWORD sample, UWORD framing,
+	BOOL framing_changed, const struct zzcfg_values *base,
+	char *status, UWORD status_size, struct zzcfg_values *candidate,
+	BOOL *changed)
+{
+	struct StringInfo *hsi =
+		(struct StringInfo *)agads[AGAD_VCAP_CROP_H]->SpecialInfo;
+	struct StringInfo *vsi =
+		(struct StringInfo *)agads[AGAD_VCAP_CROP_V]->SpecialInfo;
+	UWORD crop_h, crop_v;
+	UWORD crop_h_present, crop_v_present;
+
+	*candidate = *base;
+	if (framing == 0) {
+		*changed = sample != base->videocap_sample ||
+			base->videocap_crop_h_present || base->videocap_crop_v_present;
+		candidate->videocap_sample = sample;
+		candidate->videocap_crop_h_present = 0;
+		candidate->videocap_crop_v_present = 0;
+		return TRUE;
+	}
+
+	if (!settings_parse_u12((const char *)hsi->Buffer, &crop_h)) {
+		snprintf(status, status_size, "Bad Crop H - use 0..4095");
+		GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL,
+			GTTX_Text, status, TAG_END);
+		return FALSE;
+	}
+	if (!settings_parse_u12((const char *)vsi->Buffer, &crop_v)) {
+		snprintf(status, status_size, "Bad Crop V - use 0..4095");
+		GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL,
+			GTTX_Text, status, TAG_END);
+		return FALSE;
+	}
+
+	/* A one-axis hand-edited file opens as Custom. Merely pressing Done must
+	 * not materialize its missing axis; changing that field does. A deliberate
+	 * framing cycle (including Automatic -> Custom) makes both axes explicit. */
+	if (framing_changed) {
+		crop_h_present = 1;
+		crop_v_present = 1;
+	} else {
+		crop_h_present = base->videocap_crop_h_present ||
+			crop_h != base->videocap_crop_h;
+		crop_v_present = base->videocap_crop_v_present ||
+			crop_v != base->videocap_crop_v;
+	}
+
+	*changed = sample != base->videocap_sample ||
+		crop_h != base->videocap_crop_h || crop_v != base->videocap_crop_v ||
+		crop_h_present != base->videocap_crop_h_present ||
+		crop_v_present != base->videocap_crop_v_present;
+	candidate->videocap_sample = sample;
+	candidate->videocap_crop_h = crop_h;
+	candidate->videocap_crop_v = crop_v;
+	candidate->videocap_crop_h_present = crop_h_present;
+	candidate->videocap_crop_v_present = crop_v_present;
+	return TRUE;
+}
+
+static void settings_control_from_values(const struct zzcfg_values *values,
+	struct zz_vcap_control *control)
+{
+	struct zz_vcap_path path;
+
+	settings_path_for(&path, values->videocap_profile,
+		values->videocap_sample);
+	control->sample = path.sample;
+	control->full_width = path.full_width;
+	control->crop_h = values->videocap_crop_h;
+	control->crop_v = values->videocap_crop_v;
+	control->crop_h_present = values->videocap_crop_h_present;
+	control->crop_v_present = values->videocap_crop_v_present;
+}
+
+enum vcap_calibration_availability {
+	VCAP_CALIBRATION_UNKNOWN = -1,
+	VCAP_CALIBRATION_UNSUPPORTED = 0,
+	VCAP_CALIBRATION_WAITING,
+	VCAP_CALIBRATION_PATH_MISMATCH,
+	VCAP_CALIBRATION_READY
+};
+
+static enum vcap_calibration_availability
+settings_video_calibration_availability(
+	struct settings_live_session *session, UWORD sample, char *status,
+	UWORD status_size)
+{
+	if (!session->supported) {
+		snprintf(status, status_size,
+			"Calibrate needs matched firmware 2.10 and protocol-1 bitstream");
+		return VCAP_CALIBRATION_UNSUPPORTED;
+	}
+	if (!settings_live_refresh(session)) {
+		snprintf(status, status_size,
+			"Calibrate waiting for stable native video frames");
+		return VCAP_CALIBRATION_WAITING;
+	}
+	if (!settings_current_path_matches(session,
+		settings_vals.videocap_profile, sample)) {
+		snprintf(status, status_size,
+			"Staged capture path differs; restore it or Save Automatic + reboot");
+		return VCAP_CALIBRATION_PATH_MISMATCH;
+	}
+	snprintf(status, status_size,
+		"Calibrate is ready on the currently applied capture path");
+	return VCAP_CALIBRATION_READY;
+}
+
+/* Sampling phase and capture origin are calibration/diagnostic controls, not
+ * independent output-mode choices. Keeping them in a small secondary window
+ * makes the normal Settings path describe outcomes instead of implementation
+ * details. Values are committed to settings_vals only by Done; the main
+ * window's Save button still writes the card. */
+static BOOL settings_video_advanced_window(struct Screen *mysc, void *vi,
+	const struct ZZTopLayout *mainlayout,
+	struct settings_live_session *live_session)
+{
+	static CONST_STRPTR label_samples[] = {
+		(CONST_STRPTR)LABEL_VCAP_SAMPLE,
+		(CONST_STRPTR)LABEL_VCAP_FRAMING,
+		(CONST_STRPTR)LABEL_VCAP_CROP,
+		NULL
+	};
+	static CONST_STRPTR value_samples[] = {
+		(CONST_STRPTR)"Automatic (recommended)",
+		(CONST_STRPTR)"Average (recommended)",
+		(CONST_STRPTR)"Even (diagnostic)",
+		NULL
+	};
+	struct ZZTopLayout l = *mainlayout;
+	struct NewGadget ng;
+	struct Gadget *glist = NULL;
+	struct Gadget *gad;
+	struct Gadget *agads[AGAD_COUNT];
+	struct Window *win;
+	struct IntuiMessage *imsg;
+	struct zzcfg_values entry_values = settings_vals;
+	struct zzcfg_values candidate_values;
+	struct zz_vcap_control candidate_control;
+	struct zz_vcap_control accepted_control;
+	UWORD sample = settings_vals.videocap_sample;
+	UWORD framing = (settings_vals.videocap_crop_h_present ||
+		settings_vals.videocap_crop_v_present) ? 1 : 0;
+	ULONG imsg_class;
+	UWORD imsg_code;
+	WORD label_width, value_width, y, content_right;
+	WORD crop_width, crop_gap, button_width, button_gap;
+	WORD w, h;
+	BOOL done = FALSE;
+	BOOL changed = FALSE;
+	BOOL framing_changed = FALSE;
+	BOOL cancel = FALSE;
+	char crop_h_buf[6];
+	char crop_v_buf[6];
+	char status[128] = "Checking live calibration support...";
+	enum vcap_calibration_availability availability =
+		VCAP_CALIBRATION_UNKNOWN;
+	int i;
+
+	zz_vcap_anchor_clear(&live_session->anchors, ZZ_VCAP_ANCHOR_ADVANCED);
+	zz_vcap_anchor_clear(&live_session->anchors, ZZ_VCAP_ANCHOR_PREVIEW);
+	live_session->preview_valid = FALSE;
+	if (settings_live_refresh(live_session))
+		zz_vcap_anchor_store(&live_session->anchors, ZZ_VCAP_ANCHOR_ADVANCED,
+			&live_session->current);
+
+	label_width = zztop_max_text_width(
+		zztop_screen ? &zztop_screen->RastPort : NULL, label_samples, 8);
+	value_width = zztop_max_text_width(
+		zztop_screen ? &zztop_screen->RastPort : NULL, value_samples, 8);
+	l.gadget_left = l.margin_x + label_width + l.label_gap;
+	l.gadget_width = zztop_max_word(184, value_width + 48);
+	content_right = l.gadget_left + l.gadget_width;
+	crop_gap = 8;
+	crop_width = (l.gadget_width - crop_gap) / 2;
+	button_gap = 16;
+	button_width = 88;
+
+	snprintf(crop_h_buf, sizeof(crop_h_buf), "%u",
+		(unsigned)settings_vals.videocap_crop_h);
+	snprintf(crop_v_buf, sizeof(crop_v_buf), "%u",
+		(unsigned)settings_vals.videocap_crop_v);
+
+	gad = CreateContext(&glist);
+	for (i = 0; i < AGAD_COUNT; i++) agads[i] = NULL;
+	y = l.topborder + l.margin_y;
+
+	ng.ng_LeftEdge = l.gadget_left;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = l.gadget_width;
+	ng.ng_Height = l.gadget_height;
+	ng.ng_TextAttr = l.text_attr;
+	ng.ng_VisualInfo = vi;
+	ng.ng_Flags = PLACETEXT_LEFT;
+	ng.ng_GadgetID = AGAD_VCAP_SAMPLE;
+	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_SAMPLE;
+	agads[AGAD_VCAP_SAMPLE] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+		GTCY_Labels, vcapsample_labels, GTCY_Active, sample, TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge = y;
+	ng.ng_GadgetID = AGAD_VCAP_FRAMING;
+	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_FRAMING;
+	agads[AGAD_VCAP_FRAMING] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+		GTCY_Labels, vcapframing_labels, GTCY_Active, framing, TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge = y;
+	ng.ng_Width = crop_width;
+	ng.ng_GadgetID = AGAD_VCAP_CROP_H;
+	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_CROP;
+	agads[AGAD_VCAP_CROP_H] = gad = CreateGadget(STRING_KIND, gad, &ng,
+		GTST_MaxChars, 5, GTST_String, crop_h_buf,
+		GA_Disabled, framing == 0, TAG_END);
+	ng.ng_LeftEdge = l.gadget_left + crop_width + crop_gap;
+	ng.ng_GadgetID = AGAD_VCAP_CROP_V;
+	ng.ng_GadgetText = NULL;
+	agads[AGAD_VCAP_CROP_V] = gad = CreateGadget(STRING_KIND, gad, &ng,
+		GTST_MaxChars, 5, GTST_String, crop_v_buf,
+		GA_Disabled, framing == 0, TAG_END);
+	y += l.row_step;
+
+	ng.ng_LeftEdge = l.gadget_left;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = l.gadget_width;
+	ng.ng_GadgetID = AGAD_BTN_CALIBRATE;
+	ng.ng_GadgetText = (STRPTR)"Calibrate...";
+	ng.ng_Flags = PLACETEXT_IN;
+	agads[AGAD_BTN_CALIBRATE] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		GA_Disabled, TRUE, TAG_END);
+	y += l.row_step + l.section_gap;
+
+	ng.ng_LeftEdge = l.margin_x;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = content_right - l.margin_x;
+	ng.ng_GadgetID = AGAD_STATUS;
+	ng.ng_GadgetText = NULL;
+	ng.ng_Flags = PLACETEXT_LEFT;
+	agads[AGAD_STATUS] = gad = CreateGadget(TEXT_KIND, gad, &ng,
+		GTTX_Text, status, GTTX_Border, TRUE, TAG_END);
+	y += l.row_step + l.section_gap;
+
+	ng.ng_LeftEdge = l.margin_x;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = button_width;
+	ng.ng_GadgetID = AGAD_BTN_DONE;
+	ng.ng_GadgetText = (STRPTR)"Done";
+	ng.ng_Flags = PLACETEXT_IN;
+	agads[AGAD_BTN_DONE] = gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_END);
+	ng.ng_LeftEdge = l.margin_x + button_width + button_gap;
+	ng.ng_GadgetID = AGAD_BTN_CANCEL;
+	ng.ng_GadgetText = (STRPTR)"Cancel";
+	agads[AGAD_BTN_CANCEL] = gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_END);
+	y += l.row_step;
+
+	for (i = 0; i < AGAD_COUNT; i++) {
+		if (!agads[i]) {
+			if (glist) FreeGadgets(glist);
+			errorMessage("Advanced Video: gadget creation failed");
+			return FALSE;
+		}
+	}
+
+	w = zztop_max_word(content_right + l.margin_x,
+		l.margin_x + button_width + button_gap + button_width + l.margin_x);
+	h = y + l.gadget_height + (l.margin_y / 2) - l.topborder;
+	win = OpenWindowTags(NULL,
+		WA_Title, "Advanced Native Video",
+		WA_Gadgets, glist, WA_AutoAdjust, TRUE,
+		WA_Width, w, WA_MinWidth, w,
+		WA_InnerHeight, h, WA_MinHeight, h,
+		WA_DragBar, TRUE, WA_DepthGadget, TRUE,
+		WA_Activate, TRUE, WA_CloseGadget, TRUE,
+		WA_SizeGadget, FALSE, WA_SimpleRefresh, TRUE,
+		WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
+			BUTTONIDCMP | CYCLEIDCMP | STRINGIDCMP,
+		WA_PubScreen, mysc,
+		TAG_END);
+	if (!win) {
+		FreeGadgets(glist);
+		errorMessage("Advanced Video: OpenWindow() failed");
+		return FALSE;
+	}
+
+	GT_RefreshWindow(win, NULL);
+	while (!done) {
+		enum vcap_calibration_availability now_available =
+			settings_video_calibration_availability(
+			live_session, sample, status, sizeof(status));
+
+		if (now_available == VCAP_CALIBRATION_READY &&
+			!live_session->anchors.valid[ZZ_VCAP_ANCHOR_ADVANCED])
+			zz_vcap_anchor_store(&live_session->anchors,
+				ZZ_VCAP_ANCHOR_ADVANCED, &live_session->current);
+		if (now_available != availability) {
+			availability = now_available;
+			GT_SetGadgetAttrs(agads[AGAD_BTN_CALIBRATE], win, NULL,
+				GA_Disabled, availability != VCAP_CALIBRATION_READY, TAG_END);
+			GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL,
+				GTTX_Text, status, TAG_END);
+		}
+		Delay(2);
+		while ((imsg = GT_GetIMsg(win->UserPort))) {
+			gad = (struct Gadget *)imsg->IAddress;
+			imsg_class = imsg->Class;
+			imsg_code = imsg->Code;
+			GT_ReplyIMsg(imsg);
+
+			if (imsg_class == IDCMP_CLOSEWINDOW) {
+				cancel = TRUE;
+			} else if (imsg_class == IDCMP_REFRESHWINDOW) {
+				GT_BeginRefresh(win);
+				GT_EndRefresh(win, TRUE);
+			} else if (imsg_class == IDCMP_GADGETUP && gad) {
+				if (gad->GadgetID == AGAD_VCAP_SAMPLE) {
+					sample = imsg_code;
+					availability = VCAP_CALIBRATION_UNKNOWN;
+				} else if (gad->GadgetID == AGAD_VCAP_FRAMING) {
+					if (imsg_code != framing) {
+						framing_changed = TRUE;
+						framing = imsg_code ? 1 : 0;
+						GT_SetGadgetAttrs(agads[AGAD_VCAP_CROP_H], win, NULL,
+							GA_Disabled, framing == 0, TAG_END);
+						GT_SetGadgetAttrs(agads[AGAD_VCAP_CROP_V], win, NULL,
+							GA_Disabled, framing == 0, TAG_END);
+					}
+				} else if (gad->GadgetID == AGAD_BTN_CALIBRATE &&
+					availability == VCAP_CALIBRATION_READY) {
+					int result = vcap_calibration_run(mysc, win, live_session,
+						&accepted_control, status, sizeof(status));
+
+					if (result == 1) {
+						sample = accepted_control.sample;
+						framing = 1;
+						framing_changed = TRUE;
+						snprintf(crop_h_buf, sizeof(crop_h_buf), "%u",
+							(unsigned)accepted_control.crop_h);
+						snprintf(crop_v_buf, sizeof(crop_v_buf), "%u",
+							(unsigned)accepted_control.crop_v);
+						GT_SetGadgetAttrs(agads[AGAD_VCAP_SAMPLE], win, NULL,
+							GTCY_Active, sample, TAG_END);
+						GT_SetGadgetAttrs(agads[AGAD_VCAP_FRAMING], win, NULL,
+							GTCY_Active, 1, TAG_END);
+						GT_SetGadgetAttrs(agads[AGAD_VCAP_CROP_H], win, NULL,
+							GTST_String, crop_h_buf, GA_Disabled, FALSE, TAG_END);
+						GT_SetGadgetAttrs(agads[AGAD_VCAP_CROP_V], win, NULL,
+							GTST_String, crop_v_buf, GA_Disabled, FALSE, TAG_END);
+						snprintf(status, sizeof(status),
+							"Live preview accepted; Done stages it, Cancel restores it");
+						GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL,
+							GTTX_Text, status, TAG_END);
+					} else if (result < 0) {
+						GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL,
+							GTTX_Text, status, TAG_END);
+					}
+				} else if (gad->GadgetID == AGAD_BTN_CANCEL) {
+					cancel = TRUE;
+				} else if (gad->GadgetID == AGAD_BTN_DONE) {
+					if (settings_video_advanced_candidate(win, agads, sample,
+						framing, framing_changed, &entry_values, status,
+						sizeof(status), &candidate_values, &changed)) {
+						settings_control_from_values(&candidate_values,
+							&candidate_control);
+						if ((!live_session->preview_valid ||
+							!zz_vcap_control_equal(&candidate_control,
+								&live_session->preview_control)) &&
+							!settings_live_restore(live_session,
+								ZZ_VCAP_ANCHOR_ADVANCED)) {
+							snprintf(status, sizeof(status),
+								"Cannot restore live preview; keep window open and retry");
+							GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL,
+								GTTX_Text, status, TAG_END);
+						} else {
+							settings_vals = candidate_values;
+							live_session->preview_valid =
+								live_session->preview_valid &&
+								zz_vcap_control_equal(&candidate_control,
+									&live_session->preview_control);
+							done = TRUE;
+						}
+					}
+				}
+			}
+		}
+		if (cancel) {
+			if (settings_live_restore(live_session,
+				ZZ_VCAP_ANCHOR_ADVANCED)) {
+				live_session->preview_valid = FALSE;
+				changed = FALSE;
+				done = TRUE;
+			} else {
+				cancel = FALSE;
+				snprintf(status, sizeof(status),
+					"Cancel waiting for acknowledged live restore; retry or cold boot");
+				GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL,
+					GTTX_Text, status, TAG_END);
+			}
+		}
+	}
+
+	CloseWindow(win);
+	FreeGadgets(glist);
+	return changed;
+}
+
+static BOOL settings_update_save_gate(struct Window *win,
+	struct settings_live_session *live_session, BOOL explain)
+{
+	BOOL allowed = settings_have_cfg &&
+		settings_custom_save_allowed(live_session);
+
+	GT_SetGadgetAttrs(sgads[SGAD_BTN_SAVE], win, NULL,
+		GA_Disabled, !allowed, TAG_END);
+	if (!allowed && settings_have_cfg && explain)
+		settings_set_status(win,
+			"Custom crop belongs to another capture path; use Automatic, Save and reboot");
+	return allowed;
+}
+
 static VOID settings_window(struct Screen *mysc, void *vi,
 	const struct ZZTopLayout *mainlayout)
 {
@@ -1323,10 +2472,14 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 	struct Gadget *gad;
 	ULONG imsgClass;
 	UWORD imsgCode;
+	UWORD fw_version;
+	struct settings_live_session live_session;
 	BOOL done = FALSE;
 	WORD w = 0, h = 0;
 
-	settings_have_cfg = (zz_get_reg16(REG_ZZ_FW_VERSION) >= 0x0203);
+	fw_version = zz_get_reg16(REG_ZZ_FW_VERSION);
+	settings_have_cfg = (fw_version >= 0x0203);
+	settings_live_init(&live_session, fw_version);
 
 	if (NULL == settings_create_gadgets(&glist, vi, mainlayout, &w, &h)) {
 		if (glist) FreeGadgets(glist);
@@ -1352,14 +2505,15 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 		return;
 	}
 
-	settings_populate(win);
+	settings_populate(win, fw_version);
+	settings_live_refresh(&live_session);
 
 	if (!settings_have_cfg) {
 		/* Live scanline controls stay usable on 2.0-2.2 firmware
 		 * (they were on the main window before); everything that
 		 * needs the config-file interface is greyed out. */
 		static const UWORD cfg_only_gadgets[] = {
-			SGAD_VIDEOCAP, SGAD_NSVSYNC, SGAD_INT2,
+			SGAD_VIDEOCAP, SGAD_VCAP_ADVANCED, SGAD_INT2,
 			SGAD_MAC, SGAD_HDF, SGAD_OFFSCREEN, SGAD_OVERLAY,
 			SGAD_BTN_SAVE, SGAD_BTN_RELOAD
 		};
@@ -1369,6 +2523,7 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 				GA_Disabled, TRUE, TAG_END);
 		}
 	}
+	settings_update_save_gate(win, &live_session, FALSE);
 
 	GT_RefreshWindow(win, NULL);
 
@@ -1385,11 +2540,35 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 				case IDCMP_GADGETUP:
 					if (!gad) break;
 					switch (gad->GadgetID) {
-						case SGAD_VIDEOCAP:
-							settings_vals.videocap_pal = imsgCode;
+					case SGAD_VIDEOCAP:
+							if (imsgCode < ZZCFG_VCAP_PROFILE_COUNT) {
+								if (live_session.preview_valid &&
+									!settings_profile_matches(&live_session,
+										imsgCode, settings_vals.videocap_sample)) {
+									if (!settings_live_restore(&live_session,
+										ZZ_VCAP_ANCHOR_SETTINGS)) {
+										GT_SetGadgetAttrs(sgads[SGAD_VIDEOCAP], win,
+											NULL, GTCY_Active,
+											settings_vals.videocap_profile, TAG_END);
+										settings_set_status(win,
+											"Profile change waiting for live restore; retry");
+										break;
+									}
+									live_session.preview_valid = FALSE;
+								}
+								settings_vals.videocap_profile = imsgCode;
+								if (settings_update_save_gate(win,
+									&live_session, TRUE))
+									settings_set_status(win,
+										"Native output changed - Save, then power-cycle");
+							}
 							break;
-						case SGAD_NSVSYNC:
-							settings_vals.vsync = imsgCode;
+						case SGAD_VCAP_ADVANCED:
+							if (settings_video_advanced_window(mysc, vi, mainlayout,
+								&live_session))
+								settings_set_status(win,
+									"Advanced video staged - Save to persist");
+							settings_update_save_gate(win, &live_session, TRUE);
 							break;
 						case SGAD_SCANMODE:
 							/* live, like the old main-window control */
@@ -1410,15 +2589,43 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 							settings_vals.video_overlay = imsgCode;
 							break;
 						case SGAD_BTN_SAVE:
-							settings_save(win);
+							if (!settings_custom_save_allowed(&live_session)) {
+								settings_update_save_gate(win, &live_session, TRUE);
+							} else if (settings_save(win)) {
+								if (live_session.preview_valid) {
+									settings_live_refresh(&live_session);
+									zz_vcap_anchor_store(&live_session.anchors,
+										ZZ_VCAP_ANCHOR_SETTINGS,
+										&live_session.current);
+								} else if (settings_live_refresh(&live_session)) {
+									zz_vcap_anchor_store(&live_session.anchors,
+										ZZ_VCAP_ANCHOR_SETTINGS,
+										&live_session.current);
+								}
+								live_session.preview_valid = FALSE;
+							}
 							break;
 						case SGAD_BTN_RELOAD:
-							settings_populate(win);
+							if (settings_live_restore(&live_session,
+								ZZ_VCAP_ANCHOR_SETTINGS)) {
+								live_session.preview_valid = FALSE;
+								settings_populate(win, fw_version);
+								settings_update_save_gate(win, &live_session, FALSE);
+							} else {
+								settings_set_status(win,
+									"Reload waiting for acknowledged live restore; retry");
+							}
 							break;
 					}
 					break;
 				case IDCMP_CLOSEWINDOW:
-					done = TRUE;
+					if (settings_live_restore(&live_session,
+						ZZ_VCAP_ANCHOR_SETTINGS)) {
+						done = TRUE;
+					} else {
+						settings_set_status(win,
+							"Close waiting for acknowledged live restore; retry or cold boot");
+					}
 					break;
 				case IDCMP_REFRESHWINDOW:
 					GT_BeginRefresh(win);
@@ -1810,7 +3017,8 @@ int main(void) {
 		return 0;
 	}
 
-	if (!(ExpansionBase = (struct Library*)OpenLibrary((CONST_STRPTR)"expansion.library",0L))) {
+	if (!(ExpansionBase = (struct ExpansionBase *)
+		OpenLibrary((CONST_STRPTR)"expansion.library",0L))) {
 		errorMessage("Requires expansion.library");
 		CloseLibrary(IntuitionBase);
 		return 0;
@@ -1825,14 +3033,14 @@ int main(void) {
 			zorro_version = 3;
 		} else {
 			errorMessage("MNT ZZ9000 not found");
-			CloseLibrary(ExpansionBase);
+		CloseLibrary((struct Library *)ExpansionBase);
 			CloseLibrary(IntuitionBase);
 			return 0;
 		}
 	}
 
 	zz_regs = (UBYTE*)zz_cd->cd_BoardAddr;
-	CloseLibrary(ExpansionBase);
+	CloseLibrary((struct Library *)ExpansionBase);
 
 	if (NULL == (GfxBase = OpenLibrary((CONST_STRPTR)"graphics.library", 37)))
 		errorMessage("Requires V37 graphics.library");
