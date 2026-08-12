@@ -50,6 +50,11 @@ jobs:
           repository: BlitterStudio/zz9000-firmware
           path: zz9000-firmware
           fetch-depth: 1
+          # The live-calibration driver branch and firmware PR #66 add one
+          # shared CFG contract. Validate both push and PR runs against that
+          # companion head; after this branch lands, every other ref keeps
+          # tracking firmware master as before.
+          ref: ${{ (github.head_ref == 'feat/zztop-videocap-sample' || github.ref_name == 'feat/zztop-videocap-sample') && 'refs/pull/66/head' || 'master' }}
       - name: Run host-side tests and repository checks
         env:
           ZZ9K_FIRMWARE_DIR: ${{ github.workspace }}/zz9000-firmware

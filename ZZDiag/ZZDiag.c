@@ -581,6 +581,10 @@ int main(int argc, char **argv)
     }
 
     if (capture_path) {
+        if (board.zorro_version != 3) {
+            printf("ERROR: capture diagnostics require the Zorro III aperture\n");
+            return 20;
+        }
         if (delay_ticks > 0) {
             printf("CaptureDelayTicks      = %d (switch to native screen now)\n",
                 delay_ticks);

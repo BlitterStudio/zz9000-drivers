@@ -125,6 +125,13 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("Seek(file, 0, OFFSET_END)", text)
         self.assertNotIn('sprintf(header, "P6', text)
 
+        capture_block = text.index("if (capture_path) {")
+        aperture_guard = text.index("if (board.zorro_version != 3)",
+                                    capture_block)
+        probe = text.index("arm_videocap_probe(board.address)",
+                           capture_block)
+        self.assertLess(aperture_guard, probe)
+
     def test_zzdiag_compares_pre_ddr_probe_with_capture_memory(self):
         text = self.read("ZZDiag/ZZDiag.c")
         header = self.read("include/zz9000_hw.h")
