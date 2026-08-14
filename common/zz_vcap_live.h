@@ -9,7 +9,7 @@
 #include <exec/types.h>
 #include "zz9000_hw.h"
 
-#define ZZ_VCAP_LIVE_MIN_FW 0x020a
+#define ZZ_VCAP_LIVE_MIN_FW 0x0208
 #define ZZ_VCAP_CROP_MAX    4095
 
 enum zz_vcap_move {
@@ -81,7 +81,8 @@ struct zz_vcap_anchors {
     UBYTE valid[ZZ_VCAP_ANCHOR_COUNT];
 };
 
-int zz_vcap_live_supported(UWORD firmware_revision, ULONG capability);
+int zz_vcap_live_supported(UWORD firmware_revision,
+    UWORD firmware_capabilities, ULONG rtl_capability);
 int zz_vcap_control_valid(const struct zz_vcap_control *control);
 ULONG zz_vcap_control_pack(const struct zz_vcap_control *control);
 int zz_vcap_control_unpack(ULONG raw, struct zz_vcap_control *control);

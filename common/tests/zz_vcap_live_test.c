@@ -29,19 +29,29 @@ static struct zz_vcap_control mixed_control(void)
 
 static void test_capability(void)
 {
-    CHECK(zz_vcap_live_supported(0x020a, ZZ_VCAP_LIVE_CAPABILITY_VALUE),
-        "firmware 2.10 and exact capability are supported");
-    CHECK(zz_vcap_live_supported(0x020b, ZZ_VCAP_LIVE_CAPABILITY_VALUE),
+    CHECK(zz_vcap_live_supported(0x0208, ZZ_FW_CAP_VIDEOCAP_LIVE,
+        ZZ_VCAP_LIVE_CAPABILITY_VALUE),
+        "firmware 2.8 and exact capability are supported");
+    CHECK(zz_vcap_live_supported(0x0209, ZZ_FW_CAP_VIDEOCAP_LIVE,
+        ZZ_VCAP_LIVE_CAPABILITY_VALUE),
         "newer compatible firmware is supported");
-    CHECK(!zz_vcap_live_supported(0x0209, ZZ_VCAP_LIVE_CAPABILITY_VALUE),
+    CHECK(!zz_vcap_live_supported(0x0207, ZZ_FW_CAP_VIDEOCAP_LIVE,
+        ZZ_VCAP_LIVE_CAPABILITY_VALUE),
         "old firmware is rejected");
-    CHECK(!zz_vcap_live_supported(0x020a, 0x564d010fUL),
+    CHECK(!zz_vcap_live_supported(0x0208, 0,
+        ZZ_VCAP_LIVE_CAPABILITY_VALUE),
+        "firmware without the live-control capability is rejected");
+    CHECK(!zz_vcap_live_supported(0x0208, ZZ_FW_CAP_VIDEOCAP_LIVE,
+        0x564d010fUL),
         "wrong magic is rejected");
-    CHECK(!zz_vcap_live_supported(0x020a, 0x564c020fUL),
+    CHECK(!zz_vcap_live_supported(0x0208, ZZ_FW_CAP_VIDEOCAP_LIVE,
+        0x564c020fUL),
         "wrong protocol is rejected");
-    CHECK(!zz_vcap_live_supported(0x020a, 0x564c0107UL),
+    CHECK(!zz_vcap_live_supported(0x0208, ZZ_FW_CAP_VIDEOCAP_LIVE,
+        0x564c0107UL),
         "missing feature is rejected");
-    CHECK(!zz_vcap_live_supported(0x020a, 0x564c011fUL),
+    CHECK(!zz_vcap_live_supported(0x0208, ZZ_FW_CAP_VIDEOCAP_LIVE,
+        0x564c011fUL),
         "reserved feature is rejected");
 }
 

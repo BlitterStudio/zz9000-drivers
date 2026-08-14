@@ -15,6 +15,8 @@
 #define ZZ_BUFFER_OFFSET        0xA000
 #define ZZ_REG_CONFIG_FILE      0xEC
 #define ZZ_REG_CONFIG_FILE_LEN  0xEE
+#define ZZ_FW_CAP_VIDEOCAP_PROFILE (1U << 0)
+#define ZZ_FW_CAP_VIDEOCAP_LIVE    (1U << 1)
 
 #define ZZ_VCAP_LIVE_CAPABILITY       0x1400
 #define ZZ_VCAP_LIVE_STATUS           0x1404

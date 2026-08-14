@@ -326,7 +326,7 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
             "videocap_profile = %s\n", zzcfg_profiles[profile].name);
     } else {
         snprintf(video_config, sizeof(video_config),
-            "# Native video output (legacy firmware before ABI 2.9)\n"
+            "# Native video output (legacy firmware without profile capability)\n"
             "videocap_mode = %s\n"
             "videocap_shres = %s\n"
             "nonstandard_vsync = %s\n",

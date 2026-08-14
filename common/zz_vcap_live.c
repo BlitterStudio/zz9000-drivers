@@ -5,10 +5,12 @@
  */
 #include "zz_vcap_live.h"
 
-int zz_vcap_live_supported(UWORD firmware_revision, ULONG capability)
+int zz_vcap_live_supported(UWORD firmware_revision,
+    UWORD firmware_capabilities, ULONG rtl_capability)
 {
     return firmware_revision >= ZZ_VCAP_LIVE_MIN_FW &&
-        capability == ZZ_VCAP_LIVE_CAPABILITY_VALUE;
+        (firmware_capabilities & ZZ_FW_CAP_VIDEOCAP_LIVE) != 0 &&
+        rtl_capability == ZZ_VCAP_LIVE_CAPABILITY_VALUE;
 }
 
 int zz_vcap_control_valid(const struct zz_vcap_control *control)

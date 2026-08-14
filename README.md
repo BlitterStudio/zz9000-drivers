@@ -163,9 +163,9 @@ The drivers in this repo consult it too:
   sampling and framing live in **Advanced Video**. Framing defaults to
   **Automatic**: full-rate/full-width capture uses `280/40`, while filtered
   and Denise-adapter paths retain `188/26`. **Custom** values remain literal
-  per-machine overrides. Firmware 2.9+
-  stores this as `videocap_profile`; ZZTop transparently writes the equivalent
-  legacy key combination for older firmware.
+  per-machine overrides. Firmware 2.8 with the profile capability stores this
+  as `videocap_profile`; ZZTop transparently writes the equivalent legacy key
+  combination for older firmware, including 2.8 RC1.
 - `ZZ9000Net.device`, `zz9000ax.audio` and `mhizz9000.library` honor
   `int2 = on`; `ZZ9000Net.device` adopts the firmware's `mac`.
 - `ZZ9000.card` also reads `offscreen_bitmaps` and `video_overlay`,
@@ -175,10 +175,11 @@ The drivers in this repo consult it too:
 ### Live native-video calibration
 
 ZZTop 2.8 can calibrate Custom native-video framing without the old
-guess/save/power-cycle loop. It requires a matched firmware 2.10-or-newer and
-protocol-1 live-calibration bitstream; either half of an older/mixed install
-leaves the existing Automatic and numeric Custom controls available but keeps
-**Calibrate** disabled.
+guess/save/power-cycle loop. It requires matched firmware 2.8-or-newer and a
+protocol-1 live-calibration bitstream. ZZTop checks an explicit firmware
+live-control bit as well as the exact RTL capability, so either half of an
+older/mixed install—including 2.8 RC1 firmware—leaves the existing Automatic
+and numeric Custom controls available but keeps **Calibrate** disabled.
 
 In **Project → Settings… → Advanced Video…**, leave the staged Native Output
 path matching the currently applied path and choose **Calibrate…**. ZZTop opens

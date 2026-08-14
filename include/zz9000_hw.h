@@ -76,6 +76,9 @@
 #define ZZ_REG_TEMPERATURE       0xE0
 #define ZZ_REG_VOLTAGE_AUX       0xE2
 #define ZZ_REG_VOLTAGE_INT       0xE4
+#define ZZ_REG_FW_CAPABILITIES   0xE6
+#define ZZ_FW_CAP_VIDEOCAP_PROFILE (1U << 0)
+#define ZZ_FW_CAP_VIDEOCAP_LIVE    (1U << 1)
 #define ZZ_REG_AUDIO_CONFIG      0xF4
 #define ZZ_REG_AUDIO_RX_STATUS   0xF6
 #define ZZ_REG_AUDIO_TX_STATUS   0xF8
@@ -96,8 +99,9 @@
 #define ZZ_SCANLINE_MODE_REG     0x100C
 #define ZZ_SCANLINE_PARITY_REG   0x100E
 
-/* Native-video live calibration ABI (firmware 2.10 plus protocol 1 RTL).
- * All host accesses are ordered 16-bit Zorro reads/writes. */
+/* Native-video live calibration ABI (firmware 2.8 live-control capability
+ * plus protocol 1 RTL). All host accesses are ordered 16-bit Zorro
+ * reads/writes. */
 #define ZZ_VCAP_LIVE_CAPABILITY       0x1400
 #define ZZ_VCAP_LIVE_STATUS           0x1404
 #define ZZ_VCAP_LIVE_APPLIED_RAW      0x1408

@@ -21,7 +21,7 @@ static void check(int cond, const char *what)
     if (!cond) { printf("FAIL: %s\n", what); failures++; }
 }
 
-/* Every canonical key ZZTop writes for firmware ABI 2.9+. */
+/* Every canonical key ZZTop writes with the firmware profile capability. */
 static const char *firmware_keys[] = {
     "videocap_profile", "videocap_sample", "videocap_crop_h",
     "videocap_crop_v",
@@ -180,7 +180,7 @@ int main(void)
     }
     check(b.video_overlay == 0, "retired key does not block later keys");
 
-    /* 8. ZZTop can still save coherent settings for pre-2.9 firmware. */
+    /* 8. ZZTop can still save coherently without the profile capability. */
     defaults(&a);
     a.use_videocap_profile_key = 0;
     a.videocap_profile = ZZCFG_VCAP_FILTERED_PAL_EXACT;
