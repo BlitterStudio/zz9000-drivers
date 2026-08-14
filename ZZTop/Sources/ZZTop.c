@@ -1023,14 +1023,14 @@ static int vcap_apply_raw(ULONG raw, struct zz_vcap_snapshot *applied,
 }
 
 static void settings_live_init(struct settings_live_session *session,
-	UWORD firmware_revision)
+	UWORD firmware_revision, UWORD firmware_capabilities)
 {
 	ULONG capability;
 
 	memset(session, 0, sizeof(*session));
 	capability = vcap_read32(ZZ_VCAP_LIVE_CAPABILITY);
 	session->supported = zz_vcap_live_supported(firmware_revision,
-		capability);
+		firmware_capabilities, capability);
 	zz_vcap_anchors_init(&session->anchors);
 }
 
@@ -1758,7 +1758,7 @@ static void settings_offer_env_cleanup(void)
 }
 
 /* Populate settings_vals from the board and push into the gadgets. */
-static void settings_populate(struct Window *win, UWORD fw_version)
+static void settings_populate(struct Window *win, UWORD fw_capabilities)
 {
 	ULONG board = (ULONG)zz_regs;
 	struct zzcfg_values *sv = &settings_vals;
@@ -1770,7 +1770,8 @@ static void settings_populate(struct Window *win, UWORD fw_version)
 	 * since. */
 	memset(sv, 0, sizeof(*sv));
 	sv->videocap_profile = ZZCFG_VCAP_FULL_60;
-	sv->use_videocap_profile_key = (fw_version >= 0x0209);
+	sv->use_videocap_profile_key =
+		(fw_capabilities & ZZ_FW_CAP_VIDEOCAP_PROFILE) != 0;
 	sv->videocap_crop_h = ZZCFG_VIDEOCAP_CROP_H_COMPAT;
 	sv->videocap_crop_v = ZZCFG_VIDEOCAP_CROP_V_COMPAT;
 	sv->scanline_mode = zz_get_scanline_mode();
@@ -2133,7 +2134,7 @@ settings_video_calibration_availability(
 {
 	if (!session->supported) {
 		snprintf(status, status_size,
-			"Calibrate needs matched firmware 2.10 and protocol-1 bitstream");
+			"Calibrate needs firmware 2.8 live control and protocol-1 bitstream");
 		return VCAP_CALIBRATION_UNSUPPORTED;
 	}
 	if (!settings_live_refresh(session)) {
@@ -2473,13 +2474,15 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 	ULONG imsgClass;
 	UWORD imsgCode;
 	UWORD fw_version;
+	UWORD fw_capabilities;
 	struct settings_live_session live_session;
 	BOOL done = FALSE;
 	WORD w = 0, h = 0;
 
 	fw_version = zz_get_reg16(REG_ZZ_FW_VERSION);
+	fw_capabilities = zz_get_reg16(REG_ZZ_FW_CAPABILITIES);
 	settings_have_cfg = (fw_version >= 0x0203);
-	settings_live_init(&live_session, fw_version);
+	settings_live_init(&live_session, fw_version, fw_capabilities);
 
 	if (NULL == settings_create_gadgets(&glist, vi, mainlayout, &w, &h)) {
 		if (glist) FreeGadgets(glist);
@@ -2505,7 +2508,7 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 		return;
 	}
 
-	settings_populate(win, fw_version);
+	settings_populate(win, fw_capabilities);
 	settings_live_refresh(&live_session);
 
 	if (!settings_have_cfg) {
@@ -2609,7 +2612,7 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 							if (settings_live_restore(&live_session,
 								ZZ_VCAP_ANCHOR_SETTINGS)) {
 								live_session.preview_valid = FALSE;
-								settings_populate(win, fw_version);
+								settings_populate(win, fw_capabilities);
 								settings_update_save_gate(win, &live_session, FALSE);
 							} else {
 								settings_set_status(win,

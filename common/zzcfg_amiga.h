@@ -46,8 +46,8 @@ struct zzcfg_values {
      * is a literal Custom override. */
     UWORD videocap_crop_h_present;
     UWORD videocap_crop_v_present;
-    /* Firmware 2.9+ accepts the atomic profile key. ZZTop sets this from
-     * the live ABI; older firmware gets an equivalent legacy key trio. */
+    /* Firmware with the profile capability accepts the atomic key; older
+     * firmware gets an equivalent legacy key trio. */
     UWORD use_videocap_profile_key;
     UWORD scanline_mode;     /* 0-3 */
     UWORD scanline_parity;   /* 0-1 */
