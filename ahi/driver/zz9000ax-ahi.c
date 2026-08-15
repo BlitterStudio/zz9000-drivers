@@ -45,6 +45,7 @@
 #include "zz9000_ax.h"
 #include "zzcfg_query.h"
 #include "zz9000ax-ahi.h"
+#include "zz9000_aperture.h"
 
 // Comment out to enable debug output:
 #define kprintf(...)
@@ -733,8 +734,29 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
   ahi_data->zorro_version = zorro;
   ahi_data->t_mainproc = FindTask(NULL);
   ahi_data->buf_offset = 0;
-  // FIXME: see also zz_template_addr in RTG driver
+  /* The audio ring owns the final 64 KiB.  On negotiated Z2 cards, verify
+   * that ownership against the same descriptor P96 consumes; mixed old/new
+   * pairs retain the exact legacy top-of-window rule. */
   uint32_t offset_tx = Z9AXBase->hw_size - 0x20000;
+  if (zorro == 2) {
+    struct ZZApertureLayout layout;
+    uint16_t fw_caps = read_reg(hw_addr, ZZ_REG_FW_CAPABILITIES);
+    uint32_t descriptor = zz9000_read_reg32(
+        hw_addr, ZZ_REG_Z2_APERTURE_INFO_HI);
+    enum ZZApertureNegotiation status = zz_z2_aperture_negotiate(
+        descriptor, Z9AXBase->hw_size, fw_caps, &layout);
+
+    if (status == ZZ_APERTURE_INVALID ||
+        (status == ZZ_APERTURE_VALID &&
+         layout.audio.size != ZZ_Z2_AUDIO_SIZE)) {
+      if (record_buf) FreeVec(record_buf);
+      FreeVec(audio_buf);
+      FreeVec(ahi_data);
+      return AHISF_ERROR;
+    }
+    if (status == ZZ_APERTURE_VALID)
+      offset_tx = zz_aperture_memory_offset(layout.audio.base);
+  }
   uint32_t offset_rx = offset_tx + ZZ_AX_RX_BUFFER_DELTA;
   ahi_data->audio_hw_buf_addr = hw_addr + 0x10000 + offset_tx;
   ahi_data->audio_rx_hw_buf_addr = hw_addr + 0x10000 + offset_rx;

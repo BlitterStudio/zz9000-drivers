@@ -18,9 +18,10 @@
 #include <stdlib.h>
 
 #include "zz9000_hw.h"
+#include "zz9000_aperture.h"
 
-#define ZZDIAG_VERSION "1.10"
-#define ZZDIAG_DATE    "10.08.2026"
+#define ZZDIAG_VERSION "1.11"
+#define ZZDIAG_DATE    "15.08.2026"
 
 #define ZZDIAG_CAPTURE_ROWS 320U
 
@@ -114,12 +115,61 @@ static void print_videocap(ULONG board_addr)
     }
 }
 
-static ULONG read_reg32(ULONG board_addr, ULONG offset)
+static void print_aperture_layout(const struct ZZ9000Board *board)
 {
-    ULONG high = zz9000_read_reg16(board_addr, offset);
-    ULONG low = zz9000_read_reg16(board_addr, offset + 2UL);
+    struct ZZApertureLayout layout;
+    ULONG descriptor;
+    UWORD fw_caps;
+    enum ZZApertureNegotiation status;
 
-    return (high << 16) | low;
+    printf("AutoConfigBoardSize    = 0x%08lx (%lu KiB)\n",
+        (unsigned long)board->board_size,
+        (unsigned long)(board->board_size >> 10));
+    if (board->zorro_version != 2) {
+        printf("Z2ApertureLayout       = not applicable\n");
+        return;
+    }
+
+    fw_caps = zz9000_read_reg16(board->address, ZZ_REG_FW_CAPABILITIES);
+    descriptor = zz9000_read_reg32(board->address,
+        ZZ_REG_Z2_APERTURE_INFO_HI);
+    status = zz_z2_aperture_negotiate(descriptor, board->board_size,
+        fw_caps, &layout);
+    printf("FirmwareCapabilities   = 0x%04x\n", (unsigned)fw_caps);
+    printf("Z2ApertureDescriptor   = 0x%08lx\n", (unsigned long)descriptor);
+    if (status == ZZ_APERTURE_LEGACY) {
+        printf("Z2ApertureLayout       = legacy (handshake incomplete/absent)\n");
+        return;
+    }
+    if (status == ZZ_APERTURE_INVALID) {
+        printf("Z2ApertureLayout       = INVALID (descriptor/profile/AutoConfig mismatch)\n");
+        if (!zz_z2_aperture_profile(descriptor, &layout))
+            return;
+        printf("Z2ExpectedBoardSize    = 0x%08lx\n",
+            (unsigned long)layout.aperture_size);
+    } else {
+        printf("Z2ApertureLayout       = generation 1, %lu MiB profile\n",
+            (unsigned long)(layout.aperture_size >> 20));
+    }
+    printf("Z2Framebuffer          = 0x%08lx + 0x%08lx\n",
+        (unsigned long)layout.framebuffer.base,
+        (unsigned long)layout.framebuffer.size);
+    if (layout.pip.size) {
+        printf("Z2PIPSourcePool        = 0x%08lx + 0x%08lx\n",
+            (unsigned long)layout.pip.base,
+            (unsigned long)layout.pip.size);
+    } else {
+        printf("Z2PIPSourcePool        = unavailable\n");
+    }
+    printf("Z2TemplateScratch      = 0x%08lx + 0x%08lx\n",
+        (unsigned long)layout.template_scratch.base,
+        (unsigned long)layout.template_scratch.size);
+    printf("Z2SDKHostWindow        = 0x%08lx + 0x%08lx\n",
+        (unsigned long)layout.host_window.base,
+        (unsigned long)layout.host_window.size);
+    printf("Z2Audio                = 0x%08lx + 0x%08lx\n",
+        (unsigned long)layout.audio.base,
+        (unsigned long)layout.audio.size);
 }
 
 static int arm_videocap_probe(ULONG board_addr)
@@ -205,13 +255,13 @@ static void print_videocap_probe_comparison(const struct ZZ9000Board *board)
         return;
     }
 
-    target = read_reg32(board->address, ZZ_REG_VCAP_PROBE_TARGET);
-    awaddr = read_reg32(board->address, ZZ_REG_VCAP_PROBE_AWADDR);
-    sampler_target = read_reg32(board->address,
+    target = zz9000_read_reg32(board->address, ZZ_REG_VCAP_PROBE_TARGET);
+    awaddr = zz9000_read_reg32(board->address, ZZ_REG_VCAP_PROBE_AWADDR);
+    sampler_target = zz9000_read_reg32(board->address,
         ZZ_REG_VCAP_PROBE_SAMPLER_TARGET);
-    sampler_context = read_reg32(board->address,
+    sampler_context = zz9000_read_reg32(board->address,
         ZZ_REG_VCAP_PROBE_SAMPLER_CONTEXT);
-    sampler_config = read_reg32(board->address,
+    sampler_config = zz9000_read_reg32(board->address,
         ZZ_REG_VCAP_PROBE_SAMPLER_CONFIG);
     sampler_line = (unsigned)(sampler_target >> 16);
     sampler_source_x = (unsigned)(sampler_target & 0xffffUL);
@@ -234,14 +284,14 @@ static void print_videocap_probe_comparison(const struct ZZ9000Board *board)
     capture = (volatile const ULONG *)(board->address +
         ZZ_VIDEOCAP_BOARD_OFFSET);
     for (i = 0; i < ZZ_VCAP_PROBE_WORDS; i++) {
-        ULONG sampler_word = read_reg32(board->address,
+        ULONG sampler_word = zz9000_read_reg32(board->address,
             ZZ_REG_VCAP_PROBE_SAMPLER_DATA_BASE + (ULONG)i * 4UL);
-        ULONG axi_word = read_reg32(board->address,
+        ULONG axi_word = zz9000_read_reg32(board->address,
             ZZ_REG_VCAP_PROBE_DATA_BASE + (ULONG)i * 4UL);
         ULONG ddr_word = normalize_capture_word(capture[
             ZZ_VCAP_PROBE_TARGET_LINE * ZZ_VIDEOCAP_FULL_WIDTH +
             ZZ_VCAP_PROBE_TARGET_X + i]);
-        ULONG owner = read_reg32(board->address,
+        ULONG owner = zz9000_read_reg32(board->address,
             ZZ_REG_VCAP_PROBE_OWNER_BASE + (ULONG)i * 4UL);
         unsigned save_line = (unsigned)((owner >> 22) & 0x03ffUL);
         unsigned published_line = (unsigned)((owner >> 13) & 0x01ffUL);
@@ -392,9 +442,12 @@ static void print_videocap_precrop_probe(const struct ZZ9000Board *board)
         return;
     }
 
-    target = read_reg32(board->address, ZZ_REG_VCAP_PRE_CROP_PROBE_TARGET);
-    context = read_reg32(board->address, ZZ_REG_VCAP_PRE_CROP_PROBE_CONTEXT);
-    config = read_reg32(board->address, ZZ_REG_VCAP_PRE_CROP_PROBE_CONFIG);
+    target = zz9000_read_reg32(board->address,
+        ZZ_REG_VCAP_PRE_CROP_PROBE_TARGET);
+    context = zz9000_read_reg32(board->address,
+        ZZ_REG_VCAP_PRE_CROP_PROBE_CONTEXT);
+    config = zz9000_read_reg32(board->address,
+        ZZ_REG_VCAP_PRE_CROP_PROBE_CONFIG);
     printf("VideoCapPreCropTarget  = line %lu, raw sample x %lu\n",
         (unsigned long)(target >> 16),
         (unsigned long)(target & 0xffffUL));
@@ -408,7 +461,7 @@ static void print_videocap_precrop_probe(const struct ZZ9000Board *board)
         (unsigned long)((config >> 12) & 0x0fffUL));
 
     for (i = 0; i < ZZ_VCAP_PRE_CROP_PROBE_WORDS; i++) {
-        ULONG word = read_reg32(board->address,
+        ULONG word = zz9000_read_reg32(board->address,
             ZZ_REG_VCAP_PRE_CROP_PROBE_DATA_BASE + (ULONG)i * 4UL);
 
         if (i > 0 && word != previous)
@@ -572,6 +625,7 @@ int main(int argc, char **argv)
     printf("BoardAddress           = 0x%08lx\n", (unsigned long)board.address);
     printf("ZorroVersion           = %u\n", (unsigned)board.zorro_version);
     printf("Product                = 0x%04x\n", (unsigned)board.product);
+    print_aperture_layout(&board);
     printf("Samples                = %d\n", samples);
     printf("DelayTicks             = %d\n", delay_ticks);
 

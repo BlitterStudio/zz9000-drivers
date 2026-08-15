@@ -100,6 +100,26 @@ static inline int zz_overlay_pitch_valid(uint32_t src_w, uint32_t pitch)
 	return expected != 0 && pitch == expected;
 }
 
+/* Overflow-safe packed-YUV surface sizing for the fixed Z2 PIP pool. */
+static inline int zz_overlay_surface_size(uint32_t src_w, uint32_t src_h,
+	uint32_t *size)
+{
+	uint32_t pitch = zz_overlay_line_bytes(src_w);
+
+	if (!size || pitch == 0 || src_h == 0 || src_h > UINT32_MAX / pitch)
+		return 0;
+	*size = pitch * src_h;
+	return *size != 0;
+}
+
+static inline int zz_overlay_surface_fits(uint32_t src_w, uint32_t src_h,
+	uint32_t pool_size)
+{
+	uint32_t size;
+
+	return zz_overlay_surface_size(src_w, src_h, &size) && size <= pool_size;
+}
+
 /* A P96-managed bitmap may reserve a padded row even when packed-YUV
  * producers require a tight modulo. The allocation is still large enough
  * when its pitch is at least the visible row span; expose the tight pitch

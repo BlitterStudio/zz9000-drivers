@@ -8,6 +8,8 @@
 #ifndef ZZ9000_HW_H
 #define ZZ9000_HW_H
 
+#include "zz9000_aperture.h"
+
 #include <exec/types.h>
 #include <libraries/expansion.h>
 #include <proto/exec.h>
@@ -182,6 +184,7 @@
 
 struct ZZ9000Board {
     ULONG address;
+    ULONG board_size;
     UWORD product;
     UWORD zorro_version;
 };
@@ -189,6 +192,14 @@ struct ZZ9000Board {
 static inline UWORD zz9000_read_reg16(ULONG board_addr, ULONG offset)
 {
     return *((volatile UWORD *)(board_addr + offset));
+}
+
+static inline ULONG zz9000_read_reg32(ULONG board_addr, ULONG offset)
+{
+    ULONG high = zz9000_read_reg16(board_addr, offset);
+    ULONG low = zz9000_read_reg16(board_addr, offset + 2UL);
+
+    return (high << 16) | low;
 }
 
 static inline void zz9000_write_reg16(ULONG board_addr, ULONG offset, UWORD value)
@@ -203,6 +214,7 @@ static inline ULONG zz9000_find_board(struct ZZ9000Board *board)
 
     if (board) {
         board->address = 0;
+        board->board_size = 0;
         board->product = 0;
         board->zorro_version = 0;
     }
@@ -214,6 +226,7 @@ static inline ULONG zz9000_find_board(struct ZZ9000Board *board)
     if (cd) {
         if (board) {
             board->address = (ULONG)cd->cd_BoardAddr;
+            board->board_size = (ULONG)cd->cd_BoardSize;
             board->product = ZZ9000_PRODUCT_Z3;
             board->zorro_version = 3;
         }
@@ -225,6 +238,7 @@ static inline ULONG zz9000_find_board(struct ZZ9000Board *board)
     if (cd) {
         if (board) {
             board->address = (ULONG)cd->cd_BoardAddr;
+            board->board_size = (ULONG)cd->cd_BoardSize;
             board->product = ZZ9000_PRODUCT_Z2;
             board->zorro_version = 2;
         }

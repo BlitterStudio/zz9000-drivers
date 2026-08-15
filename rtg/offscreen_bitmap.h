@@ -37,6 +37,8 @@ static inline uint32_t zz_offscreen_pad_pitch_to(uint32_t bytesperrow,
 {
 	if (align < ZZ_OFFSCREEN_PITCH_ALIGN)
 		align = ZZ_OFFSCREEN_PITCH_ALIGN;
+	if (bytesperrow > UINT32_MAX - (align - 1))
+		return 0;
 	return (bytesperrow + align - 1) & ~(align - 1);
 }
 
@@ -82,7 +84,11 @@ static inline uint32_t zz_rgbformat_bytes_per_pixel(uint32_t rgbformat)
 static inline uint32_t zz_offscreen_bytes_per_row(uint32_t rgbformat,
 	uint32_t width)
 {
-	return width * zz_rgbformat_bytes_per_pixel(rgbformat);
+	uint32_t bytes_per_pixel = zz_rgbformat_bytes_per_pixel(rgbformat);
+
+	if (!bytes_per_pixel || width > UINT32_MAX / bytes_per_pixel)
+		return 0;
+	return width * bytes_per_pixel;
 }
 
 /* Format color depth, the P96 ModeInfo convention: RGB555 is a
@@ -112,11 +118,28 @@ static inline uint32_t zz_rgbformat_storage_bits(uint32_t rgbformat)
 /* Does (magic, pixels) identify a bitmap we allocated in card VRAM?
  * The range check guards against a stale/forged magic: our pixel data
  * always lives inside the board memory window. */
+static inline int zz_offscreen_range_within(uint32_t pixels,
+	uint32_t bytes, uint32_t membase, uint32_t memsize)
+{
+	uint32_t offset;
+
+	if (!bytes || pixels < membase)
+		return 0;
+	offset = pixels - membase;
+	return offset < memsize && bytes <= memsize - offset;
+}
+
+static inline int zz_offscreen_range_is_ours(uint32_t magic,
+	uint32_t pixels, uint32_t bytes, uint32_t membase, uint32_t memsize)
+{
+	return magic == ZZ_OFFSCREEN_MAGIC &&
+		zz_offscreen_range_within(pixels, bytes, membase, memsize);
+}
+
 static inline int zz_offscreen_is_ours(uint32_t magic, uint32_t pixels,
 	uint32_t membase, uint32_t memsize)
 {
-	return magic == ZZ_OFFSCREEN_MAGIC &&
-		pixels >= membase && pixels - membase < memsize;
+	return zz_offscreen_range_is_ours(magic, pixels, 1, membase, memsize);
 }
 
 /* Everything GetBitMapAttr can be asked about, pre-resolved by the
