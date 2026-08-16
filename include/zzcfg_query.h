@@ -47,6 +47,7 @@
 
 /* enum zz_video_modes values the config interface deals in. */
 #define ZZ_VMODE_800x600         1
+#define ZZ_VMODE_CENTERED_1080P_60 5
 #define ZZ_VMODE_720x576         6
 
 /* Query one parsed ZZ9000.CFG value. *present is set to 1 if the key

@@ -39,6 +39,7 @@
 #include "offscreen_bitmap.h"
 #include "overlay_feature.h"
 #include "zz9000_hw.h"
+#include "videocap_mode.h"
 #include <clib/Picasso96_protos.h>
 #include <inline/Picasso96.h>
 
@@ -116,10 +117,8 @@ char dummies[128];
 // Place scratch area right after framebuffer? Might be a horrible idea.
 #define Z3_GFXDATA_ADDR	(0x3200000 - 0x10000)
 #define Z3_TEMPLATE_ADDR (0x3210000 - 0x10000)
-#define ZZVMODE_800x600 1
-#define ZZVMODE_720x576 6
 #define ZZ_CARD_DATA_GFXDATA 0
-#define ZZ_CARD_DATA_SCANDBL_800X600 1
+#define ZZ_CARD_DATA_VCAP_MODE 1
 #define ZZ_CARD_DATA_NSVSYNC 2
 #define ZZ_CARD_DATA_MONITOR_SWITCH 3
 #define ZZ_CARD_DATA_DISPLAY_ENABLED 4
@@ -130,6 +129,7 @@ char dummies[128];
 #define ZZ_CARD_DATA_TEMPLATE_OFFSET 9
 #define ZZ_CARD_DATA_PIP_OFFSET 10
 #define ZZ_CARD_DATA_PIP_SIZE 11
+#define ZZ_CARD_DATA_FW_CAPABILITIES 12
 /* first firmware whose surface allocator really frees (major<<8|minor) */
 #define OFFSCREEN_BITMAPS_MIN_FWREV 0x0204
 /* first firmware with OP_VIDEO_OVERLAY + the shadow-scanout compositor */
@@ -333,10 +333,10 @@ static BOOL env_flag_exists(struct DOSBase *DOSBase, const char *name) {
 	return FALSE;
 }
 
-static LONG tooltype_vcap_800x600(char **tool_types, LONG current) {
+static LONG tooltype_vcap_mode(char **tool_types, LONG current) {
 	const char *value = tooltype_value(tool_types, "ZZ9000-VCAP-800x600");
 	if (value)
-		current = !value_is_false(value);
+		current = value_is_false(value) ? ZZ_VMODE_720x576 : ZZ_VMODE_800x600;
 
 	value = tooltype_value(tool_types, "VCAP");
 	if (!value)
@@ -346,14 +346,18 @@ static LONG tooltype_vcap_800x600(char **tool_types, LONG current) {
 		string_equal_ci(value, "60") ||
 		string_equal_ci(value, "60HZ") ||
 		value_is_true(value)) {
-		return 1;
+		return ZZ_VMODE_800x600;
 	}
+	if (string_equal_ci(value, "CENTERED") ||
+		string_equal_ci(value, "1080P") ||
+		string_equal_ci(value, "CENTERED_1080P_60"))
+		return ZZ_VMODE_CENTERED_1080P_60;
 
 	if (string_equal_ci(value, "720x576") ||
 		string_equal_ci(value, "50") ||
 		string_equal_ci(value, "50HZ") ||
 		value_is_false(value)) {
-		return 0;
+		return ZZ_VMODE_720x576;
 	}
 
 	return current;
@@ -396,13 +400,16 @@ static struct ConfigDev *find_unconfigured_configdev(struct ExpansionBase *Expan
 	return NULL;
 }
 
-static void apply_vcap_settings(MNTZZ9KRegs *regs, LONG scandoubler_800x600) {
-	if (scandoubler_800x600) {
+static void apply_vcap_settings(MNTZZ9KRegs *regs, LONG mode) {
+	if (mode == ZZ_VMODE_CENTERED_1080P_60) {
+		KPrintF("ZZ9000.card: centered 1280x1024 in 1080p60 mode.\n");
+		regs->videocap_vmode = ZZ_VMODE_CENTERED_1080P_60;
+	} else if (mode == ZZ_VMODE_800x600) {
 		KPrintF("ZZ9000.card: 800x600 60hz scandoubler mode.\n");
-		regs->videocap_vmode = ZZVMODE_800x600;
+		regs->videocap_vmode = ZZ_VMODE_800x600;
 	} else {
 		KPrintF("ZZ9000.card: 720x576 50hz scandoubler mode.\n");
-		regs->videocap_vmode = ZZVMODE_720x576;
+		regs->videocap_vmode = ZZ_VMODE_720x576;
 	}
 }
 
@@ -417,13 +424,25 @@ static void apply_card_settings(struct BoardInfo *b, char **tool_types) {
 
 	MNTZZ9KRegs *regs = (MNTZZ9KRegs *)b->RegisterBase;
 
-	b->CardData[ZZ_CARD_DATA_SCANDBL_800X600] = tooltype_vcap_800x600(
-		tool_types, (LONG)b->CardData[ZZ_CARD_DATA_SCANDBL_800X600]);
+	b->CardData[ZZ_CARD_DATA_VCAP_MODE] = zz_vcap_mode_sanitize(
+		(UWORD)tooltype_vcap_mode(tool_types,
+			(LONG)b->CardData[ZZ_CARD_DATA_VCAP_MODE]),
+		(UWORD)b->CardData[ZZ_CARD_DATA_FW_CAPABILITIES]);
+	/* Any explicit legacy sync tooltype selects the legacy full/native
+	 * identity; the firmware's runtime sync setter intentionally clears
+	 * centered mode. */
+	if (b->CardData[ZZ_CARD_DATA_VCAP_MODE] == ZZ_VMODE_CENTERED_1080P_60 &&
+		(tooltype_value(tool_types, "ZZ9000-NS-VSYNC") ||
+		 tooltype_value(tool_types, "ZZ9000-NS-VSYNC-NTSC") ||
+		 tooltype_value(tool_types, "NSVSYNC")))
+		b->CardData[ZZ_CARD_DATA_VCAP_MODE] = ZZ_VMODE_800x600;
 	b->CardData[ZZ_CARD_DATA_NSVSYNC] = tooltype_nonstandard_vsync(
 		tool_types, (LONG)b->CardData[ZZ_CARD_DATA_NSVSYNC]);
 
-	apply_vcap_settings(regs, (LONG)b->CardData[ZZ_CARD_DATA_SCANDBL_800X600]);
-	apply_nonstandard_vsync_settings(regs, (LONG)b->CardData[ZZ_CARD_DATA_NSVSYNC]);
+	apply_vcap_settings(regs, (LONG)b->CardData[ZZ_CARD_DATA_VCAP_MODE]);
+	if (b->CardData[ZZ_CARD_DATA_VCAP_MODE] != ZZ_VMODE_CENTERED_1080P_60)
+		apply_nonstandard_vsync_settings(regs,
+			(LONG)b->CardData[ZZ_CARD_DATA_NSVSYNC]);
 }
 
 static inline UWORD abs_word(WORD value) {
@@ -707,7 +726,7 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 	zorro_version = 0;
 	b->CardFlags = 0;
 	b->CardData[ZZ_CARD_DATA_GFXDATA] = 0;
-	b->CardData[ZZ_CARD_DATA_SCANDBL_800X600] = 0;
+	b->CardData[ZZ_CARD_DATA_VCAP_MODE] = ZZ_VMODE_800x600;
 	b->CardData[ZZ_CARD_DATA_NSVSYNC] = 0;
 	b->CardData[ZZ_CARD_DATA_MONITOR_SWITCH] = 1;
 	b->CardData[ZZ_CARD_DATA_DISPLAY_ENABLED] = 1;
@@ -718,6 +737,7 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 	b->CardData[ZZ_CARD_DATA_TEMPLATE_OFFSET] = 0;
 	b->CardData[ZZ_CARD_DATA_PIP_OFFSET] = 0;
 	b->CardData[ZZ_CARD_DATA_PIP_SIZE] = 0;
+	b->CardData[ZZ_CARD_DATA_FW_CAPABILITIES] = 0;
 	zz_overlay_hooks_enabled = FALSE;
 	memset(&zz_z2_pip_request, 0, sizeof(zz_z2_pip_request));
 	zz_z2_pip_bitmap = NULL;
@@ -732,6 +752,7 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 		zz_card_window_size = (ULONG)cd->cd_BoardSize - 0x10000;
 		fwrev = ((volatile uint16_t*)b->RegisterBase)[ZZ_REG_FW_VERSION/2];
 		fw_caps = ((volatile uint16_t*)b->RegisterBase)[ZZ_REG_FW_CAPABILITIES/2];
+		b->CardData[ZZ_CARD_DATA_FW_CAPABILITIES] = fw_caps;
 		if (zorro_version == 2) {
 			volatile UWORD *board = (volatile UWORD *)b->RegisterBase;
 
@@ -818,17 +839,19 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 		 * 50 Hz here; PAL-capable setups select it explicitly with
 		 * `videocap_mode = pal` (ZZTop Settings) or the tooltype. */
 		if (env_flag_exists(DOSBase, "ENV:ZZ9000-VCAP-800x600")) {
-			b->CardData[ZZ_CARD_DATA_SCANDBL_800X600] = 1;
+			b->CardData[ZZ_CARD_DATA_VCAP_MODE] = ZZ_VMODE_800x600;
 		} else {
 			cfg_value = zzcfg_query((ULONG)b->RegisterBase,
 				ZZ_CFG_KEY_VIDEOCAP_MODE, &cfg_present);
-			b->CardData[ZZ_CARD_DATA_SCANDBL_800X600] =
-				(cfg_present && cfg_value == ZZ_VMODE_720x576) ? 0 : 1;
+			b->CardData[ZZ_CARD_DATA_VCAP_MODE] = zz_vcap_mode_sanitize(
+				cfg_present ? cfg_value : ZZ_VMODE_800x600, fw_caps);
 		}
 
 		if (env_flag_exists(DOSBase, "ENV:ZZ9000-NS-VSYNC")) {
+			b->CardData[ZZ_CARD_DATA_VCAP_MODE] = ZZ_VMODE_800x600;
 			b->CardData[ZZ_CARD_DATA_NSVSYNC] = 1;
 		} else if (env_flag_exists(DOSBase, "ENV:ZZ9000-NS-VSYNC-NTSC")) {
+			b->CardData[ZZ_CARD_DATA_VCAP_MODE] = ZZ_VMODE_800x600;
 			b->CardData[ZZ_CARD_DATA_NSVSYNC] = 2;
 		} else {
 			cfg_value = zzcfg_query((ULONG)b->RegisterBase,
@@ -855,8 +878,11 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 				b->CardData[ZZ_CARD_DATA_VIDEO_OVERLAY] = (cfg_value != 0);
 		}
 
-		apply_vcap_settings(registers, (LONG)b->CardData[ZZ_CARD_DATA_SCANDBL_800X600]);
-		apply_nonstandard_vsync_settings(registers, (LONG)b->CardData[ZZ_CARD_DATA_NSVSYNC]);
+		apply_vcap_settings(registers, (LONG)b->CardData[ZZ_CARD_DATA_VCAP_MODE]);
+		if (b->CardData[ZZ_CARD_DATA_VCAP_MODE] !=
+			ZZ_VMODE_CENTERED_1080P_60)
+			apply_nonstandard_vsync_settings(registers,
+				(LONG)b->CardData[ZZ_CARD_DATA_NSVSYNC]);
 
 		cd->cd_Flags &= ~CDF_CONFIGME;
 		reserved_cd = cd;
@@ -1168,7 +1194,8 @@ UWORD SetSwitch(__REGA0(struct BoardInfo *b), __REGD0(UWORD enabled)) {
 	if (enabled == 0) {
 		// capture 24 bit amiga video to 0xe00000
 
-		if (b->CardData[ZZ_CARD_DATA_SCANDBL_800X600]) {
+		if (zz_vcap_mode_uses_native_pan(
+			(UWORD)b->CardData[ZZ_CARD_DATA_VCAP_MODE])) {
 			// slightly adjusted centering
 			zzwrite16(&registers->pan_ptr_hi, 0x00df);
 			zzwrite16(&registers->pan_ptr_lo, 0xf2f8);

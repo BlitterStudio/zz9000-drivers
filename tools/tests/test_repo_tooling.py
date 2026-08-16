@@ -78,6 +78,29 @@ class RepoToolingTests(unittest.TestCase):
             self.assertIn(token, test_stub)
             self.assertNotIn(f"#define {token}", model)
 
+    def test_centered_videocap_is_capability_gated_end_to_end(self):
+        common_header = self.read("common/zzcfg_amiga.h")
+        common_model = self.read("common/zzcfg_amiga.c")
+        hw_header = self.read("include/zz9000_hw.h")
+        zztop = self.read("ZZTop/Sources/ZZTop.c")
+        rtg = self.read("rtg/mntgfx-gcc.c")
+
+        self.assertIn("ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P (1U << 3)",
+                      hw_header)
+        self.assertLess(common_header.index("ZZCFG_VCAP_FILTERED_NTSC_EXACT"),
+                        common_header.index("ZZCFG_VCAP_CENTERED_1080P_60"))
+        self.assertIn('"centered_1080p_60"', common_model)
+        self.assertIn("ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P, ZZCFG_VCAP_FULL_60",
+                      common_model)
+        self.assertIn("if (native_override)", zztop)
+        self.assertIn("zzcfg_profile_supported(imsgCode, fw_capabilities)",
+                      zztop)
+        self.assertIn("vcapmode_legacy_labels", zztop)
+        self.assertIn("ZZ_CARD_DATA_VCAP_MODE", rtg)
+        self.assertNotIn("ZZ_CARD_DATA_SCANDBL_800X600", rtg)
+        self.assertIn("zz_vcap_mode_uses_native_pan", rtg)
+        self.assertIn("mode == ZZ_VMODE_CENTERED_1080P_60", rtg)
+
     def test_zztop_live_calibration_uses_native_v37_contract(self):
         source = self.read("ZZTop/Sources/ZZTop.c")
         build = self.read("ZZTop/build-gcc.sh")

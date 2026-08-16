@@ -302,6 +302,33 @@ int main(void)
     check(b.videocap_crop_v == 26 && b.videocap_crop_v_present == 0,
           "invalid Crop V remains absent");
 
+    /* Centered output is an appended, capability-gated profile.  A new
+     * stack preserves it exactly; mixed/old stacks render the documented
+     * full_60 fallback and never emit an unsupported profile value. */
+    defaults(&a);
+    a.firmware_capabilities = ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P;
+    a.videocap_profile = ZZCFG_VCAP_CENTERED_1080P_60;
+    n = zzcfg_generate(&a, text, sizeof(text));
+    check(strstr(text, "videocap_profile = centered_1080p_60") != NULL,
+          "supported centered profile is generated");
+    defaults(&b);
+    b.firmware_capabilities = ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P;
+    zzcfg_parse_text(text, n, &b);
+    check(b.videocap_profile == ZZCFG_VCAP_CENTERED_1080P_60,
+          "supported centered profile round-trips");
+
+    defaults(&a);
+    a.videocap_profile = ZZCFG_VCAP_CENTERED_1080P_60;
+    n = zzcfg_generate(&a, text, sizeof(text));
+    check(strstr(text, "videocap_profile = full_60") != NULL,
+          "unsupported centered profile falls back on save");
+    check(zzcfg_profile_sanitize(ZZCFG_VCAP_CENTERED_1080P_60, 0) ==
+          ZZCFG_VCAP_FULL_60, "unsupported centered profile sanitizes");
+    check(zzcfg_profile_sanitize(ZZCFG_VCAP_CENTERED_1080P_60,
+          ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P) ==
+          ZZCFG_VCAP_CENTERED_1080P_60,
+          "dynamic profile capability preserves centered output");
+
     if (failures) { printf("%d failure(s)\n", failures); return 1; }
     printf("zzcfg round-trip: all checks passed\n");
     return 0;
