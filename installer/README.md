@@ -85,12 +85,16 @@ The SDK runtime payloads (`zz9k.library`, the ARM-accelerated
 JPEG/PNG descriptors under `Storage/DataTypes`, and the `zz9k-#?` CLI
 tools) are built from the pinned zz9000-sdk ref and populated by CI.
 They need the SDK-service ZZ9000 firmware to do anything useful. On
-Zorro 2 boards, current matched firmware, SDK payloads, and drivers use
-host-window-aware audio/MP3 staging buffers for `mpega.library` and
-MHI. Image decoding and crypto offload need the Zorro 3 board window and
-fall back to software there (the installer prompts say so too). Keep the
-firmware, SDK payloads, and drivers from the same release set when using
-Zorro 2 SDK audio paths.
+Zorro 2 boards, current matched firmware, bitstream, SDK payloads, and drivers
+negotiate a shared 64 KiB host window. It supports compact audio/MP3,
+streamed image/DataType, archive, and AmiSSL clients on the shipped 2 MiB and
+4 MiB profiles. The 4 MiB profile also provides one bounded 224 KiB ZZPlay PIP
+source; the 2 MiB profile has no video PIP. Keep the complete release set
+matched: invalid or unacknowledged generation-1 descriptors disable the
+negotiated paths. Descriptor-absent legacy 4 MiB compatibility retains only the
+historical fixed 64 KiB host window, without negotiated layout or PIP; legacy
+2 MiB and unknown sizes reject it. The host window is shared across clients, so
+concurrent accelerated operations can contend.
 
 When installing the ZZ9000-accelerated `amissl.library`, the installer
 first backs up the stock `LIBS:AmiSSL/amissl_v362.library` to

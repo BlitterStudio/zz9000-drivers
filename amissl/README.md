@@ -12,6 +12,13 @@ a specific algorithm is absent, the provider advertises nothing for that path
 and operations run in AmiSSL's software exactly as stock, so the library is
 safe on machines without a ZZ9000.
 
+Matched 2 MiB and 4 MiB Zorro II stacks can also offload through the negotiated
+64 KiB host window. At provider open it reserves only one 32-byte `HOST_WINDOW`
+probe. Other exact, 16-byte-aligned persistent buffers grow lazily; if a later
+allocation misses, that operation falls back to AmiSSL software. Keep firmware,
+bitstream, SDK payloads, and drivers from the same release when qualifying this
+path.
+
 The integration (provider sources, AmiSSL patch, pinned AmiSSL ref) lives in
 the zz9000-sdk repo under `integration/amissl/`; this component only builds
 and stages the result. `build.sh` creates the adtools toolchain image

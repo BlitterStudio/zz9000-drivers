@@ -41,8 +41,11 @@ and SDK stack:
   card, which `ZZPlay` uses for MPEG-1 playback. Zorro III uses the firmware
   surface allocator; a matched generation-1 firmware/bitstream/driver stack
   also enables one bounded source on 4 MiB Zorro II cards (224 KiB, enough
-  for 352x288 YUY2). Two MiB and mixed old/new stacks fall back to software.
-  The `video_overlay` config key and `ENV:ZZ9000-NO-PIP` turn it off.
+  for 352x288 YUY2). Two MiB has no PIP. An invalid or unacknowledged
+  generation-1 descriptor also exposes no PIP; descriptor-absent legacy 4 MiB
+  compatibility retains only the historical fixed 64 KiB host window, not a
+  negotiated layout or PIP. The `video_overlay` config key and
+  `ENV:ZZ9000-NO-PIP` turn it off.
 - `ZZTop` as the configuration GUI for firmware readback, FWUP
   update/restore, and SD-card `ZZ9000.CFG` editing, sharing a Workbench
   drawer with the SDK's `ZZPlay` media player.
@@ -91,16 +94,25 @@ Picasso96 DPMS needs firmware 2.7+ with a matching rebuilt bitstream, and
 `zzsd.device` is packed into `BOOT.bin` rather than installed as a normal
 AmigaOS file.
 
-SDK offload services are limited on Zorro 2 boards: the CPU-visible
-shared heap is a small window inside the 4 MB board aperture. Current
-matched firmware, SDK runtime, and driver releases reserve a host-window
-heap for audio/MP3 staging, so `mpega.library` and `mhizz9000.library`
-work on Zorro 2. Do not mix older firmware or SDK payloads with current
-drivers on Zorro 2, because the host-window/card-only allocation flags
-must agree across the stack. Image decoding (`zz9k-picture.datatype`,
-`zz9k-view`) and crypto offload (accelerated `amissl.library`) still
-need Zorro 3 and transparently fall back to their software paths on
-Zorro 2.
+SDK offload services are bounded, but no longer audio-only, on Zorro 2.
+Current matched firmware, bitstream, SDK runtime, and drivers negotiate and
+acknowledge the exact board layout before exposing one shared 64 KiB
+CPU-visible host heap. `mpega.library`, `mhizz9000.library`, ZZPlay standalone
+MP3, streamed `zz9k-view`, `zz9k-picture.datatype`, streamed archive work, and
+the accelerated `amissl.library` use compact host-window/card-only layouts on
+both shipped 2 MiB and 4 MiB profiles. The 4 MiB profile additionally provides
+one 224 KiB PIP source for video frames that fit; the 2 MiB profile has no PIP.
+
+Keep firmware, bitstream, SDK payloads, and drivers from the same release on
+Zorro 2. Invalid or unacknowledged generation-1 descriptors deliberately fail
+closed. Descriptor-absent legacy 4 MiB compatibility instead retains the
+historical fixed 64 KiB host window only; legacy 2 MiB and unknown sizes reject
+it. The negotiated 64 KiB heap is shared across clients, so concurrent image,
+archive, audio, DataType, and TLS work can contend. Not every low-level SDK
+diagnostic has been converted from the legacy default shared heap. See the SDK's
+[Zorro II service matrix](https://github.com/BlitterStudio/zz9000-sdk/blob/master/docs/zz9k-zorro2-services.md)
+for exact client limits and fallback behavior. An 8 MiB software profile
+exists for future work, but no 8 MiB bitstream variant is shipped.
 
 ## Components
 
