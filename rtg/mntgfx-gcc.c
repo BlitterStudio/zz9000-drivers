@@ -38,6 +38,7 @@
 #include "memory_layout.h"
 #include "offscreen_bitmap.h"
 #include "overlay_feature.h"
+#include "zz9000_hw.h"
 #include <clib/Picasso96_protos.h>
 #include <inline/Picasso96.h>
 
@@ -125,6 +126,10 @@ char dummies[128];
 #define ZZ_CARD_DATA_SECONDARY_PALETTE 5
 #define ZZ_CARD_DATA_OFFSCREEN_BITMAPS 6
 #define ZZ_CARD_DATA_VIDEO_OVERLAY 7
+#define ZZ_CARD_DATA_APERTURE_INFO 8
+#define ZZ_CARD_DATA_TEMPLATE_OFFSET 9
+#define ZZ_CARD_DATA_PIP_OFFSET 10
+#define ZZ_CARD_DATA_PIP_SIZE 11
 /* first firmware whose surface allocator really frees (major<<8|minor) */
 #define OFFSCREEN_BITMAPS_MIN_FWREV 0x0204
 /* first firmware with OP_VIDEO_OVERLAY + the shadow-scanout compositor */
@@ -132,8 +137,6 @@ char dummies[128];
 /* first firmware with CARD_FEATURE_DPMS + formatter sync gating */
 #define DPMS_MIN_FWREV 0x0207
 #define MNT_MANUFACTURER 0x6d6e
-#define ZZ9000_PRODUCT_Z2 0x3
-#define ZZ9000_PRODUCT_Z3 0x4
 #define RGBFMT_BIT(format) (1UL << (format))
 #define ZZ_RGBFMT_NONE     0
 #define ZZ_RGBFMT_CLUT     1
@@ -161,6 +164,17 @@ struct ExecBase *SysBase;
 static struct ConfigDev *reserved_cd = NULL;
 static struct BlitterRegisterCache blitter_register_cache;
 static BOOL zz_overlay_hooks_enabled = FALSE;
+struct ZZBitMap;
+struct ZZZ2PIPAllocationRequest {
+	BOOL pending;
+	ULONG pitch;
+	ULONG size;
+	ULONG width;
+	ULONG height;
+	ULONG format;
+};
+static struct ZZZ2PIPAllocationRequest zz_z2_pip_request;
+static struct ZZBitMap *zz_z2_pip_bitmap = NULL;
 /* Card memory addressable from MemoryBase (autoconfig window minus the
  * 64 KB register space). b->MemorySize is SMALLER on Z3: it only caps
  * P96's own VRAM allocator, while the firmware surface heap for
@@ -171,6 +185,22 @@ static ULONG zz_card_window_size = 0;
 
 static inline volatile struct GFXData *zz_gfxdata(struct BoardInfo *b) {
 	return (volatile struct GFXData *)b->CardData[ZZ_CARD_DATA_GFXDATA];
+}
+
+static inline BOOL zz_z2_layout_active(struct BoardInfo *b) {
+	return b && !(b->CardFlags & CARDFLAG_ZORRO_3) &&
+		b->CardData[ZZ_CARD_DATA_APERTURE_INFO] != 0 &&
+		b->CardData[ZZ_CARD_DATA_TEMPLATE_OFFSET] != 0;
+}
+
+static inline uint32_t zz_z2_template_offset(struct BoardInfo *b) {
+	return zz_z2_layout_active(b) ?
+		(uint32_t)b->CardData[ZZ_CARD_DATA_TEMPLATE_OFFSET] :
+		(uint32_t)b->MemorySize;
+}
+
+static inline BOOL zz_z2_template_fits(uint32_t bytes) {
+	return bytes <= ZZ_Z2_TEMPLATE_SIZE;
 }
 
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
@@ -661,6 +691,10 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 	LONG fwrev_major = 0;
 	LONG fwrev_minor = 0;
 	LONG fwrev = 0;
+	UWORD fw_caps = 0;
+	uint32_t aperture_info = 0;
+	enum ZZApertureNegotiation aperture_status = ZZ_APERTURE_LEGACY;
+	struct ZZApertureLayout aperture_layout;
 	int result = 0;
 #ifdef DEBUG
 	LONG hwrev = 0;
@@ -680,24 +714,57 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 	b->CardData[ZZ_CARD_DATA_SECONDARY_PALETTE] = 0;
 	b->CardData[ZZ_CARD_DATA_OFFSCREEN_BITMAPS] = 1;
 	b->CardData[ZZ_CARD_DATA_VIDEO_OVERLAY] = 1;
+	b->CardData[ZZ_CARD_DATA_APERTURE_INFO] = 0;
+	b->CardData[ZZ_CARD_DATA_TEMPLATE_OFFSET] = 0;
+	b->CardData[ZZ_CARD_DATA_PIP_OFFSET] = 0;
+	b->CardData[ZZ_CARD_DATA_PIP_SIZE] = 0;
+	zz_overlay_hooks_enabled = FALSE;
+	memset(&zz_z2_pip_request, 0, sizeof(zz_z2_pip_request));
+	zz_z2_pip_bitmap = NULL;
 	if ((cd = find_unconfigured_configdev(ExpansionBase, MNT_MANUFACTURER, ZZ9000_PRODUCT_Z3))) zorro_version = 3;
 	else if ((cd = find_unconfigured_configdev(ExpansionBase, MNT_MANUFACTURER, ZZ9000_PRODUCT_Z2))) zorro_version = 2;
 
 	// Find Z3 or Z2 model
 	if (zorro_version>=2) {
 
+		b->RegisterBase = (void *)(cd->cd_BoardAddr);
 		b->MemoryBase = (uint8_t*)(cd->cd_BoardAddr)+0x10000;
 		zz_card_window_size = (ULONG)cd->cd_BoardSize - 0x10000;
+		fwrev = ((volatile uint16_t*)b->RegisterBase)[ZZ_REG_FW_VERSION/2];
+		fw_caps = ((volatile uint16_t*)b->RegisterBase)[ZZ_REG_FW_CAPABILITIES/2];
 		if (zorro_version == 2) {
-			// Top-of-window carve on Z2 (board offsets, 4 MB window):
-			// VRAM ends 0x3D0000, template scratch (zz_template_addr =
-			// MemorySize, so it slides with this constant) 0x3D0000..
-			// 0x3E0000, firmware SDK host-window heap 0x3E0000..
-			// 0x3F0000, AHI/MHI audio scratch 0x3F0000..0x400000. The
-			// heap slot is what lets zz9k.library map SDK buffers on
-			// Z2 (MHI/mpega MP3 playback); an older RTG driver with
-			// new firmware would blit templates over it.
-			b->MemorySize = cd->cd_BoardSize-0x40000;
+			volatile UWORD *board = (volatile UWORD *)b->RegisterBase;
+
+			/* These are BOARD offsets.  RegisterBase is cd_BoardAddr, not
+			 * the direct-register bank at +0x1000. */
+			aperture_info =
+				((uint32_t)board[ZZ_REG_Z2_APERTURE_INFO_HI / 2] << 16) |
+				(uint32_t)board[ZZ_REG_Z2_APERTURE_INFO_LO / 2];
+			aperture_status = zz_z2_aperture_negotiate(aperture_info,
+				(uint32_t)cd->cd_BoardSize, fw_caps, &aperture_layout);
+			if (aperture_status == ZZ_APERTURE_INVALID) {
+				KPrintF("ZZ9000.card: invalid Z2 aperture descriptor %08lx for %08lx-byte window\n",
+					(ULONG)aperture_info, (ULONG)cd->cd_BoardSize);
+				goto cleanup;
+			}
+			if (aperture_status == ZZ_APERTURE_VALID) {
+				b->MemorySize = aperture_layout.framebuffer.size;
+				b->CardData[ZZ_CARD_DATA_APERTURE_INFO] = aperture_info;
+				b->CardData[ZZ_CARD_DATA_TEMPLATE_OFFSET] =
+					zz_aperture_memory_offset(aperture_layout.template_scratch.base);
+				b->CardData[ZZ_CARD_DATA_PIP_OFFSET] = aperture_layout.pip.size ?
+					zz_aperture_memory_offset(aperture_layout.pip.base) : 0;
+				b->CardData[ZZ_CARD_DATA_PIP_SIZE] = aperture_layout.pip.size;
+				b->CardData[ZZ_CARD_DATA_GFXDATA] =
+					(ULONG)((uint8_t *)b->MemoryBase +
+					b->CardData[ZZ_CARD_DATA_TEMPLATE_OFFSET]);
+				memset((void *)b->CardData[ZZ_CARD_DATA_GFXDATA], 0,
+					sizeof(struct GFXData));
+			} else {
+				/* Exact pre-handshake ownership: framebuffer, 64 KiB
+				 * template, 64 KiB SDK host window, final 64 KiB audio. */
+				b->MemorySize = cd->cd_BoardSize-0x40000;
+			}
 		} else {
 			/*
 			 * End P96-owned VRAM exactly where the firmware SDK shared
@@ -714,11 +781,9 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 		}
 		b->MemorySpaceBase = b->MemoryBase;
 		b->MemorySpaceSize = b->MemorySize;
-		b->RegisterBase = (void *)(cd->cd_BoardAddr);
 	#ifdef DEBUG
 		hwrev = ((uint16_t*)b->RegisterBase)[0];
 	#endif
-		fwrev = ((uint16_t*)b->RegisterBase)[0xC0/2];
 		fwrev_major = fwrev >> 8;
 		fwrev_minor = fwrev & 0xFF;
 
@@ -795,6 +860,12 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 
 		cd->cd_Flags &= ~CDF_CONFIGME;
 		reserved_cd = cd;
+		if (zorro_version == 2 && aperture_status == ZZ_APERTURE_VALID) {
+			/* Acknowledge only after P96 ownership is reserved and all
+			 * aperture-relative pointers have been installed. */
+			((volatile UWORD *)b->RegisterBase)
+				[ZZ_REG_Z2_APERTURE_INFO_LO / 2] = ZZ_Z2_APERTURE_ACK_TOKEN;
+		}
 
 		result = 1;
 		goto cleanup;
@@ -894,13 +965,15 @@ int __attribute__((used)) InitCard(__REGA0(struct BoardInfo* b), __REGA1(char **
 	if (((volatile uint16_t*)b->RegisterBase)[0xC0/2] >= DPMS_MIN_FWREV)
 		b->SetDPMSLevel = (void *)SetDPMSLevel;
 	//b->ResetChip = (void *)NULL;
-	/* Off-screen bitmaps in card VRAM (Z3 only; ZZ_AllocBitMap refuses
-	 * on Z2). Requires firmware 2.4+: its surface allocator actually
+	/* General off-screen bitmaps remain Z3-only. Requires firmware 2.4+:
+	 * its surface allocator actually
 	 * frees, while older firmware bump-allocates with a no-op free and
 	 * would leak VRAM on every bitmap free. Kill switch on capable
 	 * firmware: ENV:ZZ9000-NO-OFFSCREEN, the ZZ9000.CFG
 	 * offscreen_bitmaps key (both read in FindCard), or the
-	 * OFFSCREENBITMAPS tooltype, which wins over both. */
+	 * OFFSCREENBITMAPS tooltype, which wins over both.  The bounded Z2 PIP
+	 * path installs these hooks separately below, but ZZ_AllocBitMap refuses
+	 * every Z2 request outside CreateFeature's managed-source allocation. */
 	{
 		UWORD fwrev = ((volatile uint16_t*)b->RegisterBase)[0xC0/2];
 		BOOL offscreen = (BOOL)b->CardData[ZZ_CARD_DATA_OFFSCREEN_BITMAPS];
@@ -932,8 +1005,16 @@ int __attribute__((used)) InitCard(__REGA0(struct BoardInfo* b), __REGA1(char **
 		const char *value = tooltype_value(tool_types, "VIDEOPIP");
 		if (value)
 			pip = !value_is_false(value);
+		BOOL z3_ready = (b->CardFlags & CARDFLAG_ZORRO_3) && b->AllocBitMap;
+		BOOL z2_ready = zz_z2_layout_active(b) && zz_gfxdata(b) &&
+			b->CardData[ZZ_CARD_DATA_PIP_SIZE] != 0;
 		if (pip && fwrev >= VIDEO_OVERLAY_MIN_FWREV &&
-				(b->CardFlags & CARDFLAG_ZORRO_3) && b->AllocBitMap) {
+				(z3_ready || z2_ready)) {
+			if (z2_ready) {
+				b->AllocBitMap = (void *)ZZ_AllocBitMap;
+				b->FreeBitMap = (void *)ZZ_FreeBitMap;
+				b->GetBitMapAttr = (void *)ZZ_GetBitMapAttr;
+			}
 			b->Flags |= BIF_VIDEOWINDOW;
 			b->GetFeatureAttrs = (void *)ZZ_GetFeatureAttrs;
 			b->CreateFeature = (void *)ZZ_CreateFeature;
@@ -1645,7 +1726,21 @@ void BlitTemplate(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), _
 
 	uint32_t zz_template_addr = Z3_TEMPLATE_ADDR;
 	if (!(b->CardFlags & CARDFLAG_ZORRO_3)) {
-		zz_template_addr = b->MemorySize;
+		uint32_t staged_size;
+
+		zz_template_addr = zz_z2_template_offset(b);
+		if (!t->BytesPerRow ||
+		    (uint32_t)h > UINT32_MAX / (uint32_t)t->BytesPerRow) {
+			if (b->BlitTemplateDefault)
+				b->BlitTemplateDefault(b, r, t, x, y, w, h, mask, format);
+			return;
+		}
+		staged_size = (uint32_t)t->BytesPerRow * (uint32_t)h;
+		if (!zz_z2_template_fits(staged_size)) {
+			if (b->BlitTemplateDefault)
+				b->BlitTemplateDefault(b, r, t, x, y, w, h, mask, format);
+			return;
+		}
 	}
 
 	memcpy((uint8_t*)(((uint32_t)b->MemoryBase)+zz_template_addr), t->Memory, t->BytesPerRow * h);
@@ -1711,7 +1806,7 @@ void BlitPattern(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __
 
 	uint32_t zz_template_addr = Z3_TEMPLATE_ADDR;
 	if (!(b->CardFlags & CARDFLAG_ZORRO_3)) {
-		zz_template_addr = b->MemorySize;
+		zz_template_addr = zz_z2_template_offset(b);
 	}
 
 	if (pat->Size > 15) return;
@@ -1934,6 +2029,7 @@ struct ZZBitMap {
 	struct ZZBitMap *next;
 	ULONG magic;
 	ULONG card_offset;
+	ULONG allocation_size;
 	ULONG rgbformat;
 	UWORD width, height;
 };
@@ -1954,7 +2050,8 @@ static struct ZZBitMap *zz_bitmap_ours(struct BoardInfo *b, struct BitMap *bm) {
 	if (!zbm)
 		return NULL;
 
-	if (!zz_offscreen_is_ours(zbm->magic, (uint32_t)bm->Planes[0],
+	if (!zz_offscreen_range_is_ours(zbm->magic,
+			(uint32_t)bm->Planes[0], (uint32_t)zbm->allocation_size,
 			(uint32_t)b->MemoryBase,
 			zz_card_window_size ? (uint32_t)zz_card_window_size :
 			(uint32_t)b->MemorySize))
@@ -1964,9 +2061,7 @@ static struct ZZBitMap *zz_bitmap_ours(struct BoardInfo *b, struct BitMap *bm) {
 }
 
 struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width), __REGD1(ULONG height), __REGA1(struct TagItem *tags)) {
-	if (!(b->CardFlags & CARDFLAG_ZORRO_3))
-		return NULL;
-
+	BOOL z3 = (b->CardFlags & CARDFLAG_ZORRO_3) != 0;
 	MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
 	ULONG rgbformat = RGBFB_CLUT;
 	ULONG mode_width = 0;
@@ -2023,39 +2118,76 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 	/* pitch computed locally rather than via CalculateBytesPerRow: the
 	 * P96-facing callback sizes display modes and stays YUV-blind,
 	 * while this path also allocates YUV overlay source bitmaps */
-	uint16_t bytesperrow = zz_offscreen_pad_pitch_to(
-		zz_offscreen_bytes_per_row(rgbformat, pitch_width),
-		pitch_align);
-	uint32_t size = (uint32_t)bytesperrow * height;
-	if (!size) return NULL;
+	uint32_t row_bytes = zz_offscreen_pad_pitch_to(
+		zz_offscreen_bytes_per_row(rgbformat, pitch_width), pitch_align);
+	uint16_t bytesperrow;
+	uint32_t size;
+	uint32_t card_offset;
+	ULONG bitmap_width = width;
+	ULONG bitmap_height = height;
+	ULONG bitmap_format = rgbformat;
 
-	dmy_cache
-	gfxdata->u8_user[1] = 1;
-	gfxdata->offset[1] = size;
-	zzwrite16(&registers->blitter_acc_op, ACC_OP_ALLOC_SURFACE);
+	if (!row_bytes || !height || row_bytes > UINT16_MAX ||
+	    height > UINT32_MAX / row_bytes)
+		return NULL;
+	bytesperrow = (uint16_t)row_bytes;
+	size = row_bytes * height;
 
-	uint32_t card_offset = gfxdata->offset[0];
-	if (!card_offset) return NULL;
+	if (!z3) {
+		/* Z2 exposes no general off-screen heap.  Only CreateFeature's
+		 * nested P96-managed source allocation may claim the one fixed
+		 * aperture pool, and only once. */
+		if (!zz_z2_layout_active(b) || !zz_z2_pip_request.pending ||
+		    zz_z2_pip_bitmap != NULL ||
+		    !b->CardData[ZZ_CARD_DATA_PIP_SIZE] ||
+		    height != zz_z2_pip_request.height ||
+		    zz_z2_pip_request.pitch > UINT16_MAX ||
+		    zz_z2_pip_request.size > b->CardData[ZZ_CARD_DATA_PIP_SIZE])
+			return NULL;
+		bytesperrow = (uint16_t)zz_z2_pip_request.pitch;
+		size = (uint32_t)zz_z2_pip_request.size;
+		card_offset = (uint32_t)b->CardData[ZZ_CARD_DATA_PIP_OFFSET];
+		bitmap_width = zz_z2_pip_request.width;
+		bitmap_height = zz_z2_pip_request.height;
+		bitmap_format = zz_z2_pip_request.format;
+	} else {
+		dmy_cache
+		gfxdata->u8_user[1] = 1;
+		gfxdata->offset[1] = size;
+		zzwrite16(&registers->blitter_acc_op, ACC_OP_ALLOC_SURFACE);
+		card_offset = gfxdata->offset[0];
+		if (!card_offset)
+			return NULL;
+	}
 
 	struct ZZBitMap *zbm = (struct ZZBitMap *)AllocMem(sizeof(struct ZZBitMap), MEMF_PUBLIC | MEMF_CLEAR);
 	if (!zbm) {
-		gfxdata->offset[0] = card_offset;
-		gfxdata->u8_user[0] = 0;
-		zzwrite16(&registers->blitter_acc_op, ACC_OP_FREE_SURFACE);
+		if (z3) {
+			gfxdata->offset[0] = card_offset;
+			gfxdata->u8_user[0] = 0;
+			zzwrite16(&registers->blitter_acc_op, ACC_OP_FREE_SURFACE);
+		}
 		return NULL;
+	}
+	if (!z3) {
+		memset((void *)((uint32_t)b->MemoryBase + card_offset), 0,
+			size);
 	}
 
 	zbm->bm.BytesPerRow = bytesperrow;
-	zbm->bm.Rows = height;
-	zbm->bm.Depth = (UBYTE)zz_rgbformat_depth(rgbformat);
+	zbm->bm.Rows = bitmap_height;
+	zbm->bm.Depth = (UBYTE)zz_rgbformat_depth(bitmap_format);
 	zbm->bm.Planes[0] = (PLANEPTR)((uint32_t)b->MemoryBase + card_offset);
 	zbm->magic = ZZ_OFFSCREEN_MAGIC;
 	zbm->card_offset = card_offset;
-	zbm->rgbformat = rgbformat;
-	zbm->width = width;
-	zbm->height = height;
+	zbm->allocation_size = size;
+	zbm->rgbformat = bitmap_format;
+	zbm->width = bitmap_width;
+	zbm->height = bitmap_height;
 	zbm->next = zz_bitmap_list;
 	zz_bitmap_list = zbm;
+	if (!z3)
+		zz_z2_pip_bitmap = zbm;
 
 	return &zbm->bm;
 }
@@ -2076,6 +2208,10 @@ BOOL ZZ_FreeBitMap(__REGA0(struct BoardInfo *b), __REGA1(struct BitMap *bm), __R
 		gfxdata->offset[0] = zbm->card_offset;
 		gfxdata->u8_user[0] = 0;
 		zzwrite16(&registers->blitter_acc_op, ACC_OP_FREE_SURFACE);
+	} else if (zz_z2_layout_active(b) &&
+		zbm->card_offset == b->CardData[ZZ_CARD_DATA_PIP_OFFSET]) {
+		if (zz_z2_pip_bitmap == zbm)
+			zz_z2_pip_bitmap = NULL;
 	}
 
 	FreeMem(zbm, sizeof(struct ZZBitMap));
@@ -2209,16 +2345,23 @@ static struct Library *P96Base = NULL;
  * a managed bitmap - RiVA played video through exactly this pair. */
 static struct RastPort zz_overlay_rport;
 static void zz_overlay_free_source(struct BoardInfo *b) {
-	(void)b;
+	zz_z2_pip_request.pending = FALSE;
 	if (!zz_overlay_bitmap)
 		return;
 	p96FreeBitMap(zz_overlay_bitmap);
 	zz_overlay_bitmap = NULL;
+	/* P96 normally invokes our FreeBitMap hook synchronously.  If an
+	 * allocation-failure path did not, reclaim the underlying fixed-pool
+	 * wrapper explicitly so the single-owner state cannot leak. */
+	if (zz_z2_pip_bitmap)
+		ZZ_FreeBitMap(b, &zz_z2_pip_bitmap->bm, NULL);
 }
 
 /* Push the full overlay state (or OFF) to the firmware; returns the
  * firmware status word (0 = OK). */
 static ULONG zz_overlay_push(struct BoardInfo *b, int off) {
+	if (!b || !zz_gfxdata(b) || (!off && !zz_overlay_bitmap))
+		return 1;
 	MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
 
 	dmy_cache
@@ -2261,7 +2404,10 @@ APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1
 		return NULL;
 	if (zz_overlay_bitmap)
 		return NULL; /* one overlay at a time (WinUAE parity) */
-	if (!(b->CardFlags & CARDFLAG_ZORRO_3) || !b->AllocBitMap)
+	if (!b->AllocBitMap ||
+	    (!(b->CardFlags & CARDFLAG_ZORRO_3) &&
+	     (!zz_z2_layout_active(b) ||
+	      !b->CardData[ZZ_CARD_DATA_PIP_SIZE] || !zz_gfxdata(b))))
 		return NULL;
 
 	memset(&zz_overlay, 0, sizeof(zz_overlay));
@@ -2290,6 +2436,21 @@ APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1
 			(LONG)zz_overlay.src_w, (LONG)zz_overlay.src_h,
 			(LONG)zz_overlay.rgbformat);
 		return NULL;
+	}
+	if (!(b->CardFlags & CARDFLAG_ZORRO_3)) {
+		uint32_t surface_size;
+
+		if (!zz_overlay_surface_size(zz_overlay.src_w, zz_overlay.src_h,
+				&surface_size) ||
+		    surface_size > b->CardData[ZZ_CARD_DATA_PIP_SIZE]) {
+			KPrintF("ZZ9000: CreateFeature Z2 source exceeds PIP pool\n");
+			return NULL;
+		}
+		zz_z2_pip_request.pitch = zz_overlay_line_bytes(zz_overlay.src_w);
+		zz_z2_pip_request.size = surface_size;
+		zz_z2_pip_request.width = zz_overlay.src_w;
+		zz_z2_pip_request.height = zz_overlay.src_h;
+		zz_z2_pip_request.format = zz_overlay.rgbformat;
 	}
 
 	/* P96-managed source (see the block comment above the statics):
@@ -2326,11 +2487,16 @@ APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1
 	KPrintF("ZZ9000: CreateFeature friend bpp %ld alloc width %ld\n",
 		(LONG)friend_bpp, (LONG)alloc_width);
 #endif
+	if (!(b->CardFlags & CARDFLAG_ZORRO_3))
+		zz_z2_pip_request.pending = TRUE;
 	zz_overlay_bitmap = p96AllocBitMap(alloc_width,
 		zz_overlay.src_h, 16, BMF_CLEAR, b->VisibleBitMap,
 		(RGBFTYPE)zz_overlay.rgbformat);
+	zz_z2_pip_request.pending = FALSE;
 	if (!zz_overlay_bitmap) {
 		KPrintF("ZZ9000: CreateFeature p96AllocBitMap FAILED\n");
+		if (zz_z2_pip_bitmap)
+			ZZ_FreeBitMap(b, &zz_z2_pip_bitmap->bm, NULL);
 		return NULL;
 	}
 	allocated_pitch = zz_overlay_bitmap->BytesPerRow;
@@ -2366,13 +2532,26 @@ APTR ZZ_CreateFeature(__REGA0(struct BoardInfo *b), __REGD0(ULONG type), __REGA1
 	 * b->MemorySize: the firmware surface heap sits above the P96
 	 * window (see zz_card_window_size), which a previous
 	 * MemorySize-based check here misread as a system-RAM placement. */
-	if ((uint32_t)zz_overlay_bitmap->Planes[0] < (uint32_t)b->MemoryBase ||
-	    (uint32_t)zz_overlay_bitmap->Planes[0] - (uint32_t)b->MemoryBase >=
-	    (uint32_t)zz_card_window_size) {
-		KPrintF("ZZ9000: CreateFeature source NOT on board (%08lx)\n",
-			(ULONG)zz_overlay_bitmap->Planes[0]);
-		zz_overlay_free_source(b);
-		return NULL;
+	{
+		uint32_t source_bytes;
+		int source_size_ok = allocated_pitch != 0 &&
+			zz_overlay.src_h <= UINT32_MAX / allocated_pitch;
+
+		source_bytes = source_size_ok ?
+			(uint32_t)allocated_pitch * zz_overlay.src_h : 0;
+		if (!source_size_ok ||
+		    !zz_offscreen_range_within(
+			(uint32_t)zz_overlay_bitmap->Planes[0], source_bytes,
+			(uint32_t)b->MemoryBase, (uint32_t)zz_card_window_size) ||
+		    (!(b->CardFlags & CARDFLAG_ZORRO_3) &&
+		     (uint32_t)zz_overlay_bitmap->Planes[0] !=
+			(uint32_t)b->MemoryBase +
+			(uint32_t)b->CardData[ZZ_CARD_DATA_PIP_OFFSET])) {
+			KPrintF("ZZ9000: CreateFeature source NOT on board (%08lx)\n",
+				(ULONG)zz_overlay_bitmap->Planes[0]);
+			zz_overlay_free_source(b);
+			return NULL;
+		}
 	}
 
 	/* enable the firmware master gate (the vblank ISR checks it) */
@@ -2547,13 +2726,14 @@ void BlitPlanar2Chunky(__REGA0(struct BoardInfo *b), __REGA1(struct BitMap *bm),
 	uint16_t line_size = planar_line_bytes_padded(w);
 	uint32_t output_plane_size = line_size * h;
 
-	if (output_plane_size * bm->Depth > 0xFFFF && (!(b->CardFlags & CARDFLAG_ZORRO_3))) {
+	if (!(b->CardFlags & CARDFLAG_ZORRO_3) &&
+		!zz_z2_staging_fits(0, output_plane_size, bm->Depth)) {
 		b->BlitPlanar2ChunkyDefault(b, bm, r, x, y, dx, dy, w, h, minterm, mask);
 		return;
 	}
 
 	if (!(b->CardFlags & CARDFLAG_ZORRO_3)) {
-		zz_template_addr = b->MemorySize;
+		zz_template_addr = zz_z2_template_offset(b);
 	}
 
 	if (b->CardFlags & CARDFLAG_ZORRO_3) {
@@ -2634,15 +2814,15 @@ void BlitPlanar2Direct(__REGA0(struct BoardInfo *b), __REGA1(struct BitMap *bm),
 
 	uint16_t line_size = planar_line_bytes(x, w);
 	uint32_t output_plane_size = line_size * h;
-	uint32_t staged_size = (256 << 2) + (output_plane_size * bm->Depth);
 
-	if (staged_size > 0xFFFF && (!(b->CardFlags & CARDFLAG_ZORRO_3))) {
+	if (!(b->CardFlags & CARDFLAG_ZORRO_3) &&
+		!zz_z2_staging_fits((256 << 2), output_plane_size, bm->Depth)) {
 		b->BlitPlanar2DirectDefault(b, bm, r, clut, x, y, dx, dy, w, h, minterm, mask);
 		return;
 	}
 
 	if (!(b->CardFlags & CARDFLAG_ZORRO_3)) {
-		zz_template_addr = b->MemorySize;
+		zz_template_addr = zz_z2_template_offset(b);
 	}
 
 	if (b->CardFlags & CARDFLAG_ZORRO_3) {
@@ -2762,7 +2942,7 @@ void SetSpriteImage(__REGA0(struct BoardInfo *b), __REGD7(RGBFTYPE format)) {
 	MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
 	uint32_t zz_template_addr = Z3_TEMPLATE_ADDR;
 	if (!(b->CardFlags & CARDFLAG_ZORRO_3)) {
-		zz_template_addr = b->MemorySize;
+		zz_template_addr = zz_z2_template_offset(b);
 	}
 
 	uint32_t flags = b->Flags;
@@ -2773,7 +2953,11 @@ void SetSpriteImage(__REGA0(struct BoardInfo *b), __REGD7(RGBFTYPE format)) {
 	if (flags & BIF_BIGSPRITE)
 		doubledsprite = 1;
 
-	uint16_t data_size = ((b->MouseWidth >> 3) * 2 * hiressprite) * (b->MouseHeight);
+	uint32_t data_size = ((uint32_t)(b->MouseWidth >> 3) * 2U *
+		(uint32_t)hiressprite) * (uint32_t)b->MouseHeight;
+	if (!(b->CardFlags & CARDFLAG_ZORRO_3) &&
+		!zz_z2_template_fits(data_size))
+		return;
 	memcpy((uint8_t*)(((uint32_t)b->MemoryBase)+zz_template_addr), b->MouseImage + 2 * hiressprite, data_size);
 
 	if(b->CardFlags & CARDFLAG_ZORRO_3) {

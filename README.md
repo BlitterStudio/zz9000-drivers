@@ -38,8 +38,11 @@ and SDK stack:
   settings for Zorro III, monitor DPMS power management, and clearer
   Zorro II/Zorro III profiles.
 - The P96 video window (picture-in-picture), composited and scaled on the
-  card, which `ZZPlay` uses for MPEG-1 playback. Zorro III only; the
-  `video_overlay` config key and `ENV:ZZ9000-NO-PIP` turn it off.
+  card, which `ZZPlay` uses for MPEG-1 playback. Zorro III uses the firmware
+  surface allocator; a matched generation-1 firmware/bitstream/driver stack
+  also enables one bounded source on 4 MiB Zorro II cards (224 KiB, enough
+  for 352x288 YUY2). Two MiB and mixed old/new stacks fall back to software.
+  The `video_overlay` config key and `ENV:ZZ9000-NO-PIP` turn it off.
 - `ZZTop` as the configuration GUI for firmware readback, FWUP
   update/restore, and SD-card `ZZ9000.CFG` editing, sharing a Workbench
   drawer with the SDK's `ZZPlay` media player.

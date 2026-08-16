@@ -152,12 +152,28 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("VideoCapPreCropTarget", text)
         self.assertIn("VideoCapPreCropTransitions", text)
         self.assertIn("VideoCapPreCrop[", text)
-        self.assertIn('#define ZZDIAG_VERSION "1.10"', text)
+        self.assertIn('#define ZZDIAG_VERSION "1.11"', text)
         self.assertIn("VideoCapOwnerStable", text)
         self.assertIn("ZZ_VCAP_PROBE_TARGET_X", header)
         self.assertIn("928U", header)
         self.assertIn("ZZ_VCAP_PROBE_SOURCE_X", header)
         self.assertIn("928U", header)
+
+    def test_z2_aperture_handshake_uses_board_offsets_and_two_sided_gate(self):
+        abi = self.read("include/zz9000_aperture.h")
+        driver = self.read("rtg/mntgfx-gcc.c")
+        diag = self.read("ZZDiag/ZZDiag.c")
+
+        self.assertIn("ZZ_REG_Z2_APERTURE_INFO_HI 0x111cUL", abi)
+        self.assertIn("ZZ_REG_Z2_APERTURE_INFO_LO 0x111eUL", abi)
+        self.assertIn("ZZ_FW_CAP_Z2_APERTURE_LAYOUT", abi)
+        self.assertIn("zz_z2_aperture_negotiate(aperture_info", driver)
+        self.assertIn("aperture_status == ZZ_APERTURE_VALID", driver)
+        self.assertIn("ZZ_Z2_APERTURE_ACK_TOKEN", driver)
+        self.assertIn("ZZ_CARD_DATA_TEMPLATE_OFFSET", driver)
+        self.assertNotIn("zz_template_addr = b->MemorySize", driver)
+        self.assertIn("AutoConfigBoardSize", diag)
+        self.assertIn("INVALID (descriptor/profile/AutoConfig mismatch)", diag)
 
     def test_build_scripts_have_shebangs_and_use_common_docker_image(self):
         scripts = (

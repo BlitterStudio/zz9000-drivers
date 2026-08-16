@@ -57,6 +57,7 @@ static void test_format_tables(void)
 	CHECK(zz_offscreen_bytes_per_row(11, 640) == 1280);
 	CHECK(zz_offscreen_bytes_per_row(14, 640) == 1280);
 	CHECK(zz_offscreen_bytes_per_row(0, 640) == 0);
+	CHECK(zz_offscreen_bytes_per_row(9, UINT32_MAX) == 0);
 	CHECK(zz_rgbformat_bytes_per_pixel(0xffffffffu) == 0);
 	CHECK(zz_rgbformat_depth(0) == 0);
 	CHECK(zz_rgbformat_depth(6) == 0);
@@ -97,6 +98,7 @@ static void test_alignment(void)
 	CHECK(zz_offscreen_pad_pitch_to(100, 64) == 128);
 	CHECK(zz_offscreen_pad_pitch_to(256, 256) == 256);
 	CHECK(zz_offscreen_pad_pitch_to(257, 256) == 512);
+	CHECK(zz_offscreen_pad_pitch_to(UINT32_MAX, 256) == 0);
 }
 
 static void test_is_ours(void)
@@ -115,6 +117,18 @@ static void test_is_ours(void)
 	CHECK(!zz_offscreen_is_ours(ZZ_OFFSCREEN_MAGIC, 0, base, size));
 	/* wrap-around does not sneak in */
 	CHECK(!zz_offscreen_is_ours(ZZ_OFFSCREEN_MAGIC, base - 1, base, 0xffffffffu - base + 1));
+
+	/* Ownership covers the entire allocation, not just Planes[0]. */
+	CHECK(zz_offscreen_range_is_ours(ZZ_OFFSCREEN_MAGIC,
+		base + 0x1000, 0x2000, base, size));
+	CHECK(zz_offscreen_range_is_ours(ZZ_OFFSCREEN_MAGIC,
+		base + size - 4, 4, base, size));
+	CHECK(!zz_offscreen_range_is_ours(ZZ_OFFSCREEN_MAGIC,
+		base + size - 4, 8, base, size));
+	CHECK(!zz_offscreen_range_is_ours(ZZ_OFFSCREEN_MAGIC,
+		base + 0x1000, 0, base, size));
+	CHECK(!zz_offscreen_range_within(0xfffffff0u, 0x20,
+		base, 0xffffffffu - base));
 }
 
 static void test_attr_dispatch(void)

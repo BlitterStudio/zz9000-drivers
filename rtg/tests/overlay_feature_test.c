@@ -121,6 +121,27 @@ static void test_source_pitch(void)
 	CHECK(!zz_overlay_tighten_pitch(318, NULL));
 }
 
+static void test_z2_pool_fit(void)
+{
+	uint32_t size = 0;
+
+	/* VideoCD/PAL-class YUY2 fits the 4 MiB profile's 224 KiB pool. */
+	CHECK(zz_overlay_surface_size(352, 288, &size));
+	CHECK(size == 0x31800);
+	CHECK(zz_overlay_surface_fits(352, 288, 0x38000));
+
+	/* Exact boundary is accepted. */
+	CHECK(zz_overlay_surface_size(448, 256, &size));
+	CHECK(size == 0x38000);
+	CHECK(zz_overlay_surface_fits(448, 256, 0x38000));
+
+	CHECK(!zz_overlay_surface_fits(640, 360, 0x38000));
+	CHECK(!zz_overlay_surface_fits(4096, UINT32_MAX, 0x38000));
+	CHECK(!zz_overlay_surface_size(0, 288, &size));
+	CHECK(!zz_overlay_surface_size(352, 0, &size));
+	CHECK(!zz_overlay_surface_size(352, 288, NULL));
+}
+
 static void test_apply_tags(void)
 {
 	struct ZZOverlayState st;
@@ -233,6 +254,7 @@ int main(void)
 	test_source_validation();
 	test_friend_allocation_width();
 	test_source_pitch();
+	test_z2_pool_fit();
 	test_apply_tags();
 	test_create_only_tags();
 	test_query_tags();
