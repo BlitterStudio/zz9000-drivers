@@ -253,10 +253,12 @@ void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v)
             if (zzcfg_str_eq_ci(value, "pal") ||
                     zzcfg_str_eq_ci(value, "720x576")) {
                 legacy_pal = 1;
+                legacy_full = 0;
                 v->videocap_profile = zzcfg_profile_from_legacy(legacy_pal,
                     legacy_full, legacy_vsync);
             } else if (zzcfg_str_eq_ci(value, "800x600")) {
                 legacy_pal = 0;
+                legacy_full = 0;
                 v->videocap_profile = zzcfg_profile_from_legacy(legacy_pal,
                     legacy_full, legacy_vsync);
             }

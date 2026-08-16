@@ -67,6 +67,7 @@ int main(void)
 {
     struct zzcfg_values a, b;
     char text[ZZCFG_MAX_SIZE];
+    const char *mixed;
     UWORD n;
     int i;
 
@@ -328,6 +329,23 @@ int main(void)
           ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P) ==
           ZZCFG_VCAP_CENTERED_1080P_60,
           "dynamic profile capability preserves centered output");
+
+    defaults(&b);
+    b.firmware_capabilities = ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P;
+    mixed = "videocap_profile = centered_1080p_60\n"
+            "videocap_mode = 800x600\n";
+    zzcfg_parse_text(mixed, (UWORD)strlen(mixed), &b);
+    check(b.videocap_profile == ZZCFG_VCAP_FILTERED_60,
+          "legacy mode after centered resets full-width component");
+
+    defaults(&b);
+    b.firmware_capabilities = ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P;
+    mixed = "videocap_profile = centered_1080p_60\n"
+            "videocap_mode = 800x600\n"
+            "videocap_shres = full\n";
+    zzcfg_parse_text(mixed, (UWORD)strlen(mixed), &b);
+    check(b.videocap_profile == ZZCFG_VCAP_FULL_60,
+          "later legacy full-width key still wins");
 
     if (failures) { printf("%d failure(s)\n", failures); return 1; }
     printf("zzcfg round-trip: all checks passed\n");
