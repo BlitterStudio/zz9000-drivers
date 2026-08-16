@@ -181,6 +181,19 @@ The drivers in this repo consult it too:
   per-machine overrides. Firmware 2.8 with the profile capability stores this
   as `videocap_profile`; ZZTop transparently writes the equivalent legacy key
   combination for older firmware, including 2.8 RC1.
+- With a matching v2.8-RC2-or-newer full-rate bitstream and firmware
+  capability bit 3, `centered_1080p_60` places the unchanged 1280x1024 native
+  content at `(320,28)` inside a 1920x1080 active raster. The content rectangle
+  is `[320,1600) x [28,1052)` and every surrounding pixel stays black. This is
+  native Amiga chipset video, not the separate Picasso96 1920x1080x32 RTG
+  screen mode. The reused 150 MHz/2200x1125 timing produces approximately
+  60.60606 Hz despite the nominal `60` profile name.
+- The centered choice appears and is serialized only with matching support in
+  the bitstream, firmware, `ZZ9000.card`, and ZZTop. Old, filtered-only, or
+  mixed installations safely use `full_60`/native mode 1 and do not preserve a
+  stored centered identity; `full_60` remains the default. Unrelated MAC and
+  INT2 ENV overrides preserve a supported centered choice, while legacy
+  native-video ENV overrides intentionally select their legacy fallback.
 - `ZZ9000Net.device`, `zz9000ax.audio` and `mhizz9000.library` honor
   `int2 = on`; `ZZ9000Net.device` adopts the firmware's `mac`.
 - `ZZ9000.card` also reads `offscreen_bitmaps` and `video_overlay`,
@@ -233,6 +246,11 @@ Remove the ENV variables (`ZZ9K_INT2`, `ZZ9K_MAC`,
 `ZZ9000-VCAP-800x600`, `ZZ9000-NS-VSYNC[-NTSC]`, `ZZ9000-NO-OFFSCREEN`,
 `ZZ9000-NO-PIP`) when migrating to the config file. On firmware older than 2.3 the drivers silently fall back
 to the ENV variables.
+
+Activation follows the existing configuration lifecycle. ZZTop **Save** writes
+the staged file, which is read at the next cold boot; valid runtime native-mode
+writes take effect at the next stable vblank. The centered profile does not
+add a monitor hot-plug or HDMI mode-switch guarantee.
 
 ## Command-Line Tools
 

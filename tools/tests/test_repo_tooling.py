@@ -1,5 +1,8 @@
+import os
 import pathlib
+import shutil
 import subprocess
+import tempfile
 import unittest
 
 
@@ -100,6 +103,61 @@ class RepoToolingTests(unittest.TestCase):
         self.assertNotIn("ZZ_CARD_DATA_SCANDBL_800X600", rtg)
         self.assertIn("zz_vcap_mode_uses_native_pan", rtg)
         self.assertIn("mode == ZZ_VMODE_CENTERED_1080P_60", rtg)
+
+    def test_cfg_guard_rejects_profile_value_drift(self):
+        candidates = (
+            pathlib.Path(os.environ.get("ZZ9K_FIRMWARE_DIR", "")),
+            ROOT.parent / "zz9000-firmware",
+            ROOT / "zz9000-firmware",
+        )
+        firmware_root = next(
+            (path for path in candidates if (path / "ZZ9000.CFG").is_file()),
+            None,
+        )
+        if firmware_root is None:
+            self.skipTest("companion zz9000-firmware checkout unavailable")
+
+        sources = (
+            pathlib.Path("ZZ9000.CFG"),
+            pathlib.Path("README.md"),
+            pathlib.Path("ZZ9000_proto.sdk/ZZ9000OS/src/zz_config.c"),
+        )
+        marker = "#   filtered_ntsc_exact -"
+
+        for label in ("missing", "extra"):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                fixture = pathlib.Path(tmp)
+                for relpath in sources:
+                    destination = fixture / relpath
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(firmware_root / relpath, destination)
+
+                sample = fixture / "ZZ9000.CFG"
+                text = sample.read_text(encoding="utf-8")
+                self.assertIn(marker, text)
+                profile_line = next(
+                    line for line in text.splitlines(keepends=True)
+                    if line.startswith(marker)
+                )
+                replacement = "" if label == "missing" else (
+                    profile_line +
+                    "#   unexpected_profile    - parity-guard fixture\n"
+                )
+                sample.write_text(
+                    text.replace(profile_line, replacement, 1),
+                    encoding="utf-8",
+                )
+
+                result = subprocess.run(
+                    ["sh", str(ROOT / "tools/check-cfg-keys.sh"), str(fixture)],
+                    cwd=ROOT,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                )
+                self.assertEqual(1, result.returncode, result.stdout)
+                self.assertIn("videocap_profile values", result.stdout)
 
     def test_zztop_live_calibration_uses_native_v37_contract(self):
         source = self.read("ZZTop/Sources/ZZTop.c")

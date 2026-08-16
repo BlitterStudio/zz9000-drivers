@@ -2,7 +2,7 @@
 # Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Drift guard for the ZZ9000.CFG key set.
+# Drift guard for the ZZ9000.CFG key set and native-video profile values.
 #
 # ZZTop's Settings window rewrites ZZ9000.CFG wholesale from the keys it
 # knows about, deliberately: carrying unrecognised lines through would also
@@ -18,7 +18,9 @@
 #   firmware  README.md                  the documented option table
 #   drivers   common/zzcfg_amiga.c       ZZTop's editor model
 #
-# This compares all four and fails on any disagreement.
+# This compares all four and fails on any key or ordered profile-value
+# disagreement. Profile ordering is part of the shared schema: append new
+# values so older numeric identities remain stable.
 #
 # Usage: tools/check-cfg-keys.sh [path-to-zz9000-firmware]
 # Defaults to a sibling checkout, or $ZZ9K_FIRMWARE_DIR.
@@ -72,6 +74,22 @@ sed -n '/^## Configuration File/,/^## [^C]/p' "$readme" \
 # ZZTop's editor matches each key by name.
 sed -n 's/.*zzcfg_str_eq_ci(key, "\([a-z_0-9]*\)").*/\1/p' "$editor" | sort -u > "$work/editor"
 
+# Keep the ordered videocap_profile schema aligned as well as the key names.
+# The parser branch order is canonical and must match the shipped sample,
+# firmware README, and the driver editor's descriptor array exactly.
+sed -n '/if (token_eq(key, "videocap_profile")) {/,/if (token_eq(key, "videocap_mode")) {/ {
+    s/.*token_eq(value, "\([a-z_0-9]*\)").*/\1/p
+}' "$parser" > "$work/profiles-parser"
+sed -n 's/^#   \([a-z_0-9][a-z_0-9]*\)[[:space:]]*- .*/\1/p' \
+    "$sample" > "$work/profiles-sample"
+awk -F'`' '$2 == "videocap_profile" {
+    for (i = 4; i <= NF; i += 2)
+        if ($i ~ /^[a-z_0-9]+$/) print $i
+}' "$readme" > "$work/profiles-readme"
+sed -n '/static const struct zzcfg_profile_desc zzcfg_profiles\[\] = {/,/^};/ {
+    s/^[[:space:]]*{ "\([a-z_0-9]*\)".*/\1/p
+}' "$editor" > "$work/profiles-editor"
+
 status=0
 report() {
     label=$1
@@ -94,8 +112,29 @@ report "the sample ZZ9000.CFG" "$work/canonical" "$work/sample"
 report "the firmware README table" "$work/canonical" "$work/readme"
 report "ZZTop's editor (zzcfg_amiga.c)" "$work/parser" "$work/editor"
 
+report_profiles() {
+    label=$1
+    file=$2
+    if ! cmp -s "$work/profiles-parser" "$file"; then
+        status=1
+        echo "  ORDERED videocap_profile values disagree in $label:"
+        diff -u "$work/profiles-parser" "$file" || true
+    fi
+}
+
+report_profiles "the sample ZZ9000.CFG" "$work/profiles-sample"
+report_profiles "the firmware README table" "$work/profiles-readme"
+report_profiles "ZZTop's editor (zzcfg_amiga.c)" "$work/profiles-editor"
+
+active_sample=$(sed -n 's/^[[:space:]]*\([a-z_0-9][a-z_0-9]*\)[[:space:]]*=.*$/\1/p' "$sample")
+if [ -n "$active_sample" ]; then
+    status=1
+    echo "  ACTIVE assignments in the shipped sample ZZ9000.CFG:"
+    printf '%s\n' "$active_sample" | sed 's/^/    /'
+fi
+
 if [ "$status" -eq 0 ]; then
-    echo "check-cfg-keys: OK - all four agree"
+    echo "check-cfg-keys: OK - all four agree on keys and profile values"
 else
     echo "check-cfg-keys: FAIL - see above" >&2
 fi
