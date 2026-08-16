@@ -22,3 +22,24 @@ installer drawer from there.
 To track a newer SDK: bump `SDK_REF`, rerun `sdk/build.sh`, and smoke-test per
 the SDK's `docs/zz9k-release-smoke.md`. Keep SDK bumps synchronized with any
 driver code that consumes new SDK headers or allocation flags.
+
+## Zorro II support
+
+Current matched firmware, bitstream, SDK payloads, and drivers negotiate an
+aperture-relative layout before the SDK maps any host-window allocation. Both
+shipped 2 MiB and 4 MiB profiles provide one shared 64 KiB host heap.
+
+| Payload | Zorro II status |
+| --- | --- |
+| `mpega.library`, `mhizz9000.library`, ZZPlay standalone MP3 | Supported on 2 MiB and 4 MiB through compact staging and card-only rings. |
+| `zz9k-view`, `zz9k-picture.datatype` | Supported on 2 MiB and 4 MiB through streamed input and bounded tiles. An over-wide DataType row rejects the accelerated path rather than overrunning the heap. |
+| `zz9k-archive` | Streamed test/extract paths are supported; large LHA batch arenas retain their per-member/software fallback. |
+| Accelerated `amissl.library` | Supported on 2 MiB and 4 MiB. Provider open reserves one 32-byte probe; other exact 16-byte-aligned persistent buffers grow lazily, and a later allocation miss falls back in software for that operation. |
+| ZZPlay MPEG-1/PIP | Unsupported on 2 MiB. On 4 MiB, one aligned YUY2 frame must fit the fixed 224 KiB pool; 352x288 fits and 640x360 does not. |
+| Generic `zz9k-inflate`/`zz9k-mp3`/crypto/smoke diagnostics and plain `zz9k-jpeg <file>` output | Still use at least one legacy default shared allocation and are not Zorro II qualification tools. Use the adapted production clients or `zz9k-jpeg --fb` instead. |
+
+The host heap is shared across clients, not provided per process. Keep the
+release set matched and use `zz9k-info` to verify the acknowledged layout and
+memory counters. The full matrix and hardware-qualification status live in the
+SDK's
+[Zorro II service documentation](https://github.com/BlitterStudio/zz9000-sdk/blob/master/docs/zz9k-zorro2-services.md).

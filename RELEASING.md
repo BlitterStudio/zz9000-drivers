@@ -47,13 +47,22 @@ CI must be green on each dev branch before tagging. Cut the tags in this order:
 
 ### Version-skew note for release notes (Zorro 2)
 
-Since the Zorro 2 host-window heap (firmware `SDK_HOST_WINDOW_HEAP` at board
-offset 0x3E0000), the RTG driver carves 64 KB out of Z2 VRAM
-(`BoardSize-0x40000`) to keep that region free. An **older ZZ9000.card with
-newer firmware** will still place its template-blit scratch over the heap, so
-template blits can corrupt in-flight MHI/mpega audio staging on Z2. Releases
-ship the pieces bundled; call out in the release notes that Z2 users must
-update ZZ9000.card together with the firmware.
+Current Zorro 2 bitstreams publish an aperture-relative generation-1 layout.
+The RTG driver validates it against the 2 MiB or 4 MiB AutoConfig size,
+reserves the framebuffer, template, host, audio, and optional PIP regions, then
+acknowledges it before firmware exposes the 64 KiB host heap or relocated
+`GFXData`. Invalid or unacknowledged generation-1 descriptors fail closed, so
+template/PIP activity and SDK clients cannot disagree about ownership of the
+top aperture. Descriptor-absent legacy 4 MiB compatibility intentionally keeps
+the historical fixed 64 KiB `HOST_WINDOW` path, but has no negotiated layout or
+PIP; legacy 2 MiB and unknown sizes reject that path.
+
+Releases ship the pieces bundled. Call out that Zorro 2 users must update the
+bitstream/firmware, `ZZ9000.card`, SDK payloads, and accelerated AmiSSL library
+together. The negotiated host heap serves audio, streamed image/DataType and
+archive clients, and AmiSSL, while the 4 MiB profile also owns one fixed
+224 KiB PIP source. The 2 MiB profile has no PIP, and no 8 MiB bitstream
+variant is shipped.
 
 ## 3. CI notes
 
