@@ -47,24 +47,6 @@ The installer also brings in the matching SDK runtime: `zz9k.library`,
 and the ZZPlay application. For best results, use drivers, firmware and SDK
 payloads from the same release—particularly on Zorro II.
 
-### Good features to show in a video
-
-1. Open **ZZTop → Project → Settings** to show that the card is configured
-   from one friendly window rather than several unrelated ENV variables.
-2. Cycle **Native Output** between **1280x1024 Fixed 60Hz (Full detail)**,
-   **1280x1024 Match PAL/NTSC (Full detail)**, and—on matched full-rate
-   hardware—**1280x1024 Centered in 1080p60**.
-3. Open **Advanced Video → Calibrate** and move the native Amiga picture live
-   with the cursor keys; Escape demonstrates the safe restore path.
-4. Start **ZZPlay** from `SYS:Utilities/ZZ9000/` and show MPEG video first in
-   the Workbench picture-in-picture window, then on its dedicated screen.
-5. Show a high-resolution Picasso96 Workbench, scanline modes, monitor sleep,
-   and the firmware update/backup/restore controls in ZZTop.
-
-The detailed sections below explain compatibility, every installed component,
-and the few features that intentionally differ between Zorro III, 4 MB Zorro
-II, and 2 MB Zorro II.
-
 ## Quick Start
 
 For normal installation, use the latest GitHub Release zip:
