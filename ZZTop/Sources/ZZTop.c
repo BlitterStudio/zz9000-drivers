@@ -868,8 +868,8 @@ static void do_fw_restore(struct Window *win)
 /* ------------------------------------------------------------------ */
 
 static STRPTR vcapmode_labels[] = {
-	(STRPTR)"1280x1024 60Hz (Full)",
-	(STRPTR)"1280x1024 Exact (Full)",
+	(STRPTR)"1280x1024 Fixed 60Hz (Full detail)",
+	(STRPTR)"1280x1024 Match PAL/NTSC (Full detail)",
 	(STRPTR)"800x600 60Hz (Filtered)",
 	(STRPTR)"720x576 50Hz (Filtered)",
 	(STRPTR)"Exact PAL Amiga (Filtered)",
@@ -879,8 +879,8 @@ static STRPTR vcapmode_labels[] = {
 };
 
 static STRPTR vcapmode_legacy_labels[] = {
-	(STRPTR)"1280x1024 60Hz (Full)",
-	(STRPTR)"1280x1024 Exact (Full)",
+	(STRPTR)"1280x1024 Fixed 60Hz (Full detail)",
+	(STRPTR)"1280x1024 Match PAL/NTSC (Full detail)",
 	(STRPTR)"800x600 60Hz (Filtered)",
 	(STRPTR)"720x576 50Hz (Filtered)",
 	(STRPTR)"Exact PAL Amiga (Filtered)",
@@ -1608,7 +1608,7 @@ static CONST_STRPTR settings_label_samples[] = {
  * spans the full row instead, so long messages don't inflate the
  * control column (and with it the whole window). */
 static CONST_STRPTR settings_value_samples[] = {
-	(CONST_STRPTR)"Exact NTSC Amiga (Filtered)",
+	(CONST_STRPTR)"1280x1024 Match PAL/NTSC (Full detail)",
 	(CONST_STRPTR)"INT6 (default)",
 	(CONST_STRPTR)"aa:bb:cc:dd:ee:ff",
 	NULL

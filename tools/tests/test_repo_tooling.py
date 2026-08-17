@@ -104,6 +104,15 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("zz_vcap_mode_uses_native_pan", rtg)
         self.assertIn("mode == ZZ_VMODE_CENTERED_1080P_60", rtg)
 
+    def test_zztop_full_detail_labels_explain_refresh_behavior(self):
+        zztop = self.read("ZZTop/Sources/ZZTop.c")
+
+        self.assertEqual(2, zztop.count("1280x1024 Fixed 60Hz (Full detail)"))
+        self.assertEqual(3,
+                         zztop.count("1280x1024 Match PAL/NTSC (Full detail)"))
+        self.assertNotIn("1280x1024 60Hz (Full)", zztop)
+        self.assertNotIn("1280x1024 Exact (Full)", zztop)
+
     def test_cfg_guard_rejects_profile_value_drift(self):
         candidates = (
             pathlib.Path(os.environ.get("ZZ9K_FIRMWARE_DIR", "")),
