@@ -36,6 +36,7 @@
 #include "zzcfg_query.h"
 #include "blitter_cache.h"
 #include "memory_layout.h"
+#include "mode_timing.h"
 #include "offscreen_bitmap.h"
 #include "overlay_feature.h"
 #include "zz9000_hw.h"
@@ -64,13 +65,13 @@ struct DOSBase;
 #define __saveds__
 
 #define DEVICE_VERSION 2
-#define DEVICE_REVISION 8
+#define DEVICE_REVISION 9
 #define REQUIRED_FW_VERSION_MAJOR 2
 #define REQUIRED_FW_VERSION_MINOR 0
 #define DEVICE_PRIORITY 0
 #define DEVICE_ID_STRING "$VER: ZZ9000.card+blitter " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
 #define DEVICE_NAME "ZZ9000.card"
-#define DEVICE_DATE "(07.08.2026)"
+#define DEVICE_DATE "(17.08.2026)"
 
 int __attribute__((no_reorder)) _start()
 {
@@ -107,7 +108,7 @@ __saveds struct GFXBase* InitLib(__REGA6(struct ExecBase *sysbase),
 																 __REGA0(BPTR seglist),
 																 __REGD0(struct GFXBase *exb));
 
-#define CLOCK_HZ 100000000
+#define MEMORY_CLOCK_HZ 100000000
 
 static struct GFXBase *_gfxbase;
 char *gfxname = "ZZ9000";
@@ -936,7 +937,7 @@ int __attribute__((used)) InitCard(__REGA0(struct BoardInfo* b), __REGA1(char **
 		b->PixelClockCount[i] = 1;
 	}
 
-	b->MemoryClock = CLOCK_HZ;
+	b->MemoryClock = MEMORY_CLOCK_HZ;
 
 	//b->AllocCardMem = (void *)NULL;
 	//b->FreeCardMem = (void *)NULL;
@@ -1083,35 +1084,13 @@ void SetReadPlane (__REGA0(struct BoardInfo *b), __REGD0(UBYTE plane)) { }
 #endif
 
 static BOOL modeline_id(uint16_t w, uint16_t h, uint16_t *mode) {
-	if (w == 1280 && h == 720) {
-		*mode = 0;
-	} else if (w == 800 && h == 600) {
-		*mode = 1;
-	} else if (w == 640 && h == 480) {
-		*mode = 2;
-	} else if (w == 640 && h == 400) {
-		*mode = 16;
-	} else if (w == 1024 && h == 768) {
-		*mode = 3;
-	} else if (w == 1280 && h == 1024) {
-		*mode = 4;
-	} else if (w == 1920 && h == 1080) {
-		*mode = 5;
-	} else if (w == 720 && h == 576) {
-		*mode = 6;
-	} else if (w == 720 && h == 480) {
-		*mode = 8;
-	} else if (w == 640 && h == 512) {
-		*mode = 9;
-	} else if (w == 1600 && h == 1200) {
-		*mode = 10;
-	} else if (w == 2560 && h == 1440) {
-		*mode = 11;
-	} else if (w == 1920 && h == 800) {
-		*mode = 17;
-	} else {
+	const struct zz_rtg_mode_timing *timing =
+		zz_rtg_mode_timing_for_output_size(w, h);
+
+	if (!timing)
 		return FALSE;
-	}
+
+	*mode = timing->mode_id;
 
 	return TRUE;
 }
@@ -1372,6 +1351,7 @@ void SetDPMSLevel(__REGA0(struct BoardInfo *b), __REGD0(ULONG level)) {
 }
 
 LONG ResolvePixelClock(__REGA0(struct BoardInfo *b), __REGA1(struct ModeInfo *mode_info), __REGD0(ULONG pixel_clock), __REGD7(RGBFTYPE format)) {
+	const struct zz_rtg_mode_timing *timing;
 	uint16_t w;
 	uint16_t h;
 	uint16_t scale;
@@ -1381,8 +1361,11 @@ LONG ResolvePixelClock(__REGA0(struct BoardInfo *b), __REGA1(struct ModeInfo *mo
 	sanitize_mode_flags(mode_info);
 	if (!adjusted_mode_dimensions(mode_info, &w, &h, &scale))
 		return -1;
+	timing = zz_rtg_mode_timing_for_output_size(w, h);
+	if (!timing)
+		return -1;
 
-	mode_info->PixelClock = CLOCK_HZ;
+	mode_info->PixelClock = timing->pixel_clock_hz;
 	mode_info->pll1.Clock = 0;
 	mode_info->pll2.ClockDivide = 1;
 
@@ -1390,6 +1373,7 @@ LONG ResolvePixelClock(__REGA0(struct BoardInfo *b), __REGA1(struct ModeInfo *mo
 }
 
 ULONG GetPixelClock(__REGA0(struct BoardInfo *b), __REGA1(struct ModeInfo *mode_info), __REGD0(ULONG index), __REGD7(RGBFTYPE format)) {
+	const struct zz_rtg_mode_timing *timing;
 	uint16_t w;
 	uint16_t h;
 	uint16_t scale;
@@ -1398,8 +1382,11 @@ ULONG GetPixelClock(__REGA0(struct BoardInfo *b), __REGA1(struct ModeInfo *mode_
 		return 0;
 	if (!adjusted_mode_dimensions(mode_info, &w, &h, &scale))
 		return 0;
+	timing = zz_rtg_mode_timing_for_output_size(w, h);
+	if (!timing)
+		return 0;
 
-	return CLOCK_HZ;
+	return timing->pixel_clock_hz;
 }
 
 #define VBLANK_WAIT_LIMIT 200000UL
