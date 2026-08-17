@@ -291,6 +291,14 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("ZZDiag:", ci)
         self.assertIn("ZZDiag/ZZDiag", ci)
 
+    def test_ci_checks_matching_firmware_branch_with_master_fallback(self):
+        ci = self.read(".github/workflows/ci.yml")
+        self.assertIn("id: firmware-ref", ci)
+        self.assertIn("git ls-remote --exit-code --heads", ci)
+        self.assertIn('"refs/heads/$CANDIDATE_REF"', ci)
+        self.assertIn("firmware_ref=master", ci)
+        self.assertIn("ref: ${{ steps.firmware-ref.outputs.ref }}", ci)
+
     def test_ci_audio_jobs_use_build_scripts(self):
         ci = self.read(".github/workflows/ci.yml")
         # mhi/build.sh stages zz9k headers (cloning the SDK at the
