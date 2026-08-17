@@ -2,13 +2,16 @@
 
 ## What This Repo Is
 
-AmigaOS drivers and tools for the MNT ZZ9000 Zorro II/III hardware card (BlitterStudio fork). C code targeting m68k-AmigaOS. Matching FPGA logic and ARM firmware live in `zz9000-firmware`.
+AmigaOS drivers and tools for the MNT ZZ9000 Zorro II/III hardware card
+(BlitterStudio fork). C code targeting m68k-AmigaOS. Matching FPGA logic and ARM
+firmware live in `zz9000-firmware`; reusable libraries and tools come from the
+exact `zz9000-sdk` commit pinned in `sdk/SDK_REF`.
 
 **License**: GPL-3.0-or-later
 
 ## Build System
 
-All builds use Docker/Podman with the cross-compilation image:
+All Amiga cross-builds use Docker/Podman with the cross-compilation image:
 ```
 sacredbanana/amiga-compiler:m68k-amigaos
 ```
@@ -37,6 +40,61 @@ Individual component targets: `make rtg`, `make zztop`, `make net`, `make ahi`, 
 - **No generated binaries in git**. Build outputs (*.card, *.device, *.audio, *.library, executables) are `.gitignore`d and enforced by `tools/check-release.sh` and `tools/tests/test_repo_tooling.py`. If you add a new tool, add its output to `.gitignore` AND create an empty placeholder in the installer drawer so packaging doesn't accidentally stage stale binaries.
 - **Shared headers**: `include/zz9000_hw.h` (hardware registers) and `include/zz9000_ax.h` (AX audio constants). Small tools MUST include these rather than duplicating definitions. The test suite enforces this.
 
+### Matched stack and pinned SDK
+
+- Firmware, bitstreams, drivers, and the SDK payload are one release set when a
+  change affects registers, capabilities, mode identities, mailbox services, or
+  shared-memory layouts. Mixed-version fallbacks must remain safe, but are not a
+  substitute for testing and packaging the matched set.
+- `sdk/SDK_REF` deliberately pins one exact, publicly reachable SDK commit. Do
+  not silently build a sibling SDK checkout or advance the pin without the
+  corresponding payload, tests, documentation, and installer integration.
+- Keep installer payload names, drawer placeholders, README guidance, and
+  release checks aligned whenever an artifact is added, renamed, or removed.
+
+### `ZZ9000.CFG` and ZZTop
+
+- The firmware parser is the source of truth for accepted keys. ZZTop rewrites
+  the file from its own model, so the canonical keys and ordered
+  `videocap_profile` values must stay aligned across the firmware parser,
+  firmware sample, firmware README, and `common/zzcfg_amiga.c`. Run
+  `tools/check-cfg-keys.sh [path-to-zz9000-firmware]` after either side changes.
+- Profile ordering is an append-only shared schema. Do not reorder or reuse a
+  numeric identity. The legacy `videocap_mode`, `videocap_shres`, and
+  `nonstandard_vsync` keys remain read compatibility only; new UI and docs use
+  the atomic profile.
+- ZZTop's capability and legacy label arrays must remain index-aligned with the
+  shared mode enum. Add the widest new cycle label to `settings_value_samples`
+  or the value gadget will clip it even when the real strings are correct.
+
+### Video-capture mode identity
+
+- Keep the explicit video-capture mode/profile identity in RTG `CardData`; a
+  boolean “native” flag cannot distinguish the two 1280×1024 full-detail modes.
+- Runtime mode 5 means the exact centered 1280×1024 viewport only when firmware
+  advertises `ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P` (firmware publishes that only
+  for the complete viewport-layout and dynamic-clock path). Older or mismatched
+  cards must sanitize it to the established full-frame 60 Hz mode. Modes 1 and
+  6 retain their existing full-frame behavior.
+- The centered profile is exposed only by the full-rate firmware variants. Do
+  not infer support from the numeric mode alone or advertise it on A500-family
+  variants without new hardware qualification.
+
+### Zorro II aperture contract
+
+- Current Zorro II software uses the generation-1 aperture descriptor. RTG must
+  validate the published 2 MiB or 4 MiB layout against AutoConfig, reserve every
+  region, and only then acknowledge it. Invalid or unacknowledged descriptors
+  fail closed.
+- CPU-visible SDK allocations share one 64 KiB host window; it is not 64 KiB per
+  process. The shipped 4 MiB profile has one fixed 224 KiB PIP pool, while the
+  2 MiB profile has no PIP pool. Do not restore fixed end-of-board service
+  addresses or advertise arbitrary Picasso96 off-screen allocations.
+- Descriptor-absent legacy 4 MiB cards retain only the historical fixed host
+  window; legacy 2 MiB and unknown aperture sizes reject it. Not every low-level
+  diagnostic is Zorro II-safe—check the production-client matrix in the pinned
+  SDK's `docs/zz9k-zorro2-services.md` before expanding support claims.
+
 ## Repository Structure
 
 | Directory | Artifact(s) | Build Command |
@@ -60,6 +118,7 @@ Individual component targets: `make rtg`, `make zztop`, `make net`, `make ahi`, 
 
 - **RTG unit tests**: `make rtg-tests` runs C tests in `rtg/tests/` (host-native compilation).
 - **Repo tooling tests**: `python3 -m unittest tools/tests/test_repo_tooling.py` validates build scripts, CI config, binary tracking, shared header usage, and audio driver invariants.
+- **Cross-repo CFG guard**: `tools/check-cfg-keys.sh ../zz9000-firmware` checks canonical keys and append-only profile identities against the firmware checkout.
 - **Quality gates** (`make quality`): shellcheck on all `.sh` files, actionlint on CI workflow, cppcheck on select C files. All gracefully skip if the tool is missing.
 
 CI runs `host-checks` (rtg-tests + Python tests + quality + quick release check) in parallel with component builds.
@@ -74,8 +133,8 @@ CI runs `host-checks` (rtg-tests + Python tests + quality + quick release check)
 
 The `sdk/` and `amissl/` components consume the zz9000-sdk repository at the
 commit pinned in `sdk/SDK_REF` ("pull, not move" — sources, tests, and smoke
-procedures stay in the SDK repo). Their CI jobs need that repository to be
-public/cloneable.
+procedures stay in the SDK repo). Their CI jobs need that exact commit to be
+public and cloneable before a drivers release is tagged.
 
 Local packaging alternative: `make package-local` (runs check-release first, then zips).
 
