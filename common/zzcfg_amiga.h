@@ -14,6 +14,7 @@
 
 #include <exec/types.h>
 #include <stdint.h>
+#include "zz9000_hw.h"
 #include "zzcfg_query.h"   /* key ids, statuses, inline zzcfg_query() */
 
 /* Matches the firmware's boot-time parse cap (ZZ_CONFIG_MAX_SIZE). */
@@ -30,6 +31,7 @@ enum zzcfg_videocap_profile {
     ZZCFG_VCAP_FILTERED_PAL,
     ZZCFG_VCAP_FILTERED_PAL_EXACT,
     ZZCFG_VCAP_FILTERED_NTSC_EXACT,
+    ZZCFG_VCAP_CENTERED_1080P_60,
     ZZCFG_VCAP_PROFILE_COUNT
 };
 
@@ -49,6 +51,9 @@ struct zzcfg_values {
     /* Firmware with the profile capability accepts the atomic key; older
      * firmware gets an equivalent legacy key trio. */
     UWORD use_videocap_profile_key;
+    /* Capability snapshot used to hide/sanitize profiles that need a
+     * matching FPGA+firmware path. */
+    UWORD firmware_capabilities;
     UWORD scanline_mode;     /* 0-3 */
     UWORD scanline_parity;   /* 0-1 */
     UWORD int2;              /* 0-1 */
@@ -66,6 +71,8 @@ struct zzcfg_values {
 UWORD zzcfg_profile_from_legacy(UWORD pal_mode, UWORD full, UWORD vsync);
 void zzcfg_profile_to_legacy(UWORD profile, UWORD *pal_mode, UWORD *full,
     UWORD *vsync);
+int zzcfg_profile_supported(UWORD profile, UWORD firmware_capabilities);
+UWORD zzcfg_profile_sanitize(UWORD profile, UWORD firmware_capabilities);
 
 /* Fetch the raw file contents into out (NUL-terminated, maxlen must be
  * >= 1). Returns a ZZ_CFG_FILE_* status; *outlen is the byte count.

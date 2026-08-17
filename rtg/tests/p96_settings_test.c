@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "mode_timing.h"
+
 #define SETTINGS_PATH "../../installer/ZZ9000Installer/Devs/Picasso96Settings"
 #define SETTINGS_Z3_PATH "../../installer/ZZ9000Installer/Devs/Picasso96Settings-Z3"
 
@@ -29,11 +31,14 @@ enum {
 	MIHD_HEIGHT = 6,
 	MIHD_DEPTH = 8,
 	MIHD_HOR_TOTAL = 10,
+	MIHD_HOR_BLANK_SIZE = 12,
 	MIHD_HOR_SYNC_START = 14,
 	MIHD_HOR_SYNC_SIZE = 16,
 	MIHD_VER_TOTAL = 20,
+	MIHD_VER_BLANK_SIZE = 22,
 	MIHD_VER_SYNC_START = 24,
 	MIHD_VER_SYNC_SIZE = 26,
+	MIHD_PIXEL_CLOCK = 30,
 	MIHD_MIN_SIZE = 34,
 };
 
@@ -46,6 +51,10 @@ struct ModeDepths {
 struct MonitorCaps {
 	unsigned chunks;
 	uint32_t flags;
+};
+
+struct TimingCaps {
+	unsigned records;
 };
 
 static uint16_t be16(const uint8_t *p)
@@ -107,9 +116,68 @@ static int mode_timings_populated(const uint8_t *data)
 		ver_sync_size != 0;
 }
 
+static int mode_timing_matches_hardware(const char *settings_path,
+	const uint8_t *data)
+{
+	const struct zz_rtg_mode_timing *timing;
+	uint16_t width = be16(data + MIHD_WIDTH);
+	uint16_t height = be16(data + MIHD_HEIGHT);
+	uint16_t expected_hblank;
+	uint16_t expected_vblank;
+	uint16_t expected_hsync_start;
+	uint16_t expected_vsync_start;
+
+	timing = zz_rtg_mode_timing_for_logical_size(width, height);
+	if (!timing) {
+		fprintf(stderr, "FAIL %s unsupported settings mode %ux%u\n",
+			settings_path, width, height);
+		return 0;
+	}
+
+	expected_hblank = (uint16_t)(timing->htotal - width);
+	expected_vblank = (uint16_t)(timing->vtotal - height);
+	expected_hsync_start = (uint16_t)(timing->hsync_start - width);
+	expected_vsync_start = (uint16_t)(timing->vsync_start - height);
+
+	if (be16(data + MIHD_HOR_TOTAL) != timing->htotal ||
+	    be16(data + MIHD_HOR_BLANK_SIZE) != expected_hblank ||
+	    be16(data + MIHD_HOR_SYNC_START) != expected_hsync_start ||
+	    be16(data + MIHD_HOR_SYNC_SIZE) !=
+			(uint16_t)(timing->hsync_end - timing->hsync_start) ||
+	    be16(data + MIHD_VER_TOTAL) != timing->vtotal ||
+	    be16(data + MIHD_VER_BLANK_SIZE) != expected_vblank ||
+	    be16(data + MIHD_VER_SYNC_START) != expected_vsync_start ||
+	    be16(data + MIHD_VER_SYNC_SIZE) !=
+			(uint16_t)(timing->vsync_end - timing->vsync_start) ||
+	    be32(data + MIHD_PIXEL_CLOCK) != timing->pixel_clock_hz) {
+		fprintf(stderr,
+			"FAIL %s %ux%ux%u timing is not the hardware modeline\n"
+			"     got HT=%u HB=%u HS=%u/%u VT=%u VB=%u VS=%u/%u clock=%lu\n"
+			"expected HT=%u HB=%u HS=%u/%u VT=%u VB=%u VS=%u/%u clock=%lu\n",
+			settings_path, width, height, data[MIHD_DEPTH],
+			be16(data + MIHD_HOR_TOTAL),
+			be16(data + MIHD_HOR_BLANK_SIZE),
+			be16(data + MIHD_HOR_SYNC_START),
+			be16(data + MIHD_HOR_SYNC_SIZE),
+			be16(data + MIHD_VER_TOTAL),
+			be16(data + MIHD_VER_BLANK_SIZE),
+			be16(data + MIHD_VER_SYNC_START),
+			be16(data + MIHD_VER_SYNC_SIZE),
+			(unsigned long)be32(data + MIHD_PIXEL_CLOCK),
+			timing->htotal, expected_hblank, expected_hsync_start,
+			(uint16_t)(timing->hsync_end - timing->hsync_start),
+			timing->vtotal, expected_vblank, expected_vsync_start,
+			(uint16_t)(timing->vsync_end - timing->vsync_start),
+			(unsigned long)timing->pixel_clock_hz);
+		return 0;
+	}
+
+	return 1;
+}
+
 static int parse_p96_settings(const char *settings_path,
 	struct ModeDepths *full_hd, struct ModeDepths *wide_1440,
-	struct MonitorCaps *monitor)
+	struct MonitorCaps *monitor, struct TimingCaps *timings)
 {
 	FILE *fp;
 	uint8_t hdr[12];
@@ -183,6 +251,13 @@ static int parse_p96_settings(const char *settings_path,
 			unsigned bit = depth_bit(data[MIHD_DEPTH]);
 			int timings_populated = mode_timings_populated(data);
 
+			if (!mode_timing_matches_hardware(settings_path, data)) {
+				free(data);
+				fclose(fp);
+				return 0;
+			}
+			timings->records++;
+
 			if (mode_w != current_w || mode_h != current_h) {
 				fprintf(stderr, "FAIL mode chunk does not match current resolution\n");
 				free(data);
@@ -219,6 +294,19 @@ static int parse_p96_settings(const char *settings_path,
 	}
 
 	fclose(fp);
+	return 1;
+}
+
+static int expect_timing_records(const char *name,
+	const struct TimingCaps *timings)
+{
+	if (timings->records != 40) {
+		printf("FAIL %-32s records=%u required=40\n",
+			name, timings->records);
+		return 0;
+	}
+
+	printf("ok   %s records=%u\n", name, timings->records);
 	return 1;
 }
 
@@ -279,13 +367,19 @@ int main(void)
 	struct ModeDepths z3_wide_1440 = {0, 0, 0};
 	struct MonitorCaps monitor = {0, 0};
 	struct MonitorCaps z3_monitor = {0, 0};
+	struct TimingCaps timings = {0};
+	struct TimingCaps z3_timings = {0};
 	int ok = 1;
 
-	if (!parse_p96_settings(SETTINGS_PATH, &full_hd, &wide_1440, &monitor))
+	if (!parse_p96_settings(SETTINGS_PATH, &full_hd, &wide_1440, &monitor,
+		&timings))
 		return 1;
 	if (!parse_p96_settings(SETTINGS_Z3_PATH, &z3_full_hd, &z3_wide_1440,
-		&z3_monitor))
+		&z3_monitor, &z3_timings))
 		return 1;
+
+	ok &= expect_timing_records("Picasso96 shared fixed timings", &timings);
+	ok &= expect_timing_records("Picasso96 Z3 fixed timings", &z3_timings);
 
 	ok &= expect_dpms("Picasso96 shared monitor", &monitor);
 	ok &= expect_dpms("Picasso96 Z3 monitor", &z3_monitor);

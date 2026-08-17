@@ -111,16 +111,20 @@ struct zzcfg_profile_desc {
     UWORD pal_mode;
     UWORD full;
     UWORD vsync;
+    UWORD required_capability;
+    UWORD fallback_profile;
 };
 
 /* One schema drives parsing, rendering and legacy-firmware translation. */
 static const struct zzcfg_profile_desc zzcfg_profiles[] = {
-    { "full_60",             0, 1, 0 },
-    { "full_exact",          0, 1, 1 },
-    { "filtered_60",         0, 0, 0 },
-    { "filtered_pal",        1, 0, 0 },
-    { "filtered_pal_exact",  1, 0, 1 },
-    { "filtered_ntsc_exact", 1, 0, 2 }
+    { "full_60",             0, 1, 0, 0, ZZCFG_VCAP_FULL_60 },
+    { "full_exact",          0, 1, 1, 0, ZZCFG_VCAP_FULL_EXACT },
+    { "filtered_60",         0, 0, 0, 0, ZZCFG_VCAP_FILTERED_60 },
+    { "filtered_pal",        1, 0, 0, 0, ZZCFG_VCAP_FILTERED_PAL },
+    { "filtered_pal_exact",  1, 0, 1, 0, ZZCFG_VCAP_FILTERED_PAL_EXACT },
+    { "filtered_ntsc_exact", 1, 0, 2, 0, ZZCFG_VCAP_FILTERED_NTSC_EXACT },
+    { "centered_1080p_60",   0, 1, 0,
+      ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P, ZZCFG_VCAP_FULL_60 }
 };
 
 typedef char zzcfg_profile_count_matches_enum[
@@ -158,6 +162,25 @@ void zzcfg_profile_to_legacy(UWORD profile, UWORD *pal_mode, UWORD *full,
     *pal_mode = p->pal_mode;
     *full = p->full;
     *vsync = p->vsync;
+}
+
+int zzcfg_profile_supported(UWORD profile, UWORD firmware_capabilities)
+{
+    const struct zzcfg_profile_desc *p;
+
+    if (profile >= ZZCFG_VCAP_PROFILE_COUNT) return 0;
+    p = &zzcfg_profiles[profile];
+    return p->required_capability == 0 ||
+        (firmware_capabilities & p->required_capability) ==
+            p->required_capability;
+}
+
+UWORD zzcfg_profile_sanitize(UWORD profile, UWORD firmware_capabilities)
+{
+    if (profile >= ZZCFG_VCAP_PROFILE_COUNT) return ZZCFG_VCAP_FULL_60;
+    if (!zzcfg_profile_supported(profile, firmware_capabilities))
+        return zzcfg_profiles[profile].fallback_profile;
+    return profile;
 }
 
 static int zzcfg_parse_profile(const char *value, UWORD *profile)
@@ -230,10 +253,12 @@ void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v)
             if (zzcfg_str_eq_ci(value, "pal") ||
                     zzcfg_str_eq_ci(value, "720x576")) {
                 legacy_pal = 1;
+                legacy_full = 0;
                 v->videocap_profile = zzcfg_profile_from_legacy(legacy_pal,
                     legacy_full, legacy_vsync);
             } else if (zzcfg_str_eq_ci(value, "800x600")) {
                 legacy_pal = 0;
+                legacy_full = 0;
                 v->videocap_profile = zzcfg_profile_from_legacy(legacy_pal,
                     legacy_full, legacy_vsync);
             }
@@ -313,8 +338,8 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
     static const char *sample_names[] = { "average", "even", "odd" };
     static const char *vsync_names[] = { "off", "pal", "ntsc" };
     UWORD sample = (v->videocap_sample <= 2) ? v->videocap_sample : 0;
-    UWORD profile = (v->videocap_profile < ZZCFG_VCAP_PROFILE_COUNT) ?
-        v->videocap_profile : ZZCFG_VCAP_FULL_60;
+    UWORD profile = zzcfg_profile_sanitize(v->videocap_profile,
+        v->firmware_capabilities);
     UWORD legacy_pal, legacy_full, legacy_vsync;
     char video_config[512];
     int n;

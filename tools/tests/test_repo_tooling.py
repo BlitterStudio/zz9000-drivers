@@ -1,5 +1,8 @@
+import os
 import pathlib
+import shutil
 import subprocess
+import tempfile
 import unittest
 
 
@@ -77,6 +80,93 @@ class RepoToolingTests(unittest.TestCase):
             self.assertIn(token, header)
             self.assertIn(token, test_stub)
             self.assertNotIn(f"#define {token}", model)
+
+    def test_centered_videocap_is_capability_gated_end_to_end(self):
+        common_header = self.read("common/zzcfg_amiga.h")
+        common_model = self.read("common/zzcfg_amiga.c")
+        hw_header = self.read("include/zz9000_hw.h")
+        zztop = self.read("ZZTop/Sources/ZZTop.c")
+        rtg = self.read("rtg/mntgfx-gcc.c")
+
+        self.assertIn("ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P (1U << 3)",
+                      hw_header)
+        self.assertLess(common_header.index("ZZCFG_VCAP_FILTERED_NTSC_EXACT"),
+                        common_header.index("ZZCFG_VCAP_CENTERED_1080P_60"))
+        self.assertIn('"centered_1080p_60"', common_model)
+        self.assertIn("ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P, ZZCFG_VCAP_FULL_60",
+                      common_model)
+        self.assertIn("if (native_override)", zztop)
+        self.assertIn("zzcfg_profile_supported(imsgCode, fw_capabilities)",
+                      zztop)
+        self.assertIn("vcapmode_legacy_labels", zztop)
+        self.assertIn("ZZ_CARD_DATA_VCAP_MODE", rtg)
+        self.assertNotIn("ZZ_CARD_DATA_SCANDBL_800X600", rtg)
+        self.assertIn("zz_vcap_mode_uses_native_pan", rtg)
+        self.assertIn("mode == ZZ_VMODE_CENTERED_1080P_60", rtg)
+
+    def test_zztop_full_detail_labels_explain_refresh_behavior(self):
+        zztop = self.read("ZZTop/Sources/ZZTop.c")
+
+        self.assertEqual(2, zztop.count("1280x1024 Fixed 60Hz (Full detail)"))
+        self.assertEqual(3,
+                         zztop.count("1280x1024 Match PAL/NTSC (Full detail)"))
+        self.assertNotIn("1280x1024 60Hz (Full)", zztop)
+        self.assertNotIn("1280x1024 Exact (Full)", zztop)
+
+    def test_cfg_guard_rejects_profile_value_drift(self):
+        candidates = (
+            pathlib.Path(os.environ.get("ZZ9K_FIRMWARE_DIR", "")),
+            ROOT.parent / "zz9000-firmware",
+            ROOT / "zz9000-firmware",
+        )
+        firmware_root = next(
+            (path for path in candidates if (path / "ZZ9000.CFG").is_file()),
+            None,
+        )
+        if firmware_root is None:
+            self.skipTest("companion zz9000-firmware checkout unavailable")
+
+        sources = (
+            pathlib.Path("ZZ9000.CFG"),
+            pathlib.Path("README.md"),
+            pathlib.Path("ZZ9000_proto.sdk/ZZ9000OS/src/zz_config.c"),
+        )
+        marker = "#   filtered_ntsc_exact -"
+
+        for label in ("missing", "extra"):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                fixture = pathlib.Path(tmp)
+                for relpath in sources:
+                    destination = fixture / relpath
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(firmware_root / relpath, destination)
+
+                sample = fixture / "ZZ9000.CFG"
+                text = sample.read_text(encoding="utf-8")
+                self.assertIn(marker, text)
+                profile_line = next(
+                    line for line in text.splitlines(keepends=True)
+                    if line.startswith(marker)
+                )
+                replacement = "" if label == "missing" else (
+                    profile_line +
+                    "#   unexpected_profile    - parity-guard fixture\n"
+                )
+                sample.write_text(
+                    text.replace(profile_line, replacement, 1),
+                    encoding="utf-8",
+                )
+
+                result = subprocess.run(
+                    ["sh", str(ROOT / "tools/check-cfg-keys.sh"), str(fixture)],
+                    cwd=ROOT,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                )
+                self.assertEqual(1, result.returncode, result.stdout)
+                self.assertIn("videocap_profile values", result.stdout)
 
     def test_zztop_live_calibration_uses_native_v37_contract(self):
         source = self.read("ZZTop/Sources/ZZTop.c")
@@ -200,6 +290,14 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("make rtg-tests", ci)
         self.assertIn("ZZDiag:", ci)
         self.assertIn("ZZDiag/ZZDiag", ci)
+
+    def test_ci_checks_matching_firmware_branch_with_master_fallback(self):
+        ci = self.read(".github/workflows/ci.yml")
+        self.assertIn("id: firmware-ref", ci)
+        self.assertIn("git ls-remote --exit-code --heads", ci)
+        self.assertIn('"refs/heads/$CANDIDATE_REF"', ci)
+        self.assertIn("firmware_ref=master", ci)
+        self.assertIn("ref: ${{ steps.firmware-ref.outputs.ref }}", ci)
 
     def test_ci_audio_jobs_use_build_scripts(self):
         ci = self.read(".github/workflows/ci.yml")

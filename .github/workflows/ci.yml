@@ -44,17 +44,28 @@ jobs:
       # ZZTop rewrites ZZ9000.CFG from the keys it knows, so it has to know
       # every key the firmware parses. check-cfg-keys.sh compares the two
       # repos; without this checkout it would skip silently.
+      - name: Resolve firmware ref for shared contracts
+        id: firmware-ref
+        env:
+          CANDIDATE_REF: ${{ github.head_ref || github.ref_name }}
+        run: |
+          if [ "$CANDIDATE_REF" = "feat/zztop-videocap-sample" ]; then
+            firmware_ref=refs/pull/66/head
+          elif git ls-remote --exit-code --heads \
+              https://github.com/BlitterStudio/zz9000-firmware.git \
+              "refs/heads/$CANDIDATE_REF" >/dev/null 2>&1; then
+            firmware_ref=$CANDIDATE_REF
+          else
+            firmware_ref=master
+          fi
+          printf 'ref=%s\n' "$firmware_ref" >> "$GITHUB_OUTPUT"
       - name: Checkout firmware (for its ZZ9000.CFG key set)
         uses: actions/checkout@v6
         with:
           repository: BlitterStudio/zz9000-firmware
           path: zz9000-firmware
           fetch-depth: 1
-          # The live-calibration driver branch and firmware PR #66 add one
-          # shared CFG contract. Validate both push and PR runs against that
-          # companion head; after this branch lands, every other ref keeps
-          # tracking firmware master as before.
-          ref: ${{ (github.head_ref == 'feat/zztop-videocap-sample' || github.ref_name == 'feat/zztop-videocap-sample') && 'refs/pull/66/head' || 'master' }}
+          ref: ${{ steps.firmware-ref.outputs.ref }}
       - name: Run host-side tests and repository checks
         env:
           ZZ9K_FIRMWARE_DIR: ${{ github.workspace }}/zz9000-firmware

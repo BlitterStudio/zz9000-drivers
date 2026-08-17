@@ -25,38 +25,45 @@ fork-specific issues belong in this repository's
 
 Upstream pre-fork source: <https://source.mnt.re/amiga/zz9000-drivers>
 
-## What This Fork Adds
+## What Changed Since the Original MNT Drivers
 
-Compared with the older MNT driver releases, this fork is now a full
-installer-driven AmigaOS package for the current BlitterStudio firmware
-and SDK stack:
+The original MNT drivers provided the essential AmigaOS connection to the
+ZZ9000. This independent BlitterStudio fork keeps that foundation and builds a
+complete end-user package around it. The most important differences are:
 
-- Commodore Installer packaging with Picasso96 settings migration,
-  Zorro III high-memory settings, icons, rollback-safe AmiSSL backup,
-  and CI-built binaries only.
-- Native `BT_MNT_ZZ9000` Picasso96 identity, RTG fixes, 1920x1080x32
-  settings for Zorro III, monitor DPMS power management, and clearer
-  Zorro II/Zorro III profiles.
-- The P96 video window (picture-in-picture), composited and scaled on the
-  card, which `ZZPlay` uses for MPEG-1 playback. Zorro III uses the firmware
-  surface allocator; a matched generation-1 firmware/bitstream/driver stack
-  also enables one bounded source on 4 MiB Zorro II cards (224 KiB, enough
-  for 352x288 YUY2). Two MiB has no PIP. An invalid or unacknowledged
-  generation-1 descriptor also exposes no PIP; descriptor-absent legacy 4 MiB
-  compatibility retains only the historical fixed 64 KiB host window, not a
-  negotiated layout or PIP. The `video_overlay` config key and
-  `ENV:ZZ9000-NO-PIP` turn it off.
-- `ZZTop` as the configuration GUI for firmware readback, FWUP
-  update/restore, and SD-card `ZZ9000.CFG` editing, sharing a Workbench
-  drawer with the SDK's `ZZPlay` media player.
-- Poseidon USB hardware driver, SD-card boot support, firmware-file
-  update/restore tooling, and board/network diagnostics.
-- SDK runtime payloads (`zz9k.library`, picture datatype, `mpega.library`,
-  SDK tools) built from the pinned `zz9000-sdk` revision.
-- Accelerated AmiSSL packaging with CPU-specific `amissl.library` builds
-  and the ZZ9000 OpenSSL provider compiled in.
-- ZZ9000AX audio/MHI modernization and shared interrupt/config handling
-  across AHI, MHI, and networking.
+| Improvement | What an Amiga owner gets |
+|---|---|
+| **One guided installer** | A standard Commodore Installer puts the graphics, network, audio, USB and SD drivers in the right places, installs icons and tools, updates Picasso96 settings, and offers the correct extras for the detected CPU. Upgrades are handled without asking users to copy a collection of files by hand. |
+| **ZZTop as the card's control centre** | ZZTop shows firmware and board status, edits `ZZ9000.CFG` directly on the card, changes scanlines and native-video settings, performs live picture calibration, and can install or restore firmware without removing the microSD card. |
+| **Better native and RTG video** | The current stack offers clear native-output choices, full-detail 1280x1024 capture, the optional 1280x1024 image centered in a 1920x1080 signal, 1920x1080x32 RTG modes on Zorro III, improved acceleration, monitor sleep/DPMS, modern scanlines, and numerous correctness fixes. |
+| **ZZPlay media playback** | The installed **ZZPlay** Workbench application uses the ZZ9000's ARM processors to decode MPEG-1 video and MP3/MP2 audio. Video can appear in a hardware-scaled Workbench window or on a dedicated screen. |
+| **Hardware-assisted AmiSSL** | The installer can add a CPU-matched AmiSSL library with ZZ9000 acceleration built in. Supported TLS handshakes and encrypted data are offloaded automatically for existing AmiSSL applications; unsupported operations remain in software. |
+| **A fuller set of working devices** | The package includes maintained SANA-II networking, ZZ9000AX AHI/MHI audio, Poseidon USB, SD-card boot support, firmware update/recovery, and focused board and network diagnostics. |
+| **Useful acceleration on Zorro II too** | Matched 2 MB and 4 MB releases safely expose a small shared service area for images, archives, audio and AmiSSL. A 4 MB card can additionally provide one bounded ZZPlay picture-in-picture source; 2 MB cards deliberately do not advertise PIP. |
+| **Repeatable releases** | Every component is built with pinned toolchains in CI, assembled into one installer drawer, and checked so stale local binaries cannot accidentally enter a release. |
+
+The installer also brings in the matching SDK runtime: `zz9k.library`,
+`mpega.library`, the optional accelerated picture DataType, command-line tools,
+and the ZZPlay application. For best results, use drivers, firmware and SDK
+payloads from the same release—particularly on Zorro II.
+
+### Good features to show in a video
+
+1. Open **ZZTop → Project → Settings** to show that the card is configured
+   from one friendly window rather than several unrelated ENV variables.
+2. Cycle **Native Output** between **1280x1024 Fixed 60Hz (Full detail)**,
+   **1280x1024 Match PAL/NTSC (Full detail)**, and—on matched full-rate
+   hardware—**1280x1024 Centered in 1080p60**.
+3. Open **Advanced Video → Calibrate** and move the native Amiga picture live
+   with the cursor keys; Escape demonstrates the safe restore path.
+4. Start **ZZPlay** from `SYS:Utilities/ZZ9000/` and show MPEG video first in
+   the Workbench picture-in-picture window, then on its dedicated screen.
+5. Show a high-resolution Picasso96 Workbench, scanline modes, monitor sleep,
+   and the firmware update/backup/restore controls in ZZTop.
+
+The detailed sections below explain compatibility, every installed component,
+and the few features that intentionally differ between Zorro III, 4 MB Zorro
+II, and 2 MB Zorro II.
 
 ## Quick Start
 
@@ -181,6 +188,19 @@ The drivers in this repo consult it too:
   per-machine overrides. Firmware 2.8 with the profile capability stores this
   as `videocap_profile`; ZZTop transparently writes the equivalent legacy key
   combination for older firmware, including 2.8 RC1.
+- With a matching v2.8-RC2-or-newer full-rate bitstream and firmware
+  capability bit 3, `centered_1080p_60` places the unchanged 1280x1024 native
+  content at `(320,28)` inside a 1920x1080 active raster. The content rectangle
+  is `[320,1600) x [28,1052)` and every surrounding pixel stays black. This is
+  native Amiga chipset video, not the separate Picasso96 1920x1080x32 RTG
+  screen mode. The reused 150 MHz/2200x1125 timing produces approximately
+  60.60606 Hz despite the nominal `60` profile name.
+- The centered choice appears and is serialized only with matching support in
+  the bitstream, firmware, `ZZ9000.card`, and ZZTop. Old, filtered-only, or
+  mixed installations safely use `full_60`/native mode 1 and do not preserve a
+  stored centered identity; `full_60` remains the default. Unrelated MAC and
+  INT2 ENV overrides preserve a supported centered choice, while legacy
+  native-video ENV overrides intentionally select their legacy fallback.
 - `ZZ9000Net.device`, `zz9000ax.audio` and `mhizz9000.library` honor
   `int2 = on`; `ZZ9000Net.device` adopts the firmware's `mac`.
 - `ZZ9000.card` also reads `offscreen_bitmaps` and `video_overlay`,
@@ -233,6 +253,11 @@ Remove the ENV variables (`ZZ9K_INT2`, `ZZ9K_MAC`,
 `ZZ9000-VCAP-800x600`, `ZZ9000-NS-VSYNC[-NTSC]`, `ZZ9000-NO-OFFSCREEN`,
 `ZZ9000-NO-PIP`) when migrating to the config file. On firmware older than 2.3 the drivers silently fall back
 to the ENV variables.
+
+Activation follows the existing configuration lifecycle. ZZTop **Save** writes
+the staged file, which is read at the next cold boot; valid runtime native-mode
+writes take effect at the next stable vblank. The centered profile does not
+add a monitor hot-plug or HDMI mode-switch guarantee.
 
 ## Command-Line Tools
 

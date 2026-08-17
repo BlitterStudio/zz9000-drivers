@@ -36,9 +36,11 @@
 #include "zzcfg_query.h"
 #include "blitter_cache.h"
 #include "memory_layout.h"
+#include "mode_timing.h"
 #include "offscreen_bitmap.h"
 #include "overlay_feature.h"
 #include "zz9000_hw.h"
+#include "videocap_mode.h"
 #include <clib/Picasso96_protos.h>
 #include <inline/Picasso96.h>
 
@@ -63,13 +65,13 @@ struct DOSBase;
 #define __saveds__
 
 #define DEVICE_VERSION 2
-#define DEVICE_REVISION 8
+#define DEVICE_REVISION 9
 #define REQUIRED_FW_VERSION_MAJOR 2
 #define REQUIRED_FW_VERSION_MINOR 0
 #define DEVICE_PRIORITY 0
 #define DEVICE_ID_STRING "$VER: ZZ9000.card+blitter " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
 #define DEVICE_NAME "ZZ9000.card"
-#define DEVICE_DATE "(07.08.2026)"
+#define DEVICE_DATE "(17.08.2026)"
 
 int __attribute__((no_reorder)) _start()
 {
@@ -106,7 +108,7 @@ __saveds struct GFXBase* InitLib(__REGA6(struct ExecBase *sysbase),
 																 __REGA0(BPTR seglist),
 																 __REGD0(struct GFXBase *exb));
 
-#define CLOCK_HZ 100000000
+#define MEMORY_CLOCK_HZ 100000000
 
 static struct GFXBase *_gfxbase;
 char *gfxname = "ZZ9000";
@@ -116,10 +118,8 @@ char dummies[128];
 // Place scratch area right after framebuffer? Might be a horrible idea.
 #define Z3_GFXDATA_ADDR	(0x3200000 - 0x10000)
 #define Z3_TEMPLATE_ADDR (0x3210000 - 0x10000)
-#define ZZVMODE_800x600 1
-#define ZZVMODE_720x576 6
 #define ZZ_CARD_DATA_GFXDATA 0
-#define ZZ_CARD_DATA_SCANDBL_800X600 1
+#define ZZ_CARD_DATA_VCAP_MODE 1
 #define ZZ_CARD_DATA_NSVSYNC 2
 #define ZZ_CARD_DATA_MONITOR_SWITCH 3
 #define ZZ_CARD_DATA_DISPLAY_ENABLED 4
@@ -130,6 +130,7 @@ char dummies[128];
 #define ZZ_CARD_DATA_TEMPLATE_OFFSET 9
 #define ZZ_CARD_DATA_PIP_OFFSET 10
 #define ZZ_CARD_DATA_PIP_SIZE 11
+#define ZZ_CARD_DATA_FW_CAPABILITIES 12
 /* first firmware whose surface allocator really frees (major<<8|minor) */
 #define OFFSCREEN_BITMAPS_MIN_FWREV 0x0204
 /* first firmware with OP_VIDEO_OVERLAY + the shadow-scanout compositor */
@@ -333,10 +334,10 @@ static BOOL env_flag_exists(struct DOSBase *DOSBase, const char *name) {
 	return FALSE;
 }
 
-static LONG tooltype_vcap_800x600(char **tool_types, LONG current) {
+static LONG tooltype_vcap_mode(char **tool_types, LONG current) {
 	const char *value = tooltype_value(tool_types, "ZZ9000-VCAP-800x600");
 	if (value)
-		current = !value_is_false(value);
+		current = value_is_false(value) ? ZZ_VMODE_720x576 : ZZ_VMODE_800x600;
 
 	value = tooltype_value(tool_types, "VCAP");
 	if (!value)
@@ -346,14 +347,18 @@ static LONG tooltype_vcap_800x600(char **tool_types, LONG current) {
 		string_equal_ci(value, "60") ||
 		string_equal_ci(value, "60HZ") ||
 		value_is_true(value)) {
-		return 1;
+		return ZZ_VMODE_800x600;
 	}
+	if (string_equal_ci(value, "CENTERED") ||
+		string_equal_ci(value, "1080P") ||
+		string_equal_ci(value, "CENTERED_1080P_60"))
+		return ZZ_VMODE_CENTERED_1080P_60;
 
 	if (string_equal_ci(value, "720x576") ||
 		string_equal_ci(value, "50") ||
 		string_equal_ci(value, "50HZ") ||
 		value_is_false(value)) {
-		return 0;
+		return ZZ_VMODE_720x576;
 	}
 
 	return current;
@@ -396,13 +401,16 @@ static struct ConfigDev *find_unconfigured_configdev(struct ExpansionBase *Expan
 	return NULL;
 }
 
-static void apply_vcap_settings(MNTZZ9KRegs *regs, LONG scandoubler_800x600) {
-	if (scandoubler_800x600) {
+static void apply_vcap_settings(MNTZZ9KRegs *regs, LONG mode) {
+	if (mode == ZZ_VMODE_CENTERED_1080P_60) {
+		KPrintF("ZZ9000.card: centered 1280x1024 in 1080p60 mode.\n");
+		regs->videocap_vmode = ZZ_VMODE_CENTERED_1080P_60;
+	} else if (mode == ZZ_VMODE_800x600) {
 		KPrintF("ZZ9000.card: 800x600 60hz scandoubler mode.\n");
-		regs->videocap_vmode = ZZVMODE_800x600;
+		regs->videocap_vmode = ZZ_VMODE_800x600;
 	} else {
 		KPrintF("ZZ9000.card: 720x576 50hz scandoubler mode.\n");
-		regs->videocap_vmode = ZZVMODE_720x576;
+		regs->videocap_vmode = ZZ_VMODE_720x576;
 	}
 }
 
@@ -417,13 +425,25 @@ static void apply_card_settings(struct BoardInfo *b, char **tool_types) {
 
 	MNTZZ9KRegs *regs = (MNTZZ9KRegs *)b->RegisterBase;
 
-	b->CardData[ZZ_CARD_DATA_SCANDBL_800X600] = tooltype_vcap_800x600(
-		tool_types, (LONG)b->CardData[ZZ_CARD_DATA_SCANDBL_800X600]);
+	b->CardData[ZZ_CARD_DATA_VCAP_MODE] = zz_vcap_mode_sanitize(
+		(UWORD)tooltype_vcap_mode(tool_types,
+			(LONG)b->CardData[ZZ_CARD_DATA_VCAP_MODE]),
+		(UWORD)b->CardData[ZZ_CARD_DATA_FW_CAPABILITIES]);
+	/* Any explicit legacy sync tooltype selects the legacy full/native
+	 * identity; the firmware's runtime sync setter intentionally clears
+	 * centered mode. */
+	if (b->CardData[ZZ_CARD_DATA_VCAP_MODE] == ZZ_VMODE_CENTERED_1080P_60 &&
+		(tooltype_value(tool_types, "ZZ9000-NS-VSYNC") ||
+		 tooltype_value(tool_types, "ZZ9000-NS-VSYNC-NTSC") ||
+		 tooltype_value(tool_types, "NSVSYNC")))
+		b->CardData[ZZ_CARD_DATA_VCAP_MODE] = ZZ_VMODE_800x600;
 	b->CardData[ZZ_CARD_DATA_NSVSYNC] = tooltype_nonstandard_vsync(
 		tool_types, (LONG)b->CardData[ZZ_CARD_DATA_NSVSYNC]);
 
-	apply_vcap_settings(regs, (LONG)b->CardData[ZZ_CARD_DATA_SCANDBL_800X600]);
-	apply_nonstandard_vsync_settings(regs, (LONG)b->CardData[ZZ_CARD_DATA_NSVSYNC]);
+	apply_vcap_settings(regs, (LONG)b->CardData[ZZ_CARD_DATA_VCAP_MODE]);
+	if (b->CardData[ZZ_CARD_DATA_VCAP_MODE] != ZZ_VMODE_CENTERED_1080P_60)
+		apply_nonstandard_vsync_settings(regs,
+			(LONG)b->CardData[ZZ_CARD_DATA_NSVSYNC]);
 }
 
 static inline UWORD abs_word(WORD value) {
@@ -707,7 +727,7 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 	zorro_version = 0;
 	b->CardFlags = 0;
 	b->CardData[ZZ_CARD_DATA_GFXDATA] = 0;
-	b->CardData[ZZ_CARD_DATA_SCANDBL_800X600] = 0;
+	b->CardData[ZZ_CARD_DATA_VCAP_MODE] = ZZ_VMODE_800x600;
 	b->CardData[ZZ_CARD_DATA_NSVSYNC] = 0;
 	b->CardData[ZZ_CARD_DATA_MONITOR_SWITCH] = 1;
 	b->CardData[ZZ_CARD_DATA_DISPLAY_ENABLED] = 1;
@@ -718,6 +738,7 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 	b->CardData[ZZ_CARD_DATA_TEMPLATE_OFFSET] = 0;
 	b->CardData[ZZ_CARD_DATA_PIP_OFFSET] = 0;
 	b->CardData[ZZ_CARD_DATA_PIP_SIZE] = 0;
+	b->CardData[ZZ_CARD_DATA_FW_CAPABILITIES] = 0;
 	zz_overlay_hooks_enabled = FALSE;
 	memset(&zz_z2_pip_request, 0, sizeof(zz_z2_pip_request));
 	zz_z2_pip_bitmap = NULL;
@@ -732,6 +753,7 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 		zz_card_window_size = (ULONG)cd->cd_BoardSize - 0x10000;
 		fwrev = ((volatile uint16_t*)b->RegisterBase)[ZZ_REG_FW_VERSION/2];
 		fw_caps = ((volatile uint16_t*)b->RegisterBase)[ZZ_REG_FW_CAPABILITIES/2];
+		b->CardData[ZZ_CARD_DATA_FW_CAPABILITIES] = fw_caps;
 		if (zorro_version == 2) {
 			volatile UWORD *board = (volatile UWORD *)b->RegisterBase;
 
@@ -818,17 +840,19 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 		 * 50 Hz here; PAL-capable setups select it explicitly with
 		 * `videocap_mode = pal` (ZZTop Settings) or the tooltype. */
 		if (env_flag_exists(DOSBase, "ENV:ZZ9000-VCAP-800x600")) {
-			b->CardData[ZZ_CARD_DATA_SCANDBL_800X600] = 1;
+			b->CardData[ZZ_CARD_DATA_VCAP_MODE] = ZZ_VMODE_800x600;
 		} else {
 			cfg_value = zzcfg_query((ULONG)b->RegisterBase,
 				ZZ_CFG_KEY_VIDEOCAP_MODE, &cfg_present);
-			b->CardData[ZZ_CARD_DATA_SCANDBL_800X600] =
-				(cfg_present && cfg_value == ZZ_VMODE_720x576) ? 0 : 1;
+			b->CardData[ZZ_CARD_DATA_VCAP_MODE] = zz_vcap_mode_sanitize(
+				cfg_present ? cfg_value : ZZ_VMODE_800x600, fw_caps);
 		}
 
 		if (env_flag_exists(DOSBase, "ENV:ZZ9000-NS-VSYNC")) {
+			b->CardData[ZZ_CARD_DATA_VCAP_MODE] = ZZ_VMODE_800x600;
 			b->CardData[ZZ_CARD_DATA_NSVSYNC] = 1;
 		} else if (env_flag_exists(DOSBase, "ENV:ZZ9000-NS-VSYNC-NTSC")) {
+			b->CardData[ZZ_CARD_DATA_VCAP_MODE] = ZZ_VMODE_800x600;
 			b->CardData[ZZ_CARD_DATA_NSVSYNC] = 2;
 		} else {
 			cfg_value = zzcfg_query((ULONG)b->RegisterBase,
@@ -855,8 +879,11 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 				b->CardData[ZZ_CARD_DATA_VIDEO_OVERLAY] = (cfg_value != 0);
 		}
 
-		apply_vcap_settings(registers, (LONG)b->CardData[ZZ_CARD_DATA_SCANDBL_800X600]);
-		apply_nonstandard_vsync_settings(registers, (LONG)b->CardData[ZZ_CARD_DATA_NSVSYNC]);
+		apply_vcap_settings(registers, (LONG)b->CardData[ZZ_CARD_DATA_VCAP_MODE]);
+		if (b->CardData[ZZ_CARD_DATA_VCAP_MODE] !=
+			ZZ_VMODE_CENTERED_1080P_60)
+			apply_nonstandard_vsync_settings(registers,
+				(LONG)b->CardData[ZZ_CARD_DATA_NSVSYNC]);
 
 		cd->cd_Flags &= ~CDF_CONFIGME;
 		reserved_cd = cd;
@@ -910,7 +937,7 @@ int __attribute__((used)) InitCard(__REGA0(struct BoardInfo* b), __REGA1(char **
 		b->PixelClockCount[i] = 1;
 	}
 
-	b->MemoryClock = CLOCK_HZ;
+	b->MemoryClock = MEMORY_CLOCK_HZ;
 
 	//b->AllocCardMem = (void *)NULL;
 	//b->FreeCardMem = (void *)NULL;
@@ -1057,35 +1084,13 @@ void SetReadPlane (__REGA0(struct BoardInfo *b), __REGD0(UBYTE plane)) { }
 #endif
 
 static BOOL modeline_id(uint16_t w, uint16_t h, uint16_t *mode) {
-	if (w == 1280 && h == 720) {
-		*mode = 0;
-	} else if (w == 800 && h == 600) {
-		*mode = 1;
-	} else if (w == 640 && h == 480) {
-		*mode = 2;
-	} else if (w == 640 && h == 400) {
-		*mode = 16;
-	} else if (w == 1024 && h == 768) {
-		*mode = 3;
-	} else if (w == 1280 && h == 1024) {
-		*mode = 4;
-	} else if (w == 1920 && h == 1080) {
-		*mode = 5;
-	} else if (w == 720 && h == 576) {
-		*mode = 6;
-	} else if (w == 720 && h == 480) {
-		*mode = 8;
-	} else if (w == 640 && h == 512) {
-		*mode = 9;
-	} else if (w == 1600 && h == 1200) {
-		*mode = 10;
-	} else if (w == 2560 && h == 1440) {
-		*mode = 11;
-	} else if (w == 1920 && h == 800) {
-		*mode = 17;
-	} else {
+	const struct zz_rtg_mode_timing *timing =
+		zz_rtg_mode_timing_for_output_size(w, h);
+
+	if (!timing)
 		return FALSE;
-	}
+
+	*mode = timing->mode_id;
 
 	return TRUE;
 }
@@ -1168,7 +1173,8 @@ UWORD SetSwitch(__REGA0(struct BoardInfo *b), __REGD0(UWORD enabled)) {
 	if (enabled == 0) {
 		// capture 24 bit amiga video to 0xe00000
 
-		if (b->CardData[ZZ_CARD_DATA_SCANDBL_800X600]) {
+		if (zz_vcap_mode_uses_native_pan(
+			(UWORD)b->CardData[ZZ_CARD_DATA_VCAP_MODE])) {
 			// slightly adjusted centering
 			zzwrite16(&registers->pan_ptr_hi, 0x00df);
 			zzwrite16(&registers->pan_ptr_lo, 0xf2f8);
@@ -1345,6 +1351,7 @@ void SetDPMSLevel(__REGA0(struct BoardInfo *b), __REGD0(ULONG level)) {
 }
 
 LONG ResolvePixelClock(__REGA0(struct BoardInfo *b), __REGA1(struct ModeInfo *mode_info), __REGD0(ULONG pixel_clock), __REGD7(RGBFTYPE format)) {
+	const struct zz_rtg_mode_timing *timing;
 	uint16_t w;
 	uint16_t h;
 	uint16_t scale;
@@ -1354,8 +1361,11 @@ LONG ResolvePixelClock(__REGA0(struct BoardInfo *b), __REGA1(struct ModeInfo *mo
 	sanitize_mode_flags(mode_info);
 	if (!adjusted_mode_dimensions(mode_info, &w, &h, &scale))
 		return -1;
+	timing = zz_rtg_mode_timing_for_output_size(w, h);
+	if (!timing)
+		return -1;
 
-	mode_info->PixelClock = CLOCK_HZ;
+	mode_info->PixelClock = timing->pixel_clock_hz;
 	mode_info->pll1.Clock = 0;
 	mode_info->pll2.ClockDivide = 1;
 
@@ -1363,6 +1373,7 @@ LONG ResolvePixelClock(__REGA0(struct BoardInfo *b), __REGA1(struct ModeInfo *mo
 }
 
 ULONG GetPixelClock(__REGA0(struct BoardInfo *b), __REGA1(struct ModeInfo *mode_info), __REGD0(ULONG index), __REGD7(RGBFTYPE format)) {
+	const struct zz_rtg_mode_timing *timing;
 	uint16_t w;
 	uint16_t h;
 	uint16_t scale;
@@ -1371,8 +1382,11 @@ ULONG GetPixelClock(__REGA0(struct BoardInfo *b), __REGA1(struct ModeInfo *mode_
 		return 0;
 	if (!adjusted_mode_dimensions(mode_info, &w, &h, &scale))
 		return 0;
+	timing = zz_rtg_mode_timing_for_output_size(w, h);
+	if (!timing)
+		return 0;
 
-	return CLOCK_HZ;
+	return timing->pixel_clock_hz;
 }
 
 #define VBLANK_WAIT_LIMIT 200000UL

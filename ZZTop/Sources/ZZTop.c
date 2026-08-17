@@ -868,8 +868,19 @@ static void do_fw_restore(struct Window *win)
 /* ------------------------------------------------------------------ */
 
 static STRPTR vcapmode_labels[] = {
-	(STRPTR)"1280x1024 60Hz (Full)",
-	(STRPTR)"1280x1024 Exact (Full)",
+	(STRPTR)"1280x1024 Fixed 60Hz (Full detail)",
+	(STRPTR)"1280x1024 Match PAL/NTSC (Full detail)",
+	(STRPTR)"800x600 60Hz (Filtered)",
+	(STRPTR)"720x576 50Hz (Filtered)",
+	(STRPTR)"Exact PAL Amiga (Filtered)",
+	(STRPTR)"Exact NTSC Amiga (Filtered)",
+	(STRPTR)"1280x1024 Centered in 1080p60",
+	NULL
+};
+
+static STRPTR vcapmode_legacy_labels[] = {
+	(STRPTR)"1280x1024 Fixed 60Hz (Full detail)",
+	(STRPTR)"1280x1024 Match PAL/NTSC (Full detail)",
 	(STRPTR)"800x600 60Hz (Filtered)",
 	(STRPTR)"720x576 50Hz (Filtered)",
 	(STRPTR)"Exact PAL Amiga (Filtered)",
@@ -1597,7 +1608,7 @@ static CONST_STRPTR settings_label_samples[] = {
  * spans the full row instead, so long messages don't inflate the
  * control column (and with it the whole window). */
 static CONST_STRPTR settings_value_samples[] = {
-	(CONST_STRPTR)"Exact NTSC Amiga (Filtered)",
+	(CONST_STRPTR)"1280x1024 Match PAL/NTSC (Full detail)",
 	(CONST_STRPTR)"INT6 (default)",
 	(CONST_STRPTR)"aa:bb:cc:dd:ee:ff",
 	NULL
@@ -1685,21 +1696,29 @@ static int settings_apply_env_overrides(struct zzcfg_values *sv)
 	char envmac[ZZCFG_MAC_CHARS + 3];
 	UWORD pal_mode, full, vsync;
 	int any = 0;
+	int native_override = 0;
 
 	zzcfg_profile_to_legacy(sv->videocap_profile, &pal_mode, &full, &vsync);
 	if (settings_env_exists("ENV:ZZ9000-VCAP-800x600")) {
 		pal_mode = 0;
 		full = 0;
 		any = 1;
+		native_override = 1;
 	}
 	if (settings_env_exists("ENV:ZZ9000-NS-VSYNC")) {
 		vsync = 1;
 		any = 1;
+		native_override = 1;
 	} else if (settings_env_exists("ENV:ZZ9000-NS-VSYNC-NTSC")) {
 		vsync = 2;
 		any = 1;
+		native_override = 1;
 	}
-	sv->videocap_profile = zzcfg_profile_from_legacy(pal_mode, full, vsync);
+	/* MAC/INT2 overrides are unrelated and must not collapse a centered
+	 * profile through the lossy legacy tuple. Native-video ENV overrides
+	 * intentionally select a legacy profile. */
+	if (native_override)
+		sv->videocap_profile = zzcfg_profile_from_legacy(pal_mode, full, vsync);
 	if (settings_env_exists("ENV:ZZ9K_INT2")) {
 		sv->int2 = 1;
 		any = 1;
@@ -1763,6 +1782,7 @@ static void settings_populate(struct Window *win, UWORD fw_capabilities)
 	ULONG board = (ULONG)zz_regs;
 	struct zzcfg_values *sv = &settings_vals;
 	UWORD st, rawlen = 0;
+	BOOL centered_fallback = FALSE;
 
 	/* Editor defaults; keys present in the raw file override them.
 	 * Scanlines default to the live FPGA state - the config applied
@@ -1772,6 +1792,7 @@ static void settings_populate(struct Window *win, UWORD fw_capabilities)
 	sv->videocap_profile = ZZCFG_VCAP_FULL_60;
 	sv->use_videocap_profile_key =
 		(fw_capabilities & ZZ_FW_CAP_VIDEOCAP_PROFILE) != 0;
+	sv->firmware_capabilities = fw_capabilities;
 	sv->videocap_crop_h = ZZCFG_VIDEOCAP_CROP_H_COMPAT;
 	sv->videocap_crop_v = ZZCFG_VIDEOCAP_CROP_V_COMPAT;
 	sv->scanline_mode = zz_get_scanline_mode();
@@ -1795,8 +1816,17 @@ static void settings_populate(struct Window *win, UWORD fw_capabilities)
 			 * edited since boot on every Reload, and a subsequent
 			 * Save would then write those stale values back. */
 			zzcfg_parse_text(settings_cfg_text, rawlen, sv);
+			if (!zzcfg_profile_supported(sv->videocap_profile,
+					fw_capabilities)) {
+				sv->videocap_profile = zzcfg_profile_sanitize(
+					sv->videocap_profile, fw_capabilities);
+				centered_fallback = TRUE;
+			}
 			env_active = settings_apply_env_overrides(sv);
-			if (env_active) {
+			if (centered_fallback) {
+				snprintf(settings_status_buf, sizeof(settings_status_buf),
+					"Centered 1080p needs matching firmware/bitstream; Full 60 staged");
+			} else if (env_active) {
 				snprintf(settings_status_buf, sizeof(settings_status_buf),
 					"%u bytes on card + ENV overrides", (unsigned)rawlen);
 			} else {
@@ -1901,7 +1931,8 @@ static BOOL settings_save(struct Window *win)
 }
 
 static struct Gadget *settings_create_gadgets(struct Gadget **glistptr,
-	void *vi, const struct ZZTopLayout *mainlayout, WORD *out_w, WORD *out_h)
+	void *vi, const struct ZZTopLayout *mainlayout, UWORD fw_capabilities,
+	WORD *out_w, WORD *out_h)
 {
 	struct NewGadget ng;
 	struct Gadget *gad;
@@ -1941,7 +1972,10 @@ static struct Gadget *settings_create_gadgets(struct Gadget **glistptr,
 	ng.ng_GadgetID   = SGAD_VIDEOCAP;
 	ng.ng_GadgetText = (STRPTR)LABEL_VCAPMODE;
 	sgads[SGAD_VIDEOCAP] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
-		GTCY_Labels, vcapmode_labels, GTCY_Active, 0, TAG_END);
+		GTCY_Labels,
+		(fw_capabilities & ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P) ?
+			vcapmode_labels : vcapmode_legacy_labels,
+		GTCY_Active, 0, TAG_END);
 	y += l.row_step;
 
 	ng.ng_TopEdge    = y;
@@ -2484,7 +2518,8 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 	settings_have_cfg = (fw_version >= 0x0203);
 	settings_live_init(&live_session, fw_version, fw_capabilities);
 
-	if (NULL == settings_create_gadgets(&glist, vi, mainlayout, &w, &h)) {
+	if (NULL == settings_create_gadgets(&glist, vi, mainlayout,
+			fw_capabilities, &w, &h)) {
 		if (glist) FreeGadgets(glist);
 		errorMessage("Settings: gadget creation failed");
 		return;
@@ -2544,7 +2579,8 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 					if (!gad) break;
 					switch (gad->GadgetID) {
 					case SGAD_VIDEOCAP:
-							if (imsgCode < ZZCFG_VCAP_PROFILE_COUNT) {
+							if (imsgCode < ZZCFG_VCAP_PROFILE_COUNT &&
+								zzcfg_profile_supported(imsgCode, fw_capabilities)) {
 								if (live_session.preview_valid &&
 									!settings_profile_matches(&live_session,
 										imsgCode, settings_vals.videocap_sample)) {
