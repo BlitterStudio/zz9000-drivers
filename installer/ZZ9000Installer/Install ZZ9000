@@ -135,8 +135,8 @@
 ; Scandoubler cap (ZZ9000-VCAP)
 ; --------------------------------------------------------------------
 
-(message "Native (chipset) video uses the full_60 1280x1024 profile by default. Other native-output profiles can be selected in ZZTop's Settings window and saved to ZZ9000.CFG.\n\nA matched v2.8-RC2-or-newer full-rate bitstream, firmware and drivers also offer centered_1080p_60: unchanged 1280x1024 content centered in a 1920x1080 raster with black borders. Its reused 150 MHz timing is approximately 60.60606 Hz. This is separate from the Picasso96 1920x1080 RTG screen mode. Old or mixed components safely fall back to full_60.\n\nNote: legacy ENVARC:ZZ9000-VCAP-800x600 or ZZ9000-NS-VSYNC variables override the config profile; delete them when using the Settings window."
-   (help "ZZTop Save writes ZZ9000.CFG for the next cold boot. centered_1080p_60 is shown only when the installed full-rate bitstream and firmware advertise matching support; unsupported stacks use full_60 and do not retain the centered selection."))
+(message "Native video defaults to full_60 (1280x1024). Choose another profile in ZZTop and save it to ZZ9000.CFG.\n\nA matched v2.8-RC2-or-newer full-rate stack also supports centered_1080p_60: unscaled 1280x1024 centered in a 1920x1080 raster with black borders at about 60.606 Hz. This is not the Picasso96 1920x1080 RTG mode. Other stacks fall back to full_60.\n\nLegacy ENVARC:ZZ9000-VCAP-800x600 and ZZ9000-NS-VSYNC variables override this setting; delete them when using ZZTop."
+   (help "ZZTop saves the profile to ZZ9000.CFG for the next cold boot. centered_1080p_60 appears only when the full-rate bitstream and firmware report support."))
 
 (complete 50)
 
@@ -388,8 +388,8 @@
 ; --------------------------------------------------------------------
 
 (if (exists "Libs/zz9k.library")
-   (if (askbool (prompt "Install the ZZ9000 SDK runtime?\n\nzz9k.library (firmware services), an ARM-accelerated mpega.library drop-in, and the zz9k-picture.datatype.\n\nRequires the SDK-service ZZ9000 firmware.\n\nZorro 2 note: matched current firmware, bitstream, SDK payloads, and drivers support compact audio/MP3, streamed image/DataType and archive work, and AmiSSL through one shared 64 KiB host window. A 4 MiB card can also provide a bounded ZZPlay video/PIP source; a 2 MiB card cannot.")
-                (help "zz9k.library is the AmigaOS gateway to the ZZ9000's firmware services (image decode, audio, compression, crypto). mpega.library is a drop-in replacement that decodes MP3 on the ZZ9000's ARM cores. zz9k-picture.datatype accelerates picture decoding; its JPEG/PNG descriptors are staged inactive under SYS:Storage/DataTypes for explicit opt-in. Zorro 2 support requires a matched release set and its 64 KiB host window is shared across clients, so concurrent accelerated operations can contend. Not every low-level SDK diagnostic is Zorro 2-aware."))
+   (if (askbool (prompt "Install the ZZ9000 SDK runtime?\n\nIncludes zz9k.library, ARM-accelerated mpega.library, and zz9k-picture.datatype. Requires SDK-service firmware.\n\nOn matched current Zorro 2 stacks, supported services share one 64 KiB host window. The 4 MiB profile supports a bounded ZZPlay video/PIP source; the 2 MiB profile does not.")
+                (help "zz9k.library exposes firmware services; mpega.library accelerates MP3 decoding; zz9k-picture.datatype accelerates images. JPEG/PNG descriptors are installed inactive under SYS:Storage/DataTypes. Zorro 2 clients share the 64 KiB host window and can contend; some low-level SDK diagnostics are not Zorro 2-safe."))
       (
          (set #newver   (getversion "Libs/zz9k.library"))
          (set #newmajor (/ #newver 65536))
@@ -482,8 +482,8 @@
 (if (OR (exists "Libs/AmiSSL/68020-40/amissl_v362.library")
         (exists "Libs/AmiSSL/68060/amissl_v362.library"))
    (if (exists "LIBS:AmiSSL/amissl_v362.library")
-       (if (askbool (prompt "Install the ZZ9000-accelerated amissl.library?\n\nThis replaces LIBS:AmiSSL/amissl_v362.library with a build that offloads TLS cryptography (handshakes and AES-GCM/ChaCha20 records) to the ZZ9000. Without the board or its crypto firmware it behaves exactly like stock AmiSSL.\n\nMatched 2 MiB and 4 MiB Zorro 2 stacks can offload through the shared 64 KiB host window. Provider open reserves one 32-byte probe; other exact 16-byte-aligned persistent buffers grow lazily. If a later allocation misses, that operation safely uses AmiSSL software.\n\nThe original is backed up to amissl_v362.library.bak before it is replaced.")
-                    (help "A drop-in AmiSSL 5.27 core library with the ZZ9000 crypto-offload provider compiled in: every AmiSSL application (browsers, mail clients) gets hardware-accelerated TLS with no changes. Zorro 2 support requires matched current firmware, bitstream, SDK payloads, and drivers. Its compact host heap is shared with other SDK clients; provider open reserves one 32-byte probe, other exact 16-byte-aligned persistent buffers grow lazily, and an allocation miss falls back in software for that operation. The combined binary is GPLv3; sources are public in the BlitterStudio zz9000-sdk repository."))
+       (if (askbool (prompt "Install the ZZ9000-accelerated amissl.library?\n\nReplaces LIBS:AmiSSL/amissl_v362.library with a build that offloads supported TLS crypto. Without compatible hardware or firmware it uses stock AmiSSL software paths.\n\nMatched 2 MiB and 4 MiB Zorro 2 stacks can offload through the shared 64 KiB host window. If an allocation cannot be made, that operation falls back to software.\n\nThe original library is backed up as amissl_v362.library.bak.")
+                    (help "Drop-in AmiSSL 5.27 core with ZZ9000 crypto offload for existing applications. Zorro 2 requires a matched stack and shares its small host heap with other SDK clients. The combined binary is GPLv3; sources are in the BlitterStudio zz9000-sdk repository."))
            (
               ; Pick the CPU build exactly as AmiSSL's own installer does: default
               ; to the 68060 build when the OS reports a 68060, or 68060.library /

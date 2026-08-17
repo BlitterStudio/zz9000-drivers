@@ -1,5 +1,6 @@
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -404,6 +405,18 @@ class RepoToolingTests(unittest.TestCase):
                 release_paths.add(path)
 
         self.assertEqual(set(GENERATED_ARTIFACT_PATHS), release_paths)
+
+    def test_installer_string_literals_fit_classic_installer_limit(self):
+        script = self.read("installer/ZZ9000Installer/Install ZZ9000")
+        violations = []
+
+        for match in re.finditer(r'"(?:\\.|[^"\\])*"', script, re.DOTALL):
+            payload = match.group(0)[1:-1].encode("utf-8")
+            if len(payload) > 512:
+                line = script.count("\n", 0, match.start()) + 1
+                violations.append(f"line {line}: {len(payload)} bytes")
+
+        self.assertEqual([], violations)
 
     def test_locally_packaged_tools_are_ignored(self):
         package_script = self.read("tools/package-local.sh")
