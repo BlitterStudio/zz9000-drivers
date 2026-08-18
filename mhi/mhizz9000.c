@@ -1157,7 +1157,7 @@ void i_MHIFreeDecoder(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibB
 	// Keep the hard ISR INSTALLED here: it is the MHI ownership token on
 	// the shared interrupt list, and releasing it before the teardown
 	// writes finish would let AHI allocate the card and race our own
-	// in-flight MMIO (Codex HIGH finding).
+	// in-flight MMIO during teardown.
 	Forbid();
 	mp->Status = MHIF_STOPPED;
 	mp->play_pending = FALSE;
