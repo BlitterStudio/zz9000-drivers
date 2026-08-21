@@ -347,6 +347,63 @@ int main(void)
     check(b.videocap_profile == ZZCFG_VCAP_FULL_60,
           "later legacy full-width key still wins");
 
+    /* Audio control-plane keys (firmware U5): absent from pre-audio
+     * files' output, parsed and regenerated exactly when present. */
+    defaults(&a);
+    n = zzcfg_generate(&a, text, sizeof(text));
+    check(strstr(text, "audio_") == NULL,
+          "no audio keys generated without presence");
+
+    defaults(&b);
+    {
+        const char *audio_file =
+            "audio_active = 3\n"
+            "audio_baseline = 35910\n"
+            "audio_scene2_lpf = 16000\n"
+            "audio_scene2_eq01 = 12800\n"
+            "audio_scene2_eq23 = 6450\n"
+            "audio_scene2_eq45 = 12900\n"
+            "audio_scene2_eq67 = 100\n"
+            "audio_scene2_eq89 = 51\n"
+            "audio_scene2_out = 6500\n"
+            "audio_scene2_pan = 75\n"
+            "audio_scene2_out = 6999\n";   /* last value wins */
+        zzcfg_parse_text(audio_file, (UWORD)strlen(audio_file), &b);
+    }
+    check(b.audio_active == 3 && b.audio_active_present,
+          "audio_active parses with presence");
+    check(b.audio_baseline == 35910 && b.audio_baseline_present,
+          "audio_baseline parses with presence");
+    check(b.audio_scene_mask[2] == 0xff && b.audio_scene_mask[0] == 0,
+          "scene key group masks complete");
+    check(b.audio_scene_lpf[2] == 16000 && b.audio_scene_out[2] == 6999,
+          "scene values round-trip packed");
+
+    n = zzcfg_generate(&b, text, sizeof(text));
+    check(has_exact_line(text, "audio_active = 3") &&
+          has_exact_line(text, "audio_baseline = 35910") &&
+          has_exact_line(text, "audio_scene2_lpf = 16000") &&
+          has_exact_line(text, "audio_scene2_eq01 = 12800") &&
+          has_exact_line(text, "audio_scene2_out = 6999") &&
+          has_exact_line(text, "audio_scene2_pan = 75"),
+          "audio keys regenerate exactly");
+    check(strstr(text, "audio_scene0_") == NULL,
+          "absent scenes stay absent");
+
+    defaults(&a);
+    zzcfg_parse_text(text, n, &a);
+    check(a.audio_active == 3 && a.audio_baseline == 35910 &&
+          a.audio_scene_mask[2] == 0xff && a.audio_scene_out[2] == 6999,
+          "generated audio block reparses identically");
+
+    defaults(&b);
+    {
+        const char *junk = "audio_active = 8\naudio_scene5_eq01 = x\n";
+        zzcfg_parse_text(junk, (UWORD)strlen(junk), &b);
+    }
+    check(b.audio_active == 8 && b.audio_scene_mask[5] == 0,
+          "invalid values parse permissively without presence");
+
     if (failures) { printf("%d failure(s)\n", failures); return 1; }
     printf("zzcfg round-trip: all checks passed\n");
     return 0;

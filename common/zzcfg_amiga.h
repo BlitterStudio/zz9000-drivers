@@ -65,7 +65,25 @@ struct zzcfg_values {
     UWORD video_overlay;     /* 0-1, default 1 */
     char  mac[ZZCFG_MAC_CHARS + 3];
     char  hdf[ZZCFG_HDF_CHARS + 5];
-};
+
+    /* Audio control-plane keys (firmware plan U5): audio_active,
+     * audio_baseline and one eight-key group per scene slot. Values
+     * are kept packed exactly as parsed (band pairs hi*128+lo, out
+     * pref*128+vol, baseline paula*256+ax) -- the firmware is the
+     * validator of record at cold boot. Presence is tracked per key
+     * (audio_scene_mask bits match the firmware layout) so a Settings
+     * save carries through exactly the audio keys the file had. */
+#define ZZCFG_AUDIO_SCENES 8
+    UWORD audio_active;
+    UWORD audio_active_present;
+    UWORD audio_baseline;
+    UWORD audio_baseline_present;
+    UWORD audio_scene_lpf[ZZCFG_AUDIO_SCENES];
+    UWORD audio_scene_eq[ZZCFG_AUDIO_SCENES][5];
+    UWORD audio_scene_out[ZZCFG_AUDIO_SCENES];
+    UWORD audio_scene_pan[ZZCFG_AUDIO_SCENES];
+    UWORD audio_scene_mask[ZZCFG_AUDIO_SCENES]; /* bit per key */
+ };
 
 /* Convert old three-key files and ENV overrides to/from the atomic profile. */
 UWORD zzcfg_profile_from_legacy(UWORD pal_mode, UWORD full, UWORD vsync);
