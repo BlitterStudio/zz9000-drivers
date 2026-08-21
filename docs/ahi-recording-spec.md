@@ -158,8 +158,9 @@ writes each period as 960 native 48 kHz stereo frames in little-endian signed
 
 `ZZ_REG_AUDIO_SCALE` is the number of sample frames per 20 ms period and is
 shared with playback. The AHI driver writes `ahiac_BuffSamples`, which is
-`ahiac_MixFreq / 50`; valid recording values are 1 through 960. Firmware uses
-960 if the register contains an invalid value.
+`ahiac_MixFreq / 50`. Supported conversion counts are 160/240/480/640/882/960
+frames (8/12/24/32/44.1/48 kHz); any other value in the register's 1-960
+range converts as native 48 kHz identity (960 frames, endian swap only).
 
 Only the first `frame_count * 4` bytes of a published period are defined. The
 remaining bytes retain DMA or prior-period data and must not be copied by the
@@ -171,14 +172,19 @@ ring inside the final 64 KiB reserved at the top of board memory. Each ring is
 
 ## Resampling
 
-The codec and S2MM formatter continue to run at 48 kHz. Firmware performs a
-deterministic per-period linear downsample to every rate advertised by the
-AudioMode: 8, 12, 24, 32, 44.1 and 48 kHz. Period boundaries are exact at
-20 ms, so no fractional state is shared between periods.
+The codec and S2MM formatter continue to run at 48 kHz. Firmware converts
+each completed period through one shared qualified band-limited kernel (a
+Kaiser windowed-sinc polyphase FIR; see the firmware repository's
+`docs/audio-conversion.md` for the measured passband, stop-band, group-delay,
+and cycle-cost table) at every rate advertised by the AudioMode: 8, 12, 24,
+32, 44.1 and 48 kHz. Conversion is deterministic and per-period counts are
+exact at 20 ms. Filter history crosses periods inside a dedicated converter
+instance, while the exact-rational phase lands on every period boundary.
 
-Resampling must use integer arithmetic in the receive ISR. It must not reuse
-the playback resampler state. In-place conversion is permitted because every
-supported output contains no more frames than the 960-frame source period.
+The conversion uses integer arithmetic only in the receive ISR and never
+shares state with the playback converter instance. The period is converted
+through a CPU-side scratch copy -- in-place conversion is not used -- and the
+result is written back as big-endian stereo at the exact requested count.
 
 ## Overrun behavior
 
