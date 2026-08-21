@@ -302,12 +302,14 @@ class RepoToolingTests(unittest.TestCase):
 
     def test_ci_audio_jobs_use_build_scripts(self):
         ci = self.read(".github/workflows/ci.yml")
-        # mhi/build.sh stages zz9k headers (cloning the SDK at the
-        # pinned sdk/SDK_REF when no sibling checkout exists) before
-        # re-execing into docker itself, so CI calls it host-side.
+        # mhi/build.sh and ahi/driver/build.sh stage zz9k headers (cloning
+        # the SDK at the pinned sdk/SDK_REF when no sibling checkout exists)
+        # before re-execing into docker themselves, so CI calls both
+        # host-side.
         self.assertIn("mhi/build.sh", ci)
         self.assertNotIn('-w /src/mhi "$AMIGA_IMAGE" ./build.sh', ci)
-        self.assertIn('-w /src/ahi/driver "$AMIGA_IMAGE" ./build.sh', ci)
+        self.assertIn("ahi/driver/build.sh", ci)
+        self.assertNotIn('-w /src/ahi/driver "$AMIGA_IMAGE" ./build.sh', ci)
         self.assertIn(
             '-w /src/ahi/duplextest "$AMIGA_IMAGE" ./build.sh', ci
         )
@@ -463,7 +465,7 @@ class RepoToolingTests(unittest.TestCase):
         for token in (
             "ZZ_AX_BYTES_PER_PERIOD",
             "ZZ_AX_AUDIO_BUFSZ",
-            "ZZ_AX_MIX_LEVELS_ENV",
+            "ZZ_AX_INT2_ENV",
             "ZZ_AX_IRQ_NAME_AHI",
             "ZZ_AX_IRQ_NAME_MHI",
             "ZZ_AX_AP_DSP_SET_VOLUMES",
@@ -479,7 +481,53 @@ class RepoToolingTests(unittest.TestCase):
             self.assertNotIn("#define ZZ_BYTES_PER_PERIOD", source)
             self.assertNotIn("#define AUDIO_BUFSZ", source)
             self.assertNotIn("#define REG_ZZ_AUDIO_CONFIG", source)
-            self.assertNotIn('"ENV:ZZ9K_MIX_LEVELS"', source)
+            # R11 removed ZZ9K_MIX_LEVELS outright: the value-reading
+            # helper is gone, and the only permitted literal is the
+            # existence probe feeding the one-line ignore warning.
+            self.assertNotIn("read_mix_levels_env", source)
+            self.assertNotIn("ZZ9K_MIX_LEVELS C040", source)
+            self.assertEqual(
+                1, source.count('"ENV:ZZ9K_MIX_LEVELS"'),
+                "ZZ9K_MIX_LEVELS may appear only as the warning probe",
+            )
+            self.assertIn("is ignored", source)
+
+    def test_audio_owners_issue_no_dsp_param_stamps(self):
+        """R4/U6: allocate, Play, and release never rewrite DSP state.
+
+        The master chain (LPF, mixer volume, EQ) belongs to the firmware
+        scene module; drivers act as control-plane clients gated on
+        ZZ9K_CAP_AUDIO_CONTROL, submitting a neutral source trim at
+        allocate through the trim opcode.
+        """
+        ahi = self.read("ahi/driver/zz9000ax-ahi.c")
+        mhi = self.read("mhi/mhizz9000.c")
+
+        # AHI: LPF stamp, mixer stamp, and the NOLPF bypass are gone.
+        self.assertNotIn("read_mix_levels_env", ahi)
+        self.assertNotIn("ZZ_AX_NOLPF_ENV", ahi)
+        self.assertNotIn("ZZ_AX_AP_DSP_SET_VOLUMES", ahi)
+        alloc = ahi[ahi.index("intAHIsub_AllocAudio"):ahi.index("intAHIsub_FreeAudio")]
+        self.assertNotIn("write_audio_param(hw_addr, 9", alloc)
+        self.assertNotIn("lpf_freq", alloc)
+
+        # MHI: no mixer stamp at allocate, no LPF at Play start, no DSP
+        # reset at release.
+        self.assertNotIn("read_mix_levels_env", mhi)
+        self.assertNotIn("ZZ_AX_AP_DSP_SET_VOLUMES", mhi)
+        self.assertNotIn("ZZ_AX_AP_DSP_SET_LOWPASS", mhi)
+        play = mhi[mhi.index("void i_MHIPlay"):mhi.index("void i_MHIStop")]
+        self.assertNotIn("setAudioParam", play)
+        release = mhi[
+            mhi.index("void i_MHIFreeDecoder"):mhi.index("BOOL i_MHIQueueBuffer")
+        ]
+        self.assertNotIn("setAudioParam", release)
+
+        # Both drivers gate on the capability and submit the trim.
+        for source in (ahi, mhi):
+            self.assertIn("ZZ9K_CAP_AUDIO_CONTROL", source)
+            self.assertIn("ZZ9K_OP_AUDIO_TRIM_SUBMIT", source)
+            self.assertIn("ZZ9K_AUDIO_BALANCE_NEUTRAL", source)
 
     def test_ahi_initializes_period_size_before_enabling_interrupt(self):
         source = self.read("ahi/driver/zz9000ax-ahi.c")

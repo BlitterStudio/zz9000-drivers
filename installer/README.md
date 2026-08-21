@@ -169,8 +169,9 @@ Driver and tool binaries are not duplicated as loose files at the zip
 root; they live in the exact drawer paths consumed by `Install ZZ9000`.
 
 The release job also copies component docs into `ZZ9000Installer/Docs/`:
-`ahi-README.md` covers the three audio ENV tunables
-(`ZZ9K_MIX_LEVELS`, `ZZ9000AX-NOLPF`, `ZZ9K_INT2`),
+`ahi-README.md` covers the remaining audio ENV tunable
+(`ZZ9K_INT2`) and the removed `ZZ9K_MIX_LEVELS` /
+`ZZ9000AX-NOLPF` variables,
 `usb-poseidon-README.md` covers Poseidon registration and
 troubleshooting, `sdk-README.md` documents the SDK runtime payloads,
 and `amissl-README.md` documents the accelerated AmiSSL build.

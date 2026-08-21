@@ -74,6 +74,16 @@ if ! grep -q "ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_DRAIN" \
   exit 1
 fi
 
+# Same discipline for the firmware-authoritative control plane this driver
+# submits its source trim through.
+if ! grep -q "ZZ9K_OP_AUDIO_TRIM_SUBMIT" \
+    "$script_dir/zz9k-headers/zz9k/abi.h"; then
+  echo "ERROR: the staged zz9000-sdk headers lack audio control-plane support" >&2
+  echo "       (ZZ9K_OP_AUDIO_TRIM_SUBMIT). Point ZZ9000_SDK at a checkout" >&2
+  echo "       that includes the control-plane ABI definitions." >&2
+  exit 1
+fi
+
 cd "$script_dir"
 
 if ! command -v m68k-amigaos-gcc >/dev/null 2>&1; then

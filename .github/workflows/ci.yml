@@ -277,9 +277,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      # ahi/driver/build.sh now stages the zz9k.library client headers
+      # on the host exactly like mhi/build.sh (the driver submits its
+      # source trim through the zz9k control-plane ABI), then re-execs
+      # itself through tools/amiga-docker.sh -- so it runs on the host,
+      # not inside a bare container.
       - name: Build zz9000ax.audio + ZZ9000AX
         run: |
-          docker run --rm -v "$PWD":/src -w /src/ahi/driver "$AMIGA_IMAGE" ./build.sh
+          ahi/driver/build.sh
       - name: Build ZZAXDuplexTest
         run: |
           docker run --rm -v "$PWD":/src -w /src/ahi/duplextest "$AMIGA_IMAGE" ./build.sh

@@ -63,67 +63,61 @@ If you have an unfixed R1, you have two choices:
 1. **Desolder U4** — MNT's own fix, produces the cleanest result and
    matches current hardware. Recommended if you're comfortable with
    SMD rework.
-2. **Use the driver-side compensation override** — see
-   `ENV:ZZ9K_MIX_LEVELS` below. Boosts AHI/MHI and cuts the Paula
-   pass-through to pull them back toward parity without rework.
+2. **Set the operator baseline** — with matched firmware (see
+   [Firmware-authoritative control plane](#firmware-authoritative-control-plane)
+   below), shift the Paula/AX balance from ZZTop's Audio window. The
+   baseline is enforced by the firmware's gain-staging ceiling instead
+   of relying on a hand-picked register value.
+
+The former `ENV:ZZ9K_MIX_LEVELS` register override was removed; see
+[Runtime tunables](#runtime-tunables-env-variables) below.
+
+## Firmware-authoritative control plane
+
+Both drivers are clients of the firmware's audio control plane. When
+zz9k.library is present **and** the running firmware advertises the
+audio-control capability, allocating the device submits the owner's
+neutral source trim through the control-plane mailbox; the firmware
+combines it with the operator baseline under the active scene and owns
+every master-chain write (LPF, mixer volume, EQ). Neither driver
+stamps DSP state at allocate, Play start, or release anymore, so a
+dialed-in scene survives apps opening and closing the device.
+
+The capability is deliberately unadvertised until qualified, so a
+matched pair is required for any control-plane behavior:
+
+- **New driver + old firmware** — no control surface, no trims: the
+  driver detects the absent capability and falls back to stamp-free
+  legacy playback. Audio works; the Paula/AX balance is whatever the
+  firmware's own state leaves it at (on an unfixed early R1 that can
+  mean loud Paula — see [Hardware revisions](#hardware-revisions)).
+  If `ENV:ZZ9K_MIX_LEVELS` is still set, each driver prints one
+  load-time line on the debug channel (Sashimi/serial) saying the
+  variable is ignored and that the balance remedy needs the matched
+  firmware.
+- **Old driver + new firmware** — the old driver's DSP register stamps
+  (LPF at allocate/Play, mixer volume) are rejected by the firmware's
+  scene-authority gate and playback continues unaffected. The early-R1
+  balance remedy is unavailable until the drivers are updated and an
+  operator baseline is set.
 
 ## Runtime tunables (ENV variables)
 
-All three of the variables below are optional. Unset them to get the
-default behavior. Values are read on each `AllocAudio` (AHI) or
-`AllocDecoder` (MHI) call, so changing a value takes effect the next
-time an app opens the device — no reboot required.
+The variable below is optional. Unset it to get the default behavior.
+Its value is read on each `AllocAudio` (AHI) or `AllocDecoder` (MHI)
+call, so changing it takes effect the next time an app opens the
+device — no reboot required.
 
-### `ENV:ZZ9K_MIX_LEVELS` *(AHI + MHI)*
-
-Overrides the AX's output mixer register (`AP_DSP_SET_VOLUMES`,
-parameter 10). Value is a 1-4 digit hex string packing two bytes:
-
-| Byte      | Range    | Meaning                                       |
-|-----------|----------|-----------------------------------------------|
-| High byte | `0x00`–`0xFF` | ZZ9000AX output level (AHI PCM / MHI MP3). |
-| Low byte  | `0x00`–`0xFF` | Paula line-in pass-through level.          |
-
-`0x` prefix, leading whitespace and trailing newlines are tolerated.
-On any parse failure the driver falls back to its compiled default
-so a stale or mangled file can never brick audio.
-
-**Default: `0x8080`** — the symmetric baseline MNT documents as the
-safe maximum for summed output. Matches every fixed-hardware board.
-*(Summing both channels above ~`0x100` starts saturating the DAC —
-keep `high + low ≤ 0x100` if you change the ratio.)*
-
-Examples (usable with standard AmigaShell `setenv`):
-
-```
-; Default — symmetric, fixed hardware or desoldered U4.
-setenv ZZ9K_MIX_LEVELS 8080
-
-; Early R1 compensation: boost AHI/MHI ~1.5×, cut Paula ~0.5×.
-setenv ZZ9K_MIX_LEVELS C040
-
-; AHI/MHI only, Paula muted.
-setenv ZZ9K_MIX_LEVELS FF00
-
-; Paula-only listening (rare, but supported).
-setenv ZZ9K_MIX_LEVELS 0080
-```
-
-To persist across reboots, use `setenv SAVE` (or edit `ENVARC:`).
-
-### `ENV:ZZ9000AX-NOLPF` *(AHI only)*
-
-If this variable **exists** (any content, any value), the driver's
-auto-tuned low-pass filter is bypassed and pinned to `23900 Hz`. The
-default behavior sets the LPF cutoff to half the AHI mix frequency,
-which is correct for signal integrity at lower sample rates but can
-feel slightly dull on content that's already oversampled. Set this
-variable only if you know you want flat-response output at every
-mix frequency.
-
-```
-setenv ZZ9000AX-NOLPF 1
-```
+`ENV:ZZ9K_MIX_LEVELS` *(AHI + MHI)* and `ENV:ZZ9000AX-NOLPF`
+*(AHI only)* were **removed**. Balance intent now flows through the
+firmware control plane's operator baseline and LPF intent through the
+active scene (see
+[Firmware-authoritative control plane](#firmware-authoritative-control-plane)).
+Neither driver reads either variable; if `ZZ9K_MIX_LEVELS` is still
+set, the drivers print a one-line load-time notice on the debug
+channel (Sashimi/serial) that it is ignored. Delete the stale
+variables (`Unsetenv ZZ9K_MIX_LEVELS`, `Unsetenv ZZ9000AX-NOLPF`,
+plus their `ENVARC:` copies if you used `setenv SAVE`) when updating.
 
 ### `ENV:ZZ9K_INT2` *(AHI + MHI)*
 
@@ -152,8 +146,8 @@ so remove the ENV variable when migrating.
 
 | Symptom                                               | Likely cause / fix |
 |-------------------------------------------------------|---------------------|
-| Paula much louder than MP3/MOD through the card       | Early R1 (U4 opamp). Desolder U4, or `setenv ZZ9K_MIX_LEVELS C040`. |
-| Muffled / dull AHI output at low sample rates         | Expected with auto-LPF on. Set `ENV:ZZ9000AX-NOLPF` to pin the filter at 23.9 kHz. |
+| Paula much louder than MP3/MOD through the card       | Early R1 (U4 opamp). Desolder U4, or — on matched firmware — set the operator baseline in ZZTop's Audio window. |
+| Muffled / dull AHI output at low sample rates         | LPF is scene-owned. Raise the scene LPF cutoff in ZZTop's Audio window (the old `ENV:ZZ9000AX-NOLPF` bypass was removed). |
 | "Can't allocate! Hardware already used by MHI/AHI."   | The other driver owns the card. Close whatever MHI/AHI app is running first. |
 | Audio device fails to open on specific accelerators   | INT6 conflict. `setenv ZZ9K_INT2 1` to move both drivers to INT2. |
 | Short random burst before playback on first app open  | Fixed in recent commits (driver now silences the DAC at allocate time). Update to the latest `zz9000ax.audio`. |
@@ -164,8 +158,8 @@ so remove the ENV variable when migrating.
 
 - MNT community forum, **"ZZ9000AX mixing levels register"** —
   <https://community.mnt.re/t/zz9000ax-mixing-levels-register/1011>
-  (documents the undocumented `AP_DSP_SET_VOLUMES` parameter that
-  `ZZ9K_MIX_LEVELS` writes).
+  (documents the undocumented `AP_DSP_SET_VOLUMES` parameter the
+  removed `ZZ9K_MIX_LEVELS` override used to write).
 - AHI developer documentation — <https://aminet.net/package/dev/misc/ahidev>
 - MHI SDK — shipped with the MHI-aware player's source; the public
   interface definitions this library implements live in `mhi/mhilib.h`
