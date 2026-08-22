@@ -116,7 +116,8 @@ static const char version[] __attribute__((used)) =
 #define AUDGAD_BASE_AX      (8)
 #define AUDGAD_STATUS       (9)
 #define AUDGAD_BTN_SAVE     (10)
-#define AUDGAD_COUNT        (11)
+#define AUDGAD_BTN_RENAME   (11)
+#define AUDGAD_COUNT        (12)
 
 /* Scene-editor window gadgets (sub-window of the Audio window). */
 #define SEGAD_LPF           (0)
@@ -127,6 +128,12 @@ static const char version[] __attribute__((used)) =
 #define SEGAD_STATUS        (14)
 #define SEGAD_BTN_DONE      (15)
 #define SEGAD_COUNT         (16)
+
+/* Scene-rename dialog gadgets (sub-window of the Audio window). */
+#define RNGAD_NAME          (0)
+#define RNGAD_BTN_OK        (1)
+#define RNGAD_BTN_CANCEL    (2)
+#define RNGAD_COUNT         (3)
 
 #define VCAP_RAWKEY_KEYPAD_ENTER 0x43
 #define VCAP_RAWKEY_RETURN       0x44
@@ -178,6 +185,7 @@ static const char version[] __attribute__((used)) =
 #define LABEL_BTN_AUDIO    "Audio..."
 #define LABEL_AUDIO_SCENE  "Scene"
 #define LABEL_BTN_EDITSCN  "Edit Scene..."
+#define LABEL_BTN_RENAME   "Rename..."
 #define LABEL_AUD_OUT_PEAK "Out Peak L/R"
 #define LABEL_AUD_OUT_CNT  "Out Clip/Urun"
 #define LABEL_AUD_IN_PEAK  "In Peak L/R"
@@ -190,6 +198,10 @@ static const char version[] __attribute__((used)) =
 #define LABEL_AUD_VOL      "Volume"
 #define LABEL_AUD_PAN      "Pan"
 #define LABEL_AUD_LPF      "AX Lowpass"
+
+/* Firmware scene-name cap: 8 staged chunks of two chars each. */
+#define ZZTOP_AUDIO_NAME_CHARS   16
+#define ZZTOP_AUDIO_NAME_CHUNKS  8
 
 #define SAMPLE_FWVER       "ABI 255.255"
 #define SAMPLE_TEMP        "999.9"
@@ -2869,11 +2881,19 @@ static int audio_scene_select_call(UWORD scene)
 	return ZZ9K_STATUS_TIMEOUT;
 }
 
-/* One staged parameter plus COMMIT (F3/KTD7): the firmware accumulates
- * the stage and commits the group atomically through its fade path, so
- * a release never writes a half master-chain. */
-static int audio_scene_write_commit(UWORD scene, uint32_t param,
-	uint32_t value)
+/* Scene-name parameter (value = two chars: bits 15..8 first, 7..0
+ * second; 0x0000 terminates). The ABI constant rides the staged-header
+ * refresh from the SDK checkout; keep a value-faithful fallback so
+ * ZZTop builds against either header generation. */
+#ifndef ZZ9K_AUDIO_SCENE_PARAM_NAME
+#define ZZ9K_AUDIO_SCENE_PARAM_NAME 16U
+#endif
+
+/* One staged SCENE_WRITE with explicit flags: the rename path stages
+ * several chunks before asking for the commit (see below); everything
+ * else commits immediately. */
+static int audio_scene_write_stage(UWORD scene, uint32_t param,
+	uint32_t value, uint32_t flags)
 {
 	ZZ9KAudioSceneWritePayload payload;
 	ZZ9KMailboxEntry reply;
@@ -2882,11 +2902,60 @@ static int audio_scene_write_commit(UWORD scene, uint32_t param,
 	zz9k_put_be32(payload.scene, scene);
 	zz9k_put_be32(payload.param, param);
 	zz9k_put_be32(payload.value, value);
-	zz9k_put_be32(payload.flags, ZZ9K_AUDIO_SCENE_WRITE_FLAG_COMMIT);
-	audio_log("write scene=%u param=%u val=%u\n",
-		(unsigned)scene + 1U, (unsigned)param, (unsigned)value);
+	zz9k_put_be32(payload.flags, flags);
+	audio_log("write scene=%u param=%u val=%u flags=%lx\n",
+		(unsigned)scene + 1U, (unsigned)param, (unsigned)value,
+		(unsigned long)flags);
 	return audio_mb_call(ZZ9K_OP_AUDIO_SCENE_WRITE, &payload,
 		sizeof(payload), &reply);
+}
+
+/* One staged parameter plus COMMIT (F3/KTD7): the firmware accumulates
+ * the stage and commits the group atomically through its fade path, so
+ * a release never writes a half master-chain. */
+static int audio_scene_write_commit(UWORD scene, uint32_t param,
+	uint32_t value)
+{
+	return audio_scene_write_stage(scene, param, value,
+		ZZ9K_AUDIO_SCENE_WRITE_FLAG_COMMIT);
+}
+
+/* Scene rename over the staged-write path. The name is eight two-char
+ * chunks, zero-padded to the full eight so every send has the same
+ * shape. A commit consumes the staging draft, and the first NAME chunk
+ * of a fresh draft reopens the name accumulator -- so COMMIT must ride
+ * on the LAST chunk only (committing per chunk would collapse the name
+ * to its final two characters). The leading 0x0000 guard chunk closes
+ * whatever partial name an earlier failed burst left staged, making
+ * retries self-healing. A name-only commit is zero DSP writes, so the
+ * burst applies instantly. Returns the final (committing) call's
+ * status; ZZ9K_STATUS_TIMEOUT means applied-or-coalesced as usual. */
+static int audio_scene_rename_call(UWORD scene, const char *name)
+{
+	size_t len = strlen(name);
+	int st = ZZ9K_STATUS_OK;
+	int i;
+
+	for (i = 0; i <= ZZTOP_AUDIO_NAME_CHUNKS; i++) {
+		uint32_t chunk = 0;
+		uint32_t flags = 0;
+
+		if (i > 0) {
+			size_t p = 2 * (size_t)(i - 1);
+
+			if (p < len)
+				chunk |= (uint32_t)(uint8_t)name[p] << 8;
+			if (p + 1 < len)
+				chunk |= (uint32_t)(uint8_t)name[p + 1];
+		}
+		if (i == ZZTOP_AUDIO_NAME_CHUNKS)
+			flags = ZZ9K_AUDIO_SCENE_WRITE_FLAG_COMMIT;
+		st = audio_scene_write_stage(scene,
+			ZZ9K_AUDIO_SCENE_PARAM_NAME, chunk, flags);
+		if (st != ZZ9K_STATUS_OK && st != ZZ9K_STATUS_TIMEOUT)
+			return st; /* hard error: partial chunks stay staged */
+	}
+	return st;
 }
 
 static BOOL audio_control_state_get(struct zztop_audio_state *out)
@@ -2977,19 +3046,22 @@ struct zztop_audio_scene_ui {
 	UWORD prefactor;
 	UWORD volume;
 	UWORD pan;
+	/* Operator-assigned label; "Scene N" until the first rename.
+	 * NUL-terminated, printable ASCII, firmware cap 16 chars. */
+	char name[ZZTOP_AUDIO_NAME_CHARS + 1];
 };
 
 /* Mirror of the firmware's built-in scene defaults (audio_scene.c):
  * display seed only. Same slot count as ZZCFG_AUDIO_SCENES. */
 static const struct zztop_audio_scene_ui zztop_audio_scene_defaults[8] = {
-	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 50, 100, 50 },
-	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 50, 80, 50 },
-	{ 16000, { 55, 55, 50, 50, 50, 50, 50, 50, 50, 50 }, 50, 75, 50 },
-	{ 18000, { 50, 50, 50, 50, 50, 50, 55, 55, 50, 50 }, 50, 75, 50 },
-	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 60, 70, 50 },
-	{ 12000, { 45, 45, 50, 50, 50, 50, 50, 50, 45, 45 }, 50, 90, 50 },
-	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 55, 75, 50 },
-	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 50, 60, 50 },
+	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 50, 100, 50, "" },
+	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 50, 80, 50, "" },
+	{ 16000, { 55, 55, 50, 50, 50, 50, 50, 50, 50, 50 }, 50, 75, 50, "" },
+	{ 18000, { 50, 50, 50, 50, 50, 50, 55, 55, 50, 50 }, 50, 75, 50, "" },
+	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 60, 70, 50, "" },
+	{ 12000, { 45, 45, 50, 50, 50, 50, 50, 50, 45, 45 }, 50, 90, 50, "" },
+	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 55, 75, 50, "" },
+	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 50, 60, 50, "" },
 };
 
 static struct zztop_audio_scene_ui audio_scenes[ZZCFG_AUDIO_SCENES];
@@ -3000,6 +3072,63 @@ static BOOL audio_ui_seeded = FALSE;
  * "dirty" is card-wide state that outlives the window; only a
  * successful SCENE_SAVE (or a reboot) clears it. */
 static BOOL audio_dirty = FALSE;
+
+static void audio_scene_default_name(char *buf, size_t size, UWORD scene)
+{
+	snprintf(buf, size, "Scene %u", (unsigned)(scene + 1));
+}
+
+/* Reduce operator input to what the firmware accepts: printable
+ * ASCII, trailing spaces trimmed, at most 16 chars. An empty result
+ * makes the caller fall back to the default label. */
+static void audio_scene_name_clean(const char *in, char *out, size_t size)
+{
+	size_t n = 0;
+
+	while (*in && n + 1 < size) {
+		if (*in >= 0x20 && *in <= 0x7e)
+			out[n++] = *in;
+		in++;
+	}
+	out[n] = '\0';
+	while (n > 0 && out[n - 1] == ' ')
+		out[--n] = '\0';
+}
+
+#ifdef ZZCFG_AUDIO_SCENE_NM_CHUNKS
+/* Unpack the CFG's packed name chunks (audio_sceneN_nm1..8) into buf.
+ * Returns FALSE when the file carries no name keys so the caller
+ * keeps the default label; anything non-printable ends the name, so a
+ * hand-edited file cannot seed a bad string. */
+static BOOL audio_scene_name_from_cfg(const struct zzcfg_values *sv,
+	UWORD scene, char *buf)
+{
+	UWORD mask = sv->audio_scene_mask[scene];
+	int n = 0;
+	int k;
+
+	for (k = 0; k < ZZTOP_AUDIO_NAME_CHUNKS &&
+			k < (int)ZZCFG_AUDIO_SCENE_NM_CHUNKS; k++) {
+		UWORD chunk = sv->audio_scene_nm[scene][k];
+		char c1, c2;
+
+		if (!(mask & (UWORD)(1u << (8 + k))) || chunk == 0)
+			break; /* absent key or terminator chunk */
+		c1 = (char)(chunk >> 8);
+		if (c1 < 0x20 || c1 > 0x7e)
+			break;
+		c2 = (char)(chunk & 0xff);
+		buf[n++] = c1;
+		if (c2 == 0)
+			break; /* odd-length name, zero-padded tail */
+		if (c2 < 0x20 || c2 > 0x7e)
+			break;
+		buf[n++] = c2;
+	}
+	buf[n] = '\0';
+	return n > 0;
+}
+#endif
 
 static void audio_seed_editor_state(void)
 {
@@ -3012,6 +3141,9 @@ static void audio_seed_editor_state(void)
 	/* Power-on mixer state written by audio_adau_init. */
 	audio_baseline_paula = 128;
 	audio_baseline_ax = 64;
+	for (i = 0; i < ZZCFG_AUDIO_SCENES; i++)
+		audio_scene_default_name(audio_scenes[i].name,
+			sizeof(audio_scenes[i].name), (UWORD)i);
 
 	/* Overlay the saved CFG exactly like the firmware's cold-boot fold
 	 * (R10): absent keys keep the built-in defaults. settings_cfg_text
@@ -3044,6 +3176,15 @@ static void audio_seed_editor_state(void)
 		}
 		if (mask & (UWORD)(1u << 7))
 			audio_scenes[i].pan = sv.audio_scene_pan[i];
+#ifdef ZZCFG_AUDIO_SCENE_NM_CHUNKS
+		{
+			char nm[ZZTOP_AUDIO_NAME_CHARS + 1];
+
+			if (audio_scene_name_from_cfg(&sv, (UWORD)i, nm))
+				snprintf(audio_scenes[i].name,
+					sizeof(audio_scenes[i].name), "%s", nm);
+		}
+#endif
 	}
 	if (sv.audio_baseline_present) {
 		audio_baseline_paula = sv.audio_baseline >> 8;
@@ -3306,12 +3447,23 @@ static struct Gadget *audio_create_gadgets(struct Gadget **glistptr,
 		GTCY_Labels, audio_scene_labels, GTCY_Active, scene, TAG_END);
 	y += l.row_step;
 
+	/* Edit and Rename share the gadget column (AGAD Done/Cancel
+	 * precedent); the text gadgets below inherit ng_LeftEdge/ng_Width,
+	 * so restore both after the half-width pair. */
 	ng.ng_TopEdge = y;
+	ng.ng_Width = (l.gadget_width - 16) / 2;
 	ng.ng_GadgetID = AUDGAD_BTN_EDIT;
 	ng.ng_GadgetText = (STRPTR)LABEL_BTN_EDITSCN;
 	ng.ng_Flags = PLACETEXT_IN;
 	audgads[AUDGAD_BTN_EDIT] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
 		TAG_END);
+	ng.ng_LeftEdge = l.gadget_left + ng.ng_Width + 16;
+	ng.ng_GadgetID = AUDGAD_BTN_RENAME;
+	ng.ng_GadgetText = (STRPTR)LABEL_BTN_RENAME;
+	audgads[AUDGAD_BTN_RENAME] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		TAG_END);
+	ng.ng_LeftEdge = l.gadget_left;
+	ng.ng_Width = l.gadget_width;
 	ng.ng_Flags = PLACETEXT_LEFT;
 	y += l.row_step + l.section_gap;
 
@@ -3400,6 +3552,16 @@ static struct Gadget *audio_create_gadgets(struct Gadget **glistptr,
 
 static BOOL audio_scene_editor_window(struct Screen *mysc, void *vi,
 	const struct ZZTopLayout *mainlayout, UWORD scene);
+
+static int audio_scene_rename_window(struct Screen *mysc, void *vi,
+	const struct ZZTopLayout *mainlayout, UWORD scene);
+
+enum audio_rename_result {
+	AUDIO_RENAME_CANCELLED = 0,
+	AUDIO_RENAME_COMMITTED,
+	AUDIO_RENAME_COMMITTING, /* final commit timed out: probably done */
+	AUDIO_RENAME_FAILED
+};
 
 static VOID audio_window(struct Screen *mysc, void *vi,
 	const struct ZZTopLayout *mainlayout)
@@ -3572,6 +3734,32 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 							}
 							audio_update_save_gate(win);
 							break;
+						case AUDGAD_BTN_RENAME:
+							switch (audio_scene_rename_window(mysc, vi,
+								mainlayout, scene)) {
+							case AUDIO_RENAME_COMMITTED: {
+								char msg[96];
+
+								snprintf(msg, sizeof(msg),
+									"Scene %u renamed to %s - Save to persist",
+									(unsigned)(scene + 1),
+									audio_scenes[scene].name);
+								audio_set_status(win, msg);
+								break;
+							}
+							case AUDIO_RENAME_COMMITTING:
+								audio_set_status(win,
+									"Rename committing - Save to persist");
+								break;
+							case AUDIO_RENAME_FAILED:
+								audio_set_status(win,
+									"Rename failed (busy) - retry");
+								break;
+							default:
+								break; /* cancelled: keep the status quo */
+							}
+							audio_update_save_gate(win);
+							break;
 						case AUDGAD_BASE_PAULA:
 						case AUDGAD_BASE_AX: {
 							UWORD old_paula = audio_baseline_paula;
@@ -3730,10 +3918,13 @@ static BOOL audio_scene_editor_window(struct Screen *mysc, void *vi,
 	WORD content_right, button_width, y, w, h, i;
 	BOOL done = FALSE;
 	BOOL edited = FALSE;
+	char title[32];
 
+	/* The window carries the operator-assigned name (or the default
+	 * label) so the operator always sees which scene is edited. */
+	snprintf(title, sizeof(title), "Editing %s", sc->name);
 	snprintf(status, sizeof(status),
-		"Editing Scene %u - each control commits on release",
-		(unsigned)(scene + 1));
+		"Editing %s - each control commits on release", sc->name);
 
 	label_width = zztop_max_text_width(
 		zztop_screen ? &zztop_screen->RastPort : NULL, label_samples, 8);
@@ -3851,7 +4042,7 @@ static BOOL audio_scene_editor_window(struct Screen *mysc, void *vi,
 	w = content_right + l.margin_x;
 	h = y + l.gadget_height + (l.margin_y / 2) - l.topborder;
 	win = OpenWindowTags(NULL,
-		WA_Title, "Audio Scene Editor",
+		WA_Title, title,
 		WA_Gadgets, glist, WA_AutoAdjust, TRUE,
 		WA_Width, w, WA_MinWidth, w,
 		WA_InnerHeight, h, WA_MinHeight, h,
@@ -3938,8 +4129,8 @@ static BOOL audio_scene_editor_window(struct Screen *mysc, void *vi,
 						audio_dirty = TRUE;
 						edited = TRUE;
 						snprintf(status, sizeof(status),
-								"%s committed to Scene %u - Save to persist",
-								name, (unsigned)(scene + 1));
+								"%s committed to %s - Save to persist",
+								name, sc->name);
 					} else if (cst == ZZ9K_STATUS_TIMEOUT) {
 						/* Timeout is not rejection: the commit machine
 						 * was mid-step and the reply was slow; the
@@ -3977,6 +4168,184 @@ static BOOL audio_scene_editor_window(struct Screen *mysc, void *vi,
 	CloseWindow(win);
 	FreeGadgets(glist);
 	return edited;
+}
+
+/* Scene rename (sub-window, the editor's idiom): one string gadget
+ * pre-filled with the scene's name, OK/Cancel, Return = OK, Esc or
+ * the close gadget = Cancel. OK sends the whole name as one staged
+ * chunk burst and only then touches the editor seed, so a failed
+ * burst leaves the displayed name truthful. The name reaches
+ * ZZ9000.CFG through the usual Save. */
+static int audio_scene_rename_window(struct Screen *mysc, void *vi,
+	const struct ZZTopLayout *mainlayout, UWORD scene)
+{
+	static CONST_STRPTR label_samples[] = {
+		(CONST_STRPTR)LABEL_AUDIO_SCENE,
+		NULL
+	};
+	static CONST_STRPTR value_samples[] = {
+		(CONST_STRPTR)"WWWWWWWWWWWWWWWW",
+		NULL
+	};
+	struct ZZTopLayout l = *mainlayout;
+	struct NewGadget ng;
+	struct Gadget *glist = NULL;
+	struct Gadget *gad;
+	struct Gadget *rngads[RNGAD_COUNT];
+	struct Window *win;
+	struct IntuiMessage *imsg;
+	struct StringInfo *si;
+	struct zztop_audio_scene_ui *sc = &audio_scenes[scene];
+	ULONG imsg_class;
+	UWORD imsg_code;
+	WORD label_width, value_width, button_width, button_gap, y, w, h, i;
+	BOOL done = FALSE;
+	char entry[ZZTOP_AUDIO_NAME_CHARS + 1];
+	int result = AUDIO_RENAME_CANCELLED;
+
+	label_width = zztop_max_text_width(
+		zztop_screen ? &zztop_screen->RastPort : NULL, label_samples, 8);
+	value_width = zztop_max_text_width(
+		zztop_screen ? &zztop_screen->RastPort : NULL, value_samples, 8);
+	l.gadget_left = l.margin_x + label_width + l.label_gap;
+	l.gadget_width = zztop_max_word(152, value_width + 24);
+	button_width = 88;
+	button_gap = 16;
+
+	gad = CreateContext(&glist);
+	for (i = 0; i < RNGAD_COUNT; i++) rngads[i] = NULL;
+	y = l.topborder + l.margin_y;
+
+	ng.ng_LeftEdge = l.gadget_left;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = l.gadget_width;
+	ng.ng_Height = l.gadget_height;
+	ng.ng_TextAttr = l.text_attr;
+	ng.ng_VisualInfo = vi;
+	ng.ng_Flags = PLACETEXT_LEFT;
+	ng.ng_GadgetID = RNGAD_NAME;
+	ng.ng_GadgetText = (STRPTR)LABEL_AUDIO_SCENE;
+	/* MaxChars includes the trailing NUL (settings MAC precedent). */
+	rngads[RNGAD_NAME] = gad = CreateGadget(STRING_KIND, gad, &ng,
+		GTST_MaxChars, ZZTOP_AUDIO_NAME_CHARS + 1,
+		GTST_String, sc->name,
+		TAG_END);
+	y += l.row_step + l.section_gap;
+
+	ng.ng_TopEdge = y;
+	ng.ng_Width = button_width;
+	ng.ng_GadgetID = RNGAD_BTN_OK;
+	ng.ng_GadgetText = (STRPTR)"OK";
+	ng.ng_Flags = PLACETEXT_IN;
+	rngads[RNGAD_BTN_OK] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		TAG_END);
+	ng.ng_LeftEdge = l.gadget_left + button_width + button_gap;
+	ng.ng_GadgetID = RNGAD_BTN_CANCEL;
+	ng.ng_GadgetText = (STRPTR)"Cancel";
+	rngads[RNGAD_BTN_CANCEL] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		TAG_END);
+	y += l.row_step;
+
+	for (i = 0; i < RNGAD_COUNT; i++) {
+		if (!rngads[i]) {
+			if (glist) FreeGadgets(glist);
+			errorMessage("Rename Scene: gadget creation failed");
+			return AUDIO_RENAME_CANCELLED;
+		}
+	}
+
+	w = zztop_max_word(l.gadget_left + l.gadget_width + l.margin_x,
+		l.gadget_left + 2 * button_width + button_gap + l.margin_x);
+	h = y + l.gadget_height + (l.margin_y / 2) - l.topborder;
+	win = OpenWindowTags(NULL,
+		WA_Title, "Rename Scene",
+		WA_Gadgets, glist, WA_AutoAdjust, TRUE,
+		WA_Width, w, WA_MinWidth, w,
+		WA_InnerHeight, h, WA_MinHeight, h,
+		WA_DragBar, TRUE, WA_DepthGadget, TRUE,
+		WA_Activate, TRUE, WA_CloseGadget, TRUE,
+		WA_SizeGadget, FALSE, WA_SimpleRefresh, TRUE,
+		WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
+			IDCMP_RAWKEY | BUTTONIDCMP | STRINGIDCMP,
+		WA_PubScreen, mysc,
+		TAG_END);
+	if (!win) {
+		FreeGadgets(glist);
+		errorMessage("Rename Scene: OpenWindow() failed");
+		return AUDIO_RENAME_CANCELLED;
+	}
+
+	ActivateGadget(rngads[RNGAD_NAME], win, NULL);
+	GT_RefreshWindow(win, NULL);
+	while (!done) {
+		Wait(1UL << win->UserPort->mp_SigBit);
+
+		while ((!done) && (imsg = GT_GetIMsg(win->UserPort))) {
+			BOOL accept = FALSE;
+
+			gad = (struct Gadget *)imsg->IAddress;
+			imsg_class = imsg->Class;
+			imsg_code = imsg->Code;
+			GT_ReplyIMsg(imsg);
+			audio_log("rename msg class=%08lx code=%ld\n",
+				(unsigned long)imsg_class, (long)imsg_code);
+
+			if (imsg_class == IDCMP_CLOSEWINDOW) {
+				done = TRUE;
+			} else if (imsg_class == IDCMP_REFRESHWINDOW) {
+				GT_BeginRefresh(win);
+				GT_EndRefresh(win, TRUE);
+			} else if (imsg_class == IDCMP_RAWKEY &&
+				imsg_code == VCAP_RAWKEY_ESCAPE) {
+				done = TRUE;
+			} else if (imsg_class == IDCMP_RAWKEY &&
+				(imsg_code == VCAP_RAWKEY_RETURN ||
+					imsg_code == VCAP_RAWKEY_KEYPAD_ENTER)) {
+				accept = TRUE;
+			} else if (imsg_class == IDCMP_GADGETUP && gad) {
+				if (gad->GadgetID == RNGAD_BTN_CANCEL) {
+					done = TRUE;
+				} else if (gad->GadgetID == RNGAD_BTN_OK ||
+					gad->GadgetID == RNGAD_NAME) {
+					/* Return in the string gadget releases it. */
+					accept = TRUE;
+				}
+			}
+
+			if (accept) {
+				int st;
+
+				si = (struct StringInfo *)
+					rngads[RNGAD_NAME]->SpecialInfo;
+				audio_scene_name_clean((const char *)si->Buffer,
+					entry, sizeof(entry));
+				if (!entry[0])
+					audio_scene_default_name(entry, sizeof(entry),
+						scene);
+				st = audio_scene_rename_call(scene, entry);
+				if (st == ZZ9K_STATUS_OK ||
+						st == ZZ9K_STATUS_TIMEOUT) {
+					/* Timeout = commit machine mid-step: the name
+					 * applied or coalesced; keep it, no snap-back. */
+					snprintf(sc->name, sizeof(sc->name), "%s", entry);
+					audio_dirty = TRUE;
+					result = (st == ZZ9K_STATUS_OK)
+						? AUDIO_RENAME_COMMITTED
+						: AUDIO_RENAME_COMMITTING;
+				} else {
+					/* Hard error: re-send the previous name so the
+					 * partial chunks cannot ride a later commit. */
+					audio_scene_rename_call(scene, sc->name);
+					result = AUDIO_RENAME_FAILED;
+				}
+				done = TRUE;
+			}
+		}
+	}
+
+	CloseWindow(win);
+	FreeGadgets(glist);
+	return result;
 }
 
 VOID handleGadgetEvent(struct Window *win, struct Gadget *gad, ULONG code)

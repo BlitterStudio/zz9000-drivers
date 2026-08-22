@@ -414,6 +414,48 @@ int main(void)
           strstr(text, "audio_scene2_pan") == NULL,
           "partial scene grows no sibling keys on save");
 
+    /* Scene names (firmware nm keys): per-chunk presence like every
+     * other audio key, so a partial name group round-trips exactly as
+     * parsed -- one Settings save never zero-pads or drops chunks. */
+    defaults(&b);
+    {
+        const char *partial_name = "audio_scene2_nm1 = 21347\n";
+        zzcfg_parse_text(partial_name, (UWORD)strlen(partial_name), &b);
+    }
+    check(b.audio_scene_mask[2] == 0x0100 && b.audio_scene_nm[2][0] == 21347,
+          "single nm1 key parses with its own mask bit");
+    n = zzcfg_generate(&b, text, sizeof(text));
+    check(has_exact_line(text, "audio_scene2_nm1 = 21347"),
+          "single nm1 key regenerates exactly");
+    check(strstr(text, "audio_scene2_nm2") == NULL &&
+          strstr(text, "audio_scene2_lpf") == NULL &&
+          strstr(text, "audio_scene0_") == NULL,
+          "partial name grows no sibling keys on save");
+
+    defaults(&b);
+    {
+        /* "Tag 9" as chunks: 'T''a' 'g'' ' '9'0 terminator. */
+        const char *full_name =
+            "audio_scene5_nm1 = 21601\n"
+            "audio_scene5_nm2 = 26400\n"
+            "audio_scene5_nm3 = 14592\n"
+            "audio_scene5_nm4 = 0\n";
+        zzcfg_parse_text(full_name, (UWORD)strlen(full_name), &b);
+    }
+    check(b.audio_scene_mask[5] == 0x0f00 &&
+          b.audio_scene_nm[5][0] == 21601 &&
+          b.audio_scene_nm[5][1] == 26400 &&
+          b.audio_scene_nm[5][2] == 14592,
+          "name chunk group parses packed");
+    n = zzcfg_generate(&b, text, sizeof(text));
+    check(has_exact_line(text, "audio_scene5_nm1 = 21601") &&
+          has_exact_line(text, "audio_scene5_nm2 = 26400") &&
+          has_exact_line(text, "audio_scene5_nm3 = 14592") &&
+          has_exact_line(text, "audio_scene5_nm4 = 0"),
+          "name chunk group regenerates exactly");
+    check(strstr(text, "audio_scene5_nm5") == NULL,
+          "absent trailing name chunks stay absent");
+
     defaults(&b);
     {
         const char *junk = "audio_active = 8\naudio_scene5_eq01 = x\n";

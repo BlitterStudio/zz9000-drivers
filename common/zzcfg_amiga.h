@@ -74,6 +74,12 @@ struct zzcfg_values {
      * (audio_scene_mask bits match the firmware layout) so a Settings
      * save carries through exactly the audio keys the file had. */
 #define ZZCFG_AUDIO_SCENES 8
+    /* Name chunks per scene: nm1..nm8, each packing two ASCII label
+     * characters as c1*256+c2 (0 = terminator). Bits 8..15 of
+     * audio_scene_mask are the per-chunk presence, so a partial name
+     * group round-trips exactly as parsed. Defined beside the field
+     * so callers can feature-test with #ifdef. */
+#define ZZCFG_AUDIO_SCENE_NM_CHUNKS 8
     UWORD audio_active;
     UWORD audio_active_present;
     UWORD audio_baseline;
@@ -82,6 +88,7 @@ struct zzcfg_values {
     UWORD audio_scene_eq[ZZCFG_AUDIO_SCENES][5];
     UWORD audio_scene_out[ZZCFG_AUDIO_SCENES];
     UWORD audio_scene_pan[ZZCFG_AUDIO_SCENES];
+    UWORD audio_scene_nm[ZZCFG_AUDIO_SCENES][ZZCFG_AUDIO_SCENE_NM_CHUNKS];
     UWORD audio_scene_mask[ZZCFG_AUDIO_SCENES]; /* bit per key */
  };
 

@@ -62,6 +62,17 @@ videocap_shres
 EOF
 comm -23 "$work/parser" "$work/legacy" > "$work/canonical"
 
+# The scene-name keys are 64 per-scene-per-chunk variants of one grammar;
+# they cannot all fit the 4 KiB sample parse budget (a larger sample would
+# have its audio tail ignored at boot). The sample documents the grammar
+# with scene 0's leading chunks; the rest are exempt from the SAMPLE
+# comparison only. README and the editor must still carry every key, and
+# the exemption is keyed to the exact grammar (audio_sceneN_nmK), so a
+# missing lpf/eq/out/pan key is still caught.
+sed -e '/^audio_scene[1-7]_nm[1-8]$/d' \
+    -e '/^audio_scene0_nm[5-8]$/d' \
+    "$work/canonical" > "$work/sample_expected"
+
 # The sample documents a key as a commented-out assignment.
 sed -n 's/^#\{0,1\}\([a-z_0-9]\{1,\}\) = .*/\1/p' "$sample" | sort -u > "$work/sample"
 
@@ -108,7 +119,7 @@ report() {
 }
 
 echo "check-cfg-keys: firmware parser = $(wc -l < "$work/parser" | tr -d ' ') key(s)"
-report "the sample ZZ9000.CFG" "$work/canonical" "$work/sample"
+report "the sample ZZ9000.CFG" "$work/sample_expected" "$work/sample"
 report "the firmware README table" "$work/canonical" "$work/readme"
 report "ZZTop's editor (zzcfg_amiga.c)" "$work/parser" "$work/editor"
 
