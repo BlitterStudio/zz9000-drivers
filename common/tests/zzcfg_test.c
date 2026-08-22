@@ -396,6 +396,24 @@ int main(void)
           a.audio_scene_mask[2] == 0xff && a.audio_scene_out[2] == 6999,
           "generated audio block reparses identically");
 
+    /* A hand-edited partial scene stays partial: only present keys are
+     * regenerated, so one Settings save never zero-fills the absent
+     * fields (the firmware would fold them into a silent scene). */
+    defaults(&b);
+    {
+        const char *partial = "audio_scene2_lpf = 16000\n";
+        zzcfg_parse_text(partial, (UWORD)strlen(partial), &b);
+    }
+    check(b.audio_scene_mask[2] == 0x01 && b.audio_scene_lpf[2] == 16000,
+          "partial scene parses as lpf-only");
+    n = zzcfg_generate(&b, text, sizeof(text));
+    check(has_exact_line(text, "audio_scene2_lpf = 16000"),
+          "partial scene regenerates its one key");
+    check(strstr(text, "audio_scene2_eq") == NULL &&
+          strstr(text, "audio_scene2_out") == NULL &&
+          strstr(text, "audio_scene2_pan") == NULL,
+          "partial scene grows no sibling keys on save");
+
     defaults(&b);
     {
         const char *junk = "audio_active = 8\naudio_scene5_eq01 = x\n";

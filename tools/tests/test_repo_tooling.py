@@ -302,14 +302,16 @@ class RepoToolingTests(unittest.TestCase):
 
     def test_ci_audio_jobs_use_build_scripts(self):
         ci = self.read(".github/workflows/ci.yml")
-        # mhi/build.sh and ahi/driver/build.sh stage zz9k headers (cloning
-        # the SDK at the pinned sdk/SDK_REF when no sibling checkout exists)
-        # before re-execing into docker themselves, so CI calls both
-        # host-side.
+        # mhi/build.sh, ahi/driver/build.sh and ZZTop/build-gcc.sh stage
+        # zz9k headers (via tools/stage-zz9k-headers.sh, cloning the SDK
+        # at the pinned sdk/SDK_REF when no sibling checkout exists)
+        # before re-execing into docker themselves, so CI calls all
+        # three host-side.
         self.assertIn("mhi/build.sh", ci)
         self.assertNotIn('-w /src/mhi "$AMIGA_IMAGE" ./build.sh', ci)
         self.assertIn("ahi/driver/build.sh", ci)
         self.assertNotIn('-w /src/ahi/driver "$AMIGA_IMAGE" ./build.sh', ci)
+        self.assertIn("ZZTop/build-gcc.sh", ci)
         self.assertIn(
             '-w /src/ahi/duplextest "$AMIGA_IMAGE" ./build.sh', ci
         )
@@ -341,6 +343,7 @@ class RepoToolingTests(unittest.TestCase):
             "tools/package-local.sh",
             "tools/check-release.sh",
             "tools/check-quality.sh",
+            "tools/stage-zz9k-headers.sh",
             "rtg/build.sh",
             "net/build.sh",
             "usb-poseidon/build.sh",
@@ -507,6 +510,7 @@ class RepoToolingTests(unittest.TestCase):
         self.assertNotIn("read_mix_levels_env", ahi)
         self.assertNotIn("ZZ_AX_NOLPF_ENV", ahi)
         self.assertNotIn("ZZ_AX_AP_DSP_SET_VOLUMES", ahi)
+        self.assertNotIn("ZZ_AX_AP_DSP_SET_LOWPASS", ahi)
         alloc = ahi[ahi.index("intAHIsub_AllocAudio"):ahi.index("intAHIsub_FreeAudio")]
         self.assertNotIn("write_audio_param(hw_addr, 9", alloc)
         self.assertNotIn("lpf_freq", alloc)
@@ -516,6 +520,10 @@ class RepoToolingTests(unittest.TestCase):
         self.assertNotIn("read_mix_levels_env", mhi)
         self.assertNotIn("ZZ_AX_AP_DSP_SET_VOLUMES", mhi)
         self.assertNotIn("ZZ_AX_AP_DSP_SET_LOWPASS", mhi)
+        mhi_alloc = mhi[
+            mhi.index("APTR i_MHIAllocDecoder"):mhi.index("void i_MHIFreeDecoder")
+        ]
+        self.assertNotIn("setAudioParam", mhi_alloc)
         play = mhi[mhi.index("void i_MHIPlay"):mhi.index("void i_MHIStop")]
         self.assertNotIn("setAudioParam", play)
         release = mhi[
@@ -526,8 +534,20 @@ class RepoToolingTests(unittest.TestCase):
         # Both drivers gate on the capability and submit the trim.
         for source in (ahi, mhi):
             self.assertIn("ZZ9K_CAP_AUDIO_CONTROL", source)
+            self.assertIn("(caps.capability_bits & ZZ9K_CAP_AUDIO_CONTROL)",
+                          source)
+            self.assertIn("submit_source_trim()", source)
             self.assertIn("ZZ9K_OP_AUDIO_TRIM_SUBMIT", source)
             self.assertIn("ZZ9K_AUDIO_BALANCE_NEUTRAL", source)
+
+        # The per-consumer build-script gates fail fast when the staged
+        # SDK predates the control-plane ABI.
+        self.assertIn("ZZ9K_OP_AUDIO_TRIM_SUBMIT",
+                      self.read("ahi/driver/build.sh"))
+        self.assertIn("ZZ9K_OP_AUDIO_TRIM_SUBMIT",
+                      self.read("mhi/build.sh"))
+        self.assertIn("ZZ9K_OP_AUDIO_SCENE_SELECT",
+                      self.read("ZZTop/build-gcc.sh"))
 
     def test_ahi_initializes_period_size_before_enabling_interrupt(self):
         source = self.read("ahi/driver/zz9000ax-ahi.c")

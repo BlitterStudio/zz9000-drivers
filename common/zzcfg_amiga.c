@@ -542,26 +542,29 @@ static int zzcfg_append_audio(const struct zzcfg_values *v, char *out,
     off += n;
 
     for (i = 0; i < ZZCFG_AUDIO_SCENES; i++) {
-        if (!v->audio_scene_mask[i]) continue;
-        n = snprintf(out + off, outsz - (UWORD)off,
-            "audio_scene%d_lpf = %u\n"
-            "audio_scene%d_eq01 = %u\n"
-            "audio_scene%d_eq23 = %u\n"
-            "audio_scene%d_eq45 = %u\n"
-            "audio_scene%d_eq67 = %u\n"
-            "audio_scene%d_eq89 = %u\n"
-            "audio_scene%d_out = %u\n"
-            "audio_scene%d_pan = %u\n",
-            i, (unsigned)v->audio_scene_lpf[i],
-            i, (unsigned)v->audio_scene_eq[i][0],
-            i, (unsigned)v->audio_scene_eq[i][1],
-            i, (unsigned)v->audio_scene_eq[i][2],
-            i, (unsigned)v->audio_scene_eq[i][3],
-            i, (unsigned)v->audio_scene_eq[i][4],
-            i, (unsigned)v->audio_scene_out[i],
-            i, (unsigned)v->audio_scene_pan[i]);
-        if (n < 0 || (UWORD)(off + n) >= outsz) return -1;
-        off += n;
+        /* Mirror the parse side (zzcfg_audio_scene_key): a key is
+         * emitted only when its mask bit is set, so a hand-edited
+         * partial scene never grows zero-filled siblings on save. */
+        const struct { const char *name; unsigned value; } fields[] = {
+            { "lpf",  (unsigned)v->audio_scene_lpf[i] },
+            { "eq01", (unsigned)v->audio_scene_eq[i][0] },
+            { "eq23", (unsigned)v->audio_scene_eq[i][1] },
+            { "eq45", (unsigned)v->audio_scene_eq[i][2] },
+            { "eq67", (unsigned)v->audio_scene_eq[i][3] },
+            { "eq89", (unsigned)v->audio_scene_eq[i][4] },
+            { "out",  (unsigned)v->audio_scene_out[i] },
+            { "pan",  (unsigned)v->audio_scene_pan[i] }
+        };
+        int f;
+
+        for (f = 0; f < 8; f++) {
+            if (!(v->audio_scene_mask[i] & (UWORD)(1u << f))) continue;
+            n = snprintf(out + off, outsz - (UWORD)off,
+                "audio_scene%d_%s = %u\n",
+                i, fields[f].name, fields[f].value);
+            if (n < 0 || (UWORD)(off + n) >= outsz) return -1;
+            off += n;
+        }
     }
     return off;
 }

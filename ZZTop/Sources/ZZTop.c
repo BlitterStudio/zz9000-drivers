@@ -259,7 +259,6 @@ struct ZZTopLayout {
 	WORD gadget_height;
 	WORD row_step;
 	WORD section_gap;
-	WORD slider_step;
 	WORD control_step;
 	WORD button_width;
 	WORD button_col2;
@@ -434,9 +433,6 @@ static void zztop_set_vertical_metrics(struct ZZTopLayout *layout, WORD font_y,
 	layout->section_gap = compact
 		? zztop_max_word(2, font_y / 4)
 		: zztop_max_word(5, font_y / 2);
-	layout->slider_step = layout->gadget_height + font_y + (compact
-		? zztop_max_word(6, font_y / 2)
-		: zztop_max_word(13, (font_y / 2) + 8));
 	layout->control_step = layout->row_step + layout->section_gap;
 }
 
@@ -2982,7 +2978,7 @@ static void audio_seed_editor_state(void)
 	}
 }
 
-static struct Gadget *agads[AUDGAD_COUNT];
+static struct Gadget *audgads[AUDGAD_COUNT];
 static char audio_status_buf[96];
 
 static void audio_set_status(struct Window *win, const char *text)
@@ -2991,15 +2987,15 @@ static void audio_set_status(struct Window *win, const char *text)
 	if (text != audio_status_buf) {
 		snprintf(audio_status_buf, sizeof(audio_status_buf), "%s", text);
 	}
-	if (win && agads[AUDGAD_STATUS]) {
-		GT_SetGadgetAttrs(agads[AUDGAD_STATUS], win, NULL,
+	if (win && audgads[AUDGAD_STATUS]) {
+		GT_SetGadgetAttrs(audgads[AUDGAD_STATUS], win, NULL,
 			GTTX_Text, audio_status_buf, TAG_END);
 	}
 }
 
 static void audio_update_save_gate(struct Window *win)
 {
-	GT_SetGadgetAttrs(agads[AUDGAD_BTN_SAVE], win, NULL,
+	GT_SetGadgetAttrs(audgads[AUDGAD_BTN_SAVE], win, NULL,
 		GA_Disabled, !audio_dirty, TAG_END);
 }
 
@@ -3108,12 +3104,12 @@ static void audio_refresh_meters(struct Window *win)
 
 	if (win) {
 		for (d = 0; d < 2; d++) {
-			GT_SetGadgetAttrs(agads[peak_gads[d]], win, NULL,
+			GT_SetGadgetAttrs(audgads[peak_gads[d]], win, NULL,
 				GTTX_Text, audio_peak_bufs[d], TAG_END);
-			GT_SetGadgetAttrs(agads[counts_gads[d]], win, NULL,
+			GT_SetGadgetAttrs(audgads[counts_gads[d]], win, NULL,
 				GTTX_Text, audio_counts_bufs[d], TAG_END);
 		}
-		GT_SetGadgetAttrs(agads[AUDGAD_GAIN_RED], win, NULL,
+		GT_SetGadgetAttrs(audgads[AUDGAD_GAIN_RED], win, NULL,
 			GTTX_Text, audio_gr_buf, TAG_END);
 	}
 }
@@ -3201,7 +3197,7 @@ static struct Gadget *audio_create_gadgets(struct Gadget **glistptr,
 	content_right = l.gadget_left + l.gadget_width;
 
 	gad = CreateContext(glistptr);
-	for (i = 0; i < AUDGAD_COUNT; i++) agads[i] = NULL;
+	for (i = 0; i < AUDGAD_COUNT; i++) audgads[i] = NULL;
 
 	y = l.topborder + l.margin_y;
 
@@ -3215,7 +3211,7 @@ static struct Gadget *audio_create_gadgets(struct Gadget **glistptr,
 
 	ng.ng_GadgetID = AUDGAD_SCENE;
 	ng.ng_GadgetText = (STRPTR)LABEL_AUDIO_SCENE;
-	agads[AUDGAD_SCENE] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+	audgads[AUDGAD_SCENE] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
 		GTCY_Labels, audio_scene_labels, GTCY_Active, scene, TAG_END);
 	y += l.row_step;
 
@@ -3223,33 +3219,33 @@ static struct Gadget *audio_create_gadgets(struct Gadget **glistptr,
 	ng.ng_GadgetID = AUDGAD_BTN_EDIT;
 	ng.ng_GadgetText = (STRPTR)LABEL_BTN_EDITSCN;
 	ng.ng_Flags = PLACETEXT_IN;
-	agads[AUDGAD_BTN_EDIT] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+	audgads[AUDGAD_BTN_EDIT] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
 		TAG_END);
 	ng.ng_Flags = PLACETEXT_LEFT;
 	y += l.row_step + l.section_gap;
 
 	ng.ng_TopEdge = y;
-	agads[AUDGAD_OUT_PEAK] = gad = audio_create_text(gad, &ng,
+	audgads[AUDGAD_OUT_PEAK] = gad = audio_create_text(gad, &ng,
 		AUDGAD_OUT_PEAK, (STRPTR)LABEL_AUD_OUT_PEAK, "- / - dB");
 	y += l.row_step;
 
 	ng.ng_TopEdge = y;
-	agads[AUDGAD_OUT_COUNTS] = gad = audio_create_text(gad, &ng,
+	audgads[AUDGAD_OUT_COUNTS] = gad = audio_create_text(gad, &ng,
 		AUDGAD_OUT_COUNTS, (STRPTR)LABEL_AUD_OUT_CNT, "- / -");
 	y += l.row_step;
 
 	ng.ng_TopEdge = y;
-	agads[AUDGAD_IN_PEAK] = gad = audio_create_text(gad, &ng,
+	audgads[AUDGAD_IN_PEAK] = gad = audio_create_text(gad, &ng,
 		AUDGAD_IN_PEAK, (STRPTR)LABEL_AUD_IN_PEAK, "- / - dB");
 	y += l.row_step;
 
 	ng.ng_TopEdge = y;
-	agads[AUDGAD_IN_COUNTS] = gad = audio_create_text(gad, &ng,
+	audgads[AUDGAD_IN_COUNTS] = gad = audio_create_text(gad, &ng,
 		AUDGAD_IN_COUNTS, (STRPTR)LABEL_AUD_IN_CNT, "- / -");
 	y += l.row_step;
 
 	ng.ng_TopEdge = y;
-	agads[AUDGAD_GAIN_RED] = gad = audio_create_text(gad, &ng,
+	audgads[AUDGAD_GAIN_RED] = gad = audio_create_text(gad, &ng,
 		AUDGAD_GAIN_RED, (STRPTR)LABEL_AUD_GR, "-");
 	y += l.row_step + l.section_gap;
 
@@ -3260,7 +3256,7 @@ static struct Gadget *audio_create_gadgets(struct Gadget **glistptr,
 	ng.ng_Width = l.gadget_width - 56;
 	ng.ng_GadgetID = AUDGAD_BASE_PAULA;
 	ng.ng_GadgetText = (STRPTR)LABEL_AUD_PAULA;
-	agads[AUDGAD_BASE_PAULA] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
+	audgads[AUDGAD_BASE_PAULA] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
 		GTSL_Min, 0, GTSL_Max, ZZTOP_AUDIO_LEVEL_MAX,
 		GTSL_Level, audio_baseline_paula,
 		GTSL_LevelFormat, (STRPTR)"%ld", GTSL_MaxLevelLen, 4,
@@ -3271,7 +3267,7 @@ static struct Gadget *audio_create_gadgets(struct Gadget **glistptr,
 	ng.ng_TopEdge = y;
 	ng.ng_GadgetID = AUDGAD_BASE_AX;
 	ng.ng_GadgetText = (STRPTR)LABEL_AUD_AX;
-	agads[AUDGAD_BASE_AX] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
+	audgads[AUDGAD_BASE_AX] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
 		GTSL_Min, 0, GTSL_Max, ZZTOP_AUDIO_LEVEL_MAX,
 		GTSL_Level, audio_baseline_ax,
 		GTSL_LevelFormat, (STRPTR)"%ld", GTSL_MaxLevelLen, 4,
@@ -3286,7 +3282,7 @@ static struct Gadget *audio_create_gadgets(struct Gadget **glistptr,
 	ng.ng_Width = content_right - l.margin_x;
 	ng.ng_GadgetID = AUDGAD_STATUS;
 	ng.ng_GadgetText = NULL;
-	agads[AUDGAD_STATUS] = gad = CreateGadget(TEXT_KIND, gad, &ng,
+	audgads[AUDGAD_STATUS] = gad = CreateGadget(TEXT_KIND, gad, &ng,
 		GTTX_Text, audio_status_buf, GTTX_Border, TRUE, TAG_END);
 	y += l.row_step + l.section_gap;
 
@@ -3296,7 +3292,7 @@ static struct Gadget *audio_create_gadgets(struct Gadget **glistptr,
 	ng.ng_GadgetID = AUDGAD_BTN_SAVE;
 	ng.ng_GadgetText = (STRPTR)LABEL_BTN_SAVE;
 	ng.ng_Flags = PLACETEXT_IN;
-	agads[AUDGAD_BTN_SAVE] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+	audgads[AUDGAD_BTN_SAVE] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
 		GA_Disabled, TRUE, TAG_END);
 	y += l.row_step;
 
@@ -3305,7 +3301,7 @@ static struct Gadget *audio_create_gadgets(struct Gadget **glistptr,
 	*out_h = y + l.gadget_height + (l.margin_y / 2) - l.topborder;
 
 	for (i = 0; i < AUDGAD_COUNT; i++) {
-		if (!agads[i]) return NULL;
+		if (!audgads[i]) return NULL;
 	}
 
 	return gad;
@@ -3409,15 +3405,15 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 		snprintf(audio_peak_bufs[1], sizeof(audio_peak_bufs[1]), "n/a");
 		snprintf(audio_counts_bufs[1], sizeof(audio_counts_bufs[1]), "n/a");
 		snprintf(audio_gr_buf, sizeof(audio_gr_buf), "n/a");
-		GT_SetGadgetAttrs(agads[AUDGAD_OUT_PEAK], win, NULL,
+		GT_SetGadgetAttrs(audgads[AUDGAD_OUT_PEAK], win, NULL,
 			GTTX_Text, audio_peak_bufs[0], TAG_END);
-		GT_SetGadgetAttrs(agads[AUDGAD_OUT_COUNTS], win, NULL,
+		GT_SetGadgetAttrs(audgads[AUDGAD_OUT_COUNTS], win, NULL,
 			GTTX_Text, audio_counts_bufs[0], TAG_END);
-		GT_SetGadgetAttrs(agads[AUDGAD_IN_PEAK], win, NULL,
+		GT_SetGadgetAttrs(audgads[AUDGAD_IN_PEAK], win, NULL,
 			GTTX_Text, audio_peak_bufs[1], TAG_END);
-		GT_SetGadgetAttrs(agads[AUDGAD_IN_COUNTS], win, NULL,
+		GT_SetGadgetAttrs(audgads[AUDGAD_IN_COUNTS], win, NULL,
 			GTTX_Text, audio_counts_bufs[1], TAG_END);
-		GT_SetGadgetAttrs(agads[AUDGAD_GAIN_RED], win, NULL,
+		GT_SetGadgetAttrs(audgads[AUDGAD_GAIN_RED], win, NULL,
 			GTTX_Text, audio_gr_buf, TAG_END);
 	}
 
@@ -3456,7 +3452,7 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 								audio_set_status(win,
 									"Scene switched - Save to persist across reboot");
 							} else {
-								GT_SetGadgetAttrs(agads[AUDGAD_SCENE],
+								GT_SetGadgetAttrs(audgads[AUDGAD_SCENE],
 									win, NULL, GTCY_Active, scene, TAG_END);
 								audio_set_status(win,
 									"Scene switch failed (busy) - retry");
@@ -3472,26 +3468,54 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 							audio_update_save_gate(win);
 							break;
 						case AUDGAD_BASE_PAULA:
-						case AUDGAD_BASE_AX:
+						case AUDGAD_BASE_AX: {
+							UWORD old_paula = audio_baseline_paula;
+							UWORD old_ax = audio_baseline_ax;
+							UWORD new_paula = old_paula;
+							UWORD new_ax = old_ax;
+
 							if (gad->GadgetID == AUDGAD_BASE_PAULA)
-								audio_baseline_paula = imsgCode;
+								new_paula = (UWORD)imsgCode;
 							else
-								audio_baseline_ax = imsgCode;
+								new_ax = (UWORD)imsgCode;
 							if (audio_scene_write_commit(scene,
 									ZZ9K_AUDIO_SCENE_PARAM_BASELINE,
-									ZZ9K_AUDIO_BALANCE_PACK(
-										audio_baseline_paula,
-										audio_baseline_ax)) ==
-									ZZ9K_STATUS_OK) {
+									ZZ9K_AUDIO_BALANCE_PACK(new_paula,
+										new_ax)) == ZZ9K_STATUS_OK) {
+								audio_baseline_paula = new_paula;
+								audio_baseline_ax = new_ax;
 								audio_dirty = TRUE;
 								audio_set_status(win,
 									"Baseline committed - Save to persist");
 							} else {
-								audio_set_status(win,
-									"Baseline write failed (busy) - retry");
+								/* The mirrors still hold the last
+								 * committed value; snap the slider
+								 * back to it and push it through as
+								 * a restore, the scene-editor
+								 * pattern. */
+								GT_SetGadgetAttrs(gad, win, NULL,
+									GTSL_Level, (gad->GadgetID ==
+										AUDGAD_BASE_PAULA) ? old_paula
+										: old_ax, TAG_END);
+								if (audio_scene_write_commit(scene,
+										ZZ9K_AUDIO_SCENE_PARAM_BASELINE,
+										ZZ9K_AUDIO_BALANCE_PACK(
+											old_paula, old_ax)) ==
+										ZZ9K_STATUS_OK) {
+									audio_set_status(win,
+										"Baseline write failed (busy) - retry");
+								} else {
+									/* Even the restore was dropped:
+									 * the firmware may hold the
+									 * attempted value. */
+									audio_dirty = TRUE;
+									audio_set_status(win,
+										"Baseline write failed; firmware may hold the attempted value - Save");
+								}
 							}
 							audio_update_save_gate(win);
 							break;
+						}
 						case AUDGAD_BTN_SAVE: {
 							uint32_t save_status;
 
@@ -3786,14 +3810,24 @@ static BOOL audio_scene_editor_window(struct Screen *mysc, void *vi,
 						snprintf(status, sizeof(status),
 							"%s committed to Scene %u - Save to persist",
 							name, (unsigned)(scene + 1));
-					} else {
-						/* Snap the knob back to the value the
-						 * firmware actually holds (a BUSY commit
-						 * was dropped). */
+					} else if (audio_scene_write_commit(scene, param,
+							old) == ZZ9K_STATUS_OK) {
+						/* The dropped commit never took; re-staging the
+						 * pre-edit value with COMMIT pins the firmware
+						 * back at `old`. */
 						GT_SetGadgetAttrs(segads[id], win, NULL,
 							GTSL_Level, old, TAG_END);
 						snprintf(status, sizeof(status),
 							"%s commit failed (busy) - retry", name);
+					} else {
+						/* Even the restore was dropped: the firmware
+						 * may hold the attempted value. */
+						GT_SetGadgetAttrs(segads[id], win, NULL,
+							GTSL_Level, old, TAG_END);
+						audio_dirty = TRUE;
+						snprintf(status, sizeof(status),
+							"%s commit failed; firmware may hold the attempted value - Save",
+							name);
 					}
 					GT_SetGadgetAttrs(segads[SEGAD_STATUS], win, NULL,
 						GTTX_Text, status, TAG_END);
