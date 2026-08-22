@@ -1087,14 +1087,18 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 
 		// R16 capability gate: the firmware-authoritative control plane
 		// is deliberately unadvertised until qualified, so an absent
-		// ZZ9K_CAP_AUDIO_CONTROL is the normal old-firmware case -- keep
-		// stamp-free legacy playback and skip the trim entirely. Only a
-		// firmware that advertises the surface ever hears from us as a
-		// control-plane client (allocation then yields the operator
-		// baseline plus this neutral source trim, R4). Like the query
-		// above, the trim submission blocks on the mailbox completion
-		// and must stay outside Forbid().
+		// ZZ9K_CAP_AUDIO_CONTROL is the normal old-firmware case --
+		// legacy playback with the old DSP stamps (LPF at Play start)
+		// and no trim. Only a firmware that advertises the surface ever
+		// hears from us as a control-plane client: remember the
+		// capability for this decoder's lifetime (release trim, no
+		// legacy stamps, scene-owned app mixer API) and submit this
+		// owner's neutral source trim -- the pinned keep-baseline word,
+		// "no trim from this owner" (R4). Like the query above, the
+		// trim submission blocks on the mailbox completion and must
+		// stay outside Forbid().
 		if(caps.capability_bits & ZZ9K_CAP_AUDIO_CONTROL) {
+			mp->audio_control_capped = TRUE;
 			submit_source_trim();
 		}
 	}
@@ -1204,11 +1208,17 @@ void i_MHIFreeDecoder(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibB
 		mp->rings_allocated = FALSE;
 	}
 
-	// No DSP reset here (R4): on matched firmware the scene module
-	// resets this owner's trim to neutral when the release hands the
-	// card back, and the master chain (volume, prefactor, EQ) was never
-	// ours to touch. Register writes for those params are rejected by
-	// the firmware authority gate regardless.
+	// Release the control-plane trim claimed at allocate: submit the
+	// reserved neutral balance word -- the pinned keep-baseline
+	// release, "no trim from this owner"; the firmware answers with
+	// the operator baseline pair and does not restage the mixer. No
+	// other DSP state is rewritten on release (R4): the master chain
+	// (volume, prefactor, EQ) was never ours to touch, and register
+	// writes for those params are rejected by the firmware authority
+	// gate regardless. The submission blocks on the mailbox
+	// completion, so it runs here -- outside Forbid and while
+	// ZZ9KBase is still published.
+	if(mp->audio_control_capped) submit_source_trim();
 
 	// --- Phase 3: atomically release ownership. ---
 	// Only now do we give up the card: remove the IRQ node, decrement
@@ -1377,9 +1387,16 @@ void i_MHIPlay(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 				return;
 			}
 
-			// No LPF stamp at Play start (R4): the active scene owns the
-			// low-pass cutoff; a 20000 Hz register write here would be
-			// rejected by the firmware authority gate on matched firmware.
+			// Anti-alias LPF at session start -- only when the
+			// control-plane capability was absent at allocate: old
+			// firmware has no scene module owning the cutoff, so the
+			// legacy 20000 Hz stamp stands. On control-plane firmware
+			// the active scene owns the low-pass cutoff and a
+			// register write here would be rejected by the firmware
+			// authority gate.
+			if(!mp->audio_control_capped) {
+				setAudioParam(mp, ZZ_AX_AP_DSP_SET_LOWPASS, 20000);
+			}
 
 			// Report PLAYING right away; the feeder process pushes
 			// queued data and binds the session to the AX output as
@@ -1609,12 +1626,41 @@ ULONG i_MHIQuery(REGD1( ULONG mhi_query), REGA6(struct MHI_LibBase *MHI_LibBase)
 }
 
 /*
- *
+ * App mixer API. The master-chain parameters (volume/panning,
+ * prefactor, the EQ bands) are legacy-only: they map straight onto
+ * master-chain DSP registers that the scene module owns once the
+ * firmware advertised the control plane at allocate. In that case the
+ * register write is skipped -- the scene authority gate would reject
+ * it anyway -- and the documented not-supported status is reported;
+ * use scenes (ZZTop's Audio window) on control-plane firmware.
+ * Against pre-control-plane firmware the direct writes stand.
  */
-void i_MHISetParam(REGA3(APTR mhi_handle), REGD0(UWORD mhi_param), REGD1(ULONG mhi_value), REGA6(struct MHI_LibBase *MHI_LibBase)) {
+ULONG i_MHISetParam(REGA3(APTR mhi_handle), REGD0(UWORD mhi_param), REGD1(ULONG mhi_value), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 	struct MhiPlayer *mp = (struct MhiPlayer *)mhi_handle;
 
 	if(mp) {
+		switch(mhi_param) {
+			case MHIP_PANNING:
+			case MHIP_VOLUME:
+			case MHIP_PREFACTOR:
+			case MHIP_BAND1:
+			case MHIP_BAND2:
+			case MHIP_BAND3:
+			case MHIP_BAND4:
+			case MHIP_BAND5:
+			case MHIP_BAND6:
+			case MHIP_BAND7:
+			case MHIP_BAND8:
+			case MHIP_BAND9:
+			case MHIP_BAND10:
+				if(mp->audio_control_capped) {
+					KPrintF("MHISetParam: %ld is scene-owned on control-plane firmware.\n", (ULONG)mhi_param);
+					return MHIF_UNSUPPORTED;
+				}
+				break;
+			default:
+				break;
+		}
 		switch(mhi_param) {
 			case MHIP_PANNING: // 0..50..100
 				if(mhi_value > 100) mhi_value = 100;
@@ -1681,4 +1727,5 @@ void i_MHISetParam(REGA3(APTR mhi_handle), REGD0(UWORD mhi_param), REGD1(ULONG m
 				break;
 		}
 	}
+	return MHIF_SUPPORTED;
 }

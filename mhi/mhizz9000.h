@@ -20,6 +20,6 @@ void i_MHIPlay(REGA3(APTR), REGA6(struct MHI_LibBase *));
 void i_MHIStop(REGA3(APTR), REGA6(struct MHI_LibBase *));
 void i_MHIPause(REGA3(APTR), REGA6(struct MHI_LibBase *));
 ULONG i_MHIQuery(REGD1( ULONG), REGA6(struct MHI_LibBase *));
-void i_MHISetParam(REGA3(APTR), REGD0(UWORD), REGD1( ULONG), REGA6(struct MHI_LibBase *));
+ULONG i_MHISetParam(REGA3(APTR), REGD0(UWORD), REGD1( ULONG), REGA6(struct MHI_LibBase *));
 
 #endif

@@ -77,29 +77,42 @@ The former `ENV:ZZ9K_MIX_LEVELS` register override was removed; see
 Both drivers are clients of the firmware's audio control plane. When
 zz9k.library is present **and** the running firmware advertises the
 audio-control capability, allocating the device submits the owner's
-neutral source trim through the control-plane mailbox; the firmware
-combines it with the operator baseline under the active scene and owns
-every master-chain write (LPF, mixer volume, EQ). Neither driver
-stamps DSP state at allocate, Play start, or release anymore, so a
-dialed-in scene survives apps opening and closing the device.
+neutral source trim — the reserved keep-baseline word, "no trim from
+this owner" — through the control-plane mailbox, and the same word is
+resubmitted at release. The firmware owns every master-chain write
+(LPF, mixer volume, EQ): neither driver stamps DSP state at allocate,
+Play start, or release, so a dialed-in scene survives apps opening and
+closing the device.
+
+The MHI app mixer API (`MHISetParam` for volume, panning, prefactor,
+and the EQ bands) is legacy-only against pre-control-plane firmware:
+those parameters map straight onto the master chain the scene module
+owns, so on control-plane firmware the call reports the documented
+not-supported status and the chain is left alone — use scenes
+(ZZTop's Audio window) instead.
 
 The capability is deliberately unadvertised until qualified, so a
 matched pair is required for any control-plane behavior:
 
 - **New driver + old firmware** — no control surface, no trims: the
-  driver detects the absent capability and falls back to stamp-free
-  legacy playback. Audio works; the Paula/AX balance is whatever the
-  firmware's own state leaves it at (on an unfixed early R1 that can
-  mean loud Paula — see [Hardware revisions](#hardware-revisions)).
-  If `ENV:ZZ9K_MIX_LEVELS` is still set, each driver prints one
-  load-time line on the debug channel (Sashimi/serial) saying the
-  variable is ignored and that the balance remedy needs the matched
-  firmware.
-- **Old driver + new firmware** — the old driver's DSP register stamps
-  (LPF at allocate/Play, mixer volume) are rejected by the firmware's
-  scene-authority gate and playback continues unaffected. The early-R1
-  balance remedy is unavailable until the drivers are updated and an
-  operator baseline is set.
+  driver detects the absent capability and falls back to legacy
+  playback with the old anti-alias stamps (the AHI LPF at half the
+  mix rate, the MHI 20000 Hz LPF at Play start), so old firmware
+  behaves as before. Audio works; the Paula/AX balance is whatever
+  the firmware's own state leaves it at (on an unfixed early R1 that
+  can mean loud Paula — see
+  [Hardware revisions](#hardware-revisions)). The balance remedy
+  still needs the matched firmware. If `ENV:ZZ9K_MIX_LEVELS` is
+  still set, each driver prints one load-time line on the debug
+  channel (Sashimi/serial) saying the variable is ignored and that
+  the balance remedy needs the matched firmware.
+- **Old driver + new firmware** — the old driver's DSP register
+  stamps (LPF at allocate/Play, mixer volume) are rejected by the
+  firmware's scene-authority gate and playback continues, but the
+  legacy anti-alias LPF tracking no longer happens: the cutoff stays
+  where the active scene put it, and LPF tracking only resumes once
+  the drivers are updated. The early-R1 balance remedy is unavailable
+  until the drivers are updated and an operator baseline is set.
 
 ## Runtime tunables (ENV variables)
 
@@ -147,7 +160,7 @@ so remove the ENV variable when migrating.
 | Symptom                                               | Likely cause / fix |
 |-------------------------------------------------------|---------------------|
 | Paula much louder than MP3/MOD through the card       | Early R1 (U4 opamp). Desolder U4, or — on matched firmware — set the operator baseline in ZZTop's Audio window. |
-| Muffled / dull AHI output at low sample rates         | LPF is scene-owned. Raise the scene LPF cutoff in ZZTop's Audio window (the old `ENV:ZZ9000AX-NOLPF` bypass was removed). |
+| Muffled / dull AHI output at low sample rates         | On control-plane firmware the LPF is scene-owned: raise the scene LPF cutoff in ZZTop's Audio window (the old `ENV:ZZ9000AX-NOLPF` bypass was removed; on pre-control-plane firmware the legacy half-rate LPF stamp applies as before). |
 | ZZTop's Audio button is greyed out                    | The firmware does not advertise the audio-control capability (pre-verification builds), or the AX daughterboard is absent. Update to the matched firmware release that advertises it; playback itself is unaffected. |
 | "Can't allocate! Hardware already used by MHI/AHI."   | The other driver owns the card. Close whatever MHI/AHI app is running first. |
 | Audio device fails to open on specific accelerators   | INT6 conflict. `setenv ZZ9K_INT2 1` to move both drivers to INT2. |
@@ -156,7 +169,6 @@ so remove the ENV variable when migrating.
 | Recording is silent                                   | Move both ZZ9000AX auxiliary jumpers to `IN` and select `RCA In`. |
 
 ## References
-
 - MNT community forum, **"ZZ9000AX mixing levels register"** —
   <https://community.mnt.re/t/zz9000ax-mixing-levels-register/1011>
   (documents the undocumented `AP_DSP_SET_VOLUMES` parameter the

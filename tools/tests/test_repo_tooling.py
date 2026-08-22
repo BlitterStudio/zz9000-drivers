@@ -496,42 +496,60 @@ class RepoToolingTests(unittest.TestCase):
             self.assertIn("is ignored", source)
 
     def test_audio_owners_issue_no_dsp_param_stamps(self):
-        """R4/U6: allocate, Play, and release never rewrite DSP state.
+        """R4/U6: DSP stamps are gated on the absent capability.
 
         The master chain (LPF, mixer volume, EQ) belongs to the firmware
-        scene module; drivers act as control-plane clients gated on
-        ZZ9K_CAP_AUDIO_CONTROL, submitting a neutral source trim at
-        allocate through the trim opcode.
+        scene module on control-plane firmware; drivers act as
+        control-plane clients gated on ZZ9K_CAP_AUDIO_CONTROL,
+        submitting a neutral source trim through the trim opcode and
+        re-submitting it at release. The legacy anti-alias LPF stamps
+        exist ONLY on the absent-capability (old firmware) branch --
+        never on the control-plane path -- and no mixer stamp exists
+        on either path.
         """
         ahi = self.read("ahi/driver/zz9000ax-ahi.c")
         mhi = self.read("mhi/mhizz9000.c")
 
-        # AHI: LPF stamp, mixer stamp, and the NOLPF bypass are gone.
+        # AHI: no mixer stamp and no NOLPF bypass anywhere; the LPF
+        # stamp exists exactly once, inside the absent-capability
+        # branch after the caps gate (never on the control-plane path).
         self.assertNotIn("read_mix_levels_env", ahi)
         self.assertNotIn("ZZ_AX_NOLPF_ENV", ahi)
         self.assertNotIn("ZZ_AX_AP_DSP_SET_VOLUMES", ahi)
-        self.assertNotIn("ZZ_AX_AP_DSP_SET_LOWPASS", ahi)
-        alloc = ahi[ahi.index("intAHIsub_AllocAudio"):ahi.index("intAHIsub_FreeAudio")]
-        self.assertNotIn("write_audio_param(hw_addr, 9", alloc)
-        self.assertNotIn("lpf_freq", alloc)
+        self.assertEqual(1, ahi.count("ZZ_AX_AP_DSP_SET_LOWPASS"))
+        alloc = ahi[
+            ahi.index("intAHIsub_AllocAudio"):ahi.index("intAHIsub_FreeAudio")
+        ]
+        caps_gate = alloc.index("caps.capability_bits & ZZ9K_CAP_AUDIO_CONTROL")
+        submit = alloc.index("submit_source_trim()")
+        absent_gate = alloc.index("if (!audio_control_capped)")
+        stamp = alloc.index(
+            "write_audio_param(hw_addr, ZZ_AX_AP_DSP_SET_LOWPASS")
+        self.assertLess(caps_gate, submit)
+        self.assertLess(submit, absent_gate)
+        self.assertLess(absent_gate, stamp)
 
-        # MHI: no mixer stamp at allocate, no LPF at Play start, no DSP
-        # reset at release.
+        # MHI: no mixer stamp anywhere, no DSP stamp at allocate or
+        # release; the Play-start LPF stamp sits inside the
+        # absent-capability branch.
         self.assertNotIn("read_mix_levels_env", mhi)
         self.assertNotIn("ZZ_AX_AP_DSP_SET_VOLUMES", mhi)
-        self.assertNotIn("ZZ_AX_AP_DSP_SET_LOWPASS", mhi)
+        self.assertEqual(1, mhi.count("ZZ_AX_AP_DSP_SET_LOWPASS"))
         mhi_alloc = mhi[
             mhi.index("APTR i_MHIAllocDecoder"):mhi.index("void i_MHIFreeDecoder")
         ]
         self.assertNotIn("setAudioParam", mhi_alloc)
         play = mhi[mhi.index("void i_MHIPlay"):mhi.index("void i_MHIStop")]
-        self.assertNotIn("setAudioParam", play)
+        absent_gate = play.index("if(!mp->audio_control_capped)")
+        stamp = play.index("setAudioParam(mp, ZZ_AX_AP_DSP_SET_LOWPASS")
+        self.assertLess(absent_gate, stamp)
         release = mhi[
             mhi.index("void i_MHIFreeDecoder"):mhi.index("BOOL i_MHIQueueBuffer")
         ]
         self.assertNotIn("setAudioParam", release)
 
-        # Both drivers gate on the capability and submit the trim.
+        # Both drivers gate on the capability and submit the trim
+        # (allocate and release).
         for source in (ahi, mhi):
             self.assertIn("ZZ9K_CAP_AUDIO_CONTROL", source)
             self.assertIn("(caps.capability_bits & ZZ9K_CAP_AUDIO_CONTROL)",
@@ -539,6 +557,15 @@ class RepoToolingTests(unittest.TestCase):
             self.assertIn("submit_source_trim()", source)
             self.assertIn("ZZ9K_OP_AUDIO_TRIM_SUBMIT", source)
             self.assertIn("ZZ9K_AUDIO_BALANCE_NEUTRAL", source)
+
+        # The app mixer API is legacy-only: master-chain SetParam writes
+        # stay behind the absent-capability gate and report the
+        # documented not-supported status on control-plane firmware.
+        setparam = mhi[
+            mhi.index("ULONG i_MHISetParam"):mhi.rindex("return MHIF_SUPPORTED;")
+        ]
+        self.assertIn("mp->audio_control_capped", setparam)
+        self.assertIn("MHIF_UNSUPPORTED", setparam)
 
         # The per-consumer build-script gates fail fast when the staged
         # SDK predates the control-plane ABI.

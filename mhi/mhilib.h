@@ -39,6 +39,10 @@ struct MhiPlayer {
 	UBYTE zorro_version;
 	UBYTE volume;
 	UBYTE panning;
+	UBYTE audio_control_capped; /* firmware advertised the control
+	                               plane at allocate: gates the
+	                               release-time trim submit, the legacy
+	                               LPF stamp, and the app mixer API */
 
 	/*
 	 * SDK audio-stream session state. Decode runs on the card's second

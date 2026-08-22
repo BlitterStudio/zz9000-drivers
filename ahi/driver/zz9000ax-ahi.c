@@ -91,6 +91,11 @@ struct z9ax_base    *Z9AXBase;
 // playback. Cleared in init() for the same BSS-reuse hygiene as the
 // library bases above.
 struct Library      *ZZ9KBase    = NULL;
+// Whether the firmware advertised ZZ9K_CAP_AUDIO_CONTROL at allocate:
+// gates the release-time neutral trim submit and the legacy LPF stamp
+// (absent capability = old firmware, pre-scene behavior). Mirrors the
+// ZZ9KBase lifetime: set at allocate, cleared at release.
+static int audio_control_capped = 0;
 //struct GfxBase      *GraphicsBase = NULL;
 
 int __attribute__((no_reorder)) _start()
@@ -183,6 +188,7 @@ static uint32_t __attribute__((used)) init(BPTR seg_list asm("a0"), struct Libra
   ExpansionBase = NULL;
   IntuitionBase = NULL;
   ZZ9KBase = NULL;
+  audio_control_capped = 0;
 
   if (!(DOSBase = (struct DosLibrary *)OpenLibrary((STRPTR)"dos.library",0)))
     goto fail;
@@ -651,13 +657,15 @@ static BOOL mhi_present_locked(void) {
 
 // Firmware-authoritative control plane (R4/R16): submit this owner's
 // neutral source trim through the ZZ9K_OP_AUDIO_TRIM_SUBMIT mailbox
-// opcode over zz9k.library. The firmware combines it with the
-// operator's baseline under scene policy and owns every master-chain
-// write; the reply's applied/bound words are the authority, so the
-// driver never mirrors them into DSP registers. Requires ZZ9KBase to
-// be live and must run outside Forbid() -- ZZ9KCall blocks on the
-// mailbox completion. Failure is non-fatal: playback continues exactly
-// as before, only the trim is lost (e.g. transient firmware error).
+// opcode over zz9k.library. The neutral balance word is the pinned
+// keep-baseline release -- "no trim from this owner": the firmware
+// answers with the operator baseline pair and does not restage the
+// mixer; it owns every master-chain write and the reply's
+// applied/bound words are the authority, so the driver never mirrors
+// them into DSP registers. Requires ZZ9KBase to be live and must run
+// outside Forbid() -- ZZ9KCall blocks on the mailbox completion.
+// Failure is non-fatal: playback continues exactly as before, only
+// the trim release is lost (e.g. transient firmware error).
 static void submit_source_trim(void)
 {
   ZZ9KRequest request;
@@ -821,23 +829,35 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
   }
   Permit();
 
-  // Control-plane client (R4/R16): no LPF or mixer stamp happens at
-  // allocate -- the active scene owns the master chain. When zz9k.library
-  // is present AND the running firmware advertises
-  // ZZ9K_CAP_AUDIO_CONTROL, submit this owner's neutral source trim so
-  // allocation yields the operator baseline plus our trim; the
-  // firmware's applied/bound/bounded reply is authoritative. An absent
-  // library or an absent capability is the normal old-firmware case:
-  // stamp-free legacy playback, no trim, playback unaffected. The
+  // Control-plane client (R4/R16): when zz9k.library is present AND the
+  // running firmware advertises ZZ9K_CAP_AUDIO_CONTROL, submit this
+  // owner's neutral source trim -- the reserved keep-baseline word,
+  // "no trim from this owner": the firmware answers with the operator
+  // baseline pair and does not restage the mixer. The reply is
+  // authoritative; the driver never mirrors it into DSP registers. The
   // capability query and the trim submission block on the mailbox
   // completion, so both run after the Permit above, never under Forbid.
   ZZ9KBase = OpenLibrary((STRPTR)"zz9k.library", 0);
+  audio_control_capped = 0;
   if (ZZ9KBase) {
     ZZ9KCaps caps;
     if (ZZ9KQueryCaps(&caps) == ZZ9K_STATUS_OK &&
         (caps.capability_bits & ZZ9K_CAP_AUDIO_CONTROL)) {
+      audio_control_capped = 1;
       submit_source_trim();
     }
+  }
+
+  // Old firmware (no zz9k.library, or the capability not advertised):
+  // no scene module owns the master chain, so keep the legacy
+  // anti-alias stamp at allocate -- the low-pass cutoff at half the
+  // mix rate, capped just under the filter's rough spot near 24 kHz.
+  // On control-plane firmware the LPF is scene-owned and this stamp is
+  // skipped; LPF tracking on mixed sets needs matched firmware.
+  if (!audio_control_capped) {
+    int lpf_freq = AudioCtrl->ahiac_MixFreq / 2;
+    if (lpf_freq > 23900) lpf_freq = 23900;
+    write_audio_param(hw_addr, ZZ_AX_AP_DSP_SET_LOWPASS, lpf_freq);
   }
 
   // Zero the hardware audio ring buffer before we enable playback. The
@@ -896,14 +916,19 @@ fail:
   // earlier, so we must release it here before freeing ahi_data; otherwise
   // RemIntServer would walk a freed node next time something probes.
   destroy_interrupt(ahi_data);
-  // Release the control-plane client binding opened at allocate. No
-  // DSP state is rewritten on release (R4): the firmware resets this
-  // owner's trim to neutral when the card comes back. CloseLibrary can
-  // expunge, so it stays outside any Forbid window.
+  // Release the control-plane binding opened at allocate. The release
+  // is explicit: when the capability was seen, submit the reserved
+  // neutral balance word -- the pinned keep-baseline release, "no trim
+  // from this owner"; the firmware answers with the operator baseline
+  // pair and does not restage the mixer. The submission blocks on the
+  // mailbox completion and CloseLibrary can expunge, so both stay
+  // outside any Forbid window.
   if (ZZ9KBase) {
+    if (audio_control_capped) submit_source_trim();
     CloseLibrary(ZZ9KBase);
     ZZ9KBase = NULL;
   }
+  audio_control_capped = 0;
   if (ahi_data->mainproc_signal != -1) {
     FreeSignal(ahi_data->mainproc_signal);
     ahi_data->mainproc_signal = -1;
@@ -944,14 +969,20 @@ static void __attribute__((used)) intAHIsub_FreeAudio(struct AHIAudioCtrlDrv *Au
     }
     ahi_data->worker_process = NULL;
   }
-  // Release the control-plane client binding opened at allocate. No
-  // DSP state is rewritten on release (R4): the firmware resets this
-  // owner's trim to neutral when the card comes back. CloseLibrary can
-  // expunge, so it stays outside any Forbid window.
+
+  // Release the control-plane binding opened at allocate. The release
+  // is explicit: when the capability was seen, submit the reserved
+  // neutral balance word -- the pinned keep-baseline release, "no trim
+  // from this owner"; the firmware answers with the operator baseline
+  // pair and does not restage the mixer. The submission blocks on the
+  // mailbox completion and CloseLibrary can expunge, so both stay
+  // outside any Forbid window.
   if (ZZ9KBase) {
+    if (audio_control_capped) submit_source_trim();
     CloseLibrary(ZZ9KBase);
     ZZ9KBase = NULL;
   }
+  audio_control_capped = 0;
   destroy_interrupt(ahi_data);
 
   if (ahi_data->mainproc_signal != -1) {

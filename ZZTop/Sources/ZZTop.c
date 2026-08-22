@@ -3528,8 +3528,25 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 							if (save_status ==
 									ZZ9K_AUDIO_SCENE_SAVE_OK) {
 								audio_dirty = FALSE;
+								/* The CFG now holds exactly what a
+								 * reboot restores: re-seed the
+								 * editor state from it so the
+								 * sliders snap to the persisted
+								 * values (a rejected staged write
+								 * or a failed restore can leave
+								 * the display off by one edit).
+								 */
+								audio_seed_editor_state();
+								GT_SetGadgetAttrs(
+									audgads[AUDGAD_BASE_PAULA], win,
+									NULL, GTSL_Level,
+									audio_baseline_paula, TAG_END);
+								GT_SetGadgetAttrs(
+									audgads[AUDGAD_BASE_AX], win,
+									NULL, GTSL_Level,
+									audio_baseline_ax, TAG_END);
 								audio_set_status(win,
-									"Saved - survives power-cycle");
+									"Saved - survives power-cycle; sliders show last-saved values");
 							} else if (save_status ==
 									ZZ9K_AUDIO_SCENE_SAVE_REJECTED) {
 								audio_set_status(win,
