@@ -23,7 +23,7 @@
 #include <devices/timer.h>
 #include <devices/inputevent.h>
 
-#include <clib/exec_protos.h>
+#include <clib/debug_protos.h>
 #include <clib/graphics_protos.h>
 #include <clib/intuition_protos.h>
 #include <clib/gadtools_protos.h>
@@ -32,7 +32,7 @@
 #include <clib/timer_protos.h>
 #include <clib/asl_protos.h>
 #include <clib/dos_protos.h>
-
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
@@ -142,6 +142,7 @@ static const char version[] __attribute__((used)) =
 #define MENU_ID_QUIT       (2)
 #define MENU_ID_FWUPDATE   (3)
 #define MENU_ID_FWRESTORE  (4)
+#define MENU_ID_AUDIOLOG   (5)
 
 #define LABEL_ZORROVER     "Zorro Version"
 #define LABEL_FWVER        "Firmware ABI"
@@ -355,7 +356,7 @@ static struct NewMenu zztop_newmenus[] = {
 	{ NM_ITEM,  (STRPTR)"Update Firmware...", (STRPTR)"U", 0, 0, (APTR)MENU_ID_FWUPDATE },
 	{ NM_ITEM,  (STRPTR)"Restore Backup...",  (STRPTR)"R", 0, 0, (APTR)MENU_ID_FWRESTORE },
 	{ NM_ITEM,  NM_BARLABEL,           NULL, 0, 0, NULL },
-	{ NM_ITEM,  (STRPTR)"Quit",        (STRPTR)"Q", 0, 0, (APTR)MENU_ID_QUIT },
+	{ NM_ITEM,  (STRPTR)"Audio Debug Log", (STRPTR)"A", CHECKIT, 0, (APTR)MENU_ID_AUDIOLOG },
 	{ NM_END,   NULL,                  NULL, 0, 0, NULL }
 };
 
@@ -2745,6 +2746,60 @@ static BOOL zztop_audio_surface_available(void)
 	return (zz_get_ax_present() != 0) && audio_control_capped;
 }
 
+/* ---- Audio debug logging (Project menu toggle) ----
+ * Every control-plane mailbox call, its reply, and the decoded
+ * readbacks land in T:zztop-audio.log and on the serial debug port
+ * (KPrintF; visible in Sashimi). Session-scoped: toggling off closes
+ * the file, toggling on starts a fresh one. */
+static int audio_log_on;
+static BPTR audio_log_fh;
+
+static void audio_log(const char *fmt, ...)
+{
+	static char buf[200];
+	va_list ap;
+
+	if (!audio_log_on)
+		return;
+	va_start(ap, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, ap);
+	va_end(ap);
+	if (audio_log_fh)
+		Write(audio_log_fh, buf, strlen(buf));
+	KPrintF((CONST_STRPTR)"ZZTop %s", buf);
+}
+
+static void audio_log_toggle(struct Window *win)
+{
+	struct MenuItem *item;
+
+	if (audio_log_on) {
+		audio_log_on = FALSE;
+		if (audio_log_fh) {
+			Close(audio_log_fh);
+			audio_log_fh = (BPTR)0;
+		}
+		KPrintF((CONST_STRPTR)"ZZTop audio log OFF\n");
+	} else {
+		audio_log_fh = Open((CONST_STRPTR)"T:zztop-audio.log",
+			MODE_NEWFILE);
+		audio_log_on = 1;
+		audio_log("log opened (fh=%ld)\n",
+			(long)(audio_log_fh ? 1 : 0));
+	}
+	/* Flip the menu checkmark so the toggle state is visible. */
+	if (win && zztop_menustrip) {
+		item = ItemAddress(zztop_menustrip,
+			FULLMENUNUM(0, 5, NOSUB));
+		if (item) {
+			if (audio_log_on)
+				item->Flags |= CHECKED;
+			else
+				item->Flags &= ~CHECKED;
+		}
+	}
+}
+
 /* One mailbox round-trip: build the typed request, send it, wait for
  * the completion. Runs from the GUI event loop (no Forbid held), so
  * blocking on the completion is the same trade the Settings window
@@ -2753,17 +2808,31 @@ static int audio_mb_call(uint16_t opcode, const void *payload,
 	uint16_t payload_len, ZZ9KMailboxEntry *reply)
 {
 	ZZ9KRequest request;
+	const uint32_t *rw = (const uint32_t *)payload;
+	const uint32_t *pw = (const uint32_t *)reply->payload.inline_data;
+	int status;
 
 	zz9k_request_init(&request, opcode);
 	request.entry.payload_len = payload_len;
 	memcpy(request.entry.payload.inline_data, payload, payload_len);
-	return ZZ9KCall(&request, reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+	status = ZZ9KCall(&request, reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+	audio_log("op=%04x st=%d req=%08lx,%08lx,%08lx rsp=%08lx,%08lx,%08lx\n",
+		(unsigned)opcode, status,
+		(unsigned long)zz9k_get_be32((const uint8_t *)&rw[0]),
+		(unsigned long)zz9k_get_be32((const uint8_t *)&rw[1]),
+		(unsigned long)zz9k_get_be32((const uint8_t *)&rw[2]),
+		(unsigned long)zz9k_get_be32((const uint8_t *)&pw[0]),
+		(unsigned long)zz9k_get_be32((const uint8_t *)&pw[1]),
+		(unsigned long)zz9k_get_be32((const uint8_t *)&pw[2]));
+	return status;
 }
 
 struct zztop_audio_state {
 	UWORD active_scene;
 	UWORD scene_count;
 	uint32_t baseline; /* ABI packed pair: ch1 = Paula, ch2 = AX */
+	uint32_t trim;     /* last applied mixer legs, same packing */
+	UWORD trim_bounded;
 };
 
 struct zztop_audio_meter {
@@ -2776,6 +2845,8 @@ struct zztop_audio_meter {
 	uint32_t peak_hold_ch2;
 };
 
+static BOOL audio_control_state_get(struct zztop_audio_state *out);
+
 static int audio_scene_select_call(UWORD scene)
 {
 	ZZ9KAudioSceneSelectPayload payload;
@@ -2783,8 +2854,19 @@ static int audio_scene_select_call(UWORD scene)
 
 	memset(&payload, 0, sizeof(payload));
 	zz9k_put_be32(payload.scene, scene);
-	return audio_mb_call(ZZ9K_OP_AUDIO_SCENE_SELECT, &payload,
-		sizeof(payload), &reply);
+	if (audio_mb_call(ZZ9K_OP_AUDIO_SCENE_SELECT, &payload,
+			sizeof(payload), &reply) == ZZ9K_STATUS_OK) {
+		struct zztop_audio_state st;
+		if (audio_control_state_get(&st))
+			audio_log("select %u ok; fw scene=%u base=%u/%u trim=%u/%u\n",
+				(unsigned)scene + 1U, (unsigned)st.active_scene + 1U,
+				(unsigned)ZZ9K_AUDIO_BALANCE_CH1(st.baseline),
+				(unsigned)ZZ9K_AUDIO_BALANCE_CH2(st.baseline),
+				(unsigned)ZZ9K_AUDIO_BALANCE_CH1(st.trim),
+				(unsigned)ZZ9K_AUDIO_BALANCE_CH2(st.trim));
+		return ZZ9K_STATUS_OK;
+	}
+	return ZZ9K_STATUS_TIMEOUT;
 }
 
 /* One staged parameter plus COMMIT (F3/KTD7): the firmware accumulates
@@ -2801,6 +2883,8 @@ static int audio_scene_write_commit(UWORD scene, uint32_t param,
 	zz9k_put_be32(payload.param, param);
 	zz9k_put_be32(payload.value, value);
 	zz9k_put_be32(payload.flags, ZZ9K_AUDIO_SCENE_WRITE_FLAG_COMMIT);
+	audio_log("write scene=%u param=%u val=%u\n",
+		(unsigned)scene + 1U, (unsigned)param, (unsigned)value);
 	return audio_mb_call(ZZ9K_OP_AUDIO_SCENE_WRITE, &payload,
 		sizeof(payload), &reply);
 }
@@ -2821,6 +2905,8 @@ static BOOL audio_control_state_get(struct zztop_audio_state *out)
 	out->active_scene = (UWORD)zz9k_get_be32(result.active_scene);
 	out->scene_count = (UWORD)zz9k_get_be32(result.scene_count);
 	out->baseline = zz9k_get_be32(result.baseline);
+	out->trim = zz9k_get_be32(result.trim);
+	out->trim_bounded = (UWORD)zz9k_get_be32(result.flags);
 	return TRUE;
 }
 
@@ -2855,6 +2941,11 @@ static BOOL audio_meter_read(uint32_t direction,
 	out->gain_reduction_events = zz9k_get_be32(result.gain_reduction_events);
 	out->peak_hold_ch1 = zz9k_get_be32(result.peak_hold_ch1);
 	out->peak_hold_ch2 = zz9k_get_be32(result.peak_hold_ch2);
+	audio_log("meter dir=%u peak=%u/%u clip=%u und=%u ovr=%u gr=%u id=%u\n",
+		(unsigned)direction, (unsigned)out->peak_hold_ch1,
+		(unsigned)out->peak_hold_ch2, (unsigned)out->clip_count,
+		(unsigned)out->underrun_count, (unsigned)out->overrun_count,
+		(unsigned)out->gain_reduction_events, (unsigned)out->identity);
 	return TRUE;
 }
 
@@ -3438,8 +3529,22 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 			imsgClass = imsg->Class;
 			imsgCode = imsg->Code;
 			GT_ReplyIMsg(imsg);
+			audio_log("audio msg class=%08lx id=%ld code=%ld\n",
+				(unsigned long)imsgClass,
+				gad ? (long)gad->GadgetID : -1L,
+				(long)imsgCode);
 
 			switch (imsgClass) {
+				case IDCMP_MOUSEMOVE:
+					/* Sliders here never emit GADGETUP (editor finding):
+					 * treat baseline-slider moves as live commits; the
+					 * coalescing machine absorbs the drag burst. */
+					if (gad && (gad->GadgetID == AUDGAD_BASE_PAULA ||
+							gad->GadgetID == AUDGAD_BASE_AX))
+						imsgClass = IDCMP_GADGETUP;
+					else
+						break;
+					/* FALLTHRU to the GADGETUP dispatch */
 				case IDCMP_GADGETUP:
 					if (!gad) break;
 					switch (gad->GadgetID) {
@@ -3478,39 +3583,35 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 								new_paula = (UWORD)imsgCode;
 							else
 								new_ax = (UWORD)imsgCode;
-							if (audio_scene_write_commit(scene,
+							{
+								int bst = audio_scene_write_commit(scene,
 									ZZ9K_AUDIO_SCENE_PARAM_BASELINE,
 									ZZ9K_AUDIO_BALANCE_PACK(new_paula,
-										new_ax)) == ZZ9K_STATUS_OK) {
-								audio_baseline_paula = new_paula;
-								audio_baseline_ax = new_ax;
-								audio_dirty = TRUE;
-								audio_set_status(win,
-									"Baseline committed - Save to persist");
-							} else {
-								/* The mirrors still hold the last
-								 * committed value; snap the slider
-								 * back to it and push it through as
-								 * a restore, the scene-editor
-								 * pattern. */
-								GT_SetGadgetAttrs(gad, win, NULL,
-									GTSL_Level, (gad->GadgetID ==
-										AUDGAD_BASE_PAULA) ? old_paula
-										: old_ax, TAG_END);
-								if (audio_scene_write_commit(scene,
-										ZZ9K_AUDIO_SCENE_PARAM_BASELINE,
-										ZZ9K_AUDIO_BALANCE_PACK(
-											old_paula, old_ax)) ==
-										ZZ9K_STATUS_OK) {
-									audio_set_status(win,
-										"Baseline write failed (busy) - retry");
-								} else {
-									/* Even the restore was dropped:
-									 * the firmware may hold the
-									 * attempted value. */
+										new_ax));
+								if (bst == ZZ9K_STATUS_OK ||
+										bst == ZZ9K_STATUS_TIMEOUT) {
+									/* Timeout = machine mid-step, reply slow;
+									 * the write applied or coalesced. Keep
+									 * the user's value; no snap-back. */
+									audio_baseline_paula = new_paula;
+									audio_baseline_ax = new_ax;
 									audio_dirty = TRUE;
 									audio_set_status(win,
-										"Baseline write failed; firmware may hold the attempted value - Save");
+										(bst == ZZ9K_STATUS_OK)
+										?	"Baseline committed - Save to persist"
+										:	"Baseline committing - Save to persist");
+								} else {
+									/* Hard error: restore. */
+									GT_SetGadgetAttrs(gad, win, NULL,
+										GTSL_Level, (gad->GadgetID ==
+											AUDGAD_BASE_PAULA) ? old_paula
+											: old_ax, TAG_END);
+									audio_scene_write_commit(scene,
+										ZZ9K_AUDIO_SCENE_PARAM_BASELINE,
+										ZZ9K_AUDIO_BALANCE_PACK(
+											old_paula, old_ax));
+									audio_set_status(win,
+										"Baseline write failed - retry");
 								}
 							}
 							audio_update_save_gate(win);
@@ -3776,7 +3877,10 @@ static BOOL audio_scene_editor_window(struct Screen *mysc, void *vi,
 			imsg_class = imsg->Class;
 			imsg_code = imsg->Code;
 			GT_ReplyIMsg(imsg);
-
+			audio_log("editor msg class=%08lx id=%ld code=%ld\n",
+				(unsigned long)imsg_class,
+				gad ? (long)gad->GadgetID : -1L,
+				(long)imsg_code);
 			if (imsg_class == IDCMP_CLOSEWINDOW ||
 					(imsg_class == IDCMP_GADGETUP && gad &&
 					 gad->GadgetID == SEGAD_BTN_DONE)) {
@@ -3784,7 +3888,14 @@ static BOOL audio_scene_editor_window(struct Screen *mysc, void *vi,
 			} else if (imsg_class == IDCMP_REFRESHWINDOW) {
 				GT_BeginRefresh(win);
 				GT_EndRefresh(win, TRUE);
-			} else if (imsg_class == IDCMP_GADGETUP && gad) {
+			} else if ((imsg_class == IDCMP_GADGETUP ||
+					imsg_class == IDCMP_MOUSEMOVE) && gad) {
+				/* GadTools sliders here report live drags as MOUSEMOVE
+				 * and never emit GADGETUP on release (the original LPF
+				 * slider committed on MOUSEMOVE for this reason). Commit
+				 * every move; the firmware's coalescing commit machine
+				 * collapses a drag into a couple of machine runs. */
+				int is_move = (imsg_class == IDCMP_MOUSEMOVE);
 				UWORD id = gad->GadgetID;
 				UWORD *field;
 				uint32_t param;
@@ -3818,34 +3929,44 @@ static BOOL audio_scene_editor_window(struct Screen *mysc, void *vi,
 					name = "EQ band";
 				}
 				if (field) {
+					int cst;
 					old = *field;
-					if (audio_scene_write_commit(scene, param,
-							imsg_code) == ZZ9K_STATUS_OK) {
+					cst = audio_scene_write_commit(scene, param,
+						imsg_code);
+					if (cst == ZZ9K_STATUS_OK) {
 						*field = (UWORD)imsg_code;
 						audio_dirty = TRUE;
 						edited = TRUE;
 						snprintf(status, sizeof(status),
-							"%s committed to Scene %u - Save to persist",
-							name, (unsigned)(scene + 1));
+								"%s committed to Scene %u - Save to persist",
+								name, (unsigned)(scene + 1));
+					} else if (cst == ZZ9K_STATUS_TIMEOUT) {
+						/* Timeout is not rejection: the commit machine
+						 * was mid-step and the reply was slow; the
+						 * firmware applied or coalesced the write.
+						 * Keep the user's value; never fight the
+						 * drag with a restore. */
+						*field = (UWORD)imsg_code;
+						audio_dirty = TRUE;
+						edited = TRUE;
+						snprintf(status, sizeof(status),
+								"%s committing - Save to persist", name);
 					} else if (audio_scene_write_commit(scene, param,
 							old) == ZZ9K_STATUS_OK) {
-						/* The dropped commit never took; re-staging the
-						 * pre-edit value with COMMIT pins the firmware
-						 * back at `old`. */
+						/* Hard error (bad value): restore. */
 						GT_SetGadgetAttrs(segads[id], win, NULL,
 							GTSL_Level, old, TAG_END);
 						snprintf(status, sizeof(status),
-							"%s commit failed (busy) - retry", name);
+								"%s commit failed - retry", name);
 					} else {
-						/* Even the restore was dropped: the firmware
-						 * may hold the attempted value. */
 						GT_SetGadgetAttrs(segads[id], win, NULL,
 							GTSL_Level, old, TAG_END);
 						audio_dirty = TRUE;
 						snprintf(status, sizeof(status),
-							"%s commit failed; firmware may hold the attempted value - Save",
-							name);
+								"%s commit failed; firmware may hold the attempted value - Save",
+								name);
 					}
+
 					GT_SetGadgetAttrs(segads[SEGAD_STATUS], win, NULL,
 						GTTX_Text, status, TAG_END);
 				}
@@ -4128,6 +4249,9 @@ VOID process_window_events(struct Window *mywin)
 							case MENU_ID_QUIT:
 								terminated = TRUE;
 								break;
+							case MENU_ID_AUDIOLOG:
+								audio_log_toggle(mywin);
+								break;
 						}
 						menuNumber = item->NextSelect;
 					}
@@ -4148,6 +4272,8 @@ VOID process_window_events(struct Window *mywin)
 	}
 
 	zztop_close_timer();
+	if (audio_log_on)
+		audio_log_toggle(NULL);
 }
 
 VOID gadtoolsWindow(VOID) {
