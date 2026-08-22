@@ -2845,7 +2845,24 @@ struct zztop_audio_state {
 	uint32_t baseline; /* ABI packed pair: ch1 = Paula, ch2 = AX */
 	uint32_t trim;     /* last applied mixer legs, same packing */
 	UWORD trim_bounded;
+	uint32_t save_status; /* ABI save word: QUEUED while saving, else
+	                       * the last settled outcome */
 };
+
+/* Non-blocking save statuses ride the same staged-header refresh;
+ * value-faithful fallbacks keep ZZTop building against either header
+ * generation. */
+#ifndef ZZ9K_AUDIO_SCENE_SAVE_QUEUED
+#define ZZ9K_AUDIO_SCENE_SAVE_QUEUED 3U
+#endif
+#ifndef ZZ9K_AUDIO_SCENE_SAVE_BUSY
+#define ZZ9K_AUDIO_SCENE_SAVE_BUSY 4U
+#endif
+
+/* save_status is the append-only tail word (offset 44) of the
+ * CONTROL_STATE_GET reply; reading it from the raw bytes works against
+ * either header generation for the same reason. */
+#define ZZTOP_CONTROL_STATE_SAVE_STATUS_OFF 44
 
 struct zztop_audio_meter {
 	uint32_t identity;
@@ -2976,6 +2993,8 @@ static BOOL audio_control_state_get(struct zztop_audio_state *out)
 	out->baseline = zz9k_get_be32(result.baseline);
 	out->trim = zz9k_get_be32(result.trim);
 	out->trim_bounded = (UWORD)zz9k_get_be32(result.flags);
+	out->save_status = zz9k_get_be32(
+		&reply.payload.inline_data[ZZTOP_CONTROL_STATE_SAVE_STATUS_OFF]);
 	return TRUE;
 }
 
@@ -3072,6 +3091,19 @@ static BOOL audio_ui_seeded = FALSE;
  * "dirty" is card-wide state that outlives the window; only a
  * successful SCENE_SAVE (or a reboot) clears it. */
 static BOOL audio_dirty = FALSE;
+/* A QUEUED non-blocking save is in flight in firmware; the 1 s tick
+ * settles it through the control-state report's save_status. The
+ * generation pair preserves edits made after the firmware serialized
+ * the queued snapshot. */
+static BOOL audio_save_pending = FALSE;
+static ULONG audio_edit_generation;
+static ULONG audio_save_generation;
+
+static void audio_mark_dirty(void)
+{
+	audio_dirty = TRUE;
+	audio_edit_generation++;
+}
 
 static void audio_scene_default_name(char *buf, size_t size, UWORD scene)
 {
@@ -3228,7 +3260,52 @@ static void audio_set_status(struct Window *win, const char *text)
 static void audio_update_save_gate(struct Window *win)
 {
 	GT_SetGadgetAttrs(audgads[AUDGAD_BTN_SAVE], win, NULL,
-		GA_Disabled, !audio_dirty, TAG_END);
+		GA_Disabled, !audio_dirty || audio_save_pending, TAG_END);
+}
+
+/* Settle a pending non-blocking save: the firmware machine steps in
+ * its service loop, so the outcome arrives through the control-state
+ * report. Called from the 1 s meter/poll tick; a still-QUEUED status
+ * (or a transient read failure) keeps the pending state and retries
+ * on the next tick. */
+static void audio_save_settle(struct Window *win)
+{
+	struct zztop_audio_state st;
+	uint32_t save_status;
+
+	if (!audio_save_pending)
+		return;
+	if (!audio_control_state_get(&st))
+		return;
+	save_status = st.save_status;
+	if (save_status == ZZ9K_AUDIO_SCENE_SAVE_QUEUED)
+		return; /* the machine is still running */
+
+	audio_save_pending = FALSE;
+	if (save_status == ZZ9K_AUDIO_SCENE_SAVE_OK) {
+		if (audio_edit_generation == audio_save_generation) {
+			audio_dirty = FALSE;
+			/* No edits followed serialization: the persisted state
+			 * is still current, so it is safe to re-seed and snap
+			 * the controls to the saved values. */
+			audio_seed_editor_state();
+			GT_SetGadgetAttrs(audgads[AUDGAD_BASE_PAULA], win, NULL,
+				GTSL_Level, audio_baseline_paula, TAG_END);
+			GT_SetGadgetAttrs(audgads[AUDGAD_BASE_AX], win, NULL,
+				GTSL_Level, audio_baseline_ax, TAG_END);
+			audio_set_status(win,
+				"Saved - survives power-cycle; sliders show last-saved values");
+		} else {
+			audio_set_status(win,
+				"Saved snapshot; newer edits still need Save");
+		}
+	} else if (save_status == ZZ9K_AUDIO_SCENE_SAVE_REJECTED) {
+		audio_set_status(win,
+			"Save rejected: scene level over the boundary");
+	} else {
+		audio_set_status(win, "Save failed: SD card write error");
+	}
+	audio_update_save_gate(win);
 }
 
 static const char *audio_identity_name(uint32_t identity)
@@ -3352,6 +3429,28 @@ static void audio_arm_meter_timer(struct timerequest *io)
 	io->tr_time.tv_secs = ZZTOP_AUDIO_METER_PERIOD_SECS;
 	io->tr_time.tv_micro = 0;
 	SendIO((struct IORequest *)io);
+}
+
+/* Meter gadgets show n/a when the firmware does not advertise the
+ * metering capability; the audio window still serves the control plane
+ * (and the non-blocking save poll rides the same tick). */
+static void audio_meters_unavailable(struct Window *win)
+{
+	snprintf(audio_peak_bufs[0], sizeof(audio_peak_bufs[0]), "n/a");
+	snprintf(audio_counts_bufs[0], sizeof(audio_counts_bufs[0]), "n/a");
+	snprintf(audio_peak_bufs[1], sizeof(audio_peak_bufs[1]), "n/a");
+	snprintf(audio_counts_bufs[1], sizeof(audio_counts_bufs[1]), "n/a");
+	snprintf(audio_gr_buf, sizeof(audio_gr_buf), "n/a");
+	GT_SetGadgetAttrs(audgads[AUDGAD_OUT_PEAK], win, NULL,
+		GTTX_Text, audio_peak_bufs[0], TAG_END);
+	GT_SetGadgetAttrs(audgads[AUDGAD_OUT_COUNTS], win, NULL,
+		GTTX_Text, audio_counts_bufs[0], TAG_END);
+	GT_SetGadgetAttrs(audgads[AUDGAD_IN_PEAK], win, NULL,
+		GTTX_Text, audio_peak_bufs[1], TAG_END);
+	GT_SetGadgetAttrs(audgads[AUDGAD_IN_COUNTS], win, NULL,
+		GTTX_Text, audio_counts_bufs[1], TAG_END);
+	GT_SetGadgetAttrs(audgads[AUDGAD_GAIN_RED], win, NULL,
+		GTTX_Text, audio_gr_buf, TAG_END);
 }
 
 static STRPTR audio_scene_labels[] = {
@@ -3634,8 +3733,10 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 
 	/* Own timer request, not the shared timerio: the main window may
 	 * have a refresh pending on it, and a timerequest cannot be shared
-	 * between two outstanding operations. */
-	if (audio_metering_capped) {
+	 * between two outstanding operations. The 1 s tick refreshes the
+	 * meters (metering cap) and settles a pending non-blocking save
+	 * (control cap), so it runs when either capability is present. */
+	if (audio_metering_capped || audio_control_capped) {
 		meter_port = CreateMsgPort();
 		if (meter_port) {
 			meter_io = (struct timerequest *)CreateIORequest(meter_port,
@@ -3645,29 +3746,19 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 				meter_dev_open = TRUE;
 			}
 		}
-		audio_gr_seen_valid[0] = FALSE;
-		audio_gr_seen_valid[1] = FALSE;
-		audio_refresh_meters(win);
+		if (audio_metering_capped) {
+			audio_gr_seen_valid[0] = FALSE;
+			audio_gr_seen_valid[1] = FALSE;
+			audio_refresh_meters(win);
+		} else {
+			audio_meters_unavailable(win);
+		}
 		if (meter_dev_open) {
 			audio_arm_meter_timer(meter_io);
 			meter_pending = TRUE;
 		}
 	} else {
-		snprintf(audio_peak_bufs[0], sizeof(audio_peak_bufs[0]), "n/a");
-		snprintf(audio_counts_bufs[0], sizeof(audio_counts_bufs[0]), "n/a");
-		snprintf(audio_peak_bufs[1], sizeof(audio_peak_bufs[1]), "n/a");
-		snprintf(audio_counts_bufs[1], sizeof(audio_counts_bufs[1]), "n/a");
-		snprintf(audio_gr_buf, sizeof(audio_gr_buf), "n/a");
-		GT_SetGadgetAttrs(audgads[AUDGAD_OUT_PEAK], win, NULL,
-			GTTX_Text, audio_peak_bufs[0], TAG_END);
-		GT_SetGadgetAttrs(audgads[AUDGAD_OUT_COUNTS], win, NULL,
-			GTTX_Text, audio_counts_bufs[0], TAG_END);
-		GT_SetGadgetAttrs(audgads[AUDGAD_IN_PEAK], win, NULL,
-			GTTX_Text, audio_peak_bufs[1], TAG_END);
-		GT_SetGadgetAttrs(audgads[AUDGAD_IN_COUNTS], win, NULL,
-			GTTX_Text, audio_counts_bufs[1], TAG_END);
-		GT_SetGadgetAttrs(audgads[AUDGAD_GAIN_RED], win, NULL,
-			GTTX_Text, audio_gr_buf, TAG_END);
+		audio_meters_unavailable(win);
 	}
 
 	GT_RefreshWindow(win, NULL);
@@ -3681,7 +3772,9 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 			CheckIO((struct IORequest *)meter_io)) {
 			WaitIO((struct IORequest *)meter_io);
 			meter_pending = FALSE;
-			audio_refresh_meters(win);
+			if (audio_metering_capped)
+				audio_refresh_meters(win);
+			audio_save_settle(win);
 			audio_arm_meter_timer(meter_io);
 			meter_pending = TRUE;
 		}
@@ -3715,7 +3808,7 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 								audio_scene_select_call(imsgCode) ==
 									ZZ9K_STATUS_OK) {
 								scene = imsgCode;
-								audio_dirty = TRUE;
+								audio_mark_dirty();
 								audio_set_status(win,
 									"Scene switched - Save to persist across reboot");
 							} else {
@@ -3783,7 +3876,7 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 									 * the user's value; no snap-back. */
 									audio_baseline_paula = new_paula;
 									audio_baseline_ax = new_ax;
-									audio_dirty = TRUE;
+									audio_mark_dirty();
 									audio_set_status(win,
 										(bst == ZZ9K_STATUS_OK)
 										?	"Baseline committed - Save to persist"
@@ -3815,6 +3908,23 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 								break;
 							}
 							if (save_status ==
+									ZZ9K_AUDIO_SCENE_SAVE_QUEUED) {
+								/* The firmware serialized this
+								 * generation before returning.
+								 * Later edits remain dirty when
+								 * this snapshot settles. */
+								audio_save_generation =
+									audio_edit_generation;
+								audio_save_pending = TRUE;
+								audio_set_status(win, "Saving...");
+							} else if (save_status ==
+									ZZ9K_AUDIO_SCENE_SAVE_BUSY) {
+								/* This request was refused; do not
+								 * treat somebody else's in-flight
+								 * snapshot as saving our edits. */
+								audio_set_status(win,
+									"Save busy - retry");
+							} else if (save_status ==
 									ZZ9K_AUDIO_SCENE_SAVE_OK) {
 								audio_dirty = FALSE;
 								/* The CFG now holds exactly what a
@@ -4126,7 +4236,7 @@ static BOOL audio_scene_editor_window(struct Screen *mysc, void *vi,
 						imsg_code);
 					if (cst == ZZ9K_STATUS_OK) {
 						*field = (UWORD)imsg_code;
-						audio_dirty = TRUE;
+						audio_mark_dirty();
 						edited = TRUE;
 						snprintf(status, sizeof(status),
 								"%s committed to %s - Save to persist",
@@ -4138,7 +4248,7 @@ static BOOL audio_scene_editor_window(struct Screen *mysc, void *vi,
 						 * Keep the user's value; never fight the
 						 * drag with a restore. */
 						*field = (UWORD)imsg_code;
-						audio_dirty = TRUE;
+						audio_mark_dirty();
 						edited = TRUE;
 						snprintf(status, sizeof(status),
 								"%s committing - Save to persist", name);
@@ -4152,7 +4262,7 @@ static BOOL audio_scene_editor_window(struct Screen *mysc, void *vi,
 					} else {
 						GT_SetGadgetAttrs(segads[id], win, NULL,
 							GTSL_Level, old, TAG_END);
-						audio_dirty = TRUE;
+						audio_mark_dirty();
 						snprintf(status, sizeof(status),
 								"%s commit failed; firmware may hold the attempted value - Save",
 								name);
@@ -4328,7 +4438,7 @@ static int audio_scene_rename_window(struct Screen *mysc, void *vi,
 					/* Timeout = commit machine mid-step: the name
 					 * applied or coalesced; keep it, no snap-back. */
 					snprintf(sc->name, sizeof(sc->name), "%s", entry);
-					audio_dirty = TRUE;
+					audio_mark_dirty();
 					result = (st == ZZ9K_STATUS_OK)
 						? AUDIO_RENAME_COMMITTED
 						: AUDIO_RENAME_COMMITTING;
