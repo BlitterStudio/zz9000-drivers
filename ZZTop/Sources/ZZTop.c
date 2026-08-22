@@ -41,6 +41,13 @@
 #include "fwup_amiga.h"
 #include "zzcfg_amiga.h"
 #include "zz_vcap_live.h"
+/* zz9k.library client surface for the firmware audio control plane
+ * (the Audio window). The staged zz9k-headers tree is synced from the
+ * SDK checkout by build-gcc.sh, like the AHI/MHI drivers. */
+#include "zz9k/library_vectors.h"
+#include "zz9k/request.h"
+#include <proto/zz9k.h>
+#include <math.h>
 
 #define ZZTOP_RELEASE "2.8"
 #define ZZTOP_DATE    "11.08.2026"
@@ -58,15 +65,17 @@ static const char version[] __attribute__((used)) =
 #define MYGAD_Z9AX         (6)
 #define MYGAD_STATUS       (7)
 #define MYGAD_RAWREGS      (8)
-#define MYGAD_LPF          (9)
-#define MYGAD_REFRESHMODE  (10)
-#define MYGAD_BTN_TEST     (11)
-#define MYGAD_BTN_REFRESH  (12)
-#define MYGAD_TEST_RESULT  (13)
-#define MYGAD_VIDEOCAP     (14)
-#define MYGAD_BTN_UPDATE   (15)
-#define MYGAD_BTN_RESTORE  (16)
-#define MYGAD_FW_STATUS    (17)
+#define MYGAD_REFRESHMODE  (9)
+#define MYGAD_BTN_TEST     (10)
+#define MYGAD_BTN_REFRESH  (11)
+#define MYGAD_TEST_RESULT  (12)
+#define MYGAD_VIDEOCAP     (13)
+#define MYGAD_BTN_UPDATE   (14)
+#define MYGAD_BTN_RESTORE  (15)
+/* Opens the Audio window; the LPF slider that used to sit on the main
+ * window moved there with the rest of the master-chain controls. */
+#define MYGAD_FW_STATUS    (16)
+#define MYGAD_BTN_AUDIO    (17)
 #define MYGAD_COUNT        (18)
 
 /* Settings window gadgets (own id space, own window). */
@@ -95,6 +104,30 @@ static const char version[] __attribute__((used)) =
 #define AGAD_BTN_CANCEL    (7)
 #define AGAD_COUNT         (8)
 
+/* Audio window gadgets (own id space, own window). */
+#define AUDGAD_SCENE        (0)
+#define AUDGAD_BTN_EDIT     (1)
+#define AUDGAD_OUT_PEAK     (2)
+#define AUDGAD_OUT_COUNTS   (3)
+#define AUDGAD_IN_PEAK      (4)
+#define AUDGAD_IN_COUNTS    (5)
+#define AUDGAD_GAIN_RED     (6)
+#define AUDGAD_BASE_PAULA   (7)
+#define AUDGAD_BASE_AX      (8)
+#define AUDGAD_STATUS       (9)
+#define AUDGAD_BTN_SAVE     (10)
+#define AUDGAD_COUNT        (11)
+
+/* Scene-editor window gadgets (sub-window of the Audio window). */
+#define SEGAD_LPF           (0)
+#define SEGAD_PREFACTOR     (1)
+#define SEGAD_VOLUME        (2)
+#define SEGAD_PAN           (3)
+#define SEGAD_EQ_BASE       (4)  /* SEGAD_EQ_BASE + 0..9 = bands 1..10 */
+#define SEGAD_STATUS        (14)
+#define SEGAD_BTN_DONE      (15)
+#define SEGAD_COUNT         (16)
+
 #define VCAP_RAWKEY_KEYPAD_ENTER 0x43
 #define VCAP_RAWKEY_RETURN       0x44
 #define VCAP_RAWKEY_ESCAPE       0x45
@@ -120,7 +153,6 @@ static const char version[] __attribute__((used)) =
 #define LABEL_STATUS       "Status"
 #define LABEL_RAWREGS      "Raw Regs"
 #define LABEL_VIDEOCAP     "VideoCap"
-#define LABEL_LPF          "AX Lowpass"
 #define LABEL_SCANLINES    "Scanlines"
 #define LABEL_PARITY       "Parity"
 #define LABEL_REFRESHMODE  "Auto Refresh"
@@ -142,6 +174,21 @@ static const char version[] __attribute__((used)) =
 #define LABEL_BTN_UPDATE   "Update Firmware"
 #define LABEL_BTN_RESTORE  "Restore Backup"
 #define LABEL_FW_STATUS    "Firmware Op"
+#define LABEL_BTN_AUDIO    "Audio..."
+#define LABEL_AUDIO_SCENE  "Scene"
+#define LABEL_BTN_EDITSCN  "Edit Scene..."
+#define LABEL_AUD_OUT_PEAK "Out Peak L/R"
+#define LABEL_AUD_OUT_CNT  "Out Clip/Urun"
+#define LABEL_AUD_IN_PEAK  "In Peak L/R"
+#define LABEL_AUD_IN_CNT   "In Clip/Over"
+#define LABEL_AUD_GR       "Gain Red"
+#define LABEL_AUD_PAULA    "Paula Level"
+#define LABEL_AUD_AX       "AX Level"
+#define LABEL_AUD_DONE     "Done"
+#define LABEL_AUD_PREF     "Prefactor"
+#define LABEL_AUD_VOL      "Volume"
+#define LABEL_AUD_PAN      "Pan"
+#define LABEL_AUD_LPF      "AX Lowpass"
 
 #define SAMPLE_FWVER       "ABI 255.255"
 #define SAMPLE_TEMP        "999.9"
@@ -151,7 +198,6 @@ static const char version[] __attribute__((used)) =
 #define SAMPLE_STATUS      "AX:Y USB:ffff SD:ffff B:ffff"
 #define SAMPLE_RAWREGS     "S:ffff P:ffff T:ffff A:ffff"
 #define SAMPLE_VIDEOCAP    "Lines:1023  Max:3/3  Min:3/3"
-#define SAMPLE_LPF_LEVEL   "23900 Hz"
 #define SAMPLE_TEST_RESULT "No timer.device"
 #define SAMPLE_FW_STATUS   "Updating... 100% (9999 KB)"
 
@@ -217,6 +263,7 @@ struct ZZTopLayout {
 	WORD control_step;
 	WORD button_width;
 	WORD button_col2;
+	WORD button_col3;
 	WORD button_top;
 	WORD fw_button_top;
 	WORD fw_status_top;
@@ -237,7 +284,6 @@ static CONST_STRPTR zztop_label_samples[] = {
 	(CONST_STRPTR)LABEL_STATUS,
 	(CONST_STRPTR)LABEL_RAWREGS,
 	(CONST_STRPTR)LABEL_VIDEOCAP,
-	(CONST_STRPTR)LABEL_LPF,
 	(CONST_STRPTR)LABEL_SCANLINES,
 	(CONST_STRPTR)LABEL_PARITY,
 	(CONST_STRPTR)LABEL_REFRESHMODE,
@@ -255,7 +301,6 @@ static CONST_STRPTR zztop_value_samples[] = {
 	(CONST_STRPTR)SAMPLE_STATUS,
 	(CONST_STRPTR)SAMPLE_RAWREGS,
 	(CONST_STRPTR)SAMPLE_VIDEOCAP,
-	(CONST_STRPTR)SAMPLE_LPF_LEVEL,
 	(CONST_STRPTR)SAMPLE_TEST_RESULT,
 	(CONST_STRPTR)"Gradient",
 	(CONST_STRPTR)"Even dark",
@@ -266,9 +311,9 @@ static CONST_STRPTR zztop_value_samples[] = {
 
 static CONST_STRPTR zztop_button_samples[] = {
 	(CONST_STRPTR)LABEL_BTN_TEST,
-	(CONST_STRPTR)LABEL_BTN_REFRESH,
-	(CONST_STRPTR)LABEL_BTN_UPDATE,
 	(CONST_STRPTR)LABEL_BTN_RESTORE,
+	(CONST_STRPTR)LABEL_BTN_AUDIO,
+	(CONST_STRPTR)LABEL_BTN_UPDATE,
 	NULL
 };
 
@@ -276,6 +321,9 @@ struct Library* IntuitionBase;
 struct Library* GfxBase;
 struct Library* GadToolsBase;
 struct Library* AslBase;
+/* zz9k.library base for the proto inline calls; opened once at startup
+ * (optional, like asl.library) for the Audio control-plane window. */
+struct Library* ZZ9KBase = NULL;
 
 struct ConfigDev* zz_cd;
 volatile UBYTE* zz_regs;
@@ -400,7 +448,6 @@ static void zztop_place_rows(struct ZZTopLayout *layout)
 
 	y += layout->row_step * 10;
 	y += layout->section_gap;
-	y += layout->slider_step;
 	y += layout->control_step;
 	y += layout->section_gap;
 	y += layout->row_step;
@@ -449,11 +496,13 @@ static void zztop_init_layout(struct ZZTopLayout *layout, struct Screen *screen)
 	layout->button_width = zztop_max_word(110, button_text_width + text_padding);
 
 	button_gap = zztop_max_word(16, font_x * 3);
-	/* Second button column sits one full button + gap right of the first,
-	 * so wider labels never overlap the left column. */
+	/* Second and third button columns sit one full button + gap right of
+	 * the previous, so wider labels never overlap the left column. */
 	layout->button_col2 = layout->margin_x + layout->button_width + button_gap;
+	layout->button_col3 = layout->button_col2 + layout->button_width + button_gap;
 	button_window_width = layout->margin_x + layout->button_width +
-		button_gap + layout->button_width + layout->margin_x;
+		button_gap + layout->button_width + button_gap +
+		layout->button_width + layout->margin_x;
 	layout->window_width = zztop_max_word(
 		layout->gadget_left + layout->gadget_width + layout->margin_x,
 		button_window_width);
@@ -522,13 +571,6 @@ double zz_get_voltage_int(void)
 uint32_t zz_get_ax_present(void)
 {
 	return zz_get_reg16(REG_ZZ_AUDIO_CONFIG) & 1;
-}
-
-void zz_set_lpf_freq(uint16_t freq)
-{
-	zz_set_reg(REG_ZZ_AUDIO_PARAM, 9);
-	zz_set_reg(REG_ZZ_AUDIO_VAL, freq);
-	zz_set_reg(REG_ZZ_AUDIO_PARAM, 0);
 }
 
 /*
@@ -2678,6 +2720,1093 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 	FreeGadgets(glist);
 }
 
+/* ---- Audio control plane (the Audio window, plan R13/R18) ----
+ *
+ * ZZTop is a client of the firmware-authoritative control plane over
+ * zz9k.library, exactly like the AHI/MHI drivers: scene selection and
+ * editing, the operator baseline, metering and saving are mailbox
+ * opcodes. The master-chain register path this tool used for its LPF
+ * slider is gone -- every write commits through the staged scene-write
+ * opcode (R2/R4), so the firmware stays the single arbiter.
+ */
+
+#define ZZTOP_AUDIO_METER_PERIOD_SECS 1
+#define ZZTOP_AUDIO_LPF_MIN 1
+#define ZZTOP_AUDIO_LPF_MAX 23900
+#define ZZTOP_AUDIO_RANGE_MAX 100
+#define ZZTOP_AUDIO_LEVEL_MAX 255
+
+static BOOL audio_control_capped = FALSE;
+static BOOL audio_metering_capped = FALSE;
+
+static BOOL zztop_audio_surface_available(void)
+{
+	/* R18 grey-out idiom: the button always exists, but the window
+	 * behind it needs the AX codec and a firmware that advertises
+	 * ZZ9K_CAP_AUDIO_CONTROL (R16). Until the hardware verification
+	 * session advertises the capability (KTD6), every matched set
+	 * shows the disabled button -- discoverable, not hidden. */
+	return (zz_get_ax_present() != 0) && audio_control_capped;
+}
+
+/* One mailbox round-trip: build the typed request, send it, wait for
+ * the completion. Runs from the GUI event loop (no Forbid held), so
+ * blocking on the completion is the same trade the Settings window
+ * makes for its SD-card reads. */
+static int audio_mb_call(uint16_t opcode, const void *payload,
+	uint16_t payload_len, ZZ9KMailboxEntry *reply)
+{
+	ZZ9KRequest request;
+
+	zz9k_request_init(&request, opcode);
+	request.entry.payload_len = payload_len;
+	memcpy(request.entry.payload.inline_data, payload, payload_len);
+	return ZZ9KCall(&request, reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+}
+
+struct zztop_audio_state {
+	UWORD active_scene;
+	UWORD scene_count;
+	uint32_t baseline; /* ABI packed pair: ch1 = Paula, ch2 = AX */
+};
+
+struct zztop_audio_meter {
+	uint32_t identity;
+	uint32_t clip_count;
+	uint32_t underrun_count;
+	uint32_t overrun_count;
+	uint32_t gain_reduction_events;
+	uint32_t peak_hold_ch1;
+	uint32_t peak_hold_ch2;
+};
+
+static int audio_scene_select_call(UWORD scene)
+{
+	ZZ9KAudioSceneSelectPayload payload;
+	ZZ9KMailboxEntry reply;
+
+	memset(&payload, 0, sizeof(payload));
+	zz9k_put_be32(payload.scene, scene);
+	return audio_mb_call(ZZ9K_OP_AUDIO_SCENE_SELECT, &payload,
+		sizeof(payload), &reply);
+}
+
+/* One staged parameter plus COMMIT (F3/KTD7): the firmware accumulates
+ * the stage and commits the group atomically through its fade path, so
+ * a release never writes a half master-chain. */
+static int audio_scene_write_commit(UWORD scene, uint32_t param,
+	uint32_t value)
+{
+	ZZ9KAudioSceneWritePayload payload;
+	ZZ9KMailboxEntry reply;
+
+	memset(&payload, 0, sizeof(payload));
+	zz9k_put_be32(payload.scene, scene);
+	zz9k_put_be32(payload.param, param);
+	zz9k_put_be32(payload.value, value);
+	zz9k_put_be32(payload.flags, ZZ9K_AUDIO_SCENE_WRITE_FLAG_COMMIT);
+	return audio_mb_call(ZZ9K_OP_AUDIO_SCENE_WRITE, &payload,
+		sizeof(payload), &reply);
+}
+
+static BOOL audio_control_state_get(struct zztop_audio_state *out)
+{
+	ZZ9KAudioControlStateGetPayload payload;
+	ZZ9KAudioControlStateResultPayload result;
+	ZZ9KMailboxEntry reply;
+
+	memset(&payload, 0, sizeof(payload));
+	if (audio_mb_call(ZZ9K_OP_AUDIO_CONTROL_STATE_GET, &payload,
+			sizeof(payload), &reply) != ZZ9K_STATUS_OK)
+		return FALSE;
+	/* The reply payload is byte storage; copy it out before reading
+	 * typed fields (the SDK reply-extraction convention). */
+	memcpy(&result, reply.payload.inline_data, sizeof(result));
+	out->active_scene = (UWORD)zz9k_get_be32(result.active_scene);
+	out->scene_count = (UWORD)zz9k_get_be32(result.scene_count);
+	out->baseline = zz9k_get_be32(result.baseline);
+	return TRUE;
+}
+
+/* One framed meter snapshot (R9). The HOLD_RESET request flag opts into
+ * read-and-clear peak-hold, so each poll shows the peak since the
+ * previous one without leaving a stale hold for anyone else (R8); a
+ * reply that is not a complete single frame is refused rather than
+ * half-displayed. */
+static BOOL audio_meter_read(uint32_t direction,
+	struct zztop_audio_meter *out)
+{
+	ZZ9KAudioMeterReadPayload payload;
+	ZZ9KAudioMeterResultPayload result;
+	ZZ9KMailboxEntry reply;
+
+	memset(&payload, 0, sizeof(payload));
+	zz9k_put_be32(payload.direction, direction);
+	zz9k_put_be32(payload.flags, ZZ9K_AUDIO_METER_RESULT_HOLD_RESET);
+	if (audio_mb_call(ZZ9K_OP_AUDIO_METER_READ, &payload,
+			sizeof(payload), &reply) != ZZ9K_STATUS_OK)
+		return FALSE;
+	memcpy(&result, reply.payload.inline_data, sizeof(result));
+	if (zz9k_get_be32(result.direction) != direction)
+		return FALSE;
+	if (zz9k_get_be32(result.frame_count) != 1U ||
+			zz9k_get_be32(result.frame) != 0U)
+		return FALSE; /* torn or a future multi-frame layout */
+	out->identity = zz9k_get_be32(result.identity);
+	out->clip_count = zz9k_get_be32(result.clip_count);
+	out->underrun_count = zz9k_get_be32(result.underrun_count);
+	out->overrun_count = zz9k_get_be32(result.overrun_count);
+	out->gain_reduction_events = zz9k_get_be32(result.gain_reduction_events);
+	out->peak_hold_ch1 = zz9k_get_be32(result.peak_hold_ch1);
+	out->peak_hold_ch2 = zz9k_get_be32(result.peak_hold_ch2);
+	return TRUE;
+}
+
+static BOOL audio_scene_save_call(UWORD scene, uint32_t *save_status)
+{
+	ZZ9KAudioSceneSavePayload payload;
+	ZZ9KAudioSceneSaveResultPayload result;
+	ZZ9KMailboxEntry reply;
+
+	memset(&payload, 0, sizeof(payload));
+	zz9k_put_be32(payload.scene, scene);
+	if (audio_mb_call(ZZ9K_OP_AUDIO_SCENE_SAVE, &payload,
+			sizeof(payload), &reply) != ZZ9K_STATUS_OK)
+		return FALSE;
+	memcpy(&result, reply.payload.inline_data, sizeof(result));
+	*save_status = zz9k_get_be32(result.status);
+	return TRUE;
+}
+
+/* Editor seed state. The control-plane ABI is append-only and has no
+ * scene-read opcode, so the editor seeds from the last saved
+ * ZZ9000.CFG (what a reboot restores) overlaid with this session's
+ * edits; the live firmware state stays the authority, and because each
+ * staged write carries exactly the touched parameter, display drift
+ * can never corrupt firmware state. */
+struct zztop_audio_scene_ui {
+	UWORD lpf;
+	UWORD eq[10];
+	UWORD prefactor;
+	UWORD volume;
+	UWORD pan;
+};
+
+/* Mirror of the firmware's built-in scene defaults (audio_scene.c):
+ * display seed only. Same slot count as ZZCFG_AUDIO_SCENES. */
+static const struct zztop_audio_scene_ui zztop_audio_scene_defaults[8] = {
+	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 50, 100, 50 },
+	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 50, 80, 50 },
+	{ 16000, { 55, 55, 50, 50, 50, 50, 50, 50, 50, 50 }, 50, 75, 50 },
+	{ 18000, { 50, 50, 50, 50, 50, 50, 55, 55, 50, 50 }, 50, 75, 50 },
+	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 60, 70, 50 },
+	{ 12000, { 45, 45, 50, 50, 50, 50, 50, 50, 45, 45 }, 50, 90, 50 },
+	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 55, 75, 50 },
+	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 50, 60, 50 },
+};
+
+static struct zztop_audio_scene_ui audio_scenes[ZZCFG_AUDIO_SCENES];
+static UWORD audio_baseline_paula;
+static UWORD audio_baseline_ax;
+static BOOL audio_ui_seeded = FALSE;
+/* Unsaved-changes contract (R15): edits persist in firmware RAM, so
+ * "dirty" is card-wide state that outlives the window; only a
+ * successful SCENE_SAVE (or a reboot) clears it. */
+static BOOL audio_dirty = FALSE;
+
+static void audio_seed_editor_state(void)
+{
+	struct zzcfg_values sv;
+	UWORD rawlen = 0;
+	int i, k;
+
+	memcpy(audio_scenes, zztop_audio_scene_defaults,
+		sizeof(audio_scenes));
+	/* Power-on mixer state written by audio_adau_init. */
+	audio_baseline_paula = 128;
+	audio_baseline_ax = 64;
+
+	/* Overlay the saved CFG exactly like the firmware's cold-boot fold
+	 * (R10): absent keys keep the built-in defaults. settings_cfg_text
+	 * is shared scratch -- the windows are modal, so the Settings
+	 * window is never mid-read while this runs. */
+	if (zz_get_reg16(REG_ZZ_FW_VERSION) < 0x0203)
+		return; /* no config-file interface to read */
+	if (zzcfg_read_raw((ULONG)zz_regs, settings_cfg_text,
+			ZZCFG_MAX_SIZE, &rawlen) != ZZ_CFG_FILE_OK)
+		return;
+
+	memset(&sv, 0, sizeof(sv));
+	zzcfg_parse_text(settings_cfg_text, rawlen, &sv);
+	for (i = 0; i < ZZCFG_AUDIO_SCENES; i++) {
+		UWORD mask = sv.audio_scene_mask[i];
+
+		if (mask & (UWORD)(1u << 0))
+			audio_scenes[i].lpf = sv.audio_scene_lpf[i];
+		for (k = 0; k < 5; k++) {
+			if (mask & (UWORD)(1u << (1 + k))) {
+				UWORD packed = sv.audio_scene_eq[i][k];
+
+				audio_scenes[i].eq[2 * k] = packed / 128;
+				audio_scenes[i].eq[2 * k + 1] = packed % 128;
+			}
+		}
+		if (mask & (UWORD)(1u << 6)) {
+			audio_scenes[i].prefactor = sv.audio_scene_out[i] / 128;
+			audio_scenes[i].volume = sv.audio_scene_out[i] % 128;
+		}
+		if (mask & (UWORD)(1u << 7))
+			audio_scenes[i].pan = sv.audio_scene_pan[i];
+	}
+	if (sv.audio_baseline_present) {
+		audio_baseline_paula = sv.audio_baseline >> 8;
+		audio_baseline_ax = sv.audio_baseline & 0xff;
+	}
+
+	/* Clamp to the ranges the firmware enforces on write, so a hand
+	 * edited file seeds usable slider positions. */
+	for (i = 0; i < ZZCFG_AUDIO_SCENES; i++) {
+		if (audio_scenes[i].lpf < ZZTOP_AUDIO_LPF_MIN)
+			audio_scenes[i].lpf = ZZTOP_AUDIO_LPF_MIN;
+		if (audio_scenes[i].lpf > ZZTOP_AUDIO_LPF_MAX)
+			audio_scenes[i].lpf = ZZTOP_AUDIO_LPF_MAX;
+		if (audio_scenes[i].prefactor > ZZTOP_AUDIO_RANGE_MAX)
+			audio_scenes[i].prefactor = ZZTOP_AUDIO_RANGE_MAX;
+		if (audio_scenes[i].volume > ZZTOP_AUDIO_RANGE_MAX)
+			audio_scenes[i].volume = ZZTOP_AUDIO_RANGE_MAX;
+		if (audio_scenes[i].pan > ZZTOP_AUDIO_RANGE_MAX)
+			audio_scenes[i].pan = ZZTOP_AUDIO_RANGE_MAX;
+		for (k = 0; k < 10; k++)
+			if (audio_scenes[i].eq[k] > ZZTOP_AUDIO_RANGE_MAX)
+				audio_scenes[i].eq[k] = ZZTOP_AUDIO_RANGE_MAX;
+	}
+}
+
+static struct Gadget *agads[AUDGAD_COUNT];
+static char audio_status_buf[96];
+
+static void audio_set_status(struct Window *win, const char *text)
+{
+	/* callers may pass audio_status_buf itself - don't self-copy */
+	if (text != audio_status_buf) {
+		snprintf(audio_status_buf, sizeof(audio_status_buf), "%s", text);
+	}
+	if (win && agads[AUDGAD_STATUS]) {
+		GT_SetGadgetAttrs(agads[AUDGAD_STATUS], win, NULL,
+			GTTX_Text, audio_status_buf, TAG_END);
+	}
+}
+
+static void audio_update_save_gate(struct Window *win)
+{
+	GT_SetGadgetAttrs(agads[AUDGAD_BTN_SAVE], win, NULL,
+		GA_Disabled, !audio_dirty, TAG_END);
+}
+
+static const char *audio_identity_name(uint32_t identity)
+{
+	switch (identity) {
+	case ZZ9K_AUDIO_METER_IDENTITY_AHI:
+		return "AHI";
+	case ZZ9K_AUDIO_METER_IDENTITY_MEDIA:
+		return "MHI";
+	case ZZ9K_AUDIO_METER_IDENTITY_SDK_STREAM:
+		return "SDK";
+	default:
+		return "legacy";
+	}
+}
+
+/* Peaks are unsigned 16.16 with 0x10000 = digital full scale; show
+ * dBFS like every other meter the operator has used. */
+static void audio_format_peak(char *buf, size_t size, uint32_t peak)
+{
+	double db;
+
+	if (peak == 0) {
+		snprintf(buf, size, "-oo");
+		return;
+	}
+	db = 20.0 * log10((double)peak / 65536.0);
+	if (db <= -99.9) {
+		snprintf(buf, size, "-oo");
+		return;
+	}
+	snprintf(buf, size, "%.1f", db);
+}
+
+/* Gain-reduction latch (R7/R8): the indicator is re-evaluated only by
+ * a meter read and holds its state between reads; a fresh event also
+ * echoes into the status line, where it survives until the next
+ * operator action overwrites it. */
+static char audio_peak_bufs[2][24];
+static char audio_counts_bufs[2][32];
+static char audio_gr_buf[24];
+static uint32_t audio_gr_seen[2];
+static BOOL audio_gr_seen_valid[2];
+
+static void audio_refresh_meters(struct Window *win)
+{
+	static const uint32_t directions[2] = {
+		ZZ9K_AUDIO_METER_DIRECTION_OUTPUT,
+		ZZ9K_AUDIO_METER_DIRECTION_CAPTURE
+	};
+	static const UWORD peak_gads[2] = { AUDGAD_OUT_PEAK, AUDGAD_IN_PEAK };
+	static const UWORD counts_gads[2] = {
+		AUDGAD_OUT_COUNTS, AUDGAD_IN_COUNTS
+	};
+	uint32_t gr_new = 0;
+	int d;
+
+	for (d = 0; d < 2; d++) {
+		struct zztop_audio_meter m;
+		char lbuf[12], rbuf[12];
+
+		if (!audio_meter_read(directions[d], &m)) {
+			snprintf(audio_peak_bufs[d], sizeof(audio_peak_bufs[d]),
+				"- / - dB");
+			snprintf(audio_counts_bufs[d], sizeof(audio_counts_bufs[d]),
+				"n/a");
+			continue;
+		}
+
+		audio_format_peak(lbuf, sizeof(lbuf), m.peak_hold_ch1);
+		audio_format_peak(rbuf, sizeof(rbuf), m.peak_hold_ch2);
+		snprintf(audio_peak_bufs[d], sizeof(audio_peak_bufs[d]),
+			"%s / %s dB", lbuf, rbuf);
+		snprintf(audio_counts_bufs[d], sizeof(audio_counts_bufs[d]),
+			"%lu / %lu  %s",
+			(unsigned long)m.clip_count,
+			(unsigned long)(d == 0 ? m.underrun_count
+				: m.overrun_count),
+			audio_identity_name(m.identity));
+
+		/* Counters are cumulative and saturating (R8), so a lower
+		 * value than the previous read means saturation, not a
+		 * reset; count it as one fresh event instead of wrapping. */
+		if (!audio_gr_seen_valid[d]) {
+			/* First read after the window opened: baseline the
+			 * counter so only events watched by this operator
+			 * light the indicator. */
+			audio_gr_seen_valid[d] = TRUE;
+		} else if (m.gain_reduction_events >= audio_gr_seen[d]) {
+			gr_new += m.gain_reduction_events - audio_gr_seen[d];
+		} else if (m.gain_reduction_events > 0) {
+			gr_new++;
+		}
+		audio_gr_seen[d] = m.gain_reduction_events;
+	}
+
+	if (gr_new > 0) {
+		snprintf(audio_gr_buf, sizeof(audio_gr_buf), "%lu new",
+			(unsigned long)gr_new);
+		audio_set_status(win,
+			"Gain reduction: scene policy lowered the level");
+	} else {
+		snprintf(audio_gr_buf, sizeof(audio_gr_buf), "none");
+	}
+
+	if (win) {
+		for (d = 0; d < 2; d++) {
+			GT_SetGadgetAttrs(agads[peak_gads[d]], win, NULL,
+				GTTX_Text, audio_peak_bufs[d], TAG_END);
+			GT_SetGadgetAttrs(agads[counts_gads[d]], win, NULL,
+				GTTX_Text, audio_counts_bufs[d], TAG_END);
+		}
+		GT_SetGadgetAttrs(agads[AUDGAD_GAIN_RED], win, NULL,
+			GTTX_Text, audio_gr_buf, TAG_END);
+	}
+}
+
+static void audio_arm_meter_timer(struct timerequest *io)
+{
+	io->tr_node.io_Command = TR_ADDREQUEST;
+	io->tr_time.tv_secs = ZZTOP_AUDIO_METER_PERIOD_SECS;
+	io->tr_time.tv_micro = 0;
+	SendIO((struct IORequest *)io);
+}
+
+static STRPTR audio_scene_labels[] = {
+	(STRPTR)"Scene 1",
+	(STRPTR)"Scene 2",
+	(STRPTR)"Scene 3",
+	(STRPTR)"Scene 4",
+	(STRPTR)"Scene 5",
+	(STRPTR)"Scene 6",
+	(STRPTR)"Scene 7",
+	(STRPTR)"Scene 8",
+	NULL
+};
+
+static CONST_STRPTR audio_label_samples[] = {
+	(CONST_STRPTR)LABEL_AUDIO_SCENE,
+	(CONST_STRPTR)LABEL_AUD_OUT_PEAK,
+	(CONST_STRPTR)LABEL_AUD_OUT_CNT,
+	(CONST_STRPTR)LABEL_AUD_IN_PEAK,
+	(CONST_STRPTR)LABEL_AUD_IN_CNT,
+	(CONST_STRPTR)LABEL_AUD_GR,
+	(CONST_STRPTR)LABEL_AUD_PAULA,
+	(CONST_STRPTR)LABEL_AUD_AX,
+	NULL
+};
+
+static CONST_STRPTR audio_value_samples[] = {
+	(CONST_STRPTR)"Scene 8",
+	(CONST_STRPTR)"-12.0 / -12.0 dB",
+	(CONST_STRPTR)"65535 / 65535  legacy",
+	(CONST_STRPTR)"32767 new",
+	(CONST_STRPTR)"255",
+	NULL
+};
+
+static CONST_STRPTR audio_button_samples[] = {
+	(CONST_STRPTR)LABEL_BTN_EDITSCN,
+	(CONST_STRPTR)LABEL_BTN_SAVE,
+	NULL
+};
+
+static struct Gadget *audio_create_text(struct Gadget *gad,
+	struct NewGadget *ng, UWORD gadget_id, STRPTR label,
+	const char *initial)
+{
+	ng->ng_GadgetID = gadget_id;
+	ng->ng_GadgetText = label;
+
+	return CreateGadget(TEXT_KIND, gad, ng,
+		GTTX_Text, (STRPTR)initial,
+		GTTX_Border, TRUE,
+		TAG_END);
+}
+
+static struct Gadget *audio_create_gadgets(struct Gadget **glistptr,
+	void *vi, const struct ZZTopLayout *mainlayout, UWORD scene,
+	WORD *out_w, WORD *out_h)
+{
+	struct ZZTopLayout l = *mainlayout;
+	struct NewGadget ng;
+	struct Gadget *gad;
+	WORD label_width, value_width, button_width, content_right, y, i;
+
+	/* Same font metrics as the main window, own column widths. */
+	{
+		struct RastPort *rp = zztop_screen ? &zztop_screen->RastPort : NULL;
+
+		label_width = zztop_max_text_width(rp, audio_label_samples, 8);
+		value_width = zztop_max_text_width(rp, audio_value_samples, 8);
+		button_width = zztop_max_word(90,
+			zztop_max_text_width(rp, audio_button_samples, 8) + 32);
+	}
+	l.gadget_left = l.margin_x + label_width + l.label_gap;
+	l.gadget_width = zztop_max_word(200, value_width + 48);
+	content_right = l.gadget_left + l.gadget_width;
+
+	gad = CreateContext(glistptr);
+	for (i = 0; i < AUDGAD_COUNT; i++) agads[i] = NULL;
+
+	y = l.topborder + l.margin_y;
+
+	ng.ng_LeftEdge = l.gadget_left;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = l.gadget_width;
+	ng.ng_Height = l.gadget_height;
+	ng.ng_TextAttr = l.text_attr;
+	ng.ng_VisualInfo = vi;
+	ng.ng_Flags = PLACETEXT_LEFT;
+
+	ng.ng_GadgetID = AUDGAD_SCENE;
+	ng.ng_GadgetText = (STRPTR)LABEL_AUDIO_SCENE;
+	agads[AUDGAD_SCENE] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+		GTCY_Labels, audio_scene_labels, GTCY_Active, scene, TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge = y;
+	ng.ng_GadgetID = AUDGAD_BTN_EDIT;
+	ng.ng_GadgetText = (STRPTR)LABEL_BTN_EDITSCN;
+	ng.ng_Flags = PLACETEXT_IN;
+	agads[AUDGAD_BTN_EDIT] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		TAG_END);
+	ng.ng_Flags = PLACETEXT_LEFT;
+	y += l.row_step + l.section_gap;
+
+	ng.ng_TopEdge = y;
+	agads[AUDGAD_OUT_PEAK] = gad = audio_create_text(gad, &ng,
+		AUDGAD_OUT_PEAK, (STRPTR)LABEL_AUD_OUT_PEAK, "- / - dB");
+	y += l.row_step;
+
+	ng.ng_TopEdge = y;
+	agads[AUDGAD_OUT_COUNTS] = gad = audio_create_text(gad, &ng,
+		AUDGAD_OUT_COUNTS, (STRPTR)LABEL_AUD_OUT_CNT, "- / -");
+	y += l.row_step;
+
+	ng.ng_TopEdge = y;
+	agads[AUDGAD_IN_PEAK] = gad = audio_create_text(gad, &ng,
+		AUDGAD_IN_PEAK, (STRPTR)LABEL_AUD_IN_PEAK, "- / - dB");
+	y += l.row_step;
+
+	ng.ng_TopEdge = y;
+	agads[AUDGAD_IN_COUNTS] = gad = audio_create_text(gad, &ng,
+		AUDGAD_IN_COUNTS, (STRPTR)LABEL_AUD_IN_CNT, "- / -");
+	y += l.row_step;
+
+	ng.ng_TopEdge = y;
+	agads[AUDGAD_GAIN_RED] = gad = audio_create_text(gad, &ng,
+		AUDGAD_GAIN_RED, (STRPTR)LABEL_AUD_GR, "-");
+	y += l.row_step + l.section_gap;
+
+	/* Operator baseline balance (R17), replacing ZZ9K_MIX_LEVELS: a
+	 * packed 0..255 pair written through the scene-write path. The
+	 * level text sits right of the slider, so keep the reserve. */
+	ng.ng_TopEdge = y;
+	ng.ng_Width = l.gadget_width - 56;
+	ng.ng_GadgetID = AUDGAD_BASE_PAULA;
+	ng.ng_GadgetText = (STRPTR)LABEL_AUD_PAULA;
+	agads[AUDGAD_BASE_PAULA] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
+		GTSL_Min, 0, GTSL_Max, ZZTOP_AUDIO_LEVEL_MAX,
+		GTSL_Level, audio_baseline_paula,
+		GTSL_LevelFormat, (STRPTR)"%ld", GTSL_MaxLevelLen, 4,
+		GTSL_LevelPlace, PLACETEXT_RIGHT,
+		TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge = y;
+	ng.ng_GadgetID = AUDGAD_BASE_AX;
+	ng.ng_GadgetText = (STRPTR)LABEL_AUD_AX;
+	agads[AUDGAD_BASE_AX] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
+		GTSL_Min, 0, GTSL_Max, ZZTOP_AUDIO_LEVEL_MAX,
+		GTSL_Level, audio_baseline_ax,
+		GTSL_LevelFormat, (STRPTR)"%ld", GTSL_MaxLevelLen, 4,
+		GTSL_LevelPlace, PLACETEXT_RIGHT,
+		TAG_END);
+	y += l.row_step + l.section_gap;
+
+	/* Status line spans the whole row (no side label) so messages get
+	 * the label column's width too instead of widening the window. */
+	ng.ng_LeftEdge = l.margin_x;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = content_right - l.margin_x;
+	ng.ng_GadgetID = AUDGAD_STATUS;
+	ng.ng_GadgetText = NULL;
+	agads[AUDGAD_STATUS] = gad = CreateGadget(TEXT_KIND, gad, &ng,
+		GTTX_Text, audio_status_buf, GTTX_Border, TRUE, TAG_END);
+	y += l.row_step + l.section_gap;
+
+	ng.ng_LeftEdge = l.margin_x;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = button_width;
+	ng.ng_GadgetID = AUDGAD_BTN_SAVE;
+	ng.ng_GadgetText = (STRPTR)LABEL_BTN_SAVE;
+	ng.ng_Flags = PLACETEXT_IN;
+	agads[AUDGAD_BTN_SAVE] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		GA_Disabled, TRUE, TAG_END);
+	y += l.row_step;
+
+	*out_w = content_right + l.margin_x;
+	/* Same WA_InnerHeight convention as the main window. */
+	*out_h = y + l.gadget_height + (l.margin_y / 2) - l.topborder;
+
+	for (i = 0; i < AUDGAD_COUNT; i++) {
+		if (!agads[i]) return NULL;
+	}
+
+	return gad;
+}
+
+static BOOL audio_scene_editor_window(struct Screen *mysc, void *vi,
+	const struct ZZTopLayout *mainlayout, UWORD scene);
+
+static VOID audio_window(struct Screen *mysc, void *vi,
+	const struct ZZTopLayout *mainlayout)
+{
+	struct Window *win;
+	struct Gadget *glist = NULL;
+	struct IntuiMessage *imsg;
+	struct Gadget *gad;
+	struct MsgPort *meter_port = NULL;
+	struct timerequest *meter_io = NULL;
+	BOOL meter_dev_open = FALSE;
+	BOOL meter_pending = FALSE;
+	BOOL done = FALSE;
+	ULONG imsgClass;
+	UWORD imsgCode;
+	struct zztop_audio_state state;
+	UWORD scene = 0;
+	WORD w = 0, h = 0;
+
+	if (!zztop_audio_surface_available()) {
+		errorMessage("Audio: AX codec or control-plane capability absent");
+		return;
+	}
+
+	if (!audio_ui_seeded) {
+		audio_seed_editor_state();
+		audio_ui_seeded = TRUE;
+	}
+	/* The live state wins where the ABI allows reading it: the active
+	 * scene and the baseline may carry unsaved edits from an earlier
+	 * run. A failed read (no matched set) keeps the CFG seeds. */
+	if (audio_control_state_get(&state)) {
+		if (state.active_scene < ZZCFG_AUDIO_SCENES)
+			scene = state.active_scene;
+		audio_baseline_paula =
+			(UWORD)ZZ9K_AUDIO_BALANCE_CH1(state.baseline);
+		audio_baseline_ax =
+			(UWORD)ZZ9K_AUDIO_BALANCE_CH2(state.baseline);
+	}
+
+	if (NULL == audio_create_gadgets(&glist, vi, mainlayout, scene,
+			&w, &h)) {
+		if (glist) FreeGadgets(glist);
+		errorMessage("Audio: gadget creation failed");
+		return;
+	}
+
+	win = OpenWindowTags(NULL,
+		WA_Title,        "Audio",
+		WA_Gadgets,      glist,   WA_AutoAdjust,    TRUE,
+		WA_Width,        w,       WA_MinWidth,      w,
+		WA_InnerHeight,  h,       WA_MinHeight,     h,
+		WA_DragBar,      TRUE,    WA_DepthGadget,   TRUE,
+		WA_Activate,     TRUE,    WA_CloseGadget,   TRUE,
+		WA_SizeGadget,   FALSE,   WA_SimpleRefresh, TRUE,
+		WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
+			BUTTONIDCMP | CYCLEIDCMP | SLIDERIDCMP,
+		WA_PubScreen, mysc,
+		TAG_END);
+	if (!win) {
+		FreeGadgets(glist);
+		errorMessage("Audio: OpenWindow() failed");
+		return;
+	}
+
+	audio_update_save_gate(win);
+	audio_set_status(win, audio_dirty
+		? "Unsaved changes - Save to persist"
+		: "Edits apply live; reboot reverts to the last Save");
+
+	/* Own timer request, not the shared timerio: the main window may
+	 * have a refresh pending on it, and a timerequest cannot be shared
+	 * between two outstanding operations. */
+	if (audio_metering_capped) {
+		meter_port = CreateMsgPort();
+		if (meter_port) {
+			meter_io = (struct timerequest *)CreateIORequest(meter_port,
+				sizeof(struct timerequest));
+			if (meter_io && OpenDevice((STRPTR)TIMERNAME, UNIT_MICROHZ,
+					(struct IORequest *)meter_io, 0) == 0) {
+				meter_dev_open = TRUE;
+			}
+		}
+		audio_gr_seen_valid[0] = FALSE;
+		audio_gr_seen_valid[1] = FALSE;
+		audio_refresh_meters(win);
+		if (meter_dev_open) {
+			audio_arm_meter_timer(meter_io);
+			meter_pending = TRUE;
+		}
+	} else {
+		snprintf(audio_peak_bufs[0], sizeof(audio_peak_bufs[0]), "n/a");
+		snprintf(audio_counts_bufs[0], sizeof(audio_counts_bufs[0]), "n/a");
+		snprintf(audio_peak_bufs[1], sizeof(audio_peak_bufs[1]), "n/a");
+		snprintf(audio_counts_bufs[1], sizeof(audio_counts_bufs[1]), "n/a");
+		snprintf(audio_gr_buf, sizeof(audio_gr_buf), "n/a");
+		GT_SetGadgetAttrs(agads[AUDGAD_OUT_PEAK], win, NULL,
+			GTTX_Text, audio_peak_bufs[0], TAG_END);
+		GT_SetGadgetAttrs(agads[AUDGAD_OUT_COUNTS], win, NULL,
+			GTTX_Text, audio_counts_bufs[0], TAG_END);
+		GT_SetGadgetAttrs(agads[AUDGAD_IN_PEAK], win, NULL,
+			GTTX_Text, audio_peak_bufs[1], TAG_END);
+		GT_SetGadgetAttrs(agads[AUDGAD_IN_COUNTS], win, NULL,
+			GTTX_Text, audio_counts_bufs[1], TAG_END);
+		GT_SetGadgetAttrs(agads[AUDGAD_GAIN_RED], win, NULL,
+			GTTX_Text, audio_gr_buf, TAG_END);
+	}
+
+	GT_RefreshWindow(win, NULL);
+
+	while (!done) {
+		ULONG user_sig = 1UL << win->UserPort->mp_SigBit;
+		ULONG meter_sig = meter_port ? (1UL << meter_port->mp_SigBit) : 0;
+		ULONG signals = Wait(user_sig | meter_sig);
+
+		if (meter_sig && (signals & meter_sig) && meter_pending &&
+			CheckIO((struct IORequest *)meter_io)) {
+			WaitIO((struct IORequest *)meter_io);
+			meter_pending = FALSE;
+			audio_refresh_meters(win);
+			audio_arm_meter_timer(meter_io);
+			meter_pending = TRUE;
+		}
+
+		while ((!done) && (imsg = GT_GetIMsg(win->UserPort))) {
+			gad = (struct Gadget *)imsg->IAddress;
+			imsgClass = imsg->Class;
+			imsgCode = imsg->Code;
+			GT_ReplyIMsg(imsg);
+
+			switch (imsgClass) {
+				case IDCMP_GADGETUP:
+					if (!gad) break;
+					switch (gad->GadgetID) {
+						case AUDGAD_SCENE:
+							if (imsgCode < ZZCFG_AUDIO_SCENES &&
+								audio_scene_select_call(imsgCode) ==
+									ZZ9K_STATUS_OK) {
+								scene = imsgCode;
+								audio_dirty = TRUE;
+								audio_set_status(win,
+									"Scene switched - Save to persist across reboot");
+							} else {
+								GT_SetGadgetAttrs(agads[AUDGAD_SCENE],
+									win, NULL, GTCY_Active, scene, TAG_END);
+								audio_set_status(win,
+									"Scene switch failed (busy) - retry");
+							}
+							audio_update_save_gate(win);
+							break;
+						case AUDGAD_BTN_EDIT:
+							if (audio_scene_editor_window(mysc, vi,
+								mainlayout, scene)) {
+								audio_set_status(win,
+									"Scene edited - Save to persist across reboot");
+							}
+							audio_update_save_gate(win);
+							break;
+						case AUDGAD_BASE_PAULA:
+						case AUDGAD_BASE_AX:
+							if (gad->GadgetID == AUDGAD_BASE_PAULA)
+								audio_baseline_paula = imsgCode;
+							else
+								audio_baseline_ax = imsgCode;
+							if (audio_scene_write_commit(scene,
+									ZZ9K_AUDIO_SCENE_PARAM_BASELINE,
+									ZZ9K_AUDIO_BALANCE_PACK(
+										audio_baseline_paula,
+										audio_baseline_ax)) ==
+									ZZ9K_STATUS_OK) {
+								audio_dirty = TRUE;
+								audio_set_status(win,
+									"Baseline committed - Save to persist");
+							} else {
+								audio_set_status(win,
+									"Baseline write failed (busy) - retry");
+							}
+							audio_update_save_gate(win);
+							break;
+						case AUDGAD_BTN_SAVE: {
+							uint32_t save_status;
+
+							if (!audio_scene_save_call(scene,
+									&save_status)) {
+								audio_set_status(win,
+									"Save failed: no firmware reply");
+								break;
+							}
+							if (save_status ==
+									ZZ9K_AUDIO_SCENE_SAVE_OK) {
+								audio_dirty = FALSE;
+								audio_set_status(win,
+									"Saved - survives power-cycle");
+							} else if (save_status ==
+									ZZ9K_AUDIO_SCENE_SAVE_REJECTED) {
+								audio_set_status(win,
+									"Save rejected: scene level over the boundary");
+							} else {
+								audio_set_status(win,
+									"Save failed: SD card write error");
+							}
+							audio_update_save_gate(win);
+							break;
+						}
+					}
+					break;
+				case IDCMP_CLOSEWINDOW:
+					/* Closing does not discard unsaved edits: they
+					 * persist in firmware RAM until the card is
+					 * power-cycled back to the last Save (R15). */
+					done = TRUE;
+					break;
+				case IDCMP_REFRESHWINDOW:
+					GT_BeginRefresh(win);
+					GT_EndRefresh(win, TRUE);
+					break;
+			}
+		}
+	}
+
+	if (meter_pending) {
+		if (!CheckIO((struct IORequest *)meter_io))
+			AbortIO((struct IORequest *)meter_io);
+		WaitIO((struct IORequest *)meter_io);
+	}
+	if (meter_dev_open)
+		CloseDevice((struct IORequest *)meter_io);
+	if (meter_io)
+		DeleteIORequest((struct IORequest *)meter_io);
+	if (meter_port)
+		DeleteMsgPort(meter_port);
+
+	CloseWindow(win);
+	FreeGadgets(glist);
+}
+
+/* Scene editor (sub-window, the settings_video_advanced_window
+ * precedent): every master-chain parameter of one scene as a slider.
+ * Edits commit on gadget release through the staged scene-write path
+ * (F3/KTD7) -- there is deliberately no per-mousemove writing. */
+static BOOL audio_scene_editor_window(struct Screen *mysc, void *vi,
+	const struct ZZTopLayout *mainlayout, UWORD scene)
+{
+	static CONST_STRPTR label_samples[] = {
+		(CONST_STRPTR)LABEL_AUD_LPF,
+		(CONST_STRPTR)LABEL_AUD_PREF,
+		(CONST_STRPTR)LABEL_AUD_VOL,
+		(CONST_STRPTR)LABEL_AUD_PAN,
+		NULL
+	};
+	static CONST_STRPTR eq_label_samples[] = {
+		(CONST_STRPTR)"EQ 1",
+		(CONST_STRPTR)"EQ 10",
+		NULL
+	};
+	static char status[96];
+	static char eq_labels[10][8] = {
+		"EQ 1", "EQ 2", "EQ 3", "EQ 4", "EQ 5",
+		"EQ 6", "EQ 7", "EQ 8", "EQ 9", "EQ 10"
+	};
+	struct ZZTopLayout l = *mainlayout;
+	struct NewGadget ng;
+	struct Gadget *glist = NULL;
+	struct Gadget *gad;
+	struct Gadget *segads[SEGAD_COUNT];
+	struct Window *win;
+	struct IntuiMessage *imsg;
+	struct zztop_audio_scene_ui *sc = &audio_scenes[scene];
+	ULONG imsg_class;
+	UWORD imsg_code;
+	WORD label_width, eq_label_width, left, eq_left, slider_width;
+	WORD eq_slider_width, level_reserve, eq_level_reserve, col_gap;
+	WORD content_right, button_width, y, w, h, i;
+	BOOL done = FALSE;
+	BOOL edited = FALSE;
+
+	snprintf(status, sizeof(status),
+		"Editing Scene %u - each control commits on release",
+		(unsigned)(scene + 1));
+
+	label_width = zztop_max_text_width(
+		zztop_screen ? &zztop_screen->RastPort : NULL, label_samples, 8);
+	eq_label_width = zztop_max_text_width(
+		zztop_screen ? &zztop_screen->RastPort : NULL, eq_label_samples, 8);
+	slider_width = 150;
+	eq_slider_width = 110;
+	level_reserve = 56;  /* "%ld Hz" plus padding */
+	eq_level_reserve = 32;
+	col_gap = 24;
+	button_width = 88;
+
+	left = l.margin_x + label_width + l.label_gap;
+	eq_left = left + slider_width + level_reserve + col_gap +
+		eq_label_width + l.label_gap;
+	content_right = eq_left + eq_slider_width + eq_level_reserve;
+
+	gad = CreateContext(&glist);
+	for (i = 0; i < SEGAD_COUNT; i++) segads[i] = NULL;
+
+	ng.ng_TextAttr = l.text_attr;
+	ng.ng_VisualInfo = vi;
+	ng.ng_Flags = PLACETEXT_LEFT;
+	ng.ng_Height = l.gadget_height;
+	ng.ng_GadgetText = (STRPTR)LABEL_AUD_LPF;
+
+	y = l.topborder + l.margin_y;
+
+	/* Left column: the non-EQ master chain. */
+	ng.ng_LeftEdge = left;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = slider_width;
+	ng.ng_GadgetID = SEGAD_LPF;
+	segads[SEGAD_LPF] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
+		GTSL_Min, ZZTOP_AUDIO_LPF_MIN, GTSL_Max, ZZTOP_AUDIO_LPF_MAX,
+		GTSL_Level, sc->lpf,
+		GTSL_LevelFormat, (STRPTR)"%ld Hz", GTSL_MaxLevelLen, 8,
+		GTSL_LevelPlace, PLACETEXT_RIGHT,
+		TAG_END);
+
+	ng.ng_TopEdge = y + l.row_step;
+	ng.ng_GadgetID = SEGAD_PREFACTOR;
+	ng.ng_GadgetText = (STRPTR)LABEL_AUD_PREF;
+	segads[SEGAD_PREFACTOR] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
+		GTSL_Min, 0, GTSL_Max, ZZTOP_AUDIO_RANGE_MAX,
+		GTSL_Level, sc->prefactor,
+		GTSL_LevelFormat, (STRPTR)"%ld", GTSL_MaxLevelLen, 4,
+		GTSL_LevelPlace, PLACETEXT_RIGHT,
+		TAG_END);
+
+	ng.ng_TopEdge = y + 2 * l.row_step;
+	ng.ng_GadgetID = SEGAD_VOLUME;
+	ng.ng_GadgetText = (STRPTR)LABEL_AUD_VOL;
+	segads[SEGAD_VOLUME] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
+		GTSL_Min, 0, GTSL_Max, ZZTOP_AUDIO_RANGE_MAX,
+		GTSL_Level, sc->volume,
+		GTSL_LevelFormat, (STRPTR)"%ld", GTSL_MaxLevelLen, 4,
+		GTSL_LevelPlace, PLACETEXT_RIGHT,
+		TAG_END);
+
+	ng.ng_TopEdge = y + 3 * l.row_step;
+	ng.ng_GadgetID = SEGAD_PAN;
+	ng.ng_GadgetText = (STRPTR)LABEL_AUD_PAN;
+	segads[SEGAD_PAN] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
+		GTSL_Min, 0, GTSL_Max, ZZTOP_AUDIO_RANGE_MAX,
+		GTSL_Level, sc->pan,
+		GTSL_LevelFormat, (STRPTR)"%ld", GTSL_MaxLevelLen, 4,
+		GTSL_LevelPlace, PLACETEXT_RIGHT,
+		TAG_END);
+
+	/* Right column: the ten EQ bands, stacked at row pitch so the
+	 * window stays usable on short screens. */
+	for (i = 0; i < 10; i++) {
+		ng.ng_LeftEdge = eq_left;
+		ng.ng_TopEdge = y + (WORD)i * l.row_step;
+		ng.ng_Width = eq_slider_width;
+		ng.ng_GadgetID = SEGAD_EQ_BASE + i;
+		ng.ng_GadgetText = (STRPTR)eq_labels[i];
+		segads[SEGAD_EQ_BASE + i] = gad = CreateGadget(SLIDER_KIND, gad,
+			&ng,
+			GTSL_Min, 0, GTSL_Max, ZZTOP_AUDIO_RANGE_MAX,
+			GTSL_Level, sc->eq[i],
+			GTSL_LevelFormat, (STRPTR)"%ld", GTSL_MaxLevelLen, 4,
+			GTSL_LevelPlace, PLACETEXT_RIGHT,
+			TAG_END);
+	}
+	y += 10 * l.row_step + l.section_gap;
+
+	ng.ng_LeftEdge = l.margin_x;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = content_right - l.margin_x;
+	ng.ng_GadgetID = SEGAD_STATUS;
+	ng.ng_GadgetText = NULL;
+	segads[SEGAD_STATUS] = gad = CreateGadget(TEXT_KIND, gad, &ng,
+		GTTX_Text, status, GTTX_Border, TRUE, TAG_END);
+	y += l.row_step + l.section_gap;
+
+	ng.ng_TopEdge = y;
+	ng.ng_Width = button_width;
+	ng.ng_GadgetID = SEGAD_BTN_DONE;
+	ng.ng_GadgetText = (STRPTR)LABEL_AUD_DONE;
+	ng.ng_Flags = PLACETEXT_IN;
+	segads[SEGAD_BTN_DONE] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		TAG_END);
+	y += l.row_step;
+
+	for (i = 0; i < SEGAD_COUNT; i++) {
+		if (!segads[i]) {
+			if (glist) FreeGadgets(glist);
+			errorMessage("Audio Scene Editor: gadget creation failed");
+			return FALSE;
+		}
+	}
+
+	w = content_right + l.margin_x;
+	h = y + l.gadget_height + (l.margin_y / 2) - l.topborder;
+	win = OpenWindowTags(NULL,
+		WA_Title, "Audio Scene Editor",
+		WA_Gadgets, glist, WA_AutoAdjust, TRUE,
+		WA_Width, w, WA_MinWidth, w,
+		WA_InnerHeight, h, WA_MinHeight, h,
+		WA_DragBar, TRUE, WA_DepthGadget, TRUE,
+		WA_Activate, TRUE, WA_CloseGadget, TRUE,
+		WA_SizeGadget, FALSE, WA_SimpleRefresh, TRUE,
+		WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
+			BUTTONIDCMP | SLIDERIDCMP,
+		WA_PubScreen, mysc,
+		TAG_END);
+	if (!win) {
+		FreeGadgets(glist);
+		errorMessage("Audio Scene Editor: OpenWindow() failed");
+		return FALSE;
+	}
+
+	GT_RefreshWindow(win, NULL);
+	while (!done) {
+		Wait(1UL << win->UserPort->mp_SigBit);
+
+		while ((!done) && (imsg = GT_GetIMsg(win->UserPort))) {
+			gad = (struct Gadget *)imsg->IAddress;
+			imsg_class = imsg->Class;
+			imsg_code = imsg->Code;
+			GT_ReplyIMsg(imsg);
+
+			if (imsg_class == IDCMP_CLOSEWINDOW ||
+					(imsg_class == IDCMP_GADGETUP && gad &&
+					 gad->GadgetID == SEGAD_BTN_DONE)) {
+				done = TRUE;
+			} else if (imsg_class == IDCMP_REFRESHWINDOW) {
+				GT_BeginRefresh(win);
+				GT_EndRefresh(win, TRUE);
+			} else if (imsg_class == IDCMP_GADGETUP && gad) {
+				UWORD id = gad->GadgetID;
+				UWORD *field;
+				uint32_t param;
+				const char *name;
+				UWORD old;
+
+				field = NULL;
+				name = NULL;
+				param = 0;
+				if (id == SEGAD_LPF) {
+					field = &sc->lpf;
+					param = ZZ9K_AUDIO_SCENE_PARAM_LPF;
+					name = "LPF";
+				} else if (id == SEGAD_PREFACTOR) {
+					field = &sc->prefactor;
+					param = ZZ9K_AUDIO_SCENE_PARAM_PREFACTOR;
+					name = "Prefactor";
+				} else if (id == SEGAD_VOLUME) {
+					field = &sc->volume;
+					param = ZZ9K_AUDIO_SCENE_PARAM_VOLUME;
+					name = "Volume";
+				} else if (id == SEGAD_PAN) {
+					field = &sc->pan;
+					param = ZZ9K_AUDIO_SCENE_PARAM_PAN;
+					name = "Pan";
+				} else if (id >= SEGAD_EQ_BASE &&
+						id < SEGAD_EQ_BASE + 10) {
+					field = &sc->eq[id - SEGAD_EQ_BASE];
+					param = ZZ9K_AUDIO_SCENE_PARAM_EQ_BAND_1 +
+						(id - SEGAD_EQ_BASE);
+					name = "EQ band";
+				}
+				if (field) {
+					old = *field;
+					if (audio_scene_write_commit(scene, param,
+							imsg_code) == ZZ9K_STATUS_OK) {
+						*field = (UWORD)imsg_code;
+						audio_dirty = TRUE;
+						edited = TRUE;
+						snprintf(status, sizeof(status),
+							"%s committed to Scene %u - Save to persist",
+							name, (unsigned)(scene + 1));
+					} else {
+						/* Snap the knob back to the value the
+						 * firmware actually holds (a BUSY commit
+						 * was dropped). */
+						GT_SetGadgetAttrs(segads[id], win, NULL,
+							GTSL_Level, old, TAG_END);
+						snprintf(status, sizeof(status),
+							"%s commit failed (busy) - retry", name);
+					}
+					GT_SetGadgetAttrs(segads[SEGAD_STATUS], win, NULL,
+						GTTX_Text, status, TAG_END);
+				}
+			}
+		}
+	}
+
+	CloseWindow(win);
+	FreeGadgets(glist);
+	return edited;
+}
+
 VOID handleGadgetEvent(struct Window *win, struct Gadget *gad, ULONG code)
 {
 	if (!gad) return;
@@ -2710,8 +3839,10 @@ VOID handleGadgetEvent(struct Window *win, struct Gadget *gad, ULONG code)
 			do_fw_restore(win);
 			break;
 		}
-		case MYGAD_LPF: {
-			zz_set_lpf_freq(code);
+		case MYGAD_BTN_AUDIO: {
+			/* R13: every audio control lives behind this window; the
+			 * main window is otherwise unchanged. */
+			audio_window(zztop_screen, zztop_vi, &zztop_layout);
 			break;
 		}
 		case MYGAD_REFRESHMODE: {
@@ -2814,20 +3945,6 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, const struct
 	y += layout->row_step + layout->section_gap;
 
 	ng.ng_TopEdge	= y;
-	ng.ng_GadgetID	= MYGAD_LPF;
-	ng.ng_GadgetText = (STRPTR)LABEL_LPF;
-
-	gads[MYGAD_LPF] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
-										GTSL_Min, 0,
-										GTSL_Max, 23900,
-										GTSL_Level, 23900,
-										GTSL_LevelFormat, "%ld Hz",
-										GTSL_MaxLevelLen, 10,
-											GTSL_LevelPlace, PLACETEXT_BELOW,
-											TAG_END);
-	y += layout->slider_step;
-
-	ng.ng_TopEdge	= y;
 	ng.ng_GadgetID	= MYGAD_REFRESHMODE;
 	ng.ng_GadgetText = (STRPTR)LABEL_REFRESHMODE;
 
@@ -2873,6 +3990,18 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, const struct
 	ng.ng_GadgetID	 = MYGAD_BTN_RESTORE;
 	ng.ng_GadgetText = (STRPTR)LABEL_BTN_RESTORE;
 	gads[MYGAD_BTN_RESTORE] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+											TAG_END);
+
+	/* R13/R18: opens the Audio window; greyed out (not hidden) when
+	 * the AX codec or the advertised audio-control capability is
+	 * absent. */
+	ng.ng_LeftEdge	= layout->button_col3;
+	ng.ng_GadgetID	 = MYGAD_BTN_AUDIO;
+	ng.ng_GadgetText = (STRPTR)LABEL_BTN_AUDIO;
+
+	gads[MYGAD_BTN_AUDIO] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+											GA_Disabled,
+											!zztop_audio_surface_available(),
 											TAG_END);
 
 	ng.ng_LeftEdge	 = layout->gadget_left;
@@ -2922,15 +4051,6 @@ VOID process_window_events(struct Window *mywin)
 			GT_ReplyIMsg(imsg);
 
 			switch (imsgClass) {
-				/* GadTools puts the gadget address into IAddress of IDCMP_MOUSEMOVE
-				** messages.	This is NOT true for standard Intuition messages,
-				** but is an added feature of GadTools.
-				*/
-				case IDCMP_MOUSEMOVE:
-					if (gad && gad->GadgetID == MYGAD_LPF) {
-						handleGadgetEvent(mywin, gad, imsgCode);
-					}
-					break;
 				case IDCMP_GADGETDOWN:
 					break;
 				case IDCMP_GADGETUP:
@@ -3024,7 +4144,7 @@ VOID gadtoolsWindow(VOID) {
 						 * old-look. */
 						WA_NewLookMenus, TRUE,
 						WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
-							IDCMP_VANILLAKEY | IDCMP_MENUPICK | SLIDERIDCMP |
+							IDCMP_VANILLAKEY | IDCMP_MENUPICK |
 							BUTTONIDCMP | CYCLEIDCMP,
 						WA_PubScreen, mysc,
 						TAG_END))) {
@@ -3091,7 +4211,30 @@ int main(void) {
 			 * needs it, so a missing one just disables the Update picker
 			 * rather than blocking the tool. */
 			AslBase = OpenLibrary((CONST_STRPTR)"asl.library", 37);
+			/* zz9k.library is optional like asl.library: without it,
+			 * or without the firmware advertising the audio-control
+			 * capability, the Audio button stays disabled and every
+			 * other feature is unaffected (R16). The caps are read
+			 * once here, the way the Settings window reads the
+			 * firmware capability register at setup. */
+			ZZ9KBase = OpenLibrary((STRPTR)"zz9k.library", 0);
+			if (ZZ9KBase) {
+				ZZ9KCaps caps;
+
+				if (ZZ9KQueryCaps(&caps) == ZZ9K_STATUS_OK) {
+					audio_control_capped =
+						(caps.capability_bits & ZZ9K_CAP_AUDIO_CONTROL)
+							? TRUE : FALSE;
+					audio_metering_capped =
+						(caps.capability_bits & ZZ9K_CAP_AUDIO_METERING)
+							? TRUE : FALSE;
+				}
+			}
 			gadtoolsWindow();
+			if (ZZ9KBase) {
+				CloseLibrary(ZZ9KBase);
+				ZZ9KBase = NULL;
+			}
 			if (AslBase) CloseLibrary(AslBase);
 			CloseLibrary(GadToolsBase);
 		}
