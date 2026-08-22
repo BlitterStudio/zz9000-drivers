@@ -184,7 +184,7 @@ static const char version[] __attribute__((used)) =
 #define LABEL_FW_STATUS    "Firmware Op"
 #define LABEL_BTN_AUDIO    "Audio..."
 #define LABEL_AUDIO_SCENE  "Scene"
-#define LABEL_BTN_EDITSCN  "Edit Scene..."
+#define LABEL_BTN_EDITSCN  "Edit..."
 #define LABEL_BTN_RENAME   "Rename..."
 #define LABEL_AUD_OUT_PEAK "Out Peak L/R"
 #define LABEL_AUD_OUT_CNT  "Out Clip/Urun"
