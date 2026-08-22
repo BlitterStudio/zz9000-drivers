@@ -148,6 +148,7 @@ so remove the ENV variable when migrating.
 |-------------------------------------------------------|---------------------|
 | Paula much louder than MP3/MOD through the card       | Early R1 (U4 opamp). Desolder U4, or — on matched firmware — set the operator baseline in ZZTop's Audio window. |
 | Muffled / dull AHI output at low sample rates         | LPF is scene-owned. Raise the scene LPF cutoff in ZZTop's Audio window (the old `ENV:ZZ9000AX-NOLPF` bypass was removed). |
+| ZZTop's Audio button is greyed out                    | The firmware does not advertise the audio-control capability (pre-verification builds), or the AX daughterboard is absent. Update to the matched firmware release that advertises it; playback itself is unaffected. |
 | "Can't allocate! Hardware already used by MHI/AHI."   | The other driver owns the card. Close whatever MHI/AHI app is running first. |
 | Audio device fails to open on specific accelerators   | INT6 conflict. `setenv ZZ9K_INT2 1` to move both drivers to INT2. |
 | Short random burst before playback on first app open  | Fixed in recent commits (driver now silences the DAC at allocate time). Update to the latest `zz9000ax.audio`. |
