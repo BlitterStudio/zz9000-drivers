@@ -14,16 +14,31 @@
 
 /* Matches the FWUP client's poll budget: a raw read is one small FatFs
  * read, but a slow card under load can still stall for tens of ms. */
+#ifndef ZZCFG_POLL_LIMIT
 #define ZZCFG_POLL_LIMIT 2000000UL
+#endif
 
-static volatile UWORD *reg16(ULONG board, ULONG offset)
-{
-    return (volatile UWORD *)(board + offset);
-}
+#ifdef ZZCFG_TEST_IO
+extern UWORD zzcfg_test_reg_read(ULONG board, ULONG offset);
+extern void zzcfg_test_reg_write(ULONG board, ULONG offset, UWORD value);
+extern UBYTE zzcfg_test_buffer_read(ULONG board, UWORD offset);
+#define ZZCFG_REG_READ(board, offset) \
+    zzcfg_test_reg_read((board), (offset))
+#define ZZCFG_REG_WRITE(board, offset, value) \
+    zzcfg_test_reg_write((board), (offset), (value))
+#define ZZCFG_BUFFER_READ(board, offset) \
+    zzcfg_test_buffer_read((board), (offset))
+#else
+#define ZZCFG_REG_READ(board, offset) \
+    (*(volatile UWORD *)((board) + (offset)))
+#define ZZCFG_REG_WRITE(board, offset, value) \
+    (*(volatile UWORD *)((board) + (offset)) = (value))
+#define ZZCFG_BUFFER_READ(board, offset) \
+    (*(volatile UBYTE *)((board) + ZZ_BUFFER_OFFSET + (offset)))
+#endif
 
 UWORD zzcfg_read_raw(ULONG board, char *out, UWORD maxlen, UWORD *outlen)
 {
-    volatile UBYTE *buf = (volatile UBYTE *)(board + ZZ_BUFFER_OFFSET);
     unsigned long budget = ZZCFG_POLL_LIMIT;
     UWORD status, len, i;
 
@@ -31,23 +46,31 @@ UWORD zzcfg_read_raw(ULONG board, char *out, UWORD maxlen, UWORD *outlen)
     if (maxlen == 0) return ZZ_CFG_FILE_IO_ERROR;
     out[0] = '\0';
 
-    /* Reset the handshake, then issue the read. The firmware processes
-     * register writes in bus order, so no wait is needed in between. */
-    *reg16(board, ZZ_REG_CONFIG_FILE) = 0;
-    *reg16(board, ZZ_REG_CONFIG_FILE) = 1;
-
+    /* A previous request may have left a terminal status (usually OK).
+     * Wait until firmware has observed RESET and published IDLE before
+     * sending READ; otherwise the first status load can accept the
+     * previous request and copy its stale shared-buffer snapshot. */
+    ZZCFG_REG_WRITE(board, ZZ_REG_CONFIG_FILE, 0);
     do {
-        status = *reg16(board, ZZ_REG_CONFIG_FILE);
+        status = ZZCFG_REG_READ(board, ZZ_REG_CONFIG_FILE);
+        if (status == ZZ_CFG_FILE_IDLE) break;
+    } while (--budget);
+    if (status != ZZ_CFG_FILE_IDLE)
+        return ZZ_CFG_FILE_IDLE;
+
+    ZZCFG_REG_WRITE(board, ZZ_REG_CONFIG_FILE, 1);
+    budget = ZZCFG_POLL_LIMIT;
+    do {
+        status = ZZCFG_REG_READ(board, ZZ_REG_CONFIG_FILE);
         if (status != ZZ_CFG_FILE_IDLE) break;
     } while (--budget);
-
     if (status != ZZ_CFG_FILE_OK) return status;
 
-    len = *reg16(board, ZZ_REG_CONFIG_FILE_LEN);
+    len = ZZCFG_REG_READ(board, ZZ_REG_CONFIG_FILE_LEN);
     if (len > maxlen - 1) len = maxlen - 1;
 
     for (i = 0; i < len; i++) {
-        out[i] = (char)buf[i];
+        out[i] = (char)ZZCFG_BUFFER_READ(board, i);
     }
     out[len] = '\0';
     *outlen = len;

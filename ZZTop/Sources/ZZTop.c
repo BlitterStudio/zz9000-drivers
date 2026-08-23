@@ -3162,30 +3162,36 @@ static BOOL audio_scene_name_from_cfg(const struct zzcfg_values *sv,
 }
 #endif
 
-static void audio_seed_editor_state(void)
+static void audio_editor_defaults(void)
 {
-	struct zzcfg_values sv;
-	UWORD rawlen = 0;
-	int i, k;
+	int i;
 
 	memcpy(audio_scenes, zztop_audio_scene_defaults,
 		sizeof(audio_scenes));
-	/* Power-on mixer state written by audio_adau_init. */
 	audio_baseline_paula = 128;
 	audio_baseline_ax = 64;
 	for (i = 0; i < ZZCFG_AUDIO_SCENES; i++)
 		audio_scene_default_name(audio_scenes[i].name,
 			sizeof(audio_scenes[i].name), (UWORD)i);
+}
+
+static BOOL audio_seed_editor_state(void)
+{
+	struct zzcfg_values sv;
+	UWORD rawlen = 0;
+	int i, k;
+
 
 	/* Overlay the saved CFG exactly like the firmware's cold-boot fold
 	 * (R10): absent keys keep the built-in defaults. settings_cfg_text
 	 * is shared scratch -- the windows are modal, so the Settings
 	 * window is never mid-read while this runs. */
 	if (zz_get_reg16(REG_ZZ_FW_VERSION) < 0x0203)
-		return; /* no config-file interface to read */
+		return FALSE; /* no config-file interface to read */
 	if (zzcfg_read_raw((ULONG)zz_regs, settings_cfg_text,
 			ZZCFG_MAX_SIZE, &rawlen) != ZZ_CFG_FILE_OK)
-		return;
+		return FALSE;
+	audio_editor_defaults();
 
 	memset(&sv, 0, sizeof(sv));
 	zzcfg_parse_text(settings_cfg_text, rawlen, &sv);
@@ -3240,10 +3246,12 @@ static void audio_seed_editor_state(void)
 			if (audio_scenes[i].eq[k] > ZZTOP_AUDIO_RANGE_MAX)
 				audio_scenes[i].eq[k] = ZZTOP_AUDIO_RANGE_MAX;
 	}
+	return TRUE;
 }
 
 static struct Gadget *audgads[AUDGAD_COUNT];
 static char audio_status_buf[96];
+static void audio_scene_cycle_refresh(struct Window *win, UWORD scene);
 
 static void audio_set_status(struct Window *win, const char *text)
 {
@@ -3254,6 +3262,22 @@ static void audio_set_status(struct Window *win, const char *text)
 	if (win && audgads[AUDGAD_STATUS]) {
 		GT_SetGadgetAttrs(audgads[AUDGAD_STATUS], win, NULL,
 			GTTX_Text, audio_status_buf, TAG_END);
+	}
+}
+
+static void audio_reload_saved_state(struct Window *win, UWORD scene)
+{
+	if (audio_seed_editor_state()) {
+		audio_scene_cycle_refresh(win, scene);
+		GT_SetGadgetAttrs(audgads[AUDGAD_BASE_PAULA], win, NULL,
+			GTSL_Level, audio_baseline_paula, TAG_END);
+		GT_SetGadgetAttrs(audgads[AUDGAD_BASE_AX], win, NULL,
+			GTSL_Level, audio_baseline_ax, TAG_END);
+		audio_set_status(win,
+			"Saved - survives power-cycle; sliders show last-saved values");
+	} else {
+		audio_set_status(win,
+			"Saved - readback unavailable; current values kept");
 	}
 }
 
@@ -3285,16 +3309,12 @@ static void audio_save_settle(struct Window *win)
 	if (save_status == ZZ9K_AUDIO_SCENE_SAVE_OK) {
 		if (audio_edit_generation == audio_save_generation) {
 			audio_dirty = FALSE;
-			/* No edits followed serialization: the persisted state
-			 * is still current, so it is safe to re-seed and snap
-			 * the controls to the saved values. */
-			audio_seed_editor_state();
-			GT_SetGadgetAttrs(audgads[AUDGAD_BASE_PAULA], win, NULL,
-				GTSL_Level, audio_baseline_paula, TAG_END);
-			GT_SetGadgetAttrs(audgads[AUDGAD_BASE_AX], win, NULL,
-				GTSL_Level, audio_baseline_ax, TAG_END);
-			audio_set_status(win,
-				"Saved - survives power-cycle; sliders show last-saved values");
+			/* A fresh read may update the local model. On failure,
+			 * keep the committed live values instead of replacing
+			 * them with defaults. */
+			audio_reload_saved_state(win,
+				st.active_scene < ZZCFG_AUDIO_SCENES ?
+				(UWORD)st.active_scene : 0);
 		} else {
 			audio_set_status(win,
 				"Saved snapshot; newer edits still need Save");
@@ -3453,17 +3473,26 @@ static void audio_meters_unavailable(struct Window *win)
 		GTTX_Text, audio_gr_buf, TAG_END);
 }
 
-static STRPTR audio_scene_labels[] = {
-	(STRPTR)"Scene 1",
-	(STRPTR)"Scene 2",
-	(STRPTR)"Scene 3",
-	(STRPTR)"Scene 4",
-	(STRPTR)"Scene 5",
-	(STRPTR)"Scene 6",
-	(STRPTR)"Scene 7",
-	(STRPTR)"Scene 8",
-	NULL
-};
+static STRPTR audio_scene_labels[ZZCFG_AUDIO_SCENES + 1];
+
+static void audio_scene_labels_bind(void)
+{
+	int i;
+
+	for (i = 0; i < ZZCFG_AUDIO_SCENES; i++)
+		audio_scene_labels[i] = (STRPTR)audio_scenes[i].name;
+	audio_scene_labels[ZZCFG_AUDIO_SCENES] = NULL;
+}
+
+static void audio_scene_cycle_refresh(struct Window *win, UWORD scene)
+{
+
+	if (win && audgads[AUDGAD_SCENE]) {
+		GT_SetGadgetAttrs(audgads[AUDGAD_SCENE], win, NULL,
+			GTCY_Labels, audio_scene_labels,
+			GTCY_Active, scene, TAG_END);
+	}
+}
 
 static CONST_STRPTR audio_label_samples[] = {
 	(CONST_STRPTR)LABEL_AUDIO_SCENE,
@@ -3686,7 +3715,8 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 	}
 
 	if (!audio_ui_seeded) {
-		audio_seed_editor_state();
+		if (!audio_seed_editor_state())
+			audio_editor_defaults();
 		audio_ui_seeded = TRUE;
 	}
 	/* The live state wins where the ABI allows reading it: the active
@@ -3700,6 +3730,7 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 		audio_baseline_ax =
 			(UWORD)ZZ9K_AUDIO_BALANCE_CH2(state.baseline);
 	}
+	audio_scene_labels_bind();
 
 	if (NULL == audio_create_gadgets(&glist, vi, mainlayout, scene,
 			&w, &h)) {
@@ -3833,6 +3864,7 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 							case AUDIO_RENAME_COMMITTED: {
 								char msg[96];
 
+								audio_scene_cycle_refresh(win, scene);
 								snprintf(msg, sizeof(msg),
 									"Scene %u renamed to %s - Save to persist",
 									(unsigned)(scene + 1),
@@ -3841,6 +3873,7 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 								break;
 							}
 							case AUDIO_RENAME_COMMITTING:
+								audio_scene_cycle_refresh(win, scene);
 								audio_set_status(win,
 									"Rename committing - Save to persist");
 								break;
@@ -3927,25 +3960,7 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 							} else if (save_status ==
 									ZZ9K_AUDIO_SCENE_SAVE_OK) {
 								audio_dirty = FALSE;
-								/* The CFG now holds exactly what a
-								 * reboot restores: re-seed the
-								 * editor state from it so the
-								 * sliders snap to the persisted
-								 * values (a rejected staged write
-								 * or a failed restore can leave
-								 * the display off by one edit).
-								 */
-								audio_seed_editor_state();
-								GT_SetGadgetAttrs(
-									audgads[AUDGAD_BASE_PAULA], win,
-									NULL, GTSL_Level,
-									audio_baseline_paula, TAG_END);
-								GT_SetGadgetAttrs(
-									audgads[AUDGAD_BASE_AX], win,
-									NULL, GTSL_Level,
-									audio_baseline_ax, TAG_END);
-								audio_set_status(win,
-									"Saved - survives power-cycle; sliders show last-saved values");
+								audio_reload_saved_state(win, scene);
 							} else if (save_status ==
 									ZZ9K_AUDIO_SCENE_SAVE_REJECTED) {
 								audio_set_status(win,

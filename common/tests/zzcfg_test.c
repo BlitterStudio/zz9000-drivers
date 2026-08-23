@@ -21,6 +21,76 @@ static void check(int cond, const char *what)
     if (!cond) { printf("FAIL: %s\n", what); failures++; }
 }
 
+/* Register-script seam for zzcfg_read_raw(). Firmware services Zorro
+ * writes asynchronously: a reset command is not acknowledged until a
+ * later status read. A read command issued before that acknowledgement
+ * is deliberately ignored, reproducing the stale-OK hardware race. */
+static UWORD raw_status;
+static UWORD raw_len;
+static int raw_reset_pending;
+static int raw_read_pending;
+static int raw_started_before_reset;
+static char raw_buffer[64];
+static const char *raw_next_text;
+
+static void raw_io_reset(const char *old_text, const char *next_text)
+{
+    size_t n = strlen(old_text);
+
+    memset(raw_buffer, 0, sizeof(raw_buffer));
+    memcpy(raw_buffer, old_text, n);
+    raw_status = ZZ_CFG_FILE_OK;
+    raw_len = (UWORD)n;
+    raw_reset_pending = 0;
+    raw_read_pending = 0;
+    raw_started_before_reset = 0;
+    raw_next_text = next_text;
+}
+
+UWORD zzcfg_test_reg_read(ULONG board, ULONG offset)
+{
+    (void)board;
+    if (offset == ZZ_REG_CONFIG_FILE) {
+        if (raw_reset_pending) {
+            raw_reset_pending = 0;
+            raw_status = ZZ_CFG_FILE_IDLE;
+        } else if (raw_read_pending) {
+            size_t n = strlen(raw_next_text);
+
+            memset(raw_buffer, 0, sizeof(raw_buffer));
+            memcpy(raw_buffer, raw_next_text, n);
+            raw_len = (UWORD)n;
+            raw_status = ZZ_CFG_FILE_OK;
+            raw_read_pending = 0;
+        }
+        return raw_status;
+    }
+    if (offset == ZZ_REG_CONFIG_FILE_LEN)
+        return raw_len;
+    return 0;
+}
+
+void zzcfg_test_reg_write(ULONG board, ULONG offset, UWORD value)
+{
+    (void)board;
+    if (offset != ZZ_REG_CONFIG_FILE)
+        return;
+    if (value == 0) {
+        raw_reset_pending = 1;
+    } else if (value == 1) {
+        if (raw_reset_pending)
+            raw_started_before_reset = 1;
+        else
+            raw_read_pending = 1;
+    }
+}
+
+UBYTE zzcfg_test_buffer_read(ULONG board, UWORD offset)
+{
+    (void)board;
+    return (UBYTE)raw_buffer[offset];
+}
+
 /* Every canonical key ZZTop writes with the firmware profile capability. */
 static const char *firmware_keys[] = {
     "videocap_profile", "videocap_sample", "videocap_crop_h",
@@ -464,6 +534,26 @@ int main(void)
     check(b.audio_active == 8 && b.audio_scene_mask[5] == 0,
           "invalid values parse permissively without presence");
 
+
+    /* A second raw read starts with the previous request's OK status.
+     * It must observe the reset acknowledgement before issuing READ,
+     * otherwise it returns the previous shared-buffer snapshot. */
+    {
+        char raw[32];
+        UWORD raw_bytes = 0;
+        UWORD st;
+
+        raw_io_reset("audio_baseline = 32832\n",
+                     "audio_baseline = 32896\n");
+        st = zzcfg_read_raw(0, raw, sizeof(raw), &raw_bytes);
+        check(raw_started_before_reset == 0,
+              "raw read waits for reset acknowledgement");
+        check(st == ZZ_CFG_FILE_OK,
+              "raw read reaches the new terminal status");
+        check(raw_bytes == strlen("audio_baseline = 32896\n") &&
+              strcmp(raw, "audio_baseline = 32896\n") == 0,
+              "raw read returns the newly staged config");
+    }
     if (failures) { printf("%d failure(s)\n", failures); return 1; }
     printf("zzcfg round-trip: all checks passed\n");
     return 0;
