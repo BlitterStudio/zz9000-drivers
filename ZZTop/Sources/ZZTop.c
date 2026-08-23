@@ -3179,6 +3179,7 @@ static BOOL audio_seed_editor_state(void)
 {
 	struct zzcfg_values sv;
 	UWORD rawlen = 0;
+	UWORD read_status;
 	int i, k;
 
 
@@ -3188,13 +3189,24 @@ static BOOL audio_seed_editor_state(void)
 	 * window is never mid-read while this runs. */
 	if (zz_get_reg16(REG_ZZ_FW_VERSION) < 0x0203)
 		return FALSE; /* no config-file interface to read */
-	if (zzcfg_read_raw((ULONG)zz_regs, settings_cfg_text,
-			ZZCFG_MAX_SIZE, &rawlen) != ZZ_CFG_FILE_OK)
+	read_status = zzcfg_read_raw((ULONG)zz_regs, settings_cfg_text,
+		ZZCFG_MAX_SIZE, &rawlen);
+	audio_log("cfg read st=%u len=%u\n",
+		(unsigned)read_status, (unsigned)rawlen);
+	if (read_status != ZZ_CFG_FILE_OK)
 		return FALSE;
 	audio_editor_defaults();
 
 	memset(&sv, 0, sizeof(sv));
 	zzcfg_parse_text(settings_cfg_text, rawlen, &sv);
+	audio_log("cfg parsed base=%u present=%u active=%u present=%u "
+		"s0mask=%04x nm1=%u\n",
+		(unsigned)sv.audio_baseline,
+		(unsigned)sv.audio_baseline_present,
+		(unsigned)sv.audio_active,
+		(unsigned)sv.audio_active_present,
+		(unsigned)sv.audio_scene_mask[0],
+		(unsigned)sv.audio_scene_nm[0][0]);
 	for (i = 0; i < ZZCFG_AUDIO_SCENES; i++) {
 		UWORD mask = sv.audio_scene_mask[i];
 
