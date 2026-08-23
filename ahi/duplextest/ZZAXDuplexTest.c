@@ -26,8 +26,20 @@
 #define FRAME_BYTES 4UL
 
 static const char version[] __attribute__((used)) =
-    "\0$VER: ZZAXDuplexTest 1.1 (07.08.2026)";
+    "\0$VER: ZZAXDuplexTest 1.2 (23.08.2026)";
 
+
+/* One coherent 1 kHz cycle at 48 kHz, 0.99 full scale. Ceiling mode
+ * repeats this table in both channels through the same AHIAudioCtrl
+ * that owns capture, avoiding a second exclusive AHI allocation. */
+static const WORD ceiling_sine[48] = {
+       0,   4234,   8396,  12414,  16220,  19748,  22938,  25736,
+   28093,  29970,  31334,  32162,  32439,  32162,  31334,  29970,
+   28093,  25736,  22938,  19748,  16220,  12414,   8396,   4234,
+       0,  -4234,  -8396, -12414, -16220, -19748, -22938, -25736,
+  -28093, -29970, -31334, -32162, -32439, -32162, -31334, -29970,
+  -28093, -25736, -22938, -19748, -16220, -12414,  -8396,  -4234
+};
 struct Library *AHIBase;
 
 struct capture_context {
@@ -147,6 +159,36 @@ static BOOL write_wave(const char *path, const WORD *samples, ULONG frames)
   return TRUE;
 }
 
+static BOOL write_raw_be(const char *path, const WORD *samples, ULONG frames)
+{
+  UBYTE output[4096];
+  ULONG sample_count = frames * 2UL;
+  ULONG sample_index = 0;
+  BPTR file = Open((CONST_STRPTR)path, MODE_NEWFILE);
+
+  if (!file) return FALSE;
+  while (sample_index < sample_count) {
+    ULONG output_bytes = 0;
+
+    while (sample_index < sample_count &&
+           output_bytes + 2UL <= sizeof(output)) {
+      UWORD sample = (UWORD)samples[sample_index++];
+      output[output_bytes++] = (UBYTE)(sample >> 8);
+      output[output_bytes++] = (UBYTE)(sample & 0xffU);
+    }
+    if (Write(file, output, output_bytes) != (LONG)output_bytes) {
+      Close(file);
+      DeleteFile((CONST_STRPTR)path);
+      return FALSE;
+    }
+  }
+  if (!Close(file)) {
+    DeleteFile((CONST_STRPTR)path);
+    return FALSE;
+  }
+  return TRUE;
+}
+
 static ULONG find_mode(void)
 {
   ULONG id = AHI_INVALID_ID;
@@ -178,15 +220,21 @@ static ULONG find_mode(void)
   return AHI_INVALID_ID;
 }
 
-static void make_tone(WORD *samples)
+static void make_tone(WORD *samples, BOOL ceiling_mode)
 {
   ULONG frame;
 
   for (frame = 0; frame < TONE_FRAMES; frame++) {
-    samples[frame * 2UL] =
-        ((frame / 60UL) & 1UL) ? (WORD)0x1800 : (WORD)-0x1800;
-    samples[frame * 2UL + 1UL] =
-        ((frame / 40UL) & 1UL) ? (WORD)0x1000 : (WORD)-0x1000;
+    if (ceiling_mode) {
+      WORD sample = ceiling_sine[frame % 48UL];
+      samples[frame * 2UL] = sample;
+      samples[frame * 2UL + 1UL] = sample;
+    } else {
+      samples[frame * 2UL] =
+          ((frame / 60UL) & 1UL) ? (WORD)0x1800 : (WORD)-0x1800;
+      samples[frame * 2UL + 1UL] =
+          ((frame / 40UL) & 1UL) ? (WORD)0x1000 : (WORD)-0x1000;
+    }
   }
 }
 
@@ -202,7 +250,9 @@ int main(int argc, char **argv)
   ULONG control_result = AHIE_UNKNOWN;
   ULONG stop_result = AHIE_UNKNOWN;
   BOOL aborted = FALSE;
-  BOOL wave_written = FALSE;
+  BOOL output_written = FALSE;
+  BOOL ceiling_mode = FALSE;
+  BOOL capture_only = FALSE;
   BOOL sound_loaded = FALSE;
   BOOL started = FALSE;
   int result = RETURN_FAIL;
@@ -223,11 +273,26 @@ int main(int argc, char **argv)
   if (argc > 2) {
     LONG parsed = atol(argv[2]);
     if (parsed < 1 || parsed > (LONG)MAX_SECONDS) {
-      printf("Usage: ZZAXDuplexTest [output.wav [seconds 1-%u]]\n",
-             (unsigned int)MAX_SECONDS);
+      printf("Usage: ZZAXDuplexTest [output [seconds 1-%u "
+             "[ceiling|capture]]]\n", (unsigned int)MAX_SECONDS);
       goto cleanup;
     }
     seconds = (ULONG)parsed;
+  }
+  if (argc > 3) {
+    if (strcmp(argv[3], "ceiling") == 0)
+      ceiling_mode = TRUE;
+    else if (strcmp(argv[3], "capture") == 0)
+      capture_only = TRUE;
+    else {
+      printf("ERROR: mode must be 'ceiling' or 'capture'\n");
+      goto cleanup;
+    }
+  }
+  if (argc > 4) {
+    printf("Usage: ZZAXDuplexTest [output [seconds 1-%u "
+           "[ceiling|capture]]]\n", (unsigned int)MAX_SECONDS);
+    goto cleanup;
   }
 
   target_frames = seconds * MIX_FREQ;
@@ -235,12 +300,14 @@ int main(int argc, char **argv)
   context.capacity_frames = target_frames;
   context.buffer = AllocVec(target_frames * FRAME_BYTES,
                             MEMF_PUBLIC | MEMF_CLEAR);
-  tone = AllocVec(TONE_FRAMES * FRAME_BYTES, MEMF_PUBLIC | MEMF_CLEAR);
-  if (!context.buffer || !tone) {
+  if (!capture_only)
+    tone = AllocVec(TONE_FRAMES * FRAME_BYTES, MEMF_PUBLIC | MEMF_CLEAR);
+  if (!context.buffer || (!capture_only && !tone)) {
     printf("ERROR: unable to allocate audio buffers\n");
     goto cleanup;
   }
-  make_tone(tone);
+  if (!capture_only)
+    make_tone(tone, ceiling_mode);
 
   port = CreateMsgPort();
   if (!port) {
@@ -292,26 +359,26 @@ int main(int argc, char **argv)
     goto cleanup;
   }
 
-  tone_info.ahisi_Type = AHIST_S16S;
-  tone_info.ahisi_Address = tone;
-  tone_info.ahisi_Length = TONE_FRAMES;
-  if (AHI_LoadSound(0, AHIST_DYNAMICSAMPLE, &tone_info, audioctrl) !=
-      AHIE_OK) {
-    printf("ERROR: AHI_LoadSound failed\n");
-    goto cleanup;
+  if (!capture_only) {
+    tone_info.ahisi_Type = AHIST_S16S;
+    tone_info.ahisi_Address = tone;
+    tone_info.ahisi_Length = TONE_FRAMES;
+    if (AHI_LoadSound(0, AHIST_DYNAMICSAMPLE, &tone_info, audioctrl) !=
+        AHIE_OK) {
+      printf("ERROR: AHI_LoadSound failed\n");
+      goto cleanup;
+    }
+    sound_loaded = TRUE;
   }
-  sound_loaded = TRUE;
 
-  /*
-   * This is the full-duplex gate: one AHIAudioCtrl and one control operation
-   * start playback and recording together. AHIRecord plus a separate player
-   * is two exclusive low-level allocations and is deliberately not this test.
-   */
+  /* One AudioCtrl owns every AHI direction used by this process.
+   * Ceiling mode starts playback+record together; capture mode starts
+   * record only so an independent Paula player can supply the source. */
   {
     struct TagItem start_tags[] = {
       { AHIC_Input, 0 },
       { AHIC_MixFreq_Query, (ULONG)&actual_mix_freq },
-      { AHIC_Play, TRUE },
+      { AHIC_Play, capture_only ? FALSE : TRUE },
       { AHIC_Record, TRUE },
       { TAG_DONE, 0 }
     };
@@ -325,11 +392,13 @@ int main(int argc, char **argv)
   }
   started = TRUE;
 
-  AHI_SetVol(0, 0x10000L, 0x8000L, audioctrl,
-             AHISF_IMM | AHISF_NODELAY);
-  AHI_SetSound(0, 0, 0, TONE_FRAMES, audioctrl,
+  if (!capture_only) {
+    AHI_SetVol(0, 0x10000L, 0x8000L, audioctrl,
                AHISF_IMM | AHISF_NODELAY);
-  AHI_SetFreq(0, MIX_FREQ, audioctrl, AHISF_IMM | AHISF_NODELAY);
+    AHI_SetSound(0, 0, 0, TONE_FRAMES, audioctrl,
+                 AHISF_IMM | AHISF_NODELAY);
+    AHI_SetFreq(0, MIX_FREQ, audioctrl, AHISF_IMM | AHISF_NODELAY);
+  }
 
   while (context.frames < target_frames && ticks < timeout_ticks) {
     if (SetSignal(0, SIGBREAKF_CTRL_C) & SIGBREAKF_CTRL_C) {
@@ -352,11 +421,18 @@ int main(int argc, char **argv)
   started = FALSE;
 
   if (context.frames) {
-    wave_written = write_wave(output_path, (const WORD *)context.buffer,
-                              context.frames);
+    output_written = (ceiling_mode || capture_only)
+        ? write_raw_be(output_path, (const WORD *)context.buffer,
+                       context.frames)
+        : write_wave(output_path, (const WORD *)context.buffer,
+                     context.frames);
   }
 
   printf("mode=%s\n", MODE_NAME);
+  if (ceiling_mode)
+    printf("capture_mode=ceiling-1khz-s16be\n");
+  else if (capture_only)
+    printf("capture_mode=capture-s16be\n");
   printf("mode_id=0x%08x\n", (unsigned int)audio_id);
   printf("mix_freq=%u\n", (unsigned int)actual_mix_freq);
   printf("callbacks=%u\n", (unsigned int)context.callbacks);
@@ -365,14 +441,17 @@ int main(int argc, char **argv)
   printf("type_errors=%u\n", (unsigned int)context.type_errors);
   printf("start_result=%u\n", (unsigned int)control_result);
   printf("stop_result=%u\n", (unsigned int)stop_result);
-  printf("wave=%s\n", wave_written ? output_path : "NOT_WRITTEN");
+  if (ceiling_mode || capture_only)
+    printf("output=%s\n", output_written ? output_path : "NOT_WRITTEN");
+  else
+    printf("wave=%s\n", output_written ? output_path : "NOT_WRITTEN");
 
   if (!aborted &&
       actual_mix_freq == MIX_FREQ &&
       context.frames == target_frames &&
       context.type_errors == 0 &&
       stop_result == AHIE_OK &&
-      wave_written) {
+      output_written) {
     printf("result=PASS\n");
     result = RETURN_OK;
   } else {
