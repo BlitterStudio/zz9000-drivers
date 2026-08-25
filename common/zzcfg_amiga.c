@@ -826,15 +826,18 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
         v->mac[0] ? "" : "#", v->mac[0] ? v->mac : "68:82:F2:00:00:01",
         v->hdf[0] ? "" : "#", v->hdf[0] ? v->hdf : "zz9000.hdf");
 
-    if (n < 0) return 0;
-    if ((UWORD)n >= outsz) return (UWORD)(outsz - 1);
+    if (n < 0 || (UWORD)n >= outsz) return 0;
 
     /* Audio control-plane keys (firmware U5): carried through exactly
      * when the parsed file had them, so a Settings save never deletes
      * an operator's saved scenes. */
     if (zzcfg_audio_present(v)) {
         int off = zzcfg_append_audio(v, out, outsz, n);
-        if (off < 0) return (UWORD)(outsz - 1);
+        /* 0 is the failure value zzcfg_save refuses: an oversized
+         * preserved audio block must fail the save outright, never
+         * be written back as a truncated file over the operator's
+         * saved scenes. */
+        if (off < 0) return 0;
         n = off;
     }
     return (UWORD)n;

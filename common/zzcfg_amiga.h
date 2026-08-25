@@ -126,12 +126,16 @@ int zzcfg_hdf_name_valid(const char *name);
 void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v);
 
 /* Render a fresh, fully commented ZZ9000.CFG from v. Returns the byte
- * count (always < ZZCFG_MAX_SIZE for any input). */
+ * count, or 0 when the rendered file does not fit in outsz (a fully
+ * populated audio control plane outgrows ZZCFG_MAX_SIZE). zzcfg_save
+ * refuses 0, so an oversized model is never written as a partial
+ * file. */
 UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz);
 
 /* Generate and push the file to the SD card as ZZ9000.CFG via FWUP.
- * Returns an FWUP status (FWUP_OK on success). The previous file is
- * kept as ZZ9000.bak by the firmware. */
+ * Returns an FWUP status (FWUP_OK on success; FWUP_ERR_UNKNOWN with
+ * nothing written when the rendered file overflows the buffer). The
+ * previous file is kept as ZZ9000.bak by the firmware. */
 UWORD zzcfg_save(ULONG board, const struct zzcfg_values *v);
 
 #endif /* ZZCFG_AMIGA_H */

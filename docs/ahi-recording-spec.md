@@ -149,22 +149,28 @@ writes each period as 960 native 48 kHz stereo frames in little-endian signed
 16-bit format. On every receive completion, firmware shall:
 
 1. invalidate the completed 3840-byte period from the ARM caches;
-2. resample its 960 frames to the requested `ZZ_REG_AUDIO_SCALE` frame count;
+2. resample its 960 frames to `output_frame_count` frames
+   (`ZZ_REG_AUDIO_SCALE`, defined below);
 3. write signed stereo samples in big-endian order at the start of the same
    period;
-4. flush `frame_count * 4` bytes and issue the required memory barrier;
+4. flush `output_frame_count * 4` bytes and issue the required memory
+   barrier;
 5. publish the period and incremented sequence in `ZZ_REG_AUDIO_RX_STATUS`;
 6. assert the shared Amiga audio interrupt when recording is enabled.
 
 `ZZ_REG_AUDIO_SCALE` is the number of sample frames per 20 ms period and is
-shared with playback. The AHI driver writes `ahiac_BuffSamples`, which is
+shared with playback. Its written value is the `requested_frame_count`; the
+number of frames firmware converts and publishes for the period is the
+`output_frame_count`. The AHI driver writes `ahiac_BuffSamples`, which is
 `ahiac_MixFreq / 50`. Supported conversion counts are 160/240/480/640/882/960
-frames (8/12/24/32/44.1/48 kHz); any other value in the register's 1-960
-range converts as native 48 kHz identity (960 frames, endian swap only).
+frames (8/12/24/32/44.1/48 kHz), where `output_frame_count` equals
+`requested_frame_count`; every off-table value in the register's 1-960 range
+converts as native 48 kHz identity (endian swap only) with
+`output_frame_count = 960`, regardless of the requested count.
 
-Only the first `frame_count * 4` bytes of a published period are defined. The
-remaining bytes retain DMA or prior-period data and must not be copied by the
-driver.
+Only the first `output_frame_count * 4` bytes of a published period are
+defined. The remaining bytes retain DMA or prior-period data and must not be
+copied by the driver.
 
 The driver places the receive ring 32768 bytes after the existing transmit
 ring inside the final 64 KiB reserved at the top of board memory. Each ring is
@@ -184,7 +190,9 @@ instance, while the exact-rational phase lands on every period boundary.
 The conversion uses integer arithmetic only in the receive ISR and never
 shares state with the playback converter instance. The period is converted
 through a CPU-side scratch copy -- in-place conversion is not used -- and the
-result is written back as big-endian stereo at the exact requested count.
+result is written back as big-endian stereo at `output_frame_count` frames:
+the requested count for the six supported counts, and 960 identity frames
+for every off-table request.
 
 ## Overrun behavior
 

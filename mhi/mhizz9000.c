@@ -1606,18 +1606,20 @@ ULONG i_MHIQuery(REGD1( ULONG mhi_query), REGA6(struct MHI_LibBase *MHI_LibBase)
 		case MHIQ_JOINT_STEREO:
 			return MHIF_SUPPORTED;
 
+		// Mixer controls (volume, panning, prefactor, the EQ bands)
+		// are deliberately NOT advertised: support is not universal,
+		// and matched control-plane firmware rejects the corresponding
+		// setters (see i_MHISetParam). Advertising them would make
+		// compliant players expose dead controls. Direct MHISetParam
+		// calls still work against pre-control-plane firmware.
 		case MHIQ_VOLUME_CONTROL:
-			return MHIF_SUPPORTED;
-//		case MHIQ_PANNING_CONTROL:
-//			return MHIF_SUPPORTED;
-
 		case MHIQ_PREFACTOR_CONTROL:
 		case MHIQ_BASS_CONTROL:
 		case MHIQ_TREBLE_CONTROL:
 		case MHIQ_MID_CONTROL:
 		case MHIQ_5_BAND_EQ:
 		case MHIQ_10_BAND_EQ:
-			return MHIF_SUPPORTED;
+			return MHIF_UNSUPPORTED;
 
 
 		default:
@@ -1627,13 +1629,17 @@ ULONG i_MHIQuery(REGD1( ULONG mhi_query), REGA6(struct MHI_LibBase *MHI_LibBase)
 
 /*
  * App mixer API. The master-chain parameters (volume/panning,
- * prefactor, the EQ bands) are legacy-only: they map straight onto
- * master-chain DSP registers that the scene module owns once the
- * firmware advertised the control plane at allocate. In that case the
- * register write is skipped -- the scene authority gate would reject
- * it anyway -- and the documented not-supported status is reported;
- * use scenes (ZZTop's Audio window) on control-plane firmware.
- * Against pre-control-plane firmware the direct writes stand.
+ * prefactor, the EQ bands) are legacy-only, and i_MHIQuery therefore
+ * does not advertise them: support is not universal, and matched
+ * control-plane firmware returns unsupported for these setters. They
+ * map straight onto master-chain DSP registers that the scene module
+ * owns once the firmware advertised the control plane at allocate. In
+ * that case the register write is skipped -- the scene authority gate
+ * would reject it anyway -- and the documented not-supported status
+ * is reported; use scenes (ZZTop's Audio window) on control-plane
+ * firmware. Against pre-control-plane firmware the direct writes
+ * stand, so legacy callers that invoke MHISetParam directly (without
+ * probing MHIQuery) keep working.
  */
 ULONG i_MHISetParam(REGA3(APTR mhi_handle), REGD0(UWORD mhi_param), REGD1(ULONG mhi_value), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 	struct MhiPlayer *mp = (struct MhiPlayer *)mhi_handle;
