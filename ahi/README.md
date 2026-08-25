@@ -63,11 +63,12 @@ If you have an unfixed R1, you have two choices:
 1. **Desolder U4** — MNT's own fix, produces the cleanest result and
    matches current hardware. Recommended if you're comfortable with
    SMD rework.
-2. **Set the operator baseline** — with matched firmware (see
-   [Firmware-authoritative control plane](#firmware-authoritative-control-plane)
-   below), shift the Paula/AX balance from ZZTop's Audio window. The
-   baseline is enforced by the firmware's gain-staging ceiling instead
-   of relying on a hand-picked register value.
+2. **Set baseline and measured ceilings** — matched firmware exposes
+   both in ZZTop's Audio window. Baseline sets the listening balance;
+   Paula/AX Ceiling stores the card's clean single-leg measurements
+   and weights gain staging before applying 3/4 headroom. The qualified
+   R1 card measured 48/80 (Paula weight 1.667, boundary 60). Save only
+   after calibration and the chosen baseline/scenes pass validation.
 
 The former `ENV:ZZ9K_MIX_LEVELS` register override was removed; see
 [Runtime tunables](#runtime-tunables-env-variables) below.
@@ -90,9 +91,9 @@ those parameters map straight onto the master chain the scene module
 owns, so on control-plane firmware the call reports the documented
 not-supported status and the chain is left alone — use scenes
 (ZZTop's Audio window) instead.
-
-The capability is deliberately unadvertised until qualified, so a
-matched pair is required for any control-plane behavior:
+The calibrated matched firmware advertises the capability after its
+hardware gate. Clients still require a matched pair and retain these
+mixed-version fallbacks:
 
 - **New driver + old firmware** — no control surface, no trims: the
   driver detects the absent capability and falls back to legacy
@@ -110,9 +111,9 @@ matched pair is required for any control-plane behavior:
   stamps (LPF at allocate/Play, mixer volume) are rejected by the
   firmware's scene-authority gate and playback continues, but the
   legacy anti-alias LPF tracking no longer happens: the cutoff stays
-  where the active scene put it, and LPF tracking only resumes once
-  the drivers are updated. The early-R1 balance remedy is unavailable
-  until the drivers are updated and an operator baseline is set.
+  where the active scene put it until the drivers are updated.
+  Early-R1 baseline/calibration is unavailable until the matched
+  drivers expose the control surface.
 
 ## Runtime tunables (ENV variables)
 

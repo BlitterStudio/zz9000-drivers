@@ -209,6 +209,28 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("if (live_session.preview_valid) {", source)
         self.assertIn("../common/zz_vcap_live.c", build)
 
+    def test_zztop_audio_calibration_is_typed_live_and_persisted(self):
+        source = self.read("ZZTop/Sources/ZZTop.c")
+        cfg_header = self.read("common/zzcfg_amiga.h")
+        cfg_source = self.read("common/zzcfg_amiga.c")
+
+        for token in (
+            "AUDGAD_CEIL_PAULA",
+            "AUDGAD_CEIL_AX",
+            "ZZ9K_AUDIO_CALIBRATION_PACK(",
+            "result.ceiling_paula",
+            "result.ceiling_ax",
+            "GTIN_Number, audio_ceiling_paula",
+            "GTIN_Number, audio_ceiling_ax",
+            "Calibration must be 1..4095",
+            "Calibration committed - Save to persist",
+        ):
+            self.assertIn(token, source)
+        self.assertIn("audio_ceiling_paula_present", cfg_header)
+        self.assertIn("audio_ceiling_ax_present", cfg_header)
+        self.assertIn('"audio_ceiling_paula"', cfg_source)
+        self.assertIn('"audio_ceiling_ax"', cfg_source)
+
     def test_zzdiag_capture_dump_has_fixed_header_and_size_gate(self):
         text = self.read("ZZDiag/ZZDiag.c")
         self.assertIn('"P6\\n1280 320\\n255\\n"', text)
@@ -839,7 +861,9 @@ class RepoToolingTests(unittest.TestCase):
         ]
 
         self.assertEqual(1, source.count("audioctrl = AHI_AllocAudioA("))
-        self.assertIn("{ AHIC_Play, TRUE }", start_body)
+        self.assertIn(
+            "{ AHIC_Play, paula_cross_mode ? FALSE : TRUE }", start_body
+        )
         self.assertNotIn("capture_only", source)
         self.assertIn("{ AHIC_Record, TRUE }", start_body)
         self.assertIn("{ AHIA_RecordFunc, (ULONG)&hook }", source)
@@ -855,6 +879,19 @@ class RepoToolingTests(unittest.TestCase):
         self.assertNotIn("Write(", hook_body)
         self.assertIn("if (!Close(file))", source)
         self.assertIn("DeleteFile((CONST_STRPTR)path);", source)
+        self.assertIn(
+            "static UBYTE paula_channel[] = { PAULA_LEFT_MASK };", source
+        )
+        self.assertIn(
+            "paula_io->ioa_Request.io_Flags = ADIOF_NOWAIT;", source
+        )
+        self.assertIn("ADIOF_PERVOL | ADIOF_WRITEMESSAGE;", source)
+        self.assertIn("AllocVec(sizeof(paula_sine), MEMF_CHIP)", source)
+        self.assertIn("GetMsg(paula_port) != &paula_io->ioa_WriteMsg", source)
+        self.assertIn("paula_start=PASS channel=left", source)
+        self.assertIn("paula_io->ioa_Period = PAULA_PERIOD;", source)
+        self.assertIn("paula_io->ioa_Cycles = 0;", source)
+        self.assertIn("AbortIO((struct IORequest *)paula_io);", source)
 
     def test_ahi_recording_drains_only_resident_periods(self):
         source = self.read("ahi/driver/zz9000ax-ahi.c")

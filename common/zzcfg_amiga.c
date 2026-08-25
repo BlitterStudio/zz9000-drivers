@@ -407,6 +407,20 @@ void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v)
                 v->audio_baseline = baseline;
                 v->audio_baseline_present = 1;
             }
+        } else if (zzcfg_str_eq_ci(key, "audio_ceiling_paula")) {
+            UWORD ceiling;
+            if (zzcfg_parse_u16(value, &ceiling) &&
+                    ceiling >= 1 && ceiling <= 4095) {
+                v->audio_ceiling_paula = ceiling;
+                v->audio_ceiling_paula_present = 1;
+            }
+        } else if (zzcfg_str_eq_ci(key, "audio_ceiling_ax")) {
+            UWORD ceiling;
+            if (zzcfg_parse_u16(value, &ceiling) &&
+                    ceiling >= 1 && ceiling <= 4095) {
+                v->audio_ceiling_ax = ceiling;
+                v->audio_ceiling_ax_present = 1;
+            }
         } else if (zzcfg_str_eq_ci(key, "audio_scene0_lpf")) {
             zzcfg_audio_scene_key(v, 0, 0, value);
         } else if (zzcfg_str_eq_ci(key, "audio_scene0_eq01")) {
@@ -671,7 +685,9 @@ static int zzcfg_audio_present(const struct zzcfg_values *v)
 {
     int i;
 
-    if (v->audio_active_present || v->audio_baseline_present)
+    if (v->audio_active_present || v->audio_baseline_present ||
+            v->audio_ceiling_paula_present ||
+            v->audio_ceiling_ax_present)
         return 1;
     for (i = 0; i < ZZCFG_AUDIO_SCENES; i++)
         if (v->audio_scene_mask[i])
@@ -687,12 +703,18 @@ static int zzcfg_append_audio(const struct zzcfg_values *v, char *out,
     if (off < 0 || (UWORD)off >= outsz) return -1;
     n = snprintf(out + off, outsz - (UWORD)off,
         "\n"
-        "# Audio control plane: active scene and operator baseline\n"
+        "# Audio control plane: scene, baseline and measured ceilings\n"
         "%saudio_active = %u\n"
-        "%saudio_baseline = %u\n",
+        "%saudio_baseline = %u\n"
+        "%saudio_ceiling_paula = %u\n"
+        "%saudio_ceiling_ax = %u\n",
         v->audio_active_present ? "" : "#", (unsigned)v->audio_active,
         v->audio_baseline_present ? "" : "#",
-        (unsigned)v->audio_baseline);
+        (unsigned)v->audio_baseline,
+        v->audio_ceiling_paula_present ? "" : "#",
+        (unsigned)v->audio_ceiling_paula,
+        v->audio_ceiling_ax_present ? "" : "#",
+        (unsigned)v->audio_ceiling_ax);
     if (n < 0 || (UWORD)(off + n) >= outsz) return -1;
     off += n;
 

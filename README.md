@@ -118,7 +118,7 @@ exists for future work, but no 8 MiB bitstream variant is shipped.
 | MHI audio | `mhizz9000.library` | `Libs:MHI/` | Exposes the AX hardware MP3 decoder to MHI-aware players. |
 | USB | `zzusbhw.device` | `Devs:USBHardware/` | Poseidon USB hardware driver. See [usb-poseidon/README.md](usb-poseidon/README.md). |
 | SD boot | `zzsd.device` | Firmware `BOOT.bin` | Size-constrained boot driver for FAT32-hosted HDF boot. See [sd-boot/README.md](sd-boot/README.md). |
-| Configuration | `ZZTop` | `SYS:Utilities/ZZ9000/` | GUI for hardware readback, firmware update/restore, and the SD-card `ZZ9000.CFG` settings (Project > Settings; needs firmware 2.3+). The **Audio** button opens the audio control plane (scenes, master-chain editing, meters, Paula/AX baseline) when the AX codec and a capability-advertising firmware are present; audio edits apply live and persist in firmware RAM until **Save** writes them to `ZZ9000.CFG` — a power-cycle reverts to the last Save. See [the ZZ9000 drawer](#the-zz9000-drawer). |
+| Configuration | `ZZTop` | `SYS:Utilities/ZZ9000/` | GUI for hardware readback, firmware update/restore, and `ZZ9000.CFG` settings. The capability-gated **Audio** window owns scenes, meters, Paula/AX baseline and measured per-card ceilings; edits apply live, and **Save** persists them. |
 | Scanlines | `ZZScanlines` | `C:` | CLI for scanline V1/V2 modes. |
 | Firmware update | `ZZFwUpdate` | `C:` | Pushes `BOOT.bin` or another root-level file to the ZZ9000 FAT32 microSD card over Zorro. |
 | SDK services | `zz9k.library` | `Libs:` | AmigaOS gateway to the SDK v2 firmware services (image/video decode, audio, compression, crypto). Built from the pinned [zz9000-sdk](https://github.com/BlitterStudio/zz9000-sdk) ref by `sdk/build.sh`. |

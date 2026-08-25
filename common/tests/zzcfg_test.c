@@ -429,6 +429,8 @@ int main(void)
         const char *audio_file =
             "audio_active = 3\n"
             "audio_baseline = 35910\n"
+            "audio_ceiling_paula = 48\n"
+            "audio_ceiling_ax = 80\n"
             "audio_scene2_lpf = 16000\n"
             "audio_scene2_eq01 = 12800\n"
             "audio_scene2_eq23 = 6450\n"
@@ -444,6 +446,10 @@ int main(void)
           "audio_active parses with presence");
     check(b.audio_baseline == 35910 && b.audio_baseline_present,
           "audio_baseline parses with presence");
+    check(b.audio_ceiling_paula == 48 &&
+          b.audio_ceiling_paula_present &&
+          b.audio_ceiling_ax == 80 && b.audio_ceiling_ax_present,
+          "audio calibration parses with presence");
     check(b.audio_scene_mask[2] == 0xff && b.audio_scene_mask[0] == 0,
           "scene key group masks complete");
     check(b.audio_scene_lpf[2] == 16000 && b.audio_scene_out[2] == 6999,
@@ -452,6 +458,8 @@ int main(void)
     n = zzcfg_generate(&b, text, sizeof(text));
     check(has_exact_line(text, "audio_active = 3") &&
           has_exact_line(text, "audio_baseline = 35910") &&
+          has_exact_line(text, "audio_ceiling_paula = 48") &&
+          has_exact_line(text, "audio_ceiling_ax = 80") &&
           has_exact_line(text, "audio_scene2_lpf = 16000") &&
           has_exact_line(text, "audio_scene2_eq01 = 12800") &&
           has_exact_line(text, "audio_scene2_out = 6999") &&
@@ -463,8 +471,18 @@ int main(void)
     defaults(&a);
     zzcfg_parse_text(text, n, &a);
     check(a.audio_active == 3 && a.audio_baseline == 35910 &&
+          a.audio_ceiling_paula == 48 && a.audio_ceiling_ax == 80 &&
           a.audio_scene_mask[2] == 0xff && a.audio_scene_out[2] == 6999,
           "generated audio block reparses identically");
+
+    defaults(&a);
+    zzcfg_parse_text("audio_ceiling_paula = 0\n"
+                     "audio_ceiling_ax = 4096\n",
+                     (UWORD)strlen("audio_ceiling_paula = 0\n"
+                                   "audio_ceiling_ax = 4096\n"), &a);
+    check(!a.audio_ceiling_paula_present &&
+          !a.audio_ceiling_ax_present,
+          "out-of-range audio calibration stays absent");
 
     /* A hand-edited partial scene stays partial: only present keys are
      * regenerated, so one Settings save never zero-fills the absent

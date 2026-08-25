@@ -47,9 +47,41 @@ this command once per prefactor step; do not start a Paula player.
 The line-out RCA pair must be looped to line-in and both auxiliary
 jumpers set to `IN`.
 
-Do not use ZZ9000AX AHI recording for a Paula-only output-ceiling
-cross-check. Bench diagnostics show that the record path observes the
-Paula feed even with mixer legs `0/0` and with scene volume `0`, so its
-capture is not an isolated measurement of the controlled line output.
-Capture the Paula cross-check from the line-output RCA pair with an
-independent external ADC/recorder instead.
+## Paula cross-channel ceiling mode
+
+A same-channel Paula loopback is invalid: AHI recording taps the
+physical ADC before `St Mixer1`, so it sees the direct Paula feed as
+well as the returned line output. `paula-cross` isolates them by
+generating a deterministic 16-sample tone on Paula hardware channel 1
+(left) while AHI records without playback.
+
+First prove channel isolation with every line-output-to-auxiliary cable
+disconnected:
+
+```text
+ZZAXDuplexTest RAM:cap_a205_paula_isolation.raw 5 paula-cross
+```
+
+It must print `paula_start=PASS channel=left period=222` before
+`result=PASS`; the waveform is copied into chip-accessible DMA memory
+and the start message proves `audio.device` accepted the write.
+
+On the qualified R1 card the direct left Paula reference appears on
+capture channel 2, while channel 1 is isolated by about 101 dB. After
+confirming that mapping, identify which line-output RCA carries the
+left-only tone with an amplifier, then connect only that active output
+to auxiliary-input **left**. Leave the other line output and auxiliary
+input right disconnected. The internal Paula wiring and auxiliary
+capture ordering make this a cross-channel route in the capture domain.
+With baseline Paula 254 / AX 0, the scene chain processes the left
+Paula tone and the cable
+returns that output into capture channel 1:
+
+```text
+ZZAXDuplexTest RAM:cap_a205_paula_0080.raw 5 paula-cross
+python util/analyze_audio_saturation.py --auto-tone --channel 1 \
+    --reference-channel 2 cap_a205_paula_0080.raw
+```
+
+Never use `paula-cross` with a normal same-channel stereo loopback.
+The isolation capture is a mandatory setup gate before a sweep.

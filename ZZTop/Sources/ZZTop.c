@@ -114,10 +114,12 @@ static const char version[] __attribute__((used)) =
 #define AUDGAD_GAIN_RED     (6)
 #define AUDGAD_BASE_PAULA   (7)
 #define AUDGAD_BASE_AX      (8)
-#define AUDGAD_STATUS       (9)
-#define AUDGAD_BTN_SAVE     (10)
-#define AUDGAD_BTN_RENAME   (11)
-#define AUDGAD_COUNT        (12)
+#define AUDGAD_CEIL_PAULA   (9)
+#define AUDGAD_CEIL_AX      (10)
+#define AUDGAD_STATUS       (11)
+#define AUDGAD_BTN_SAVE     (12)
+#define AUDGAD_BTN_RENAME   (13)
+#define AUDGAD_COUNT        (14)
 
 /* Scene-editor window gadgets (sub-window of the Audio window). */
 #define SEGAD_LPF           (0)
@@ -193,6 +195,8 @@ static const char version[] __attribute__((used)) =
 #define LABEL_AUD_GR       "Gain Red"
 #define LABEL_AUD_PAULA    "Paula Level"
 #define LABEL_AUD_AX       "AX Level"
+#define LABEL_AUD_CEIL_PAULA "Paula Ceiling"
+#define LABEL_AUD_CEIL_AX    "AX Ceiling"
 #define LABEL_AUD_DONE     "Done"
 #define LABEL_AUD_PREF     "Prefactor"
 #define LABEL_AUD_VOL      "Volume"
@@ -2744,6 +2748,8 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 #define ZZTOP_AUDIO_LPF_MAX 23900
 #define ZZTOP_AUDIO_RANGE_MAX 100
 #define ZZTOP_AUDIO_LEVEL_MAX 255
+#define ZZTOP_AUDIO_CEILING_MIN 1
+#define ZZTOP_AUDIO_CEILING_MAX 4095
 
 static BOOL audio_control_capped = FALSE;
 static BOOL audio_metering_capped = FALSE;
@@ -2844,6 +2850,9 @@ struct zztop_audio_state {
 	UWORD scene_count;
 	uint32_t baseline; /* ABI packed pair: ch1 = Paula, ch2 = AX */
 	uint32_t trim;     /* last applied mixer legs, same packing */
+	uint32_t ceiling;  /* derived AX-equivalent policy boundary */
+	UWORD ceiling_paula;
+	UWORD ceiling_ax;
 	UWORD trim_bounded;
 	uint32_t save_status; /* ABI save word: QUEUED while saving, else
 	                       * the last settled outcome */
@@ -2904,6 +2913,12 @@ static int audio_scene_select_call(UWORD scene)
  * ZZTop builds against either header generation. */
 #ifndef ZZ9K_AUDIO_SCENE_PARAM_NAME
 #define ZZ9K_AUDIO_SCENE_PARAM_NAME 16U
+#endif
+#ifndef ZZ9K_AUDIO_SCENE_PARAM_CALIBRATION
+#define ZZ9K_AUDIO_SCENE_PARAM_CALIBRATION 17U
+#define ZZ9K_AUDIO_CALIBRATION_PACK(paula, ax) \
+	((uint32_t)((uint32_t)(UWORD)(paula) | \
+	 ((uint32_t)(UWORD)(ax) << 16)))
 #endif
 
 /* One staged SCENE_WRITE with explicit flags: the rename path stages
@@ -2993,6 +3008,9 @@ static BOOL audio_control_state_get(struct zztop_audio_state *out)
 	out->baseline = zz9k_get_be32(result.baseline);
 	out->trim = zz9k_get_be32(result.trim);
 	out->trim_bounded = (UWORD)zz9k_get_be32(result.flags);
+	out->ceiling = zz9k_get_be32(result.ceiling);
+	out->ceiling_paula = (UWORD)zz9k_get_be32(result.ceiling_paula);
+	out->ceiling_ax = (UWORD)zz9k_get_be32(result.ceiling_ax);
 	out->save_status = zz9k_get_be32(
 		&reply.payload.inline_data[ZZTOP_CONTROL_STATE_SAVE_STATUS_OFF]);
 	return TRUE;
@@ -3086,6 +3104,8 @@ static const struct zztop_audio_scene_ui zztop_audio_scene_defaults[8] = {
 static struct zztop_audio_scene_ui audio_scenes[ZZCFG_AUDIO_SCENES];
 static UWORD audio_baseline_paula;
 static UWORD audio_baseline_ax;
+static UWORD audio_ceiling_paula;
+static UWORD audio_ceiling_ax;
 static BOOL audio_ui_seeded = FALSE;
 /* Unsaved-changes contract (R15): edits persist in firmware RAM, so
  * "dirty" is card-wide state that outlives the window; only a
@@ -3170,6 +3190,8 @@ static void audio_editor_defaults(void)
 		sizeof(audio_scenes));
 	audio_baseline_paula = 128;
 	audio_baseline_ax = 64;
+	audio_ceiling_paula = 256;
+	audio_ceiling_ax = 256;
 	for (i = 0; i < ZZCFG_AUDIO_SCENES; i++)
 		audio_scene_default_name(audio_scenes[i].name,
 			sizeof(audio_scenes[i].name), (UWORD)i);
@@ -3240,6 +3262,17 @@ static BOOL audio_seed_editor_state(void)
 		audio_baseline_paula = sv.audio_baseline >> 8;
 		audio_baseline_ax = sv.audio_baseline & 0xff;
 	}
+	if (sv.audio_ceiling_paula_present &&
+			sv.audio_ceiling_ax_present) {
+		audio_ceiling_paula = sv.audio_ceiling_paula;
+		audio_ceiling_ax = sv.audio_ceiling_ax;
+	}
+	if (audio_ceiling_paula < ZZTOP_AUDIO_CEILING_MIN ||
+			audio_ceiling_paula > ZZTOP_AUDIO_CEILING_MAX)
+		audio_ceiling_paula = 256;
+	if (audio_ceiling_ax < ZZTOP_AUDIO_CEILING_MIN ||
+			audio_ceiling_ax > ZZTOP_AUDIO_CEILING_MAX)
+		audio_ceiling_ax = 256;
 
 	/* Clamp to the ranges the firmware enforces on write, so a hand
 	 * edited file seeds usable slider positions. */
@@ -3285,8 +3318,12 @@ static void audio_reload_saved_state(struct Window *win, UWORD scene)
 			GTSL_Level, audio_baseline_paula, TAG_END);
 		GT_SetGadgetAttrs(audgads[AUDGAD_BASE_AX], win, NULL,
 			GTSL_Level, audio_baseline_ax, TAG_END);
+		GT_SetGadgetAttrs(audgads[AUDGAD_CEIL_PAULA], win, NULL,
+			GTIN_Number, audio_ceiling_paula, TAG_END);
+		GT_SetGadgetAttrs(audgads[AUDGAD_CEIL_AX], win, NULL,
+			GTIN_Number, audio_ceiling_ax, TAG_END);
 		audio_set_status(win,
-			"Saved - survives power-cycle; sliders show last-saved values");
+			"Saved - survives power-cycle; controls show saved values");
 	} else {
 		audio_set_status(win,
 			"Saved - readback unavailable; current values kept");
@@ -3515,6 +3552,8 @@ static CONST_STRPTR audio_label_samples[] = {
 	(CONST_STRPTR)LABEL_AUD_GR,
 	(CONST_STRPTR)LABEL_AUD_PAULA,
 	(CONST_STRPTR)LABEL_AUD_AX,
+	(CONST_STRPTR)LABEL_AUD_CEIL_PAULA,
+	(CONST_STRPTR)LABEL_AUD_CEIL_AX,
 	NULL
 };
 
@@ -3658,6 +3697,27 @@ static struct Gadget *audio_create_gadgets(struct Gadget **glistptr,
 		TAG_END);
 	y += l.row_step + l.section_gap;
 
+	ng.ng_Width = l.gadget_width;
+	ng.ng_TopEdge = y;
+	ng.ng_GadgetID = AUDGAD_CEIL_PAULA;
+	ng.ng_GadgetText = (STRPTR)LABEL_AUD_CEIL_PAULA;
+	audgads[AUDGAD_CEIL_PAULA] = gad = CreateGadget(
+		INTEGER_KIND, gad, &ng,
+		GTIN_Number, audio_ceiling_paula,
+		GTIN_MaxChars, 4,
+		TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge = y;
+	ng.ng_GadgetID = AUDGAD_CEIL_AX;
+	ng.ng_GadgetText = (STRPTR)LABEL_AUD_CEIL_AX;
+	audgads[AUDGAD_CEIL_AX] = gad = CreateGadget(
+		INTEGER_KIND, gad, &ng,
+		GTIN_Number, audio_ceiling_ax,
+		GTIN_MaxChars, 4,
+		TAG_END);
+	y += l.row_step + l.section_gap;
+
 	/* Status line spans the whole row (no side label) so messages get
 	 * the label column's width too instead of widening the window. */
 	ng.ng_LeftEdge = l.margin_x;
@@ -3731,9 +3791,8 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 			audio_editor_defaults();
 		audio_ui_seeded = TRUE;
 	}
-	/* The live state wins where the ABI allows reading it: the active
-	 * scene and the baseline may carry unsaved edits from an earlier
-	 * run. A failed read (no matched set) keeps the CFG seeds. */
+	/* Live state wins where the ABI permits it: scene, baseline and
+	 * calibration may carry unsaved edits from an earlier run. */
 	if (audio_control_state_get(&state)) {
 		if (state.active_scene < ZZCFG_AUDIO_SCENES)
 			scene = state.active_scene;
@@ -3741,6 +3800,8 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 			(UWORD)ZZ9K_AUDIO_BALANCE_CH1(state.baseline);
 		audio_baseline_ax =
 			(UWORD)ZZ9K_AUDIO_BALANCE_CH2(state.baseline);
+		audio_ceiling_paula = state.ceiling_paula;
+		audio_ceiling_ax = state.ceiling_ax;
 	}
 	audio_scene_labels_bind();
 
@@ -3834,9 +3895,8 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 
 			switch (imsgClass) {
 				case IDCMP_MOUSEMOVE:
-					/* Sliders here never emit GADGETUP (editor finding):
-					 * treat baseline-slider moves as live commits; the
-					 * coalescing machine absorbs the drag burst. */
+					/* Baseline sliders never emit GADGETUP; treat moves
+					 * as live commits and let firmware coalesce them. */
 					if (gad && (gad->GadgetID == AUDGAD_BASE_PAULA ||
 							gad->GadgetID == AUDGAD_BASE_AX))
 						imsgClass = IDCMP_GADGETUP;
@@ -3939,6 +3999,58 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 									audio_set_status(win,
 										"Baseline write failed - retry");
 								}
+							}
+							audio_update_save_gate(win);
+							break;
+						}
+						case AUDGAD_CEIL_PAULA:
+						case AUDGAD_CEIL_AX: {
+							UWORD old_paula = audio_ceiling_paula;
+							UWORD old_ax = audio_ceiling_ax;
+							UWORD new_paula = old_paula;
+							UWORD new_ax = old_ax;
+							LONG entered =
+								((struct StringInfo *)gad->SpecialInfo)->LongInt;
+							int cst;
+
+							if (entered < ZZTOP_AUDIO_CEILING_MIN ||
+									entered > ZZTOP_AUDIO_CEILING_MAX) {
+								GT_SetGadgetAttrs(gad, win, NULL,
+									GTIN_Number,
+									(gad->GadgetID == AUDGAD_CEIL_PAULA)
+									? old_paula : old_ax, TAG_END);
+								audio_set_status(win,
+									"Calibration must be 1..4095");
+								break;
+							}
+							if (gad->GadgetID == AUDGAD_CEIL_PAULA)
+								new_paula = (UWORD)entered;
+							else
+								new_ax = (UWORD)entered;
+							cst = audio_scene_write_commit(scene,
+								ZZ9K_AUDIO_SCENE_PARAM_CALIBRATION,
+								ZZ9K_AUDIO_CALIBRATION_PACK(
+									new_paula, new_ax));
+							if (cst == ZZ9K_STATUS_OK ||
+									cst == ZZ9K_STATUS_TIMEOUT) {
+								audio_ceiling_paula = new_paula;
+								audio_ceiling_ax = new_ax;
+								audio_mark_dirty();
+								audio_set_status(win,
+									(cst == ZZ9K_STATUS_OK)
+									? "Calibration committed - Save to persist"
+									: "Calibration committing - Save to persist");
+							} else {
+								GT_SetGadgetAttrs(gad, win, NULL,
+									GTIN_Number, (gad->GadgetID ==
+										AUDGAD_CEIL_PAULA) ? old_paula :
+										old_ax, TAG_END);
+								audio_scene_write_commit(scene,
+									ZZ9K_AUDIO_SCENE_PARAM_CALIBRATION,
+									ZZ9K_AUDIO_CALIBRATION_PACK(
+										old_paula, old_ax));
+								audio_set_status(win,
+									"Calibration write failed - retry");
 							}
 							audio_update_save_gate(win);
 							break;
