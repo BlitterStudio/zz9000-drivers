@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "zzcfg_amiga.h"
+#include "fwup_client.h"   /* FWUP_ERR_UNKNOWN: zzcfg_save refusal */
 
 static int failures;
 
@@ -551,6 +552,56 @@ int main(void)
     }
     check(b.audio_active == 8 && b.audio_scene_mask[5] == 0,
           "invalid values parse permissively without presence");
+
+    /* Maximal legal audio model: every presence flag, every scene's
+     * 16-key mask and every value at its accepted ceiling -- exactly
+     * what parsing a fully populated firmware-U5 file yields. It
+     * renders past ZZCFG_MAX_SIZE, so generation must fail explicitly
+     * (0, the value zzcfg_save refuses) instead of returning a
+     * writable truncated length that would save a partial file over
+     * the operator's scenes. */
+    defaults(&b);
+    b.audio_active_present = 1;
+    b.audio_baseline_present = 1;
+    b.audio_ceiling_paula_present = 1;
+    b.audio_ceiling_ax_present = 1;
+    b.audio_active = 7u;
+    b.audio_baseline = 65535u;
+    b.audio_ceiling_paula = 4095u;
+    b.audio_ceiling_ax = 4095u;
+    for (i = 0; i < ZZCFG_AUDIO_SCENES; i++) {
+        int f;
+
+        b.audio_scene_mask[i] = 0xffffu;
+        b.audio_scene_lpf[i] = 20000u;
+        b.audio_scene_out[i] = 100u;
+        b.audio_scene_pan[i] = 100u;
+        for (f = 0; f < 5; f++) b.audio_scene_eq[i][f] = 100u;
+        for (f = 0; f < ZZCFG_AUDIO_SCENE_NM_CHUNKS; f++)
+            b.audio_scene_nm[i][f] = 0x7e7eu;
+    }
+    n = zzcfg_generate(&b, text, sizeof(text));
+    check(n == 0, "maximal audio model fails generation, not outsz-1");
+    check(zzcfg_save(0, &b) == FWUP_ERR_UNKNOWN,
+          "maximal audio model is never saved as a truncated file");
+
+    /* A fully populated single scene still renders: the failure above
+     * is the size cliff, not populated audio keys themselves. */
+    defaults(&b);
+    b.audio_active_present = 1;
+    b.audio_active = 3;
+    b.audio_scene_mask[2] = 0xffffu;
+    b.audio_scene_lpf[2] = 16000;
+    for (i = 0; i < 5; i++) b.audio_scene_eq[2][i] = 65535u;
+    b.audio_scene_out[2] = 6999;
+    b.audio_scene_pan[2] = 75;
+    for (i = 0; i < ZZCFG_AUDIO_SCENE_NM_CHUNKS; i++)
+        b.audio_scene_nm[2][i] = 65535u;
+    n = zzcfg_generate(&b, text, sizeof(text));
+    check(n > 0 && n < (UWORD)sizeof(text),
+          "full single scene still renders complete");
+    check(has_exact_line(text, "audio_scene2_nm8 = 65535"),
+          "last scene key survives in the rendered file");
 
 
     /* A second raw read starts with the previous request's OK status.
