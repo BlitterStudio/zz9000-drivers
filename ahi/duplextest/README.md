@@ -45,16 +45,11 @@ S16BE stereo, ready for `analyze_audio_saturation.py`. For the primary
 ceiling sweep, set the operator baseline to Paula 0 / AX 254 and run
 this command once per prefactor step; do not start a Paula player.
 The line-out RCA pair must be looped to line-in and both auxiliary
-jumpers set to `IN`. The separate Paula-only cross-check uses baseline
-254 / 0, a Paula sample player, and this tool's capture-only mode.
+jumpers set to `IN`.
 
-For the Paula-only cross-check, start the Paula sample player and run
-record-only mode:
-
-```text
-ZZAXDuplexTest RAM:cap_paula.raw 5 capture
-```
-
-Capture mode starts `AHIC_Record` without AHI playback and writes the
-same raw 48 kHz S16BE format. It replaces AHIRecord's AIFF/WAVE output,
-so the analyzer needs no container extraction step.
+Do not use ZZ9000AX AHI recording for a Paula-only output-ceiling
+cross-check. Bench diagnostics show that the record path observes the
+Paula feed even with mixer legs `0/0` and with scene volume `0`, so its
+capture is not an isolated measurement of the controlled line output.
+Capture the Paula cross-check from the line-output RCA pair with an
+independent external ADC/recorder instead.

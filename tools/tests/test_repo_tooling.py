@@ -839,9 +839,8 @@ class RepoToolingTests(unittest.TestCase):
         ]
 
         self.assertEqual(1, source.count("audioctrl = AHI_AllocAudioA("))
-        self.assertIn(
-            "{ AHIC_Play, capture_only ? FALSE : TRUE }", start_body
-        )
+        self.assertIn("{ AHIC_Play, TRUE }", start_body)
+        self.assertNotIn("capture_only", source)
         self.assertIn("{ AHIC_Record, TRUE }", start_body)
         self.assertIn("{ AHIA_RecordFunc, (ULONG)&hook }", source)
         self.assertIn("message->ahirm_Type != AHIST_S16S", hook_body)
