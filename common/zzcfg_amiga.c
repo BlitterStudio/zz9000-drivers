@@ -14,16 +14,31 @@
 
 /* Matches the FWUP client's poll budget: a raw read is one small FatFs
  * read, but a slow card under load can still stall for tens of ms. */
+#ifndef ZZCFG_POLL_LIMIT
 #define ZZCFG_POLL_LIMIT 2000000UL
+#endif
 
-static volatile UWORD *reg16(ULONG board, ULONG offset)
-{
-    return (volatile UWORD *)(board + offset);
-}
+#ifdef ZZCFG_TEST_IO
+extern UWORD zzcfg_test_reg_read(ULONG board, ULONG offset);
+extern void zzcfg_test_reg_write(ULONG board, ULONG offset, UWORD value);
+extern UBYTE zzcfg_test_buffer_read(ULONG board, UWORD offset);
+#define ZZCFG_REG_READ(board, offset) \
+    zzcfg_test_reg_read((board), (offset))
+#define ZZCFG_REG_WRITE(board, offset, value) \
+    zzcfg_test_reg_write((board), (offset), (value))
+#define ZZCFG_BUFFER_READ(board, offset) \
+    zzcfg_test_buffer_read((board), (offset))
+#else
+#define ZZCFG_REG_READ(board, offset) \
+    (*(volatile UWORD *)((board) + (offset)))
+#define ZZCFG_REG_WRITE(board, offset, value) \
+    (*(volatile UWORD *)((board) + (offset)) = (value))
+#define ZZCFG_BUFFER_READ(board, offset) \
+    (*(volatile UBYTE *)((board) + ZZ_BUFFER_OFFSET + (offset)))
+#endif
 
 UWORD zzcfg_read_raw(ULONG board, char *out, UWORD maxlen, UWORD *outlen)
 {
-    volatile UBYTE *buf = (volatile UBYTE *)(board + ZZ_BUFFER_OFFSET);
     unsigned long budget = ZZCFG_POLL_LIMIT;
     UWORD status, len, i;
 
@@ -31,23 +46,31 @@ UWORD zzcfg_read_raw(ULONG board, char *out, UWORD maxlen, UWORD *outlen)
     if (maxlen == 0) return ZZ_CFG_FILE_IO_ERROR;
     out[0] = '\0';
 
-    /* Reset the handshake, then issue the read. The firmware processes
-     * register writes in bus order, so no wait is needed in between. */
-    *reg16(board, ZZ_REG_CONFIG_FILE) = 0;
-    *reg16(board, ZZ_REG_CONFIG_FILE) = 1;
-
+    /* A previous request may have left a terminal status (usually OK).
+     * Wait until firmware has observed RESET and published IDLE before
+     * sending READ; otherwise the first status load can accept the
+     * previous request and copy its stale shared-buffer snapshot. */
+    ZZCFG_REG_WRITE(board, ZZ_REG_CONFIG_FILE, 0);
     do {
-        status = *reg16(board, ZZ_REG_CONFIG_FILE);
+        status = ZZCFG_REG_READ(board, ZZ_REG_CONFIG_FILE);
+        if (status == ZZ_CFG_FILE_IDLE) break;
+    } while (--budget);
+    if (status != ZZ_CFG_FILE_IDLE)
+        return ZZ_CFG_FILE_IDLE;
+
+    ZZCFG_REG_WRITE(board, ZZ_REG_CONFIG_FILE, 1);
+    budget = ZZCFG_POLL_LIMIT;
+    do {
+        status = ZZCFG_REG_READ(board, ZZ_REG_CONFIG_FILE);
         if (status != ZZ_CFG_FILE_IDLE) break;
     } while (--budget);
-
     if (status != ZZ_CFG_FILE_OK) return status;
 
-    len = *reg16(board, ZZ_REG_CONFIG_FILE_LEN);
+    len = ZZCFG_REG_READ(board, ZZ_REG_CONFIG_FILE_LEN);
     if (len > maxlen - 1) len = maxlen - 1;
 
     for (i = 0; i < len; i++) {
-        out[i] = (char)buf[i];
+        out[i] = (char)ZZCFG_BUFFER_READ(board, i);
     }
     out[len] = '\0';
     *outlen = len;
@@ -103,6 +126,49 @@ static int zzcfg_parse_u12(const char *s, UWORD *out)
         s++;
     }
     *out = (UWORD)value;
+    return 1;
+}
+
+static int zzcfg_parse_u16(const char *s, UWORD *out)
+{
+    ULONG value = 0;
+
+    if (!*s) return 0;
+    while (*s) {
+        if (*s < '0' || *s > '9') return 0;
+        value = value * 10 + (ULONG)(*s - '0');
+        if (value > 65535) return 0;
+        s++;
+    }
+    *out = (UWORD)value;
+    return 1;
+}
+
+/* One audio_scene<N>_<field> key (firmware U5 layout): fields are
+ * 0 = lpf, 1..5 = eq01..eq89 pairs, 6 = out, 7 = pan and
+ * 8..15 = nm1..nm8 name chunks. The editor round-trips the packed
+ * decimal untouched; range validation is the firmware's at cold
+ * boot. */
+static int zzcfg_audio_scene_key(struct zzcfg_values *v, int scene,
+    int field, const char *value)
+{
+    UWORD packed;
+
+    if (scene < 0 || scene >= ZZCFG_AUDIO_SCENES) return 0;
+    if (!zzcfg_parse_u16(value, &packed)) return 0;
+
+    switch (field) {
+    case 0: v->audio_scene_lpf[scene] = packed; break;
+    case 1: case 2: case 3: case 4: case 5:
+        v->audio_scene_eq[scene][field - 1] = packed; break;
+    case 6: v->audio_scene_out[scene] = packed; break;
+    case 7: v->audio_scene_pan[scene] = packed; break;
+    case 8: case 9: case 10: case 11:
+    case 12: case 13: case 14: case 15:
+        v->audio_scene_nm[scene][field - 8] = packed; break;
+    default: return 0;
+    }
+    v->audio_scene_mask[scene] |= (UWORD)(1u << field);
     return 1;
 }
 
@@ -329,8 +395,363 @@ void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v)
         } else if (zzcfg_str_eq_ci(key, "hdf")) {
             if (strlen(value) < sizeof(v->hdf))
                 strcpy(v->hdf, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_active")) {
+            UWORD active;
+            if (zzcfg_parse_u16(value, &active)) {
+                v->audio_active = active;
+                v->audio_active_present = 1;
+            }
+        } else if (zzcfg_str_eq_ci(key, "audio_baseline")) {
+            UWORD baseline;
+            if (zzcfg_parse_u16(value, &baseline)) {
+                v->audio_baseline = baseline;
+                v->audio_baseline_present = 1;
+            }
+        } else if (zzcfg_str_eq_ci(key, "audio_ceiling_paula")) {
+            UWORD ceiling;
+            if (zzcfg_parse_u16(value, &ceiling) &&
+                    ceiling >= 1 && ceiling <= 4095) {
+                v->audio_ceiling_paula = ceiling;
+                v->audio_ceiling_paula_present = 1;
+            }
+        } else if (zzcfg_str_eq_ci(key, "audio_ceiling_ax")) {
+            UWORD ceiling;
+            if (zzcfg_parse_u16(value, &ceiling) &&
+                    ceiling >= 1 && ceiling <= 4095) {
+                v->audio_ceiling_ax = ceiling;
+                v->audio_ceiling_ax_present = 1;
+            }
+        } else if (zzcfg_str_eq_ci(key, "audio_scene0_lpf")) {
+            zzcfg_audio_scene_key(v, 0, 0, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene0_eq01")) {
+            zzcfg_audio_scene_key(v, 0, 1, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene0_eq23")) {
+            zzcfg_audio_scene_key(v, 0, 2, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene0_eq45")) {
+            zzcfg_audio_scene_key(v, 0, 3, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene0_eq67")) {
+            zzcfg_audio_scene_key(v, 0, 4, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene0_eq89")) {
+            zzcfg_audio_scene_key(v, 0, 5, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene0_out")) {
+            zzcfg_audio_scene_key(v, 0, 6, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene0_pan")) {
+            zzcfg_audio_scene_key(v, 0, 7, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene0_nm1")) {
+            zzcfg_audio_scene_key(v, 0, 8, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene0_nm2")) {
+            zzcfg_audio_scene_key(v, 0, 9, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene0_nm3")) {
+            zzcfg_audio_scene_key(v, 0, 10, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene0_nm4")) {
+            zzcfg_audio_scene_key(v, 0, 11, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene0_nm5")) {
+            zzcfg_audio_scene_key(v, 0, 12, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene0_nm6")) {
+            zzcfg_audio_scene_key(v, 0, 13, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene0_nm7")) {
+            zzcfg_audio_scene_key(v, 0, 14, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene0_nm8")) {
+            zzcfg_audio_scene_key(v, 0, 15, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene1_lpf")) {
+            zzcfg_audio_scene_key(v, 1, 0, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene1_eq01")) {
+            zzcfg_audio_scene_key(v, 1, 1, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene1_eq23")) {
+            zzcfg_audio_scene_key(v, 1, 2, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene1_eq45")) {
+            zzcfg_audio_scene_key(v, 1, 3, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene1_eq67")) {
+            zzcfg_audio_scene_key(v, 1, 4, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene1_eq89")) {
+            zzcfg_audio_scene_key(v, 1, 5, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene1_out")) {
+            zzcfg_audio_scene_key(v, 1, 6, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene1_pan")) {
+            zzcfg_audio_scene_key(v, 1, 7, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene1_nm1")) {
+            zzcfg_audio_scene_key(v, 1, 8, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene1_nm2")) {
+            zzcfg_audio_scene_key(v, 1, 9, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene1_nm3")) {
+            zzcfg_audio_scene_key(v, 1, 10, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene1_nm4")) {
+            zzcfg_audio_scene_key(v, 1, 11, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene1_nm5")) {
+            zzcfg_audio_scene_key(v, 1, 12, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene1_nm6")) {
+            zzcfg_audio_scene_key(v, 1, 13, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene1_nm7")) {
+            zzcfg_audio_scene_key(v, 1, 14, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene1_nm8")) {
+            zzcfg_audio_scene_key(v, 1, 15, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene2_lpf")) {
+            zzcfg_audio_scene_key(v, 2, 0, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene2_eq01")) {
+            zzcfg_audio_scene_key(v, 2, 1, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene2_eq23")) {
+            zzcfg_audio_scene_key(v, 2, 2, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene2_eq45")) {
+            zzcfg_audio_scene_key(v, 2, 3, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene2_eq67")) {
+            zzcfg_audio_scene_key(v, 2, 4, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene2_eq89")) {
+            zzcfg_audio_scene_key(v, 2, 5, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene2_out")) {
+            zzcfg_audio_scene_key(v, 2, 6, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene2_pan")) {
+            zzcfg_audio_scene_key(v, 2, 7, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene2_nm1")) {
+            zzcfg_audio_scene_key(v, 2, 8, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene2_nm2")) {
+            zzcfg_audio_scene_key(v, 2, 9, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene2_nm3")) {
+            zzcfg_audio_scene_key(v, 2, 10, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene2_nm4")) {
+            zzcfg_audio_scene_key(v, 2, 11, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene2_nm5")) {
+            zzcfg_audio_scene_key(v, 2, 12, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene2_nm6")) {
+            zzcfg_audio_scene_key(v, 2, 13, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene2_nm7")) {
+            zzcfg_audio_scene_key(v, 2, 14, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene2_nm8")) {
+            zzcfg_audio_scene_key(v, 2, 15, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene3_lpf")) {
+            zzcfg_audio_scene_key(v, 3, 0, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene3_eq01")) {
+            zzcfg_audio_scene_key(v, 3, 1, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene3_eq23")) {
+            zzcfg_audio_scene_key(v, 3, 2, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene3_eq45")) {
+            zzcfg_audio_scene_key(v, 3, 3, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene3_eq67")) {
+            zzcfg_audio_scene_key(v, 3, 4, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene3_eq89")) {
+            zzcfg_audio_scene_key(v, 3, 5, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene3_out")) {
+            zzcfg_audio_scene_key(v, 3, 6, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene3_pan")) {
+            zzcfg_audio_scene_key(v, 3, 7, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene3_nm1")) {
+            zzcfg_audio_scene_key(v, 3, 8, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene3_nm2")) {
+            zzcfg_audio_scene_key(v, 3, 9, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene3_nm3")) {
+            zzcfg_audio_scene_key(v, 3, 10, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene3_nm4")) {
+            zzcfg_audio_scene_key(v, 3, 11, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene3_nm5")) {
+            zzcfg_audio_scene_key(v, 3, 12, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene3_nm6")) {
+            zzcfg_audio_scene_key(v, 3, 13, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene3_nm7")) {
+            zzcfg_audio_scene_key(v, 3, 14, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene3_nm8")) {
+            zzcfg_audio_scene_key(v, 3, 15, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene4_lpf")) {
+            zzcfg_audio_scene_key(v, 4, 0, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene4_eq01")) {
+            zzcfg_audio_scene_key(v, 4, 1, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene4_eq23")) {
+            zzcfg_audio_scene_key(v, 4, 2, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene4_eq45")) {
+            zzcfg_audio_scene_key(v, 4, 3, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene4_eq67")) {
+            zzcfg_audio_scene_key(v, 4, 4, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene4_eq89")) {
+            zzcfg_audio_scene_key(v, 4, 5, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene4_out")) {
+            zzcfg_audio_scene_key(v, 4, 6, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene4_pan")) {
+            zzcfg_audio_scene_key(v, 4, 7, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene4_nm1")) {
+            zzcfg_audio_scene_key(v, 4, 8, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene4_nm2")) {
+            zzcfg_audio_scene_key(v, 4, 9, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene4_nm3")) {
+            zzcfg_audio_scene_key(v, 4, 10, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene4_nm4")) {
+            zzcfg_audio_scene_key(v, 4, 11, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene4_nm5")) {
+            zzcfg_audio_scene_key(v, 4, 12, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene4_nm6")) {
+            zzcfg_audio_scene_key(v, 4, 13, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene4_nm7")) {
+            zzcfg_audio_scene_key(v, 4, 14, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene4_nm8")) {
+            zzcfg_audio_scene_key(v, 4, 15, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene5_lpf")) {
+            zzcfg_audio_scene_key(v, 5, 0, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene5_eq01")) {
+            zzcfg_audio_scene_key(v, 5, 1, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene5_eq23")) {
+            zzcfg_audio_scene_key(v, 5, 2, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene5_eq45")) {
+            zzcfg_audio_scene_key(v, 5, 3, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene5_eq67")) {
+            zzcfg_audio_scene_key(v, 5, 4, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene5_eq89")) {
+            zzcfg_audio_scene_key(v, 5, 5, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene5_out")) {
+            zzcfg_audio_scene_key(v, 5, 6, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene5_pan")) {
+            zzcfg_audio_scene_key(v, 5, 7, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene5_nm1")) {
+            zzcfg_audio_scene_key(v, 5, 8, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene5_nm2")) {
+            zzcfg_audio_scene_key(v, 5, 9, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene5_nm3")) {
+            zzcfg_audio_scene_key(v, 5, 10, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene5_nm4")) {
+            zzcfg_audio_scene_key(v, 5, 11, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene5_nm5")) {
+            zzcfg_audio_scene_key(v, 5, 12, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene5_nm6")) {
+            zzcfg_audio_scene_key(v, 5, 13, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene5_nm7")) {
+            zzcfg_audio_scene_key(v, 5, 14, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene5_nm8")) {
+            zzcfg_audio_scene_key(v, 5, 15, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene6_lpf")) {
+            zzcfg_audio_scene_key(v, 6, 0, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene6_eq01")) {
+            zzcfg_audio_scene_key(v, 6, 1, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene6_eq23")) {
+            zzcfg_audio_scene_key(v, 6, 2, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene6_eq45")) {
+            zzcfg_audio_scene_key(v, 6, 3, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene6_eq67")) {
+            zzcfg_audio_scene_key(v, 6, 4, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene6_eq89")) {
+            zzcfg_audio_scene_key(v, 6, 5, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene6_out")) {
+            zzcfg_audio_scene_key(v, 6, 6, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene6_pan")) {
+            zzcfg_audio_scene_key(v, 6, 7, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene6_nm1")) {
+            zzcfg_audio_scene_key(v, 6, 8, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene6_nm2")) {
+            zzcfg_audio_scene_key(v, 6, 9, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene6_nm3")) {
+            zzcfg_audio_scene_key(v, 6, 10, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene6_nm4")) {
+            zzcfg_audio_scene_key(v, 6, 11, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene6_nm5")) {
+            zzcfg_audio_scene_key(v, 6, 12, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene6_nm6")) {
+            zzcfg_audio_scene_key(v, 6, 13, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene6_nm7")) {
+            zzcfg_audio_scene_key(v, 6, 14, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene6_nm8")) {
+            zzcfg_audio_scene_key(v, 6, 15, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene7_lpf")) {
+            zzcfg_audio_scene_key(v, 7, 0, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene7_eq01")) {
+            zzcfg_audio_scene_key(v, 7, 1, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene7_eq23")) {
+            zzcfg_audio_scene_key(v, 7, 2, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene7_eq45")) {
+            zzcfg_audio_scene_key(v, 7, 3, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene7_eq67")) {
+            zzcfg_audio_scene_key(v, 7, 4, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene7_eq89")) {
+            zzcfg_audio_scene_key(v, 7, 5, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene7_out")) {
+            zzcfg_audio_scene_key(v, 7, 6, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene7_pan")) {
+            zzcfg_audio_scene_key(v, 7, 7, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene7_nm1")) {
+            zzcfg_audio_scene_key(v, 7, 8, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene7_nm2")) {
+            zzcfg_audio_scene_key(v, 7, 9, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene7_nm3")) {
+            zzcfg_audio_scene_key(v, 7, 10, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene7_nm4")) {
+            zzcfg_audio_scene_key(v, 7, 11, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene7_nm5")) {
+            zzcfg_audio_scene_key(v, 7, 12, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene7_nm6")) {
+            zzcfg_audio_scene_key(v, 7, 13, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene7_nm7")) {
+            zzcfg_audio_scene_key(v, 7, 14, value);
+        } else if (zzcfg_str_eq_ci(key, "audio_scene7_nm8")) {
+            zzcfg_audio_scene_key(v, 7, 15, value);
         }
     }
+}
+
+static int zzcfg_audio_present(const struct zzcfg_values *v)
+{
+    int i;
+
+    if (v->audio_active_present || v->audio_baseline_present ||
+            v->audio_ceiling_paula_present ||
+            v->audio_ceiling_ax_present)
+        return 1;
+    for (i = 0; i < ZZCFG_AUDIO_SCENES; i++)
+        if (v->audio_scene_mask[i])
+            return 1;
+    return 0;
+}
+
+static int zzcfg_append_audio(const struct zzcfg_values *v, char *out,
+    UWORD outsz, int off)
+{
+    int i, n;
+
+    if (off < 0 || (UWORD)off >= outsz) return -1;
+    n = snprintf(out + off, outsz - (UWORD)off,
+        "\n"
+        "# Audio control plane: scene, baseline and measured ceilings\n"
+        "%saudio_active = %u\n"
+        "%saudio_baseline = %u\n"
+        "%saudio_ceiling_paula = %u\n"
+        "%saudio_ceiling_ax = %u\n",
+        v->audio_active_present ? "" : "#", (unsigned)v->audio_active,
+        v->audio_baseline_present ? "" : "#",
+        (unsigned)v->audio_baseline,
+        v->audio_ceiling_paula_present ? "" : "#",
+        (unsigned)v->audio_ceiling_paula,
+        v->audio_ceiling_ax_present ? "" : "#",
+        (unsigned)v->audio_ceiling_ax);
+    if (n < 0 || (UWORD)(off + n) >= outsz) return -1;
+    off += n;
+
+    for (i = 0; i < ZZCFG_AUDIO_SCENES; i++) {
+        /* Mirror the parse side (zzcfg_audio_scene_key): a key is
+         * emitted only when its mask bit is set, so a hand-edited
+         * partial scene never grows zero-filled siblings on save. */
+        const struct { const char *name; unsigned value; } fields[] = {
+            { "lpf",  (unsigned)v->audio_scene_lpf[i] },
+            { "eq01", (unsigned)v->audio_scene_eq[i][0] },
+            { "eq23", (unsigned)v->audio_scene_eq[i][1] },
+            { "eq45", (unsigned)v->audio_scene_eq[i][2] },
+            { "eq67", (unsigned)v->audio_scene_eq[i][3] },
+            { "eq89", (unsigned)v->audio_scene_eq[i][4] },
+            { "out",  (unsigned)v->audio_scene_out[i] },
+            { "pan",  (unsigned)v->audio_scene_pan[i] },
+            { "nm1",  (unsigned)v->audio_scene_nm[i][0] },
+            { "nm2",  (unsigned)v->audio_scene_nm[i][1] },
+            { "nm3",  (unsigned)v->audio_scene_nm[i][2] },
+            { "nm4",  (unsigned)v->audio_scene_nm[i][3] },
+            { "nm5",  (unsigned)v->audio_scene_nm[i][4] },
+            { "nm6",  (unsigned)v->audio_scene_nm[i][5] },
+            { "nm7",  (unsigned)v->audio_scene_nm[i][6] },
+            { "nm8",  (unsigned)v->audio_scene_nm[i][7] }
+        };
+        int f;
+
+        for (f = 0; f < 16; f++) {
+            if (!(v->audio_scene_mask[i] & (UWORD)(1u << f))) continue;
+            n = snprintf(out + off, outsz - (UWORD)off,
+                "audio_scene%d_%s = %u\n",
+                i, fields[f].name, fields[f].value);
+            if (n < 0 || (UWORD)(off + n) >= outsz) return -1;
+            off += n;
+        }
+    }
+    return off;
 }
 
 UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
@@ -407,6 +828,15 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
 
     if (n < 0) return 0;
     if ((UWORD)n >= outsz) return (UWORD)(outsz - 1);
+
+    /* Audio control-plane keys (firmware U5): carried through exactly
+     * when the parsed file had them, so a Settings save never deletes
+     * an operator's saved scenes. */
+    if (zzcfg_audio_present(v)) {
+        int off = zzcfg_append_audio(v, out, outsz, n);
+        if (off < 0) return (UWORD)(outsz - 1);
+        n = off;
+    }
     return (UWORD)n;
 }
 

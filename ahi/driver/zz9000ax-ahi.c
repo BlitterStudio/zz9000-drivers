@@ -47,6 +47,10 @@
 #include "zz9000ax-ahi.h"
 #include "zz9000_aperture.h"
 
+#include "zz9k/library_vectors.h"
+#include "zz9k/request.h"
+#include <proto/zz9k.h>
+
 // Comment out to enable debug output:
 #define kprintf(...)
 
@@ -81,6 +85,17 @@ struct Library      *UtilityBase;
 struct Library      *AHIsubBase  = NULL;
 struct DosLibrary   *DOSBase     = NULL;
 struct z9ax_base    *Z9AXBase;
+// zz9k.library base for the proto inline calls; opened per AllocAudio
+// (AHI's low-level API is exclusive, so at most one owner exists) and
+// closed again on FreeAudio. NULL means "no control plane" -- legacy
+// playback. Cleared in init() for the same BSS-reuse hygiene as the
+// library bases above.
+struct Library      *ZZ9KBase    = NULL;
+// Whether the firmware advertised ZZ9K_CAP_AUDIO_CONTROL at allocate:
+// gates the release-time neutral trim submit and the legacy LPF stamp
+// (absent capability = old firmware, pre-scene behavior). Mirrors the
+// ZZ9KBase lifetime: set at allocate, cleared at release.
+static int audio_control_capped = 0;
 //struct GfxBase      *GraphicsBase = NULL;
 
 int __attribute__((no_reorder)) _start()
@@ -172,6 +187,8 @@ static uint32_t __attribute__((used)) init(BPTR seg_list asm("a0"), struct Libra
   UtilityBase = NULL;
   ExpansionBase = NULL;
   IntuitionBase = NULL;
+  ZZ9KBase = NULL;
+  audio_control_capped = 0;
 
   if (!(DOSBase = (struct DosLibrary *)OpenLibrary((STRPTR)"dos.library",0)))
     goto fail;
@@ -215,6 +232,18 @@ static uint32_t __attribute__((used)) init(BPTR seg_list asm("a0"), struct Libra
     Z9AXBase->flags |= ZZ_AX_DEVF_INT2MODE;
   } else {
     kprintf((CONST_STRPTR)"ZZ9000AX: Using INT6 mode (default).\n");
+  }
+
+  // The mix-levels env override is gone (R11): Paula/AX balance intent
+  // now flows through the firmware control plane's operator baseline.
+  // Probe for the stale variable's existence only -- never parse a
+  // value -- and tell operators still carrying the old early-R1 remedy
+  // where the replacement lives. KPrintF (not the locally disabled
+  // kprintf) so the one-liner is always visible on the debug channel.
+  if ((fh = Open((CONST_STRPTR)"ENV:ZZ9K_MIX_LEVELS", MODE_OLDFILE))) {
+    Close(fh);
+    KPrintF((CONST_STRPTR)"ZZ9000AX: ENV:ZZ9K_MIX_LEVELS is ignored; "
+            "balance needs matched firmware (scene baseline).\n");
   }
 
   return (uint32_t)dev;
@@ -626,50 +655,40 @@ static BOOL mhi_present_locked(void) {
   return FindName(IrqList, (CONST_STRPTR)ZZ_AX_IRQ_NAME_MHI) ? TRUE : FALSE;
 }
 
-// Read an optional user override for AP_DSP_SET_VOLUMES from
-// ENV:ZZ9K_MIX_LEVELS. The file (created e.g. with
-// `setenv ZZ9K_MIX_LEVELS C040`) contains a 1-4 digit hex string packing
-// ZZ9000AX/AHI output level in the high byte and Paula pass-through in
-// the low byte. "0x" prefix, leading whitespace and trailing newlines
-// are tolerated. Returns `default_value` on any failure so a stale or
-// mangled file can never brick audio.
-static uint16_t read_mix_levels_env(uint16_t default_value)
+// Firmware-authoritative control plane (R4/R16): submit this owner's
+// neutral source trim through the ZZ9K_OP_AUDIO_TRIM_SUBMIT mailbox
+// opcode over zz9k.library. The neutral balance word is the pinned
+// keep-baseline release -- "no trim from this owner": the firmware
+// answers with the operator baseline pair and does not restage the
+// mixer; it owns every master-chain write and the reply's
+// applied/bound words are the authority, so the driver never mirrors
+// them into DSP registers. Requires ZZ9KBase to be live and must run
+// outside Forbid() -- ZZ9KCall blocks on the mailbox completion.
+// Failure is non-fatal: playback continues exactly as before, only
+// the trim release is lost (e.g. transient firmware error).
+static void submit_source_trim(void)
 {
-  BPTR fh;
-  UBYTE buf[16];
-  LONG len;
-  uint16_t out = 0;
-  int digits = 0;
-  int i;
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  ZZ9KAudioTrimSubmitPayload *payload;
+  int status;
 
-  if (!DOSBase) return default_value;
-  fh = Open((CONST_STRPTR)ZZ_AX_MIX_LEVELS_ENV, MODE_OLDFILE);
-  if (!fh) return default_value;
-  len = Read(fh, buf, sizeof(buf) - 1);
-  Close(fh);
-  if (len <= 0) return default_value;
-  buf[len] = 0;
+  zz9k_request_init(&request, ZZ9K_OP_AUDIO_TRIM_SUBMIT);
+  request.entry.payload_len = sizeof(ZZ9KAudioTrimSubmitPayload);
+  payload = (ZZ9KAudioTrimSubmitPayload *)request.entry.payload.inline_data;
+  zz9k_put_be32(payload->balance, ZZ9K_AUDIO_BALANCE_NEUTRAL);
+  zz9k_put_be32(payload->flags, 0);
 
-  for (i = 0; i < len && digits < 4; i++) {
-    UBYTE c = buf[i];
-    int d;
-    if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
-      if (digits > 0) break;
-      continue;
+  status = ZZ9KCall(&request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+  if (status == ZZ9K_STATUS_OK) {
+    // The reply payload is byte storage; copy it out before reading
+    // typed fields (mirrors the SDK reply-extraction convention).
+    ZZ9KAudioTrimResultPayload result;
+    memcpy(&result, reply.payload.inline_data, sizeof(result));
+    if (zz9k_get_be32(result.flags) & ZZ9K_AUDIO_TRIM_RESULT_BOUNDED) {
+      KPrintF((CONST_STRPTR)"ZZ9000AX: neutral trim bounded by scene policy.\n");
     }
-    if (digits == 0 && c == '0' && (i + 1 < len) &&
-        (buf[i + 1] == 'x' || buf[i + 1] == 'X')) {
-      i++;
-      continue;
-    }
-    if (c >= '0' && c <= '9') d = c - '0';
-    else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
-    else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
-    else break;
-    out = (uint16_t)((out << 4) | d);
-    digits++;
   }
-  return (digits > 0) ? out : default_value;
 }
 
 static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagList asm("a1"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
@@ -799,18 +818,6 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
   write_reg(hw_addr, ZZ_REG_AUDIO_CONFIG, 0);
   Permit();
 
-  int lpf_freq = AudioCtrl->ahiac_MixFreq / 2;
-
-  // filter has issues near 24KHz
-  if (lpf_freq > 23900) lpf_freq = 23900;
-
-  BPTR f;
-  if ((f = Open((APTR)ZZ_AX_NOLPF_ENV, MODE_OLDFILE))) {
-    Close(f);
-    // turn off auto low pass filter
-    lpf_freq = 23900;
-  }
-
   Forbid();
   // set tx buffer address
   write_audio_param(hw_addr, 0, offset_tx>>16);
@@ -820,24 +827,38 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
     write_audio_param(hw_addr, ZZ_AX_AP_RX_BUF_OFFS_HI, offset_rx>>16);
     write_audio_param(hw_addr, ZZ_AX_AP_RX_BUF_OFFS_LO, offset_rx&0xffff);
   }
-
-  // set LPF freq to half of sampling freq
-  write_audio_param(hw_addr, 9, lpf_freq);
-
-  // Balanced Paula-vs-ZZ9000AX output mixer default (param 10,
-  // AP_DSP_SET_VOLUMES). High byte = ZZ9000AX/AHI level, low byte = Paula
-  // pass-through level, each 0x00-0xFF. Summing both above ~0x100 starts
-  // saturating the DAC (per MNT forum thread 1011).
-  //
-  // Default 0x8080 is the symmetric baseline that matches the fixed-
-  // hardware revision every new customer receives (MNT removed the U4
-  // opamp that over-amplified Paula pass-through on early R1 units).
-  // Owners of an unfixed early R1 where raw Paula dominates over AHI
-  // output can compensate via `setenv ZZ9K_MIX_LEVELS C040` (boost AHI,
-  // cut Paula) — or any other 4-digit hex value — without rebuilding.
-  write_audio_param(hw_addr, ZZ_AX_AP_DSP_SET_VOLUMES,
-                    read_mix_levels_env(ZZ_AX_DEFAULT_MIX_LEVELS));
   Permit();
+
+  // Control-plane client (R4/R16): when zz9k.library is present AND the
+  // running firmware advertises ZZ9K_CAP_AUDIO_CONTROL, submit this
+  // owner's neutral source trim -- the reserved keep-baseline word,
+  // "no trim from this owner": the firmware answers with the operator
+  // baseline pair and does not restage the mixer. The reply is
+  // authoritative; the driver never mirrors it into DSP registers. The
+  // capability query and the trim submission block on the mailbox
+  // completion, so both run after the Permit above, never under Forbid.
+  ZZ9KBase = OpenLibrary((STRPTR)"zz9k.library", 0);
+  audio_control_capped = 0;
+  if (ZZ9KBase) {
+    ZZ9KCaps caps;
+    if (ZZ9KQueryCaps(&caps) == ZZ9K_STATUS_OK &&
+        (caps.capability_bits & ZZ9K_CAP_AUDIO_CONTROL)) {
+      audio_control_capped = 1;
+      submit_source_trim();
+    }
+  }
+
+  // Old firmware (no zz9k.library, or the capability not advertised):
+  // no scene module owns the master chain, so keep the legacy
+  // anti-alias stamp at allocate -- the low-pass cutoff at half the
+  // mix rate, capped just under the filter's rough spot near 24 kHz.
+  // On control-plane firmware the LPF is scene-owned and this stamp is
+  // skipped; LPF tracking on mixed sets needs matched firmware.
+  if (!audio_control_capped) {
+    int lpf_freq = AudioCtrl->ahiac_MixFreq / 2;
+    if (lpf_freq > 23900) lpf_freq = 23900;
+    write_audio_param(hw_addr, ZZ_AX_AP_DSP_SET_LOWPASS, lpf_freq);
+  }
 
   // Zero the hardware audio ring buffer before we enable playback. The
   // FPGA DAC starts consuming from audio_hw_buf_addr as soon as the HW
@@ -895,6 +916,19 @@ fail:
   // earlier, so we must release it here before freeing ahi_data; otherwise
   // RemIntServer would walk a freed node next time something probes.
   destroy_interrupt(ahi_data);
+  // Release the control-plane binding opened at allocate. The release
+  // is explicit: when the capability was seen, submit the reserved
+  // neutral balance word -- the pinned keep-baseline release, "no trim
+  // from this owner"; the firmware answers with the operator baseline
+  // pair and does not restage the mixer. The submission blocks on the
+  // mailbox completion and CloseLibrary can expunge, so both stay
+  // outside any Forbid window.
+  if (ZZ9KBase) {
+    if (audio_control_capped) submit_source_trim();
+    CloseLibrary(ZZ9KBase);
+    ZZ9KBase = NULL;
+  }
+  audio_control_capped = 0;
   if (ahi_data->mainproc_signal != -1) {
     FreeSignal(ahi_data->mainproc_signal);
     ahi_data->mainproc_signal = -1;
@@ -935,6 +969,20 @@ static void __attribute__((used)) intAHIsub_FreeAudio(struct AHIAudioCtrlDrv *Au
     }
     ahi_data->worker_process = NULL;
   }
+
+  // Release the control-plane binding opened at allocate. The release
+  // is explicit: when the capability was seen, submit the reserved
+  // neutral balance word -- the pinned keep-baseline release, "no trim
+  // from this owner"; the firmware answers with the operator baseline
+  // pair and does not restage the mixer. The submission blocks on the
+  // mailbox completion and CloseLibrary can expunge, so both stay
+  // outside any Forbid window.
+  if (ZZ9KBase) {
+    if (audio_control_capped) submit_source_trim();
+    CloseLibrary(ZZ9KBase);
+    ZZ9KBase = NULL;
+  }
+  audio_control_capped = 0;
   destroy_interrupt(ahi_data);
 
   if (ahi_data->mainproc_signal != -1) {

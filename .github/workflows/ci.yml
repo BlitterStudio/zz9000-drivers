@@ -114,13 +114,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      # ZZTop/build-gcc.sh stages the zz9k.library client headers from a
+      # zz9000-sdk checkout on the host, then re-execs itself through
+      # tools/amiga-docker.sh -- like the mhi/ahi jobs -- because the
+      # Audio window is a control-plane client over the zz9k ABI.
       - name: Build ZZTop
         run: |
-          docker run --rm -v "$PWD":/src -w /src/ZZTop "$AMIGA_IMAGE" \
-            m68k-amigaos-gcc Sources/ZZTop.c ../common/fwup_amiga.c ../common/fwup_client.c \
-              ../common/zzcfg_amiga.c ../common/zz_vcap_live.c \
-              -m68030 -O2 -I../common -I../include -o ZZTop \
-              -Wall -Wextra -Wno-unused-parameter -lamiga -noixemul -lm
+          ZZTop/build-gcc.sh
       - uses: actions/upload-artifact@v7
         with:
           name: ZZTop
@@ -277,9 +277,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      # ahi/driver/build.sh now stages the zz9k.library client headers
+      # on the host exactly like mhi/build.sh (the driver submits its
+      # source trim through the zz9k control-plane ABI), then re-execs
+      # itself through tools/amiga-docker.sh -- so it runs on the host,
+      # not inside a bare container.
       - name: Build zz9000ax.audio + ZZ9000AX
         run: |
-          docker run --rm -v "$PWD":/src -w /src/ahi/driver "$AMIGA_IMAGE" ./build.sh
+          ahi/driver/build.sh
       - name: Build ZZAXDuplexTest
         run: |
           docker run --rm -v "$PWD":/src -w /src/ahi/duplextest "$AMIGA_IMAGE" ./build.sh

@@ -16,7 +16,8 @@ DEPS := $(COMMON_DIR)/fwup_client.h
 # includes so the pure parse/generate model can be tested on the host.
 CFG_SOURCES := zzcfg_test.c $(COMMON_DIR)/zzcfg_amiga.c stubs/fwup_stub.c
 CFG_DEPS := $(COMMON_DIR)/zzcfg_amiga.h $(COMMON_DIR)/../include/zzcfg_query.h
-CFG_CPPFLAGS := -Istubs -I$(COMMON_DIR) -I$(COMMON_DIR)/../include
+CFG_CPPFLAGS := -Istubs -I$(COMMON_DIR) -I$(COMMON_DIR)/../include \
+	-DZZCFG_TEST_IO -DZZCFG_POLL_LIMIT=32UL
 VCAP_SOURCES := zz_vcap_live_test.c $(COMMON_DIR)/zz_vcap_live.c
 VCAP_DEPS := $(COMMON_DIR)/zz_vcap_live.h $(COMMON_DIR)/../include/zz9000_hw.h
 VCAP_CPPFLAGS := -Istubs -I$(COMMON_DIR) -I$(COMMON_DIR)/../include

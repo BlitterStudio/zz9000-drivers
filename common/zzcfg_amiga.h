@@ -65,7 +65,33 @@ struct zzcfg_values {
     UWORD video_overlay;     /* 0-1, default 1 */
     char  mac[ZZCFG_MAC_CHARS + 3];
     char  hdf[ZZCFG_HDF_CHARS + 5];
-};
+
+    /* Audio control-plane keys: active scene, baseline, per-card clean
+     * ceilings and one key group per scene. Packed scene values remain
+     * byte-for-byte compatible with firmware; presence is tracked so
+     * a Settings save preserves partial hand-edited files. */
+#define ZZCFG_AUDIO_SCENES 8
+    /* Name chunks per scene: nm1..nm8, each packing two ASCII label
+     * characters as c1*256+c2 (0 = terminator). Bits 8..15 of
+     * audio_scene_mask are the per-chunk presence, so a partial name
+     * group round-trips exactly as parsed. Defined beside the field
+     * so callers can feature-test with #ifdef. */
+#define ZZCFG_AUDIO_SCENE_NM_CHUNKS 8
+    UWORD audio_active;
+    UWORD audio_active_present;
+    UWORD audio_baseline;
+    UWORD audio_baseline_present;
+    UWORD audio_ceiling_paula;
+    UWORD audio_ceiling_paula_present;
+    UWORD audio_ceiling_ax;
+    UWORD audio_ceiling_ax_present;
+    UWORD audio_scene_lpf[ZZCFG_AUDIO_SCENES];
+    UWORD audio_scene_eq[ZZCFG_AUDIO_SCENES][5];
+    UWORD audio_scene_out[ZZCFG_AUDIO_SCENES];
+    UWORD audio_scene_pan[ZZCFG_AUDIO_SCENES];
+    UWORD audio_scene_nm[ZZCFG_AUDIO_SCENES][ZZCFG_AUDIO_SCENE_NM_CHUNKS];
+    UWORD audio_scene_mask[ZZCFG_AUDIO_SCENES]; /* bit per key */
+ };
 
 /* Convert old three-key files and ENV overrides to/from the atomic profile. */
 UWORD zzcfg_profile_from_legacy(UWORD pal_mode, UWORD full, UWORD vsync);

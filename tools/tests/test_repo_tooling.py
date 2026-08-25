@@ -209,6 +209,28 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("if (live_session.preview_valid) {", source)
         self.assertIn("../common/zz_vcap_live.c", build)
 
+    def test_zztop_audio_calibration_is_typed_live_and_persisted(self):
+        source = self.read("ZZTop/Sources/ZZTop.c")
+        cfg_header = self.read("common/zzcfg_amiga.h")
+        cfg_source = self.read("common/zzcfg_amiga.c")
+
+        for token in (
+            "AUDGAD_CEIL_PAULA",
+            "AUDGAD_CEIL_AX",
+            "ZZ9K_AUDIO_CALIBRATION_PACK(",
+            "result.ceiling_paula",
+            "result.ceiling_ax",
+            "GTIN_Number, audio_ceiling_paula",
+            "GTIN_Number, audio_ceiling_ax",
+            "Calibration must be 1..4095",
+            "Calibration committed - Save to persist",
+        ):
+            self.assertIn(token, source)
+        self.assertIn("audio_ceiling_paula_present", cfg_header)
+        self.assertIn("audio_ceiling_ax_present", cfg_header)
+        self.assertIn('"audio_ceiling_paula"', cfg_source)
+        self.assertIn('"audio_ceiling_ax"', cfg_source)
+
     def test_zzdiag_capture_dump_has_fixed_header_and_size_gate(self):
         text = self.read("ZZDiag/ZZDiag.c")
         self.assertIn('"P6\\n1280 320\\n255\\n"', text)
@@ -302,12 +324,16 @@ class RepoToolingTests(unittest.TestCase):
 
     def test_ci_audio_jobs_use_build_scripts(self):
         ci = self.read(".github/workflows/ci.yml")
-        # mhi/build.sh stages zz9k headers (cloning the SDK at the
-        # pinned sdk/SDK_REF when no sibling checkout exists) before
-        # re-execing into docker itself, so CI calls it host-side.
+        # mhi/build.sh, ahi/driver/build.sh and ZZTop/build-gcc.sh stage
+        # zz9k headers (via tools/stage-zz9k-headers.sh, cloning the SDK
+        # at the pinned sdk/SDK_REF when no sibling checkout exists)
+        # before re-execing into docker themselves, so CI calls all
+        # three host-side.
         self.assertIn("mhi/build.sh", ci)
         self.assertNotIn('-w /src/mhi "$AMIGA_IMAGE" ./build.sh', ci)
-        self.assertIn('-w /src/ahi/driver "$AMIGA_IMAGE" ./build.sh', ci)
+        self.assertIn("ahi/driver/build.sh", ci)
+        self.assertNotIn('-w /src/ahi/driver "$AMIGA_IMAGE" ./build.sh', ci)
+        self.assertIn("ZZTop/build-gcc.sh", ci)
         self.assertIn(
             '-w /src/ahi/duplextest "$AMIGA_IMAGE" ./build.sh', ci
         )
@@ -339,6 +365,7 @@ class RepoToolingTests(unittest.TestCase):
             "tools/package-local.sh",
             "tools/check-release.sh",
             "tools/check-quality.sh",
+            "tools/stage-zz9k-headers.sh",
             "rtg/build.sh",
             "net/build.sh",
             "usb-poseidon/build.sh",
@@ -463,7 +490,7 @@ class RepoToolingTests(unittest.TestCase):
         for token in (
             "ZZ_AX_BYTES_PER_PERIOD",
             "ZZ_AX_AUDIO_BUFSZ",
-            "ZZ_AX_MIX_LEVELS_ENV",
+            "ZZ_AX_INT2_ENV",
             "ZZ_AX_IRQ_NAME_AHI",
             "ZZ_AX_IRQ_NAME_MHI",
             "ZZ_AX_AP_DSP_SET_VOLUMES",
@@ -479,7 +506,97 @@ class RepoToolingTests(unittest.TestCase):
             self.assertNotIn("#define ZZ_BYTES_PER_PERIOD", source)
             self.assertNotIn("#define AUDIO_BUFSZ", source)
             self.assertNotIn("#define REG_ZZ_AUDIO_CONFIG", source)
-            self.assertNotIn('"ENV:ZZ9K_MIX_LEVELS"', source)
+            # R11 removed ZZ9K_MIX_LEVELS outright: the value-reading
+            # helper is gone, and the only permitted literal is the
+            # existence probe feeding the one-line ignore warning.
+            self.assertNotIn("read_mix_levels_env", source)
+            self.assertNotIn("ZZ9K_MIX_LEVELS C040", source)
+            self.assertEqual(
+                1, source.count('"ENV:ZZ9K_MIX_LEVELS"'),
+                "ZZ9K_MIX_LEVELS may appear only as the warning probe",
+            )
+            self.assertIn("is ignored", source)
+
+    def test_audio_owners_issue_no_dsp_param_stamps(self):
+        """R4/U6: DSP stamps are gated on the absent capability.
+
+        The master chain (LPF, mixer volume, EQ) belongs to the firmware
+        scene module on control-plane firmware; drivers act as
+        control-plane clients gated on ZZ9K_CAP_AUDIO_CONTROL,
+        submitting a neutral source trim through the trim opcode and
+        re-submitting it at release. The legacy anti-alias LPF stamps
+        exist ONLY on the absent-capability (old firmware) branch --
+        never on the control-plane path -- and no mixer stamp exists
+        on either path.
+        """
+        ahi = self.read("ahi/driver/zz9000ax-ahi.c")
+        mhi = self.read("mhi/mhizz9000.c")
+
+        # AHI: no mixer stamp and no NOLPF bypass anywhere; the LPF
+        # stamp exists exactly once, inside the absent-capability
+        # branch after the caps gate (never on the control-plane path).
+        self.assertNotIn("read_mix_levels_env", ahi)
+        self.assertNotIn("ZZ_AX_NOLPF_ENV", ahi)
+        self.assertNotIn("ZZ_AX_AP_DSP_SET_VOLUMES", ahi)
+        self.assertEqual(1, ahi.count("ZZ_AX_AP_DSP_SET_LOWPASS"))
+        alloc = ahi[
+            ahi.index("intAHIsub_AllocAudio"):ahi.index("intAHIsub_FreeAudio")
+        ]
+        caps_gate = alloc.index("caps.capability_bits & ZZ9K_CAP_AUDIO_CONTROL")
+        submit = alloc.index("submit_source_trim()")
+        absent_gate = alloc.index("if (!audio_control_capped)")
+        stamp = alloc.index(
+            "write_audio_param(hw_addr, ZZ_AX_AP_DSP_SET_LOWPASS")
+        self.assertLess(caps_gate, submit)
+        self.assertLess(submit, absent_gate)
+        self.assertLess(absent_gate, stamp)
+
+        # MHI: no mixer stamp anywhere, no DSP stamp at allocate or
+        # release; the Play-start LPF stamp sits inside the
+        # absent-capability branch.
+        self.assertNotIn("read_mix_levels_env", mhi)
+        self.assertNotIn("ZZ_AX_AP_DSP_SET_VOLUMES", mhi)
+        self.assertEqual(1, mhi.count("ZZ_AX_AP_DSP_SET_LOWPASS"))
+        mhi_alloc = mhi[
+            mhi.index("APTR i_MHIAllocDecoder"):mhi.index("void i_MHIFreeDecoder")
+        ]
+        self.assertNotIn("setAudioParam", mhi_alloc)
+        play = mhi[mhi.index("void i_MHIPlay"):mhi.index("void i_MHIStop")]
+        absent_gate = play.index("if(!mp->audio_control_capped)")
+        stamp = play.index("setAudioParam(mp, ZZ_AX_AP_DSP_SET_LOWPASS")
+        self.assertLess(absent_gate, stamp)
+        release = mhi[
+            mhi.index("void i_MHIFreeDecoder"):mhi.index("BOOL i_MHIQueueBuffer")
+        ]
+        self.assertNotIn("setAudioParam", release)
+
+        # Both drivers gate on the capability and submit the trim
+        # (allocate and release).
+        for source in (ahi, mhi):
+            self.assertIn("ZZ9K_CAP_AUDIO_CONTROL", source)
+            self.assertIn("(caps.capability_bits & ZZ9K_CAP_AUDIO_CONTROL)",
+                          source)
+            self.assertIn("submit_source_trim()", source)
+            self.assertIn("ZZ9K_OP_AUDIO_TRIM_SUBMIT", source)
+            self.assertIn("ZZ9K_AUDIO_BALANCE_NEUTRAL", source)
+
+        # The app mixer API is legacy-only: master-chain SetParam writes
+        # stay behind the absent-capability gate and report the
+        # documented not-supported status on control-plane firmware.
+        setparam = mhi[
+            mhi.index("ULONG i_MHISetParam"):mhi.rindex("return MHIF_SUPPORTED;")
+        ]
+        self.assertIn("mp->audio_control_capped", setparam)
+        self.assertIn("MHIF_UNSUPPORTED", setparam)
+
+        # The per-consumer build-script gates fail fast when the staged
+        # SDK predates the control-plane ABI.
+        self.assertIn("ZZ9K_OP_AUDIO_TRIM_SUBMIT",
+                      self.read("ahi/driver/build.sh"))
+        self.assertIn("ZZ9K_OP_AUDIO_TRIM_SUBMIT",
+                      self.read("mhi/build.sh"))
+        self.assertIn("ZZ9K_OP_AUDIO_SCENE_SELECT",
+                      self.read("ZZTop/build-gcc.sh"))
 
     def test_ahi_initializes_period_size_before_enabling_interrupt(self):
         source = self.read("ahi/driver/zz9000ax-ahi.c")
@@ -744,7 +861,10 @@ class RepoToolingTests(unittest.TestCase):
         ]
 
         self.assertEqual(1, source.count("audioctrl = AHI_AllocAudioA("))
-        self.assertIn("{ AHIC_Play, TRUE }", start_body)
+        self.assertIn(
+            "{ AHIC_Play, paula_cross_mode ? FALSE : TRUE }", start_body
+        )
+        self.assertNotIn("capture_only", source)
         self.assertIn("{ AHIC_Record, TRUE }", start_body)
         self.assertIn("{ AHIA_RecordFunc, (ULONG)&hook }", source)
         self.assertIn("message->ahirm_Type != AHIST_S16S", hook_body)
@@ -759,6 +879,19 @@ class RepoToolingTests(unittest.TestCase):
         self.assertNotIn("Write(", hook_body)
         self.assertIn("if (!Close(file))", source)
         self.assertIn("DeleteFile((CONST_STRPTR)path);", source)
+        self.assertIn(
+            "static UBYTE paula_channel[] = { PAULA_LEFT_MASK };", source
+        )
+        self.assertIn(
+            "paula_io->ioa_Request.io_Flags = ADIOF_NOWAIT;", source
+        )
+        self.assertIn("ADIOF_PERVOL | ADIOF_WRITEMESSAGE;", source)
+        self.assertIn("AllocVec(sizeof(paula_sine), MEMF_CHIP)", source)
+        self.assertIn("GetMsg(paula_port) != &paula_io->ioa_WriteMsg", source)
+        self.assertIn("paula_start=PASS channel=left", source)
+        self.assertIn("paula_io->ioa_Period = PAULA_PERIOD;", source)
+        self.assertIn("paula_io->ioa_Cycles = 0;", source)
+        self.assertIn("AbortIO((struct IORequest *)paula_io);", source)
 
     def test_ahi_recording_drains_only_resident_periods(self):
         source = self.read("ahi/driver/zz9000ax-ahi.c")

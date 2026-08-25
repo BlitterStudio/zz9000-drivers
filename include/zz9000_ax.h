@@ -72,10 +72,11 @@ static inline uint16_t zz_ax_audio_tx_status_sequence(uint16_t status)
 #define ZZ_AX_DECODE_INIT       1
 #define ZZ_AX_DECODE_RUN        2
 
-#define ZZ_AX_DEFAULT_MIX_LEVELS 0x8080
-#define ZZ_AX_MIX_LEVELS_ENV    "ENV:ZZ9K_MIX_LEVELS"
+// The mix-levels and no-LPF env overrides were removed outright (R11):
+// mix balance intent flows through the firmware control plane's operator
+// baseline, and LPF intent through the active scene. Only the INT2
+// selection variable remains driver-read.
 #define ZZ_AX_INT2_ENV          "ENV:ZZ9K_INT2"
-#define ZZ_AX_NOLPF_ENV         "ENV:ZZ9000AX-NOLPF"
 
 #define ZZ_AX_IRQ_NAME_AHI      "ZZ9000AX"
 #define ZZ_AX_IRQ_NAME_MHI      "mhizz9000"

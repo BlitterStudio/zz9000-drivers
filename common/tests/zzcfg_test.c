@@ -21,6 +21,76 @@ static void check(int cond, const char *what)
     if (!cond) { printf("FAIL: %s\n", what); failures++; }
 }
 
+/* Register-script seam for zzcfg_read_raw(). Firmware services Zorro
+ * writes asynchronously: a reset command is not acknowledged until a
+ * later status read. A read command issued before that acknowledgement
+ * is deliberately ignored, reproducing the stale-OK hardware race. */
+static UWORD raw_status;
+static UWORD raw_len;
+static int raw_reset_pending;
+static int raw_read_pending;
+static int raw_started_before_reset;
+static char raw_buffer[64];
+static const char *raw_next_text;
+
+static void raw_io_reset(const char *old_text, const char *next_text)
+{
+    size_t n = strlen(old_text);
+
+    memset(raw_buffer, 0, sizeof(raw_buffer));
+    memcpy(raw_buffer, old_text, n);
+    raw_status = ZZ_CFG_FILE_OK;
+    raw_len = (UWORD)n;
+    raw_reset_pending = 0;
+    raw_read_pending = 0;
+    raw_started_before_reset = 0;
+    raw_next_text = next_text;
+}
+
+UWORD zzcfg_test_reg_read(ULONG board, ULONG offset)
+{
+    (void)board;
+    if (offset == ZZ_REG_CONFIG_FILE) {
+        if (raw_reset_pending) {
+            raw_reset_pending = 0;
+            raw_status = ZZ_CFG_FILE_IDLE;
+        } else if (raw_read_pending) {
+            size_t n = strlen(raw_next_text);
+
+            memset(raw_buffer, 0, sizeof(raw_buffer));
+            memcpy(raw_buffer, raw_next_text, n);
+            raw_len = (UWORD)n;
+            raw_status = ZZ_CFG_FILE_OK;
+            raw_read_pending = 0;
+        }
+        return raw_status;
+    }
+    if (offset == ZZ_REG_CONFIG_FILE_LEN)
+        return raw_len;
+    return 0;
+}
+
+void zzcfg_test_reg_write(ULONG board, ULONG offset, UWORD value)
+{
+    (void)board;
+    if (offset != ZZ_REG_CONFIG_FILE)
+        return;
+    if (value == 0) {
+        raw_reset_pending = 1;
+    } else if (value == 1) {
+        if (raw_reset_pending)
+            raw_started_before_reset = 1;
+        else
+            raw_read_pending = 1;
+    }
+}
+
+UBYTE zzcfg_test_buffer_read(ULONG board, UWORD offset)
+{
+    (void)board;
+    return (UBYTE)raw_buffer[offset];
+}
+
 /* Every canonical key ZZTop writes with the firmware profile capability. */
 static const char *firmware_keys[] = {
     "videocap_profile", "videocap_sample", "videocap_crop_h",
@@ -347,6 +417,161 @@ int main(void)
     check(b.videocap_profile == ZZCFG_VCAP_FULL_60,
           "later legacy full-width key still wins");
 
+    /* Audio control-plane keys (firmware U5): absent from pre-audio
+     * files' output, parsed and regenerated exactly when present. */
+    defaults(&a);
+    n = zzcfg_generate(&a, text, sizeof(text));
+    check(strstr(text, "audio_") == NULL,
+          "no audio keys generated without presence");
+
+    defaults(&b);
+    {
+        const char *audio_file =
+            "audio_active = 3\n"
+            "audio_baseline = 35910\n"
+            "audio_ceiling_paula = 48\n"
+            "audio_ceiling_ax = 80\n"
+            "audio_scene2_lpf = 16000\n"
+            "audio_scene2_eq01 = 12800\n"
+            "audio_scene2_eq23 = 6450\n"
+            "audio_scene2_eq45 = 12900\n"
+            "audio_scene2_eq67 = 100\n"
+            "audio_scene2_eq89 = 51\n"
+            "audio_scene2_out = 6500\n"
+            "audio_scene2_pan = 75\n"
+            "audio_scene2_out = 6999\n";   /* last value wins */
+        zzcfg_parse_text(audio_file, (UWORD)strlen(audio_file), &b);
+    }
+    check(b.audio_active == 3 && b.audio_active_present,
+          "audio_active parses with presence");
+    check(b.audio_baseline == 35910 && b.audio_baseline_present,
+          "audio_baseline parses with presence");
+    check(b.audio_ceiling_paula == 48 &&
+          b.audio_ceiling_paula_present &&
+          b.audio_ceiling_ax == 80 && b.audio_ceiling_ax_present,
+          "audio calibration parses with presence");
+    check(b.audio_scene_mask[2] == 0xff && b.audio_scene_mask[0] == 0,
+          "scene key group masks complete");
+    check(b.audio_scene_lpf[2] == 16000 && b.audio_scene_out[2] == 6999,
+          "scene values round-trip packed");
+
+    n = zzcfg_generate(&b, text, sizeof(text));
+    check(has_exact_line(text, "audio_active = 3") &&
+          has_exact_line(text, "audio_baseline = 35910") &&
+          has_exact_line(text, "audio_ceiling_paula = 48") &&
+          has_exact_line(text, "audio_ceiling_ax = 80") &&
+          has_exact_line(text, "audio_scene2_lpf = 16000") &&
+          has_exact_line(text, "audio_scene2_eq01 = 12800") &&
+          has_exact_line(text, "audio_scene2_out = 6999") &&
+          has_exact_line(text, "audio_scene2_pan = 75"),
+          "audio keys regenerate exactly");
+    check(strstr(text, "audio_scene0_") == NULL,
+          "absent scenes stay absent");
+
+    defaults(&a);
+    zzcfg_parse_text(text, n, &a);
+    check(a.audio_active == 3 && a.audio_baseline == 35910 &&
+          a.audio_ceiling_paula == 48 && a.audio_ceiling_ax == 80 &&
+          a.audio_scene_mask[2] == 0xff && a.audio_scene_out[2] == 6999,
+          "generated audio block reparses identically");
+
+    defaults(&a);
+    zzcfg_parse_text("audio_ceiling_paula = 0\n"
+                     "audio_ceiling_ax = 4096\n",
+                     (UWORD)strlen("audio_ceiling_paula = 0\n"
+                                   "audio_ceiling_ax = 4096\n"), &a);
+    check(!a.audio_ceiling_paula_present &&
+          !a.audio_ceiling_ax_present,
+          "out-of-range audio calibration stays absent");
+
+    /* A hand-edited partial scene stays partial: only present keys are
+     * regenerated, so one Settings save never zero-fills the absent
+     * fields (the firmware would fold them into a silent scene). */
+    defaults(&b);
+    {
+        const char *partial = "audio_scene2_lpf = 16000\n";
+        zzcfg_parse_text(partial, (UWORD)strlen(partial), &b);
+    }
+    check(b.audio_scene_mask[2] == 0x01 && b.audio_scene_lpf[2] == 16000,
+          "partial scene parses as lpf-only");
+    n = zzcfg_generate(&b, text, sizeof(text));
+    check(has_exact_line(text, "audio_scene2_lpf = 16000"),
+          "partial scene regenerates its one key");
+    check(strstr(text, "audio_scene2_eq") == NULL &&
+          strstr(text, "audio_scene2_out") == NULL &&
+          strstr(text, "audio_scene2_pan") == NULL,
+          "partial scene grows no sibling keys on save");
+
+    /* Scene names (firmware nm keys): per-chunk presence like every
+     * other audio key, so a partial name group round-trips exactly as
+     * parsed -- one Settings save never zero-pads or drops chunks. */
+    defaults(&b);
+    {
+        const char *partial_name = "audio_scene2_nm1 = 21347\n";
+        zzcfg_parse_text(partial_name, (UWORD)strlen(partial_name), &b);
+    }
+    check(b.audio_scene_mask[2] == 0x0100 && b.audio_scene_nm[2][0] == 21347,
+          "single nm1 key parses with its own mask bit");
+    n = zzcfg_generate(&b, text, sizeof(text));
+    check(has_exact_line(text, "audio_scene2_nm1 = 21347"),
+          "single nm1 key regenerates exactly");
+    check(strstr(text, "audio_scene2_nm2") == NULL &&
+          strstr(text, "audio_scene2_lpf") == NULL &&
+          strstr(text, "audio_scene0_") == NULL,
+          "partial name grows no sibling keys on save");
+
+    defaults(&b);
+    {
+        /* "Tag 9" as chunks: 'T''a' 'g'' ' '9'0 terminator. */
+        const char *full_name =
+            "audio_scene5_nm1 = 21601\n"
+            "audio_scene5_nm2 = 26400\n"
+            "audio_scene5_nm3 = 14592\n"
+            "audio_scene5_nm4 = 0\n";
+        zzcfg_parse_text(full_name, (UWORD)strlen(full_name), &b);
+    }
+    check(b.audio_scene_mask[5] == 0x0f00 &&
+          b.audio_scene_nm[5][0] == 21601 &&
+          b.audio_scene_nm[5][1] == 26400 &&
+          b.audio_scene_nm[5][2] == 14592,
+          "name chunk group parses packed");
+    n = zzcfg_generate(&b, text, sizeof(text));
+    check(has_exact_line(text, "audio_scene5_nm1 = 21601") &&
+          has_exact_line(text, "audio_scene5_nm2 = 26400") &&
+          has_exact_line(text, "audio_scene5_nm3 = 14592") &&
+          has_exact_line(text, "audio_scene5_nm4 = 0"),
+          "name chunk group regenerates exactly");
+    check(strstr(text, "audio_scene5_nm5") == NULL,
+          "absent trailing name chunks stay absent");
+
+    defaults(&b);
+    {
+        const char *junk = "audio_active = 8\naudio_scene5_eq01 = x\n";
+        zzcfg_parse_text(junk, (UWORD)strlen(junk), &b);
+    }
+    check(b.audio_active == 8 && b.audio_scene_mask[5] == 0,
+          "invalid values parse permissively without presence");
+
+
+    /* A second raw read starts with the previous request's OK status.
+     * It must observe the reset acknowledgement before issuing READ,
+     * otherwise it returns the previous shared-buffer snapshot. */
+    {
+        char raw[32];
+        UWORD raw_bytes = 0;
+        UWORD st;
+
+        raw_io_reset("audio_baseline = 32832\n",
+                     "audio_baseline = 32896\n");
+        st = zzcfg_read_raw(0, raw, sizeof(raw), &raw_bytes);
+        check(raw_started_before_reset == 0,
+              "raw read waits for reset acknowledgement");
+        check(st == ZZ_CFG_FILE_OK,
+              "raw read reaches the new terminal status");
+        check(raw_bytes == strlen("audio_baseline = 32896\n") &&
+              strcmp(raw, "audio_baseline = 32896\n") == 0,
+              "raw read returns the newly staged config");
+    }
     if (failures) { printf("%d failure(s)\n", failures); return 1; }
     printf("zzcfg round-trip: all checks passed\n");
     return 0;

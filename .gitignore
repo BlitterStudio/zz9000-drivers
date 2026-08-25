@@ -51,5 +51,8 @@ attic
 .DS_Store
 __pycache__/
 
-# staged zz9k.library client headers (mhi/build.sh syncs from the SDK checkout)
+# staged zz9k.library client headers (mhi/build.sh, ahi/driver/build.sh and
+# ZZTop/build-gcc.sh sync from the SDK checkout)
 mhi/zz9k-headers/
+ahi/driver/zz9k-headers/
+ZZTop/zz9k-headers/

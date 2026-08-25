@@ -45,6 +45,7 @@
 
 #include "zz9k/audio.h"
 #include "zz9k/library_vectors.h"
+#include "zz9k/request.h"
 #include "zz9k/shared.h"
 #include <proto/zz9k.h>
 
@@ -103,50 +104,39 @@ static void setAudioParam(struct MhiPlayer *mp, ULONG Param, UWORD Value) {
 	*((volatile UWORD*)(mp->hw_addr+ZZ_REG_AUDIO_PARAM)) = 0;
 }
 
-// Read an optional user override for AP_DSP_SET_VOLUMES from
-// ENV:ZZ9K_MIX_LEVELS. The file (created e.g. with
-// `setenv ZZ9K_MIX_LEVELS C040`) contains a 1-4 digit hex string packing
-// ZZ9000AX/MHI output level in the high byte and Paula pass-through in
-// the low byte. "0x" prefix, leading whitespace and trailing newlines
-// are tolerated. Returns `default_value` on any failure so a stale or
-// mangled file can never brick audio.
-static UWORD read_mix_levels_env(UWORD default_value) {
-	BPTR fh;
-	UBYTE buf[16];
-	LONG len;
-	UWORD out = 0;
-	int digits = 0;
-	int i;
+// Firmware-authoritative control plane (R4/R16): submit this owner's
+// neutral source trim through the ZZ9K_OP_AUDIO_TRIM_SUBMIT mailbox
+// opcode. The firmware combines it with the operator's baseline under
+// scene policy and owns every master-chain write; the reply's
+// applied/bound words are the authority, so the driver never mirrors
+// them into DSP registers. Requires ZZ9KBase to be live (claim winner)
+// and must run outside Forbid() -- ZZ9KCall blocks on the mailbox
+// completion. Failure is non-fatal: playback continues exactly as
+// before, only the trim is lost (e.g. transient firmware error).
+static void submit_source_trim(void) {
+	ZZ9KRequest request;
+	ZZ9KMailboxEntry reply;
+	ZZ9KAudioTrimSubmitPayload *payload;
+	int status;
 
-	if (!DOSBase) return default_value;
-	fh = Open((CONST_STRPTR)ZZ_AX_MIX_LEVELS_ENV, MODE_OLDFILE);
-	if (!fh) return default_value;
-	len = Read(fh, buf, sizeof(buf) - 1);
-	Close(fh);
-	if (len <= 0) return default_value;
-	buf[len] = 0;
+	zz9k_request_init(&request, ZZ9K_OP_AUDIO_TRIM_SUBMIT);
+	request.entry.payload_len = sizeof(ZZ9KAudioTrimSubmitPayload);
+	payload = (ZZ9KAudioTrimSubmitPayload *)request.entry.payload.inline_data;
+	zz9k_put_be32(payload->balance, ZZ9K_AUDIO_BALANCE_NEUTRAL);
+	zz9k_put_be32(payload->flags, 0);
 
-	for (i = 0; i < len && digits < 4; i++) {
-		UBYTE c = buf[i];
-		int d;
-		if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
-			if (digits > 0) break;
-			continue;
+	status = ZZ9KCall(&request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+	if(status == ZZ9K_STATUS_OK) {
+		// The reply payload is byte storage; copy it out before reading
+		// typed fields (mirrors the SDK reply-extraction convention).
+		ZZ9KAudioTrimResultPayload result;
+		memcpy(&result, reply.payload.inline_data, sizeof(result));
+		if(zz9k_get_be32(result.flags) & ZZ9K_AUDIO_TRIM_RESULT_BOUNDED) {
+			KPrintF("MHI: neutral trim bounded by scene policy.\n");
 		}
-		if (digits == 0 && c == '0' && (i + 1 < len) &&
-		    (buf[i + 1] == 'x' || buf[i + 1] == 'X')) {
-			i++;
-			continue;
-		}
-		if (c >= '0' && c <= '9') d = c - '0';
-		else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
-		else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
-		else break;
-		out = (UWORD)((out << 4) | d);
-		digits++;
 	}
-	return (digits > 0) ? out : default_value;
 }
+
 /* ****************************** */
 /*  END ZZ9000AX parameter access */
 /* ****************************** */
@@ -237,6 +227,18 @@ BOOL UserLibInit(struct MHI_LibBase *MhiLibBase) {
 			cfg_present) {
 		// `int2 = on` in ZZ9000.CFG (firmware 2.3+)
 		MhiLibBase->flags |= ZZ_AX_DEVF_INT2MODE;
+	}
+
+	// The mix-levels env override is gone (R11): Paula/AX balance intent
+	// now flows through the firmware control plane's operator baseline.
+	// Probe for the stale variable's existence only -- never parse a
+	// value -- and tell operators still carrying the old early-R1 remedy
+	// where the replacement lives. kprintf (not the trace-gated KPrintF)
+	// so the one-liner is always visible on the debug channel.
+	if((fh=Open((CONST_STRPTR)"ENV:ZZ9K_MIX_LEVELS", MODE_OLDFILE))) {
+		Close(fh);
+		kprintf((CONST_STRPTR)"MHI: ENV:ZZ9K_MIX_LEVELS is ignored; "
+		       "balance needs matched firmware (scene baseline).\n");
 	}
 
 	return TRUE;
@@ -1082,22 +1084,29 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 			CloseLibrary(base);
 			return NULL;
 		}
+
+		// R16 capability gate: the firmware-authoritative control plane
+		// is deliberately unadvertised until qualified, so an absent
+		// ZZ9K_CAP_AUDIO_CONTROL is the normal old-firmware case --
+		// legacy playback with the old DSP stamps (LPF at Play start)
+		// and no trim. Only a firmware that advertises the surface ever
+		// hears from us as a control-plane client: remember the
+		// capability for this decoder's lifetime (release trim, no
+		// legacy stamps, scene-owned app mixer API) and submit this
+		// owner's neutral source trim -- the pinned keep-baseline word,
+		// "no trim from this owner" (R4). Like the query above, the
+		// trim submission blocks on the mailbox completion and must
+		// stay outside Forbid().
+		if(caps.capability_bits & ZZ9K_CAP_AUDIO_CONTROL) {
+			mp->audio_control_capped = TRUE;
+			submit_source_trim();
+		}
 	}
 
-	// Set a balanced Paula-vs-ZZ9000AX output mixer default. AP_DSP_SET_VOLUMES
-	// (param 10) encodes AHI/MHI output level in the high byte and Paula pass-
-	// through level in the low byte (each 0x00-0xFF). Summing both above
-	// ~0x100 starts saturating the DAC (per MNT community forum thread 1011).
-	//
-	// Default 0x8080 is the symmetric baseline that matches the fixed-
-	// hardware revision every new customer receives (MNT removed the U4
-	// opamp that over-amplified Paula pass-through on early R1 units).
-	// Owners of an unfixed early R1 where raw Paula dominates over MP3
-	// output can compensate via `setenv ZZ9K_MIX_LEVELS C040` (boost MHI,
-	// cut Paula) — or any other 4-digit hex value — without rebuilding.
-	// (Ref: community.mnt.re/t/zz9000ax-mixing-levels-register/1011)
-	setAudioParam(mp, ZZ_AX_AP_DSP_SET_VOLUMES,
-	              read_mix_levels_env(ZZ_AX_DEFAULT_MIX_LEVELS));
+	// No mixer stamp here (R4): the output balance is the firmware's to
+	// set -- the operator baseline plus the trim submitted above -- and
+	// a register write would be rejected by the scene authority gate on
+	// matched firmware anyway.
 
 	// Spawn the feeder process; it idles until Play opens a session.
 	g_feeder_mp = mp;
@@ -1199,18 +1208,17 @@ void i_MHIFreeDecoder(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibB
 		mp->rings_allocated = FALSE;
 	}
 
-	setAudioParam(mp, ZZ_AX_AP_DSP_SET_STEREO_VOLUME, 100 | (50<<8));
-	setAudioParam(mp, ZZ_AX_AP_DSP_SET_PREFACTOR,     50);
-	setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND1,      50);
-	setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND2,      50);
-	setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND3,      50);
-	setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND4,      50);
-	setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND5,      50);
-	setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND6,      50);
-	setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND7,      50);
-	setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND8,      50);
-	setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND9,      50);
-	setAudioParam(mp, ZZ_AX_AP_DSP_SET_EQ_BAND10,     50);
+	// Release the control-plane trim claimed at allocate: submit the
+	// reserved neutral balance word -- the pinned keep-baseline
+	// release, "no trim from this owner"; the firmware answers with
+	// the operator baseline pair and does not restage the mixer. No
+	// other DSP state is rewritten on release (R4): the master chain
+	// (volume, prefactor, EQ) was never ours to touch, and register
+	// writes for those params are rejected by the firmware authority
+	// gate regardless. The submission blocks on the mailbox
+	// completion, so it runs here -- outside Forbid and while
+	// ZZ9KBase is still published.
+	if(mp->audio_control_capped) submit_source_trim();
 
 	// --- Phase 3: atomically release ownership. ---
 	// Only now do we give up the card: remove the IRQ node, decrement
@@ -1379,8 +1387,16 @@ void i_MHIPlay(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 				return;
 			}
 
-			// set LPF to 20KHz
-			setAudioParam(mp, ZZ_AX_AP_DSP_SET_LOWPASS, 20000);
+			// Anti-alias LPF at session start -- only when the
+			// control-plane capability was absent at allocate: old
+			// firmware has no scene module owning the cutoff, so the
+			// legacy 20000 Hz stamp stands. On control-plane firmware
+			// the active scene owns the low-pass cutoff and a
+			// register write here would be rejected by the firmware
+			// authority gate.
+			if(!mp->audio_control_capped) {
+				setAudioParam(mp, ZZ_AX_AP_DSP_SET_LOWPASS, 20000);
+			}
 
 			// Report PLAYING right away; the feeder process pushes
 			// queued data and binds the session to the AX output as
@@ -1610,12 +1626,41 @@ ULONG i_MHIQuery(REGD1( ULONG mhi_query), REGA6(struct MHI_LibBase *MHI_LibBase)
 }
 
 /*
- *
+ * App mixer API. The master-chain parameters (volume/panning,
+ * prefactor, the EQ bands) are legacy-only: they map straight onto
+ * master-chain DSP registers that the scene module owns once the
+ * firmware advertised the control plane at allocate. In that case the
+ * register write is skipped -- the scene authority gate would reject
+ * it anyway -- and the documented not-supported status is reported;
+ * use scenes (ZZTop's Audio window) on control-plane firmware.
+ * Against pre-control-plane firmware the direct writes stand.
  */
-void i_MHISetParam(REGA3(APTR mhi_handle), REGD0(UWORD mhi_param), REGD1(ULONG mhi_value), REGA6(struct MHI_LibBase *MHI_LibBase)) {
+ULONG i_MHISetParam(REGA3(APTR mhi_handle), REGD0(UWORD mhi_param), REGD1(ULONG mhi_value), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 	struct MhiPlayer *mp = (struct MhiPlayer *)mhi_handle;
 
 	if(mp) {
+		switch(mhi_param) {
+			case MHIP_PANNING:
+			case MHIP_VOLUME:
+			case MHIP_PREFACTOR:
+			case MHIP_BAND1:
+			case MHIP_BAND2:
+			case MHIP_BAND3:
+			case MHIP_BAND4:
+			case MHIP_BAND5:
+			case MHIP_BAND6:
+			case MHIP_BAND7:
+			case MHIP_BAND8:
+			case MHIP_BAND9:
+			case MHIP_BAND10:
+				if(mp->audio_control_capped) {
+					KPrintF("MHISetParam: %ld is scene-owned on control-plane firmware.\n", (ULONG)mhi_param);
+					return MHIF_UNSUPPORTED;
+				}
+				break;
+			default:
+				break;
+		}
 		switch(mhi_param) {
 			case MHIP_PANNING: // 0..50..100
 				if(mhi_value > 100) mhi_value = 100;
@@ -1682,4 +1727,5 @@ void i_MHISetParam(REGA3(APTR mhi_handle), REGD0(UWORD mhi_param), REGD1(ULONG m
 				break;
 		}
 	}
+	return MHIF_SUPPORTED;
 }
