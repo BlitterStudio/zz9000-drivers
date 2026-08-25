@@ -826,8 +826,7 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
         v->mac[0] ? "" : "#", v->mac[0] ? v->mac : "68:82:F2:00:00:01",
         v->hdf[0] ? "" : "#", v->hdf[0] ? v->hdf : "zz9000.hdf");
 
-    if (n < 0) return 0;
-    if ((UWORD)n >= outsz) return (UWORD)(outsz - 1);
+    if (n < 0 || (UWORD)n >= outsz) return 0;
 
     /* Audio control-plane keys (firmware U5): carried through exactly
      * when the parsed file had them, so a Settings save never deletes

@@ -603,6 +603,22 @@ int main(void)
     check(has_exact_line(text, "audio_scene2_nm8 = 65535"),
           "last scene key survives in the rendered file");
 
+    /* The fixed preamble must fail exactly like the audio block: a
+     * buffer too small for it returns 0 -- never a plausible
+     * truncated length such as outsz - 1 that a caller could
+     * mistake for a complete file and save over the operator's. */
+    defaults(&b);
+    n = zzcfg_generate(&b, text, sizeof(text));
+    check(n > 0, "defaults model generates for the overflow checks");
+    {
+        char tiny[64];
+
+        check(zzcfg_generate(&b, tiny, sizeof(tiny)) == 0,
+              "small buffer fails the preamble with 0, not outsz-1");
+    }
+    check(zzcfg_generate(&b, text, n) == 0,
+          "one-byte-short buffer fails the preamble with 0, not outsz-1");
+
 
     /* A second raw read starts with the previous request's OK status.
      * It must observe the reset acknowledgement before issuing READ,
