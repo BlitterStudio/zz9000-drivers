@@ -793,7 +793,10 @@ static void mhi_feeder(void) {
 	treq = (struct timerequest *)CreateIORequest(port,
 	                                             sizeof(struct timerequest));
 	if(!treq) goto out;
-	if(OpenDevice((STRPTR)"timer.device", UNIT_VBLANK,
+	/* Retry deadlines are real microsecond timers. The vblank timer unit
+	 * hooks the feeder into vertical-blank service while MHI is active; this
+	 * was the remaining difference from the stable ZZPlay/AHI timer path. */
+	if(OpenDevice((STRPTR)"timer.device", UNIT_MICROHZ,
 	              (struct IORequest *)treq, 0) != 0) goto out;
 	dev_open = 1;
 
