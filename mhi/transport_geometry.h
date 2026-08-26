@@ -3,6 +3,10 @@
 
 #include <stdint.h>
 
+
+/* Match the passing AHI/ZZPlay task class. Elevated feeder priority caused
+ * measurable RTG overlay disruption whenever MHI entered PLAYING. */
+#define ZZ_MHI_FEEDER_PRIORITY 0
 struct zz_mhi_transport_geometry {
 	uint32_t staging_bytes;
 	uint32_t mp3_ring_bytes;

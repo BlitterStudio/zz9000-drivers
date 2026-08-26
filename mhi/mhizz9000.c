@@ -1129,13 +1129,13 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 	g_feeder_mp = mp;
 	mp->feeder_state = 0;
 	mp->feeder_quit = FALSE;
-	// Priority 5: the feeder must keep its retry cadence under load
-	// (busy apps, disk activity run at 0); its work per wake is a few
-	// short mailbox ops, so it cannot hog anything.
+	// Normal priority: the Z3 batched rings provide ample runway, and running
+	// this mailbox feeder above Intuition/graphics was measured to disturb
+	// native-overlay presentation while an MHI stream was active.
 	if(!CreateNewProcTags(NP_Entry, (ULONG)mhi_feeder,
 	                      NP_Name, (ULONG)"mhizz9000 feeder",
 	                      NP_StackSize, 16384,
-	                      NP_Priority, 5,
+	                      NP_Priority, ZZ_MHI_FEEDER_PRIORITY,
 	                      TAG_DONE)) {
 		mp->feeder_state = 2;
 	}

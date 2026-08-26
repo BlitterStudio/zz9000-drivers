@@ -5,6 +5,7 @@
 int main(void)
 {
 	struct zz_mhi_transport_geometry z2 = zz_mhi_transport_geometry(2U);
+	assert(ZZ_MHI_FEEDER_PRIORITY == 0);
 	struct zz_mhi_transport_geometry z3 = zz_mhi_transport_geometry(3U);
 
 	assert(z2.staging_bytes == 4U * 1024U);
