@@ -509,6 +509,21 @@ static void mhi_stream_close(struct MhiPlayer *mp) {
 	}
 }
 
+#ifdef ZZ_MHI_DIAG_DECODE_ONLY
+/* Diagnostic discriminator: keep the MHI feeder and firmware decoder busy
+ * while deliberately leaving the AX pump unbound. Retire decoded PCM through
+ * READ so the small MHI rings cannot fill and accidentally turn the test idle.
+ * This build is silent by design and must never replace the production target. */
+static void mhi_diag_consume_pcm(struct MhiPlayer *mp) {
+	ULONG used;
+
+	if(!mp || mp->session == 0) return;
+	used = mp->result.pcm_write - mp->result.pcm_read;
+	if(used != 0)
+		(void)ZZ9KAudioStreamRead(mp->session, used, 0, &mp->result);
+}
+#endif
+
 // Complete a deferred Play: bind the session to the AX output once the
 // card has decoded PCM and knows the sample rate. MHIPlay may legally
 // arrive BEFORE any data is queued (the legacy driver allowed it, and
@@ -539,6 +554,11 @@ static void mhi_try_bind(struct MhiPlayer *mp) {
 		   mp->result.sample_rate == 0)
 			return;
 	}
+#ifdef ZZ_MHI_DIAG_DECODE_ONLY
+	mp->play_pending = FALSE;
+	KPrintF("MHI diagnostic: decoder active, AX binding suppressed.\n");
+	return;
+#endif
 	if(ZZ9KAudioStreamPlay(mp->session, 0, &mp->result) != ZZ9K_STATUS_OK) {
 		KPrintF("mhi_try_bind: PLAY rejected.\n");
 		return;
@@ -676,10 +696,14 @@ static BOOL mhi_stream_service_drain(struct MhiPlayer *mp) {
 		return FALSE;
 	}
 
+#ifdef ZZ_MHI_DIAG_DECODE_ONLY
+	rc = ZZ9KAudioStreamRead(mp->session, 0, 0, &mp->result);
+#else
 	if(mp->play_pending)
 		rc = ZZ9KAudioStreamRead(mp->session, 0, 0, &mp->result);
 	else
 		rc = ZZ9KAudioStreamPlay(mp->session, 0, &mp->result);
+#endif
 	if(rc != ZZ9K_STATUS_OK) {
 		if(mhi_stream_status_retryable(rc))
 			return TRUE;
@@ -813,6 +837,9 @@ static void mhi_feeder(void) {
 		   mp->Status == MHIF_PLAYING) {
 			mhi_feed_pending(mp);
 			mhi_try_bind(mp);
+#ifdef ZZ_MHI_DIAG_DECODE_ONLY
+			mhi_diag_consume_pcm(mp);
+#endif
 			drain_busy = mhi_stream_service_drain(mp);
 			busy = mp->have_unfed || mp->backpressure ||
 			       mp->play_pending || drain_busy;
@@ -1583,7 +1610,11 @@ ULONG i_MHIQuery(REGD1( ULONG mhi_query), REGA6(struct MHI_LibBase *MHI_LibBase)
 			return (ULONG)"audio/mpeg{audio/mp3}"; // We currently only support mp3 contained in a raw MPEG stream.
 
 		case MHIQ_DECODER_NAME:
+#ifdef ZZ_MHI_DIAG_DECODE_ONLY
+			return (ULONG)"ZZ9000AX (decode-only diagnostic)";
+#else
 			return (ULONG)"ZZ9000AX (SDK core-1)";
+#endif
 
 		case MHIQ_DECODER_VERSION:
 			return (ULONG)IDSTRING;
