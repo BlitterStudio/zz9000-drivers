@@ -17,22 +17,28 @@
  * 0x1000).  The low word is also the write-only host acknowledgement. */
 #define ZZ_REG_Z2_APERTURE_INFO_HI 0x111cUL
 #define ZZ_REG_Z2_APERTURE_INFO_LO 0x111eUL
-#define ZZ_Z2_APERTURE_ACK_TOKEN   0xa501U
+#define ZZ_Z2_APERTURE_ACK_TOKEN   0xa502U
 
 #define ZZ_FW_CAP_Z2_APERTURE_LAYOUT (1U << 2)
 
 #define ZZ_Z2_APERTURE_INFO_MAGIC_MASK      0xff000000UL
 #define ZZ_Z2_APERTURE_INFO_MAGIC           0x5a000000UL
 #define ZZ_Z2_APERTURE_INFO_GENERATION_MASK 0x00ff0000UL
-#define ZZ_Z2_APERTURE_INFO_GENERATION_1    0x00010000UL
+#define ZZ_Z2_APERTURE_INFO_GENERATION_2    0x00020000UL
 
-#define ZZ_Z2_APERTURE_INFO_2M 0x5a010502UL
-#define ZZ_Z2_APERTURE_INFO_4M 0x5a010704UL
-#define ZZ_Z2_APERTURE_INFO_8M 0x5a010708UL
+#define ZZ_Z2_APERTURE_INFO_2M 0x5a020502UL
+#define ZZ_Z2_APERTURE_INFO_4M 0x5a020704UL
+#define ZZ_Z2_APERTURE_INFO_8M 0x5a020708UL
 
 #define ZZ_Z2_REGISTER_SPACE_SIZE 0x00010000UL
 #define ZZ_Z2_TEMPLATE_SIZE       0x00010000UL
 #define ZZ_Z2_AUDIO_SIZE          0x00010000UL
+/* Generation 2 carves a fixed 48 KiB direct-ring reservation out of the
+ * top of the old host-window region: it sits between the smaller host heap
+ * and the audio scratch, holds the single Z2 audio direct-ring grant, and
+ * is not a payload region -- clients learn its geometry only from the SDK
+ * acquire op. */
+#define ZZ_Z2_DIRECT_RING_RESERVE_SIZE 0x0000C000UL
 
 struct ZZApertureRegion {
 	uint32_t base; /* board-relative */
