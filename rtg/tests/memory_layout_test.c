@@ -43,11 +43,11 @@ static void check_profile(uint32_t info, uint32_t size,
 static void test_profiles(void)
 {
 	check_profile(ZZ_Z2_APERTURE_INFO_2M, 0x200000, 0x1c0000,
-		0, 0, 0x1d0000, 0x1e0000, 0x10000);
+		0, 0, 0x1d0000, 0x1e0000, 0x4000);
 	check_profile(ZZ_Z2_APERTURE_INFO_4M, 0x400000, 0x388000,
-		0x398000, 0x38000, 0x3d0000, 0x3e0000, 0x10000);
+		0x398000, 0x38000, 0x3d0000, 0x3e0000, 0x4000);
 	check_profile(ZZ_Z2_APERTURE_INFO_8M, 0x800000, 0x770000,
-		0x780000, 0x40000, 0x7c0000, 0x7d0000, 0x20000);
+		0x780000, 0x40000, 0x7c0000, 0x7d0000, 0x14000);
 }
 
 static void test_compatibility_matrix(void)
@@ -63,7 +63,7 @@ static void test_compatibility_matrix(void)
 		ZZ_FW_CAP_Z2_APERTURE_LAYOUT, &layout) == ZZ_APERTURE_LEGACY);
 	CHECK(zz_z2_aperture_negotiate(ZZ_Z2_APERTURE_INFO_4M, 0x200000,
 		ZZ_FW_CAP_Z2_APERTURE_LAYOUT, &layout) == ZZ_APERTURE_INVALID);
-	CHECK(zz_z2_aperture_negotiate(0x5a020704, 0x400000,
+	CHECK(zz_z2_aperture_negotiate(0x5a030704, 0x400000,
 		ZZ_FW_CAP_Z2_APERTURE_LAYOUT, &layout) == ZZ_APERTURE_INVALID);
 	CHECK(zz_z2_aperture_negotiate(0x5a010604, 0x400000,
 		ZZ_FW_CAP_Z2_APERTURE_LAYOUT, &layout) == ZZ_APERTURE_INVALID);

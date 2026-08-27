@@ -147,7 +147,7 @@ static inline int zz_z2_aperture_profile(uint32_t descriptor,
 		value.aperture_size = 0x00200000UL;
 		value.framebuffer = (struct ZZApertureRegion){0x00010000UL, 0x001c0000UL};
 		value.template_scratch = (struct ZZApertureRegion){0x001d0000UL, 0x00010000UL};
-		value.host_window = (struct ZZApertureRegion){0x001e0000UL, 0x00010000UL};
+		value.host_window = (struct ZZApertureRegion){0x001e0000UL, 0x00004000UL};
 		value.audio = (struct ZZApertureRegion){0x001f0000UL, 0x00010000UL};
 		break;
 	case ZZ_Z2_APERTURE_INFO_4M:
@@ -155,7 +155,7 @@ static inline int zz_z2_aperture_profile(uint32_t descriptor,
 		value.framebuffer = (struct ZZApertureRegion){0x00010000UL, 0x00388000UL};
 		value.pip = (struct ZZApertureRegion){0x00398000UL, 0x00038000UL};
 		value.template_scratch = (struct ZZApertureRegion){0x003d0000UL, 0x00010000UL};
-		value.host_window = (struct ZZApertureRegion){0x003e0000UL, 0x00010000UL};
+		value.host_window = (struct ZZApertureRegion){0x003e0000UL, 0x00004000UL};
 		value.audio = (struct ZZApertureRegion){0x003f0000UL, 0x00010000UL};
 		break;
 	case ZZ_Z2_APERTURE_INFO_8M:
@@ -163,7 +163,7 @@ static inline int zz_z2_aperture_profile(uint32_t descriptor,
 		value.framebuffer = (struct ZZApertureRegion){0x00010000UL, 0x00770000UL};
 		value.pip = (struct ZZApertureRegion){0x00780000UL, 0x00040000UL};
 		value.template_scratch = (struct ZZApertureRegion){0x007c0000UL, 0x00010000UL};
-		value.host_window = (struct ZZApertureRegion){0x007d0000UL, 0x00020000UL};
+		value.host_window = (struct ZZApertureRegion){0x007d0000UL, 0x00014000UL};
 		value.audio = (struct ZZApertureRegion){0x007f0000UL, 0x00010000UL};
 		break;
 	default:
