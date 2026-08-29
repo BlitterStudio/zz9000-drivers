@@ -47,15 +47,20 @@ CI must be green on each dev branch before tagging. Cut the tags in this order:
 
 ### Version-skew note for release notes (Zorro 2)
 
-Current Zorro 2 bitstreams publish an aperture-relative generation-1 layout.
-The RTG driver validates it against the 2 MiB or 4 MiB AutoConfig size,
-reserves the framebuffer, template, host, audio, and optional PIP regions, then
-acknowledges it before firmware exposes the 64 KiB host heap or relocated
-`GFXData`. Invalid or unacknowledged generation-1 descriptors fail closed, so
-template/PIP activity and SDK clients cannot disagree about ownership of the
-top aperture. Descriptor-absent legacy 4 MiB compatibility intentionally keeps
-the historical fixed 64 KiB `HOST_WINDOW` path, but has no negotiated layout or
-PIP; legacy 2 MiB and unknown sizes reject that path.
+Current Zorro 2 bitstreams publish an aperture-relative layout in two
+generations: generation 1 (the previously supported 64 KiB host-heap layout,
+still published by older matched sets) and generation 2 (16 KiB host heap
+plus the 48 KiB Z2 audio direct-ring reservation). The RTG driver validates
+the descriptor against the 2 MiB or 4 MiB AutoConfig size, reserves the
+framebuffer, template, host, audio, and optional PIP regions, then
+acknowledges it with the descriptor's own generation token before firmware
+exposes the host heap or relocated `GFXData`. Invalid or unacknowledged
+descriptors fail closed, so template/PIP activity and SDK clients cannot
+disagree about ownership of the top aperture; a driver update alone never
+disables RTG on a generation-1 board. Descriptor-absent legacy 4 MiB
+compatibility intentionally keeps the historical fixed 64 KiB `HOST_WINDOW`
+path, but has no negotiated layout or PIP; legacy 2 MiB and unknown sizes
+reject that path.
 
 Releases ship the pieces bundled. Call out that Zorro 2 users must update the
 bitstream/firmware, `ZZ9000.card`, SDK payloads, and accelerated AmiSSL library

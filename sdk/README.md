@@ -26,8 +26,15 @@ driver code that consumes new SDK headers or allocation flags.
 ## Zorro II support
 
 Current matched firmware, bitstream, SDK payloads, and drivers negotiate an
-aperture-relative layout before the SDK maps any host-window allocation. Both
-shipped 2 MiB and 4 MiB profiles provide one shared 64 KiB host heap.
+aperture-relative layout before the SDK maps any host-window allocation. The
+layout has two generations: generation 1 (previous matched sets, and still
+published by older FPGA/firmware pairs) provides one shared 64 KiB host heap;
+generation 2 (with the direct-ring reservation) shrinks the negotiated host
+heap to 16 KiB on the 2 MiB and 4 MiB profiles and carves the freed 48 KiB
+for the Z2 audio direct-ring grant. Both generations negotiate and
+acknowledge with their own token — a driver update alone never disables RTG
+on a generation-1 board. Plan Zorro II heap allocations against the
+generation the card actually acknowledges (`zz9k-info` reports it).
 
 | Payload | Zorro II status |
 | --- | --- |
