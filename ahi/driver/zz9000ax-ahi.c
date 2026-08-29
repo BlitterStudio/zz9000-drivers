@@ -461,41 +461,39 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
   if (AudioCtrl->ahiac_BuffSamples > BOUNCE_MAX_FRAMES)
     return;  /* the legacy defence-in-depth bound still applies */
 
-  /* AHI v4 untimed-driver cadence with whole-period staging. The
-   * app may request a buffer smaller than MixFreq/50 (HippoPlayer:
-   * BuffSamples 640 at 44.1 kHz), so the correct mix cadence is
-   * MixFreq/BuffSamples per second (68.9/s here), NOT one per wake
-   * gated by ring runway -- gating mixes to staging throttled the
-   * song to BuffSamples*50 frames/s (measured 2/3 speed: 45.5
-   * mixes/s, 116 kB/s consumed). PreTimer IS the cadence: AHI v4
-   * paces an untimed sub-driver by answering PreTimer TRUE until a
-   * full BuffSamples-period has elapsed. Mix whenever PreTimer
-   * allows, accumulate the mix-sized output, and stage only whole
-   * grant periods (source_rate/50*4) -- every staged chunk is one
-   * tagged period so credits always close, and the ring's own free
-   * space bounds outstanding buffer. The lease stays PAUSED until
-   * two periods are staged (inaudible prefill). */
+  /* MNT's battle-tested AHI sequence (commit b14c239, "don't use
+   * AHI TIMING anymore"), adapted to the lease: each 10-ms round,
+   * query PreTimer -- when it allows, announce PlayerFunc and mix
+   * one BuffSamples chunk; call PostTimer UNCONDITIONALLY, because
+   * PostTimer is what advances ahi.device's software timing clock
+   * (gating it behind the mix froze the clock: PreTimer never
+   * allowed again, total silence). Binding PlayerFunc to actual
+   * mixes (rather than every round) matters at the 10-ms round
+   * rate: MNT's rounds ran at the 20-ms interrupt grid where every
+   * round mixed, while half of ours are PreTimer skips, and a
+   * PlayerFunc without a mix makes MP3 decoders schedule decode
+   * work for periods that never consume it -- the skip-ahead. Mix
+   * output accumulates and only whole grant periods
+   * (source_rate/50*4) enter the ring under its own backpressure,
+   * so any BuffSamples the app requested works at its natural
+   * cadence. The lease stays PAUSED until two periods are staged
+   * (inaudible prefill). */
   {
     uint32_t lease_period =
         (session->grant.source_rate / 50U) * 4U;
 
     if (lease_period != 0U && lease_period <= BOUNCE_BUFSZ &&
-        ahi_data->lease_accum != NULL && !ahi_data->play_stop) {
+        ahi_data->lease_accum != NULL && !ahi_data->play_stop &&
+        AudioCtrl->ahiac_PreTimer && AudioCtrl->ahiac_MixerFunc) {
       if (!(*AudioCtrl->ahiac_PreTimer)()) {
         uint32_t mix_bytes = AudioCtrl->ahiac_BuffSamples << 2;
         uint32_t room = BOUNCE_BUFSZ - ahi_data->lease_accum_fill;
 
-        /* PlayerFunc announces a period that WILL be mixed (AHI v4
-         * contract: one call per mixed period, none on PreTimer
-         * skip rounds). Calling it on skip rounds doubles the
-         * player-visible mix rate; MP3 decoders schedule decode
-         * per PlayerFunc, over-produce, and skip ahead once their
-         * buffering breaks -- the residual jump after the first
-         * few seconds. */
-        CallHookPkt(AudioCtrl->ahiac_PlayerFunc, AudioCtrl, NULL);
         if (mix_bytes > room)
           mix_bytes = room;
         if (mix_bytes != 0U) {
+          CallHookPkt(AudioCtrl->ahiac_PlayerFunc, AudioCtrl,
+                      NULL);
           CallHookPkt(AudioCtrl->ahiac_MixerFunc, AudioCtrl,
                       (void *)(uintptr_t)ahi_data->audio_buf_addr);
           fabric_swap_period_le(
@@ -508,10 +506,11 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
                  mix_bytes);
           ahi_data->lease_accum_fill += mix_bytes;
         }
-        (*AudioCtrl->ahiac_PostTimer)();
       }
+      (*AudioCtrl->ahiac_PostTimer)();
       while (ahi_data->lease_accum_fill >= lease_period &&
-             zz9k_audio_ring_free_bytes(session) >= lease_period) {
+             zz9k_audio_ring_free_bytes(session) >=
+                 lease_period) {
         if (zz9k_audio_ring_write(session, ahi_data->lease_accum,
                 lease_period) != lease_period)
           break;
