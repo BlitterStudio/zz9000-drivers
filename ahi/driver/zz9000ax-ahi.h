@@ -50,6 +50,7 @@ struct z9ax {
    * mode, created by the worker when fabric_mode is set. */
   struct MsgPort *lease_timer_port;
   struct timerequest *lease_timer_req;
+  struct timeval lease_timer_deadline;
   int8_t lease_timer_signal;
 };
 
@@ -58,6 +59,7 @@ struct z9ax {
 struct z9ax_base {
   struct Library ahisub_base;
   struct z9ax *owner;
+  struct z9ax *allocating;
   uint32_t hw_addr;
   uint32_t hw_size;
   uint8_t zorro_version;

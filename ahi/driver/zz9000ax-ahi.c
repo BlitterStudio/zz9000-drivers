@@ -33,6 +33,7 @@
 #include <proto/intuition.h>
 #include <proto/utility.h>
 #include <proto/expansion.h>
+#include <proto/timer.h>
 
 #include <proto/ahi_sub.h>
 #include <clib/ahi_sub_protos.h>
@@ -75,10 +76,9 @@
 // keep this in sync with the mixer byte math (bytes = BuffSamples << 2)
 // and with the bounce-buffer capacity check in WorkerProcess().
 #define BOUNCE_MAX_FRAMES ZZ_AX_BOUNCE_MAX_FRAMES
-// Lease-mode staging headroom: periods mixed ahead of firmware's
-// consumed cursor. 4 = 80 ms of runway; the compositor consumes one
-// period per 20-ms tick, so the timer keeps this topped up.
-#define LEASE_RUNWAY_PERIODS 2
+// Lease-mode startup headroom: two periods = 40 ms. Absolute deadline
+// pacing keeps production locked to the compositor after playback begins.
+#define LEASE_RUNWAY_PERIODS 2U
 
 // AmigaOS scheduling is strictly preemptive priority with no aging; any
 // task at or above this priority stuck in a CPU loop will starve the mixer
@@ -90,6 +90,7 @@ struct ExecBase     *SysBase;
 struct Library      *UtilityBase;
 struct Library      *AHIsubBase  = NULL;
 struct DosLibrary   *DOSBase     = NULL;
+struct Device       *TimerBase    = NULL;
 struct z9ax_base    *Z9AXBase;
 // zz9k.library base for the proto inline calls; opened per AllocAudio
 // (AHI's low-level API is exclusive, so at most one owner exists) and
@@ -185,6 +186,7 @@ static uint32_t __attribute__((used)) init(BPTR seg_list asm("a0"), struct Libra
   Z9AXBase->hw_size = 0;
   Z9AXBase->flags = 0;
   Z9AXBase->owner = NULL;
+  Z9AXBase->allocating = NULL;
 
   // Same reasoning for the library-base globals: the fail: label below
   // calls CloseLibrary on any non-NULL base, so leftover pointers from a
@@ -467,8 +469,8 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
    * exactly once per period, which the 20-ms round rate
    * guarantees). The lease adaptations are only at the output side:
    * the mix accumulates and stages whole grant periods under ring
-   * backpressure, and the lease stays PAUSED until two periods are
-   * staged (inaudible prefill). */
+   * backpressure, and the lease stays PAUSED until the configured
+   * runway is staged (inaudible prefill). */
   {
     uint32_t lease_period =
         (session->grant.source_rate / 50U) * 4U;
@@ -511,7 +513,7 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
       }
       if ((session->flags & ZZ9K_AUDIO_RING_PRODUCER_FLAG_PAUSED) &&
           session->write_cursor - session->consumed_cursor >=
-              2ULL * lease_period) {
+              (uint64_t)LEASE_RUNWAY_PERIODS * lease_period) {
         session->flags &= ~ZZ9K_AUDIO_RING_PRODUCER_FLAG_PAUSED;
       }
     }
@@ -528,18 +530,41 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
   zz9k_audio_ring_publish(session);
 }
 
-/* (Re)arm the 10-ms UNIT_MICROHZ lease timer. */
+/* Keep the mix clock anchored to an absolute 50-Hz deadline. Re-arming a
+ * relative 20-ms request after each delivery accumulates dispatch latency;
+ * production then falls below the compositor's fixed 50-Hz consumption rate.
+ * A late deadline becomes an immediate request, preserving every elapsed AHI
+ * period without running the steady-state clock fast. */
 static void fabric_timer_post(struct z9ax *ahi_data)
 {
+  struct timeval now;
+  struct timeval delay;
+
+  ahi_data->lease_timer_deadline.tv_micro += 20000;
+  if (ahi_data->lease_timer_deadline.tv_micro >= 1000000) {
+    ahi_data->lease_timer_deadline.tv_secs++;
+    ahi_data->lease_timer_deadline.tv_micro -= 1000000;
+  }
+  GetSysTime(&now);
+  if (ahi_data->lease_timer_deadline.tv_secs > now.tv_secs ||
+      (ahi_data->lease_timer_deadline.tv_secs == now.tv_secs &&
+       ahi_data->lease_timer_deadline.tv_micro > now.tv_micro)) {
+    delay.tv_secs =
+        ahi_data->lease_timer_deadline.tv_secs - now.tv_secs;
+    if (ahi_data->lease_timer_deadline.tv_micro < now.tv_micro) {
+      delay.tv_secs--;
+      delay.tv_micro = 1000000 +
+          ahi_data->lease_timer_deadline.tv_micro - now.tv_micro;
+    } else {
+      delay.tv_micro =
+          ahi_data->lease_timer_deadline.tv_micro - now.tv_micro;
+    }
+  } else {
+    delay.tv_secs = 0;
+    delay.tv_micro = 0;
+  }
   ahi_data->lease_timer_req->tr_node.io_Command = TR_ADDREQUEST;
-  /* One round per audio period (20 ms) -- master's round rate.
-   * The card interrupt anchored master's worker at 50 Hz; the
-   * lease worker anchors to timer.device at the same rate, because
-   * PostTimer is ahi.device's clock tick: advancing it at any rate
-   * other than the period rate skews AHI's timing model and
-   * destabilizes decode scheduling in the players. */
-  ahi_data->lease_timer_req->tr_time.tv_secs = 0;
-  ahi_data->lease_timer_req->tr_time.tv_micro = 20000;
+  ahi_data->lease_timer_req->tr_time = delay;
   SendIO((struct IORequest *)ahi_data->lease_timer_req);
 }
 
@@ -590,6 +615,8 @@ void WorkerProcess() {
                        (struct IORequest *)ahi_data->lease_timer_req,
                        0) == 0) {
           lease_timer_sig = 1L << ahi_data->lease_timer_port->mp_SigBit;
+          TimerBase = ahi_data->lease_timer_req->tr_node.io_Device;
+          GetSysTime(&ahi_data->lease_timer_deadline);
           fabric_timer_post(ahi_data);
         }
       }
@@ -693,6 +720,7 @@ void WorkerProcess() {
       AbortIO((struct IORequest *)ahi_data->lease_timer_req);
       WaitIO((struct IORequest *)ahi_data->lease_timer_req);
       CloseDevice((struct IORequest *)ahi_data->lease_timer_req);
+      TimerBase = NULL;
     }
     DeleteIORequest((struct IORequest *)ahi_data->lease_timer_req);
     ahi_data->lease_timer_req = NULL;
@@ -1103,6 +1131,16 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
   if(!hw_addr) return AHISF_ERROR; // TW: Only AHISF_xxx return codes are allowed here.
   if(!zorro) return AHISF_ERROR; // TW: Only AHISF_xxx return codes are allowed here.
 
+  /* Fast rejection for the normal second-open case. The reservation below
+   * closes the blocking control-plane TOCTOU window; this check avoids doing
+   * allocations for an owner that is already established. */
+  Forbid();
+  if (Z9AXBase->owner || Z9AXBase->allocating) {
+    Permit();
+    return AHISF_ERROR;
+  }
+  Permit();
+
   // ZZ_REG_AUDIO_CONFIG bit 0 is the "AX present" strap; mask explicitly so
   // other status bits can't ever make this look like detection succeeded.
   uint16_t audio_config = read_reg(hw_addr, ZZ_REG_AUDIO_CONFIG);
@@ -1180,6 +1218,7 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
         (status == ZZ_APERTURE_VALID &&
          layout.audio.size != ZZ_Z2_AUDIO_SIZE)) {
       if (record_buf) FreeVec(record_buf);
+      FreeVec(lease_accum);
       FreeVec(audio_buf);
       FreeVec(ahi_data);
       return AHISF_ERROR;
@@ -1191,6 +1230,20 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
   ahi_data->audio_hw_buf_addr = hw_addr + 0x10000 + offset_tx;
   ahi_data->audio_rx_hw_buf_addr = hw_addr + 0x10000 + offset_rx;
 
+  /* Serialize AllocAudio before touching the driver-global zz9k.library
+   * base or control-plane capability state. A rejected peer must not close
+   * or clear the active owner's globals. */
+  Forbid();
+  if (Z9AXBase->owner || Z9AXBase->allocating) {
+    Permit();
+    if (record_buf) FreeVec(record_buf);
+    FreeVec(lease_accum);
+    FreeVec(audio_buf);
+    FreeVec(ahi_data);
+    return AHISF_ERROR;
+  }
+  Z9AXBase->allocating = ahi_data;
+  Permit();
   AudioCtrl->ahiac_DriverData = ahi_data;
 
   // Control-plane client (R4/R16): when zz9k.library is present AND the
@@ -1239,8 +1292,10 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
   // requested direction mask.
   prepare_irq_struct(ahi_data);
   Forbid();
-  if (Z9AXBase->owner ||
+  if (Z9AXBase->owner || Z9AXBase->allocating != ahi_data ||
       (!ahi_data->fabric_mode && mhi_present_locked())) {
+    if (Z9AXBase->allocating == ahi_data)
+      Z9AXBase->allocating = NULL;
     Permit();
     kprintf((CONST_STRPTR)"Can't allocate! Audio hardware already owned.\n");
     /* The control-plane binding opened above the claim must be
@@ -1261,6 +1316,7 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
     return AHISF_ERROR;
   }
   Z9AXBase->owner = ahi_data;
+  Z9AXBase->allocating = NULL;
   install_irq_server_locked(ahi_data);
   // Explicitly silence the FPGA DAC before we touch any audio state.
   // Rationale: destroy_interrupt() writes this same 0 on FreeAudio, so
