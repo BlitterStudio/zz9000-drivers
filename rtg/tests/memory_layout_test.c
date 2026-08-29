@@ -69,6 +69,34 @@ static void test_compatibility_matrix(void)
 		ZZ_FW_CAP_Z2_APERTURE_LAYOUT, &layout) == ZZ_APERTURE_INVALID);
 }
 
+/* PR #74 review: generation-1 descriptors must keep negotiating VALID
+ * (with their old larger host window) so a new driver cannot disable RTG
+ * on an old FPGA/firmware pair, and the acknowledgement must echo the
+ * descriptor's own generation. */
+static void test_generation1_compatibility(void)
+{
+	struct ZZApertureLayout gen1;
+	struct ZZApertureLayout gen2;
+
+	CHECK(zz_z2_aperture_negotiate(ZZ_Z2_APERTURE_INFO_4M_GEN1, 0x400000,
+		ZZ_FW_CAP_Z2_APERTURE_LAYOUT, &gen1) == ZZ_APERTURE_VALID);
+	CHECK(zz_z2_aperture_negotiate(ZZ_Z2_APERTURE_INFO_2M_GEN1, 0x200000,
+		ZZ_FW_CAP_Z2_APERTURE_LAYOUT, &gen1) == ZZ_APERTURE_VALID);
+	CHECK(zz_z2_aperture_negotiate(ZZ_Z2_APERTURE_INFO_8M_GEN1, 0x800000,
+		ZZ_FW_CAP_Z2_APERTURE_LAYOUT, &gen1) == ZZ_APERTURE_VALID);
+	CHECK(zz_z2_aperture_profile(ZZ_Z2_APERTURE_INFO_4M_GEN1, &gen1));
+	CHECK(zz_z2_aperture_profile(ZZ_Z2_APERTURE_INFO_4M, &gen2));
+	CHECK(gen1.host_window.size == 0x00010000UL);
+	CHECK(gen2.host_window.size == 0x00004000UL);
+	CHECK(zz_z2_aperture_ack_token(ZZ_Z2_APERTURE_INFO_4M_GEN1) ==
+		ZZ_Z2_APERTURE_ACK_TOKEN_GEN1);
+	CHECK(zz_z2_aperture_ack_token(ZZ_Z2_APERTURE_INFO_4M) ==
+		ZZ_Z2_APERTURE_ACK_TOKEN_GEN2);
+	/* A gen-1 descriptor against the wrong board size still fails. */
+	CHECK(zz_z2_aperture_negotiate(ZZ_Z2_APERTURE_INFO_4M_GEN1, 0x200000,
+		ZZ_FW_CAP_Z2_APERTURE_LAYOUT, &gen1) == ZZ_APERTURE_INVALID);
+}
+
 static void test_malformed_layouts(void)
 {
 	struct ZZApertureLayout layout;
@@ -108,6 +136,7 @@ int main(void)
 {
 	test_profiles();
 	test_compatibility_matrix();
+	test_generation1_compatibility();
 	test_malformed_layouts();
 	test_z3_boundary();
 	test_z2_staging_bounds();

@@ -891,7 +891,8 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 			/* Acknowledge only after P96 ownership is reserved and all
 			 * aperture-relative pointers have been installed. */
 			((volatile UWORD *)b->RegisterBase)
-				[ZZ_REG_Z2_APERTURE_INFO_LO / 2] = ZZ_Z2_APERTURE_ACK_TOKEN;
+				[ZZ_REG_Z2_APERTURE_INFO_LO / 2] =
+					zz_z2_aperture_ack_token(aperture_info);
 		}
 
 		result = 1;
