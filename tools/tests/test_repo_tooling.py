@@ -282,7 +282,9 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("ZZ_FW_CAP_Z2_APERTURE_LAYOUT", abi)
         self.assertIn("zz_z2_aperture_negotiate(aperture_info", driver)
         self.assertIn("aperture_status == ZZ_APERTURE_VALID", driver)
-        self.assertIn("ZZ_Z2_APERTURE_ACK_TOKEN", driver)
+        # Generation-aware acknowledgement (PR #74 review): the
+        # driver must echo the descriptor's own generation token.
+        self.assertIn("zz_z2_aperture_ack_token(aperture_info)", driver)
         self.assertIn("ZZ_CARD_DATA_TEMPLATE_OFFSET", driver)
         self.assertNotIn("zz_template_addr = b->MemorySize", driver)
         self.assertIn("AutoConfigBoardSize", diag)
