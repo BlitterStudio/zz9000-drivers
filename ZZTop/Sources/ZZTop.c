@@ -119,7 +119,8 @@ static const char version[] __attribute__((used)) =
 #define AUDGAD_STATUS       (11)
 #define AUDGAD_BTN_SAVE     (12)
 #define AUDGAD_BTN_RENAME   (13)
-#define AUDGAD_COUNT        (14)
+#define AUDGAD_BTN_BALANCE  (14)
+#define AUDGAD_COUNT        (15)
 
 /* Scene-editor window gadgets (sub-window of the Audio window). */
 #define SEGAD_LPF           (0)
@@ -177,6 +178,7 @@ static const char version[] __attribute__((used)) =
 #define LABEL_MAC          "MAC Address"
 #define LABEL_HDF          "SD HDF Image"
 #define LABEL_BTN_SAVE     "Save"
+#define LABEL_BTN_BALANCE  "Balanced"
 #define LABEL_BTN_RELOAD   "Reload"
 #define LABEL_TEST_RESULT  "Result"
 #define LABEL_BTN_TEST     "Reg Probe"
@@ -3370,7 +3372,7 @@ static void audio_save_settle(struct Window *win)
 		}
 	} else if (save_status == ZZ9K_AUDIO_SCENE_SAVE_REJECTED) {
 		audio_set_status(win,
-			"Save rejected: scene level over the boundary");
+			"Save rejected: level over boundary");
 	} else {
 		audio_set_status(win, "Save failed: SD card write error");
 	}
@@ -3569,6 +3571,7 @@ static CONST_STRPTR audio_value_samples[] = {
 static CONST_STRPTR audio_button_samples[] = {
 	(CONST_STRPTR)LABEL_BTN_EDITSCN,
 	(CONST_STRPTR)LABEL_BTN_SAVE,
+	(CONST_STRPTR)LABEL_BTN_BALANCE,
 	NULL
 };
 
@@ -3737,6 +3740,24 @@ static struct Gadget *audio_create_gadgets(struct Gadget **glistptr,
 	ng.ng_Flags = PLACETEXT_IN;
 	audgads[AUDGAD_BTN_SAVE] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
 		GA_Disabled, TRUE, TAG_END);
+
+	/* One-click equal-loudness balance: both legs at the same
+	 * fraction (3/8) of their measured ceilings, so Paula and AX
+	 * contribute identically in AX-equivalent units on calibrated
+	 * cards and keep an equal ratio uncalibrated. 3/8 each, because
+	 * the save validator bounds the SUM of both legs to the enforced
+	 * boundary (3/4 of the AX ceiling): two equal legs share it, and
+	 * the pair composes exactly at the boundary like scene 1. The
+	 * ceilings are hardware measurements, not preferences --
+	 * deliberately not touched here. */
+	ng.ng_LeftEdge = l.margin_x + button_width + l.label_gap;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = button_width;
+	ng.ng_GadgetID = AUDGAD_BTN_BALANCE;
+	ng.ng_GadgetText = (STRPTR)LABEL_BTN_BALANCE;
+	ng.ng_Flags = PLACETEXT_IN;
+	audgads[AUDGAD_BTN_BALANCE] = gad = CreateGadget(BUTTON_KIND, gad,
+		&ng, TAG_END);
 	y += l.row_step;
 
 	*out_w = content_right + l.margin_x;
@@ -4055,6 +4076,40 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 							audio_update_save_gate(win);
 							break;
 						}
+						case AUDGAD_BTN_BALANCE: {
+							UWORD bal_paula = (UWORD)(
+								(3UL * audio_ceiling_paula) / 8UL);
+							UWORD bal_ax = (UWORD)(
+								(3UL * audio_ceiling_ax) / 8UL);
+							int bst = audio_scene_write_commit(
+								scene,
+								ZZ9K_AUDIO_SCENE_PARAM_BASELINE,
+								ZZ9K_AUDIO_BALANCE_PACK(bal_paula,
+									bal_ax));
+							if (bst == ZZ9K_STATUS_OK ||
+									bst == ZZ9K_STATUS_TIMEOUT) {
+								audio_baseline_paula = bal_paula;
+								audio_baseline_ax = bal_ax;
+								audio_mark_dirty();
+								GT_SetGadgetAttrs(
+									audgads[AUDGAD_BASE_PAULA],
+									win, NULL,
+									GTSL_Level, bal_paula, TAG_END);
+								GT_SetGadgetAttrs(
+									audgads[AUDGAD_BASE_AX],
+									win, NULL,
+									GTSL_Level, bal_ax, TAG_END);
+								audio_set_status(win,
+									(bst == ZZ9K_STATUS_OK)
+									?	"Balance committed - Save to persist"
+									:	"Balance committing...");
+							} else {
+								audio_set_status(win,
+									"Balance failed - retry");
+							}
+							audio_update_save_gate(win);
+							break;
+						}
 						case AUDGAD_BTN_SAVE: {
 							uint32_t save_status;
 
@@ -4088,7 +4143,7 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 							} else if (save_status ==
 									ZZ9K_AUDIO_SCENE_SAVE_REJECTED) {
 								audio_set_status(win,
-									"Save rejected: scene level over the boundary");
+									"Save rejected: level over boundary");
 							} else {
 								audio_set_status(win,
 									"Save failed: SD card write error");
