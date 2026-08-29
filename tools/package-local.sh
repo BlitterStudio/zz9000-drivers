@@ -26,6 +26,12 @@ install -Dm755 net/ZZNetStats/ZZNetStats        "$inst/Tools/ZZNetStats"
 install -Dm755 ZZDiag/ZZDiag                    "$inst/Tools/ZZDiag"
 install -Dm644 ahi/README.md                    "$inst/Docs/ahi-README.md"
 install -Dm644 usb-poseidon/README.md           "$inst/Docs/usb-poseidon-README.md"
+# Diagnostic-only MHI build (feeder-vs-pump hardware isolation); staged
+# under Docs, deliberately never installed as the production library.
+if [ -f mhi/mhizz9000.library.decode-only ]; then
+    install -Dm644 mhi/mhizz9000.library.decode-only \
+        "$inst/Docs/mhizz9000.library.decode-only"
+fi
 
 # SDK runtime payloads (built by sdk/build.sh from the pinned zz9000-sdk ref).
 install -Dm644 sdk/out/Libs/zz9k.library        "$inst/Libs/zz9k.library"
