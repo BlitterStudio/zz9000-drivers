@@ -814,6 +814,26 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("uint16_t play_sequence;",
                       header)
 
+    def test_ahi_fabric_lease_stages_little_endian_bounded(self):
+        """The lease contract is S16LE but AHI's mixer writes m68k
+        big-endian; the legacy register path let firmware swap (the
+        SWAB register). The lease pump must swap every period itself
+        before staging, and keep only a bounded runway of premixed
+        periods in flight instead of filling the whole granted ring on
+        the first wake (the hardware session caught both)."""
+        source = self.read("ahi/driver/zz9000ax-ahi.c")
+        pump = source[
+            source.index("static void fabric_lease_pump"):
+            source.index("/* (Re)arm the 10-ms UNIT_MICROHZ")
+        ]
+        self.assertIn("fabric_swap_period_le", pump)
+        swap = pump.index("fabric_swap_period_le(")
+        mixer = pump.index("ahiac_MixerFunc")
+        ring_write = pump.index("zz9k_audio_ring_write")
+        self.assertLess(mixer, swap)
+        self.assertLess(swap, ring_write)
+        self.assertIn("LEASE_RUNWAY_PERIODS", pump)
+
     def test_ahi_exclusive_owner_is_claimed_before_hardware_mutation(self):
         header = self.read("ahi/driver/zz9000ax-ahi.h")
         source = self.read("ahi/driver/zz9000ax-ahi.c")

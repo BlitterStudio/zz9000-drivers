@@ -75,6 +75,11 @@
 // keep this in sync with the mixer byte math (bytes = BuffSamples << 2)
 // and with the bounce-buffer capacity check in WorkerProcess().
 #define BOUNCE_MAX_FRAMES ZZ_AX_BOUNCE_MAX_FRAMES
+// Lease-mode staging headroom: periods mixed ahead of firmware's
+// consumed cursor. 4 = 80 ms of runway; the compositor consumes one
+// period per 20-ms tick, so the timer keeps this topped up.
+#define LEASE_RUNWAY_PERIODS 4
+
 // AmigaOS scheduling is strictly preemptive priority with no aging; any
 // task at or above this priority stuck in a CPU loop will starve the mixer
 // and produce audible stutter. Keep the mixer well above user-level tasks
@@ -411,6 +416,21 @@ static BOOL playback_period_ready(struct z9ax *ahi_data,
   return TRUE;
 }
 
+/* AHI's mixer writes m68k-native big-endian S16; the lease contract
+ * is S16LE (the legacy register path let firmware do this swap -- the
+ * SWAB register / audio_swab). The pump owns the conversion here: one
+ * in-place word swap per staged period, before the bytes go to the
+ * granted ring. */
+static void fabric_swap_period_le(void *buffer, uint32_t bytes)
+{
+  uint16_t *words = (uint16_t *)buffer;
+  uint32_t i;
+
+  for (i = 0U; i < bytes / 2U; i++)
+    words[i] = (uint16_t)((words[i] >> 8) | (words[i] << 8));
+}
+
+
 
 /* One lease-pacing pass (worker context, timer wake): adopt firmware
  * credits, stage whole source-rate periods while credited space and
@@ -433,6 +453,8 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
     return;
   if (zz9k_audio_ring_take_credits(session, 4U) ==
       ZZ9K_AUDIO_RING_CREDIT_REVOKED) {
+    KPrintF((CONST_STRPTR)"ZZ9000AX: fabric lease REVOKED; staging "
+            "stopped (heartbeat/cursor/generation).\n");
     ahi_data->lease_held = 0;
     memset(session, 0, sizeof(*session));
     return;
@@ -440,13 +462,22 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
   if (AudioCtrl->ahiac_BuffSamples > BOUNCE_MAX_FRAMES)
     return;  /* the legacy defence-in-depth bound still applies */
   bytes = AudioCtrl->ahiac_BuffSamples << 2;
+  /* Bounded runway: stage at most LEASE_RUNWAY_PERIODS periods ahead
+   * of firmware's consumed cursor. Without the bound the first wake
+   * after Start mixes the whole granted ring back-to-back (~17
+   * periods, 340 ms of PlayerFunc burst) -- the proof client's
+   * discipline is a few periods of headroom, not a full ring. */
   while (!ahi_data->play_stop &&
-         zz9k_audio_ring_free_bytes(session) >= bytes) {
+         zz9k_audio_ring_free_bytes(session) >= bytes &&
+         session->write_cursor - session->consumed_cursor <=
+             (uint64_t)LEASE_RUNWAY_PERIODS * bytes) {
     CallHookPkt(AudioCtrl->ahiac_PlayerFunc, AudioCtrl, NULL);
     if ((*AudioCtrl->ahiac_PreTimer)())
       break;
     CallHookPkt(AudioCtrl->ahiac_MixerFunc, AudioCtrl,
                 (void *)(uintptr_t)ahi_data->audio_buf_addr);
+    fabric_swap_period_le(
+        (void *)(uintptr_t)ahi_data->audio_buf_addr, bytes);
     if (zz9k_audio_ring_write(session,
             (const void *)(uintptr_t)ahi_data->audio_buf_addr,
             bytes) != bytes)
@@ -905,8 +936,11 @@ static int fabric_lease_acquire(struct z9ax *ahi_data, uint32_t mix_freq)
     zz9k_put_be32(payload->source_rate_hz, mix_freq);
 
     status = ZZ9KCall(&request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
-    if (status != ZZ9K_STATUS_OK)
+    if (status != ZZ9K_STATUS_OK) {
+      KPrintF((CONST_STRPTR)"ZZ9000AX: lease acquire slot %lu refused: "
+              "status %ld.\n", (unsigned long)slot, (long)status);
       continue;
+    }
     memcpy(&result, reply.payload.inline_data, sizeof(result));
 
     memset(session, 0, sizeof(*session));
@@ -1008,6 +1042,9 @@ static void fabric_lease_release(struct z9ax *ahi_data)
     zz9k_put_be32(rel->flags, 0U);
   }
   (void)ZZ9KCall(&request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+
+  KPrintF((CONST_STRPTR)"ZZ9000AX: fabric lease released (slot %lu "
+          "gen %lu).\n", (unsigned long)slot, (unsigned long)generation);
 }
 
 static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagList asm("a1"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
@@ -1142,6 +1179,16 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
       (!ahi_data->fabric_mode && mhi_present_locked())) {
     Permit();
     kprintf((CONST_STRPTR)"Can't allocate! Audio hardware already owned.\n");
+    /* The control-plane binding opened above the claim must be
+     * released exactly like the fail: label -- the neutral trim
+     * release plus the library close -- or a rejected allocation
+     * leaks an open zz9k.library and a registered owner trim. */
+    if (ZZ9KBase) {
+      if (audio_control_capped) submit_source_trim();
+      CloseLibrary(ZZ9KBase);
+      ZZ9KBase = NULL;
+    }
+    audio_control_capped = 0;
     if (record_buf) FreeVec(record_buf);
     FreeVec(audio_buf);
     FreeVec(ahi_data);
@@ -1392,15 +1439,17 @@ static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), 
   if (!ahi_data) return AHIE_OK;
 
   if ((flags & AHISF_PLAY) && ahi_data->fabric_mode) {
-    /* Lease mode: acquire at the first play Start, clear PAUSED, and
+    /* Lease mode: acquire at the first play Start (or after a
+     * mid-session revocation zeroed lease_held), clear PAUSED, and
      * let the credit-paced worker take it from here. A refused
      * acquire fails the Start honestly: the fabric owns the output,
      * so a silent legacy fallback would be silent no-output. */
     if (!ahi_data->lease_held) {
       if (!fabric_lease_acquire(ahi_data,
                                 AudioCtrl->ahiac_MixFreq)) {
-        kprintf((CONST_STRPTR)"ZZ9000AX: fabric lease refused; "
-                "Start(PLAY) fails\n");
+        KPrintF((CONST_STRPTR)"ZZ9000AX: fabric lease refused at "
+                "%lu Hz; Start(PLAY) fails.\n",
+                (unsigned long)AudioCtrl->ahiac_MixFreq);
         result = AHIE_UNKNOWN;
       }
     }
