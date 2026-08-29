@@ -461,27 +461,26 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
   if (AudioCtrl->ahiac_BuffSamples > BOUNCE_MAX_FRAMES)
     return;  /* the legacy defence-in-depth bound still applies */
 
-  /* Whole-period staging (fixes the partial-fill equilibrium): the
-   * grant's period is source_rate/50*4; ahi.device may run a
-   * BuffSamples whose mix is smaller than that (player-requested
-   * buffer sizes), and staging mix-sized chunks never lines up with
-   * the lease period -- the fill silence-pads the gaps and padded
-   * periods retire no credit, a self-sustaining partial fill
-   * (measured 64% at 44.1 kHz). Mixer output accumulates in a
-   * dedicated buffer and only whole lease periods enter the ring,
-   * so every staged chunk is one tagged period and credits always
-   * close. One mix per wake (PlayerFunc bursts starve decoders);
-   * outstanding tops at LEASE_RUNWAY_PERIODS; the lease stays
-   * PAUSED until two periods are staged (inaudible prefill). */
+  /* AHI v4 untimed-driver cadence with whole-period staging. The
+   * app may request a buffer smaller than MixFreq/50 (HippoPlayer:
+   * BuffSamples 640 at 44.1 kHz), so the correct mix cadence is
+   * MixFreq/BuffSamples per second (68.9/s here), NOT one per wake
+   * gated by ring runway -- gating mixes to staging throttled the
+   * song to BuffSamples*50 frames/s (measured 2/3 speed: 45.5
+   * mixes/s, 116 kB/s consumed). PreTimer IS the cadence: AHI v4
+   * paces an untimed sub-driver by answering PreTimer TRUE until a
+   * full BuffSamples-period has elapsed. Mix whenever PreTimer
+   * allows, accumulate the mix-sized output, and stage only whole
+   * grant periods (source_rate/50*4) -- every staged chunk is one
+   * tagged period so credits always close, and the ring's own free
+   * space bounds outstanding buffer. The lease stays PAUSED until
+   * two periods are staged (inaudible prefill). */
   {
     uint32_t lease_period =
         (session->grant.source_rate / 50U) * 4U;
 
     if (lease_period != 0U && lease_period <= BOUNCE_BUFSZ &&
-        ahi_data->lease_accum != NULL &&
-        !ahi_data->play_stop &&
-        session->write_cursor - session->consumed_cursor <
-            (uint64_t)LEASE_RUNWAY_PERIODS * lease_period) {
+        ahi_data->lease_accum != NULL && !ahi_data->play_stop) {
       CallHookPkt(AudioCtrl->ahiac_PlayerFunc, AudioCtrl, NULL);
       if (!(*AudioCtrl->ahiac_PreTimer)()) {
         uint32_t mix_bytes = AudioCtrl->ahiac_BuffSamples << 2;
@@ -503,24 +502,22 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
           ahi_data->lease_accum_fill += mix_bytes;
         }
         (*AudioCtrl->ahiac_PostTimer)();
-        while (ahi_data->lease_accum_fill >= lease_period &&
-               zz9k_audio_ring_free_bytes(session) >=
-                   lease_period) {
-          if (zz9k_audio_ring_write(session, ahi_data->lease_accum,
-                  lease_period) != lease_period)
-            break;
-          ahi_data->lease_accum_fill -= lease_period;
-          memmove(ahi_data->lease_accum,
-              ahi_data->lease_accum + lease_period,
-              ahi_data->lease_accum_fill);
-        }
       }
-    }
-    if ((session->flags & ZZ9K_AUDIO_RING_PRODUCER_FLAG_PAUSED) &&
-        !ahi_data->play_stop &&
-        session->write_cursor - session->consumed_cursor >=
-            2ULL * lease_period) {
-      session->flags &= ~ZZ9K_AUDIO_RING_PRODUCER_FLAG_PAUSED;
+      while (ahi_data->lease_accum_fill >= lease_period &&
+             zz9k_audio_ring_free_bytes(session) >= lease_period) {
+        if (zz9k_audio_ring_write(session, ahi_data->lease_accum,
+                lease_period) != lease_period)
+          break;
+        ahi_data->lease_accum_fill -= lease_period;
+        memmove(ahi_data->lease_accum,
+            ahi_data->lease_accum + lease_period,
+            ahi_data->lease_accum_fill);
+      }
+      if ((session->flags & ZZ9K_AUDIO_RING_PRODUCER_FLAG_PAUSED) &&
+          session->write_cursor - session->consumed_cursor >=
+              2ULL * lease_period) {
+        session->flags &= ~ZZ9K_AUDIO_RING_PRODUCER_FLAG_PAUSED;
+      }
     }
   }
   if (!ahi_data->lease_traced) {

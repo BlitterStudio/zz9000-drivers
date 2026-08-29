@@ -832,7 +832,12 @@ class RepoToolingTests(unittest.TestCase):
         ring_write = pump.index("zz9k_audio_ring_write")
         self.assertLess(mixer, swap)
         self.assertLess(swap, ring_write)
-        self.assertIn("LEASE_RUNWAY_PERIODS", pump)
+        # PreTimer is the mix cadence (AHI v4 untimed-driver pacing);
+        # staging is whole grant periods under ring backpressure.
+        pretimer = pump.index("ahiac_PreTimer")
+        self.assertLess(pretimer, mixer)
+        self.assertIn("lease_accum", pump)
+        self.assertIn("grant.source_rate / 50U", pump)
 
     def test_ahi_exclusive_owner_is_claimed_before_hardware_mutation(self):
         header = self.read("ahi/driver/zz9000ax-ahi.h")
