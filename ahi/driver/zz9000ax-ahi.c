@@ -78,7 +78,7 @@
 // Lease-mode staging headroom: periods mixed ahead of firmware's
 // consumed cursor. 4 = 80 ms of runway; the compositor consumes one
 // period per 20-ms tick, so the timer keeps this topped up.
-#define LEASE_RUNWAY_PERIODS 4
+#define LEASE_RUNWAY_PERIODS 2
 
 // AmigaOS scheduling is strictly preemptive priority with no aging; any
 // task at or above this priority stuck in a CPU loop will starve the mixer
@@ -467,17 +467,18 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
    * after Start mixes the whole granted ring back-to-back (~17
    * periods, 340 ms of PlayerFunc burst) -- the proof client's
    * discipline is a few periods of headroom, not a full ring. */
-  /* Legacy cadence: at most ONE period per wake, credit-gated. The
-   * qualified legacy path called PlayerFunc/MixerFunc strictly once
-   * per 20-ms card interrupt, never in bursts; catch-up bursts make
-   * HippoPlayer-class decoders underrun their AHI channels and skip
-   * ahead (the ~1 s skip cycle). The 10-ms timer plus one-period
-   * staging settles to exactly one mix per 20 ms at steady state;
-   * the LEASE_RUNWAY_PERIODS cap bounds outstanding buffer for
-   * scheduling jitter. */
+  /* Legacy cadence with a safe margin: at most ONE mix per wake
+   * (PlayerFunc bursts starve HippoPlayer-class decoders), but the
+   * outstanding buffer runs up to LEASE_RUNWAY_PERIODS instead of a
+   * 0-1 period margin -- the compositor silence-pads every period
+   * the source ring is short, audible as a constant 50 Hz buzz.
+   * Steady state is one mix per 20 ms (credit gated) with headroom
+   * against scheduling jitter. The lease stays PAUSED (as published
+   * at acquire) until two periods are staged: an inaudible prefill,
+   * so playback starts into a primed ring instead of a gap. */
   if (!ahi_data->play_stop &&
       zz9k_audio_ring_free_bytes(session) >= bytes &&
-      session->write_cursor - session->consumed_cursor <=
+      session->write_cursor - session->consumed_cursor <
           (uint64_t)LEASE_RUNWAY_PERIODS * bytes) {
     CallHookPkt(AudioCtrl->ahiac_PlayerFunc, AudioCtrl, NULL);
     if (!(*AudioCtrl->ahiac_PreTimer)()) {
@@ -490,6 +491,12 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
               bytes) == bytes)
         (*AudioCtrl->ahiac_PostTimer)();
     }
+  }
+  if ((session->flags & ZZ9K_AUDIO_RING_PRODUCER_FLAG_PAUSED) &&
+      !ahi_data->play_stop &&
+      session->write_cursor - session->consumed_cursor >=
+          2ULL * bytes) {
+    session->flags &= ~ZZ9K_AUDIO_RING_PRODUCER_FLAG_PAUSED;
   }
   if (!ahi_data->lease_traced) {
     ahi_data->lease_traced = 1;
@@ -1480,8 +1487,9 @@ static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), 
     if (result == AHIE_OK) {
       Forbid();
       ahi_data->buf_offset = 0;
-      ahi_data->lease_session.flags &=
-          ~ZZ9K_AUDIO_RING_PRODUCER_FLAG_PAUSED;
+      /* PAUSED stays as acquired: the worker clears it once two
+       * periods are staged (primed-ring prefill). Stop(PLAY) sets
+       * it again, so a resume re-primes the same way. */
       ahi_data->play_stop = 0;
       update_hw_interrupts(ahi_data);
       Permit();
