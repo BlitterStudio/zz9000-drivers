@@ -467,22 +467,29 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
    * after Start mixes the whole granted ring back-to-back (~17
    * periods, 340 ms of PlayerFunc burst) -- the proof client's
    * discipline is a few periods of headroom, not a full ring. */
-  while (!ahi_data->play_stop &&
-         zz9k_audio_ring_free_bytes(session) >= bytes &&
-         session->write_cursor - session->consumed_cursor <=
-             (uint64_t)LEASE_RUNWAY_PERIODS * bytes) {
+  /* Legacy cadence: at most ONE period per wake, credit-gated. The
+   * qualified legacy path called PlayerFunc/MixerFunc strictly once
+   * per 20-ms card interrupt, never in bursts; catch-up bursts make
+   * HippoPlayer-class decoders underrun their AHI channels and skip
+   * ahead (the ~1 s skip cycle). The 10-ms timer plus one-period
+   * staging settles to exactly one mix per 20 ms at steady state;
+   * the LEASE_RUNWAY_PERIODS cap bounds outstanding buffer for
+   * scheduling jitter. */
+  if (!ahi_data->play_stop &&
+      zz9k_audio_ring_free_bytes(session) >= bytes &&
+      session->write_cursor - session->consumed_cursor <=
+          (uint64_t)LEASE_RUNWAY_PERIODS * bytes) {
     CallHookPkt(AudioCtrl->ahiac_PlayerFunc, AudioCtrl, NULL);
-    if ((*AudioCtrl->ahiac_PreTimer)())
-      break;
-    CallHookPkt(AudioCtrl->ahiac_MixerFunc, AudioCtrl,
-                (void *)(uintptr_t)ahi_data->audio_buf_addr);
-    fabric_swap_period_le(
-        (void *)(uintptr_t)ahi_data->audio_buf_addr, bytes);
-    if (zz9k_audio_ring_write(session,
-            (const void *)(uintptr_t)ahi_data->audio_buf_addr,
-            bytes) != bytes)
-      break;  /* credit raced mid-pass; next wake retries */
-    (*AudioCtrl->ahiac_PostTimer)();
+    if (!(*AudioCtrl->ahiac_PreTimer)()) {
+      CallHookPkt(AudioCtrl->ahiac_MixerFunc, AudioCtrl,
+                  (void *)(uintptr_t)ahi_data->audio_buf_addr);
+      fabric_swap_period_le(
+          (void *)(uintptr_t)ahi_data->audio_buf_addr, bytes);
+      if (zz9k_audio_ring_write(session,
+              (const void *)(uintptr_t)ahi_data->audio_buf_addr,
+              bytes) == bytes)
+        (*AudioCtrl->ahiac_PostTimer)();
+    }
   }
   if (!ahi_data->lease_traced) {
     ahi_data->lease_traced = 1;
