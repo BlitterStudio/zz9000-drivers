@@ -1233,7 +1233,14 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
     write_audio_param(hw_addr, 0, offset_tx >> 16);
     write_audio_param(hw_addr, 1, offset_tx & 0xffff);
   }
-  if (record_capable) {
+  /* Record buffer params arm the firmware's deferred audio_init_i2s
+   * (a full TX-formatter reset+restart) at EVERY allocation -- on the
+   * running fabric that restart storms the formatter's period
+   * interrupt (the skip-forward defect) and is the handoff-29 record
+   * wart with teeth. In lease mode the RX params move to the first
+   * Start(RECORD); a playback-only session never restarts the
+   * formatter at all. Legacy stacks keep the qualified behavior. */
+  if (record_capable && !ahi_data->fabric_mode) {
     write_audio_param(hw_addr, ZZ_AX_AP_RX_BUF_OFFS_HI, offset_rx >> 16);
     write_audio_param(hw_addr, ZZ_AX_AP_RX_BUF_OFFS_LO, offset_rx & 0xffff);
   }
@@ -1506,6 +1513,19 @@ static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), 
   if ((flags & AHISF_RECORD) && ahi_data->record_capable) {
     uint16_t status;
 
+    if (ahi_data->fabric_mode) {
+      /* Deferred from AllocAudio (see there): the RX buffer params
+       * land only when recording is actually requested. They arm the
+       * firmware's deferred formatter reinit -- an accepted glitch
+       * when starting capture, never a playback-session side
+       * effect. */
+      uint32_t offset_rx = ahi_data->audio_rx_hw_buf_addr -
+                           (ahi_data->hw_addr + 0x10000);
+      write_audio_param(ahi_data->hw_addr, ZZ_AX_AP_RX_BUF_OFFS_HI,
+                        offset_rx >> 16);
+      write_audio_param(ahi_data->hw_addr, ZZ_AX_AP_RX_BUF_OFFS_LO,
+                        offset_rx & 0xffff);
+    }
     write_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_SCALE,
               AudioCtrl->ahiac_BuffSamples);
     status = read_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_RX_STATUS);
