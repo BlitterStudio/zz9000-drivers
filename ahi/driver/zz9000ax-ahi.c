@@ -1099,6 +1099,7 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
   // TW: Just take the values from where init() has already stored them.
   uint32_t hw_addr = Z9AXBase->hw_addr;
   int zorro = Z9AXBase->zorro_version;
+  TEXT varbuf[16];
   if(!hw_addr) return AHISF_ERROR; // TW: Only AHISF_xxx return codes are allowed here.
   if(!zorro) return AHISF_ERROR; // TW: Only AHISF_xxx return codes are allowed here.
 
@@ -1215,6 +1216,15 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
     }
     ahi_data->fabric_mode =
         (uint8_t)fabric_rate_capped();
+    /* Bisection toggle (skip investigation): ENV:ZZ9K_AHI_LEGACY
+     * forces master's legacy register path on this same build and
+     * firmware -- one test splits the remaining defect space between
+     * the lease machinery and everything else. */
+    if (DOSBase) {
+      if (GetVar((CONST_STRPTR)"ZZ9K_AHI_LEGACY", varbuf,
+                 sizeof(varbuf), 0UL) >= 0L)
+        ahi_data->fabric_mode = 0;
+    }
   }
   // Atomic ownership claim: reject both another low-level AHI allocation
   // and -- on non-fabric stacks -- MHI, before touching shared hardware.
