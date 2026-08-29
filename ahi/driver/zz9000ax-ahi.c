@@ -447,7 +447,6 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
                               struct AHIAudioCtrlDrv *AudioCtrl)
 {
   ZZ9KAudioRingSession *session = &ahi_data->lease_session;
-  uint32_t bytes;
 
   if (!ahi_data->lease_held || !session->mapped)
     return;
@@ -461,42 +460,68 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
   }
   if (AudioCtrl->ahiac_BuffSamples > BOUNCE_MAX_FRAMES)
     return;  /* the legacy defence-in-depth bound still applies */
-  bytes = AudioCtrl->ahiac_BuffSamples << 2;
-  /* Bounded runway: stage at most LEASE_RUNWAY_PERIODS periods ahead
-   * of firmware's consumed cursor. Without the bound the first wake
-   * after Start mixes the whole granted ring back-to-back (~17
-   * periods, 340 ms of PlayerFunc burst) -- the proof client's
-   * discipline is a few periods of headroom, not a full ring. */
-  /* Legacy cadence with a safe margin: at most ONE mix per wake
-   * (PlayerFunc bursts starve HippoPlayer-class decoders), but the
-   * outstanding buffer runs up to LEASE_RUNWAY_PERIODS instead of a
-   * 0-1 period margin -- the compositor silence-pads every period
-   * the source ring is short, audible as a constant 50 Hz buzz.
-   * Steady state is one mix per 20 ms (credit gated) with headroom
-   * against scheduling jitter. The lease stays PAUSED (as published
-   * at acquire) until two periods are staged: an inaudible prefill,
-   * so playback starts into a primed ring instead of a gap. */
-  if (!ahi_data->play_stop &&
-      zz9k_audio_ring_free_bytes(session) >= bytes &&
-      session->write_cursor - session->consumed_cursor <
-          (uint64_t)LEASE_RUNWAY_PERIODS * bytes) {
-    CallHookPkt(AudioCtrl->ahiac_PlayerFunc, AudioCtrl, NULL);
-    if (!(*AudioCtrl->ahiac_PreTimer)()) {
-      CallHookPkt(AudioCtrl->ahiac_MixerFunc, AudioCtrl,
-                  (void *)(uintptr_t)ahi_data->audio_buf_addr);
-      fabric_swap_period_le(
-          (void *)(uintptr_t)ahi_data->audio_buf_addr, bytes);
-      if (zz9k_audio_ring_write(session,
-              (const void *)(uintptr_t)ahi_data->audio_buf_addr,
-              bytes) == bytes)
+
+  /* Whole-period staging (fixes the partial-fill equilibrium): the
+   * grant's period is source_rate/50*4; ahi.device may run a
+   * BuffSamples whose mix is smaller than that (player-requested
+   * buffer sizes), and staging mix-sized chunks never lines up with
+   * the lease period -- the fill silence-pads the gaps and padded
+   * periods retire no credit, a self-sustaining partial fill
+   * (measured 64% at 44.1 kHz). Mixer output accumulates in a
+   * dedicated buffer and only whole lease periods enter the ring,
+   * so every staged chunk is one tagged period and credits always
+   * close. One mix per wake (PlayerFunc bursts starve decoders);
+   * outstanding tops at LEASE_RUNWAY_PERIODS; the lease stays
+   * PAUSED until two periods are staged (inaudible prefill). */
+  {
+    uint32_t lease_period =
+        (session->grant.source_rate / 50U) * 4U;
+
+    if (lease_period != 0U && lease_period <= BOUNCE_BUFSZ &&
+        ahi_data->lease_accum != NULL &&
+        !ahi_data->play_stop &&
+        session->write_cursor - session->consumed_cursor <
+            (uint64_t)LEASE_RUNWAY_PERIODS * lease_period) {
+      CallHookPkt(AudioCtrl->ahiac_PlayerFunc, AudioCtrl, NULL);
+      if (!(*AudioCtrl->ahiac_PreTimer)()) {
+        uint32_t mix_bytes = AudioCtrl->ahiac_BuffSamples << 2;
+        uint32_t room = BOUNCE_BUFSZ - ahi_data->lease_accum_fill;
+
+        if (mix_bytes > room)
+          mix_bytes = room;
+        if (mix_bytes != 0U) {
+          CallHookPkt(AudioCtrl->ahiac_MixerFunc, AudioCtrl,
+                      (void *)(uintptr_t)ahi_data->audio_buf_addr);
+          fabric_swap_period_le(
+              (void *)(uintptr_t)ahi_data->audio_buf_addr,
+              mix_bytes);
+          memcpy(ahi_data->lease_accum +
+                     ahi_data->lease_accum_fill,
+                 (const void *)(uintptr_t)
+                     ahi_data->audio_buf_addr,
+                 mix_bytes);
+          ahi_data->lease_accum_fill += mix_bytes;
+        }
         (*AudioCtrl->ahiac_PostTimer)();
+        while (ahi_data->lease_accum_fill >= lease_period &&
+               zz9k_audio_ring_free_bytes(session) >=
+                   lease_period) {
+          if (zz9k_audio_ring_write(session, ahi_data->lease_accum,
+                  lease_period) != lease_period)
+            break;
+          ahi_data->lease_accum_fill -= lease_period;
+          memmove(ahi_data->lease_accum,
+              ahi_data->lease_accum + lease_period,
+              ahi_data->lease_accum_fill);
+        }
+      }
     }
-  }
-  if ((session->flags & ZZ9K_AUDIO_RING_PRODUCER_FLAG_PAUSED) &&
-      !ahi_data->play_stop &&
-      session->write_cursor - session->consumed_cursor >=
-          2ULL * bytes) {
-    session->flags &= ~ZZ9K_AUDIO_RING_PRODUCER_FLAG_PAUSED;
+    if ((session->flags & ZZ9K_AUDIO_RING_PRODUCER_FLAG_PAUSED) &&
+        !ahi_data->play_stop &&
+        session->write_cursor - session->consumed_cursor >=
+            2ULL * lease_period) {
+      session->flags &= ~ZZ9K_AUDIO_RING_PRODUCER_FLAG_PAUSED;
+    }
   }
   if (!ahi_data->lease_traced) {
     ahi_data->lease_traced = 1;
@@ -1107,9 +1132,13 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
   void* audio_buf = AllocVec(BOUNCE_BUFSZ, MEMF_PUBLIC | MEMF_FAST | MEMF_CLEAR);
   void* record_buf = record_capable ?
       AllocVec(BOUNCE_BUFSZ, MEMF_PUBLIC | MEMF_FAST | MEMF_CLEAR) : NULL;
+  void* lease_accum =
+      AllocVec(BOUNCE_BUFSZ, MEMF_PUBLIC | MEMF_FAST | MEMF_CLEAR);
 
-  if (!ahi_data || !audio_buf || (record_capable && !record_buf)) {
+  if (!ahi_data || !audio_buf || !lease_accum ||
+      (record_capable && !record_buf)) {
     if (record_buf) FreeVec(record_buf);
+    if (lease_accum) FreeVec(lease_accum);
     if (audio_buf) FreeVec(audio_buf);
     if (ahi_data)  FreeVec(ahi_data);
     return AHISF_ERROR; // TW: Only AHISF_xxx return codes are allowed here.
@@ -1123,6 +1152,8 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
       (audio_config & ZZ_AX_AUDIO_CONFIG_TX_STATUS_CAPABLE) != 0;
   ahi_data->flags = Z9AXBase->flags;
   ahi_data->audio_buf_addr = (uint32_t)audio_buf;
+  ahi_data->lease_accum = (uint8_t *)lease_accum;
+  ahi_data->lease_accum_fill = 0U;
   ahi_data->record_buf_addr = (uint32_t)record_buf;
   ahi_data->hw_addr = hw_addr;
   ahi_data->audioctrl = AudioCtrl;
@@ -1214,6 +1245,7 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
     }
     audio_control_capped = 0;
     if (record_buf) FreeVec(record_buf);
+    FreeVec(lease_accum);
     FreeVec(audio_buf);
     FreeVec(ahi_data);
     AudioCtrl->ahiac_DriverData = NULL;
@@ -1352,6 +1384,10 @@ fail:
     FreeVec((void*)ahi_data->audio_buf_addr);
     ahi_data->audio_buf_addr = 0;
   }
+  if (ahi_data->lease_accum) {
+    FreeVec(ahi_data->lease_accum);
+    ahi_data->lease_accum = NULL;
+  }
   if (ahi_data->record_buf_addr) {
     FreeVec((void*)ahi_data->record_buf_addr);
     ahi_data->record_buf_addr = 0;
@@ -1415,6 +1451,10 @@ static void __attribute__((used)) intAHIsub_FreeAudio(struct AHIAudioCtrlDrv *Au
   if (ahi_data->audio_buf_addr) {
     FreeVec((void*)ahi_data->audio_buf_addr);
     ahi_data->audio_buf_addr = 0;
+  }
+  if (ahi_data->lease_accum) {
+    FreeVec(ahi_data->lease_accum);
+    ahi_data->lease_accum = NULL;
   }
   if (ahi_data->record_buf_addr) {
     FreeVec((void*)ahi_data->record_buf_addr);

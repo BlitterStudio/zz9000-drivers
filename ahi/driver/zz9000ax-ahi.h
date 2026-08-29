@@ -44,6 +44,8 @@ struct z9ax {
   uint8_t lease_traced;      /* one-shot first-pump diagnostic */
   uint16_t lease_pad;
   ZZ9KAudioRingSession lease_session;
+  uint8_t *lease_accum;       /* whole-period staging accumulator */
+  uint32_t lease_accum_fill;  /* bytes buffered in lease_accum */
   /* timer.device (UNIT_MICROHZ) lease-pacing timer; NULL in legacy
    * mode, created by the worker when fabric_mode is set. */
   struct MsgPort *lease_timer_port;
