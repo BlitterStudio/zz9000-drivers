@@ -484,6 +484,15 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
       break;  /* credit raced mid-pass; next wake retries */
     (*AudioCtrl->ahiac_PostTimer)();
   }
+  if (!ahi_data->lease_traced) {
+    ahi_data->lease_traced = 1;
+    KPrintF((CONST_STRPTR)"ZZ9000AX: lease pump first pass: staged "
+            "w=%lu consumed=%lu flags=%lx play_stop=%u.\n",
+            (unsigned long)session->write_cursor,
+            (unsigned long)session->consumed_cursor,
+            (unsigned long)session->flags,
+            (unsigned int)ahi_data->play_stop);
+  }
   zz9k_audio_ring_publish(session);
 }
 
@@ -1008,6 +1017,7 @@ static int fabric_lease_acquire(struct z9ax *ahi_data, uint32_t mix_freq)
     /* First publication: paused, cursor 0, fresh heartbeat. The lease
      * is live from acquisition even before PCM is staged (R11). */
     zz9k_audio_ring_publish(session);
+    ahi_data->lease_traced = 0;
     ahi_data->lease_held = 1;
     return 1;
   }

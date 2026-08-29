@@ -41,6 +41,7 @@ struct z9ax {
    * shared flags it publishes. */
   uint8_t fabric_mode;
   uint8_t lease_held;
+  uint8_t lease_traced;      /* one-shot first-pump diagnostic */
   uint16_t lease_pad;
   ZZ9KAudioRingSession lease_session;
   /* timer.device (UNIT_MICROHZ) lease-pacing timer; NULL in legacy
