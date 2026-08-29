@@ -481,11 +481,18 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
 
     if (lease_period != 0U && lease_period <= BOUNCE_BUFSZ &&
         ahi_data->lease_accum != NULL && !ahi_data->play_stop) {
-      CallHookPkt(AudioCtrl->ahiac_PlayerFunc, AudioCtrl, NULL);
       if (!(*AudioCtrl->ahiac_PreTimer)()) {
         uint32_t mix_bytes = AudioCtrl->ahiac_BuffSamples << 2;
         uint32_t room = BOUNCE_BUFSZ - ahi_data->lease_accum_fill;
 
+        /* PlayerFunc announces a period that WILL be mixed (AHI v4
+         * contract: one call per mixed period, none on PreTimer
+         * skip rounds). Calling it on skip rounds doubles the
+         * player-visible mix rate; MP3 decoders schedule decode
+         * per PlayerFunc, over-produce, and skip ahead once their
+         * buffering breaks -- the residual jump after the first
+         * few seconds. */
+        CallHookPkt(AudioCtrl->ahiac_PlayerFunc, AudioCtrl, NULL);
         if (mix_bytes > room)
           mix_bytes = room;
         if (mix_bytes != 0U) {
