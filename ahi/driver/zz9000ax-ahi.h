@@ -1,3 +1,6 @@
+#include <devices/timer.h>
+#include <zz9k/abi.h>
+
 // Driver data
 struct z9ax {
   struct Task *t_mainproc;
@@ -20,13 +23,31 @@ struct z9ax {
   uint16_t disable_cnt;
   uint8_t zorro_version;
   struct AHIAudioCtrlDrv *audioctrl;
+  struct AHIRecordMessage record_message;
   uint16_t play_stop;
   uint16_t record_stop;
-  struct AHIRecordMessage record_message;
   uint8_t flags;
   uint8_t irq_installed;
   uint8_t record_capable;
   uint8_t tx_status_capable;
+  /* Audio-fabric lease mode (AHI migration). fabric_mode: the card
+   * advertised ZZ9K_CAP_AUDIO_FABRIC plus the audio service's
+   * FABRIC_RATE flag at allocate, so playback runs as a direct-ring
+   * lease producer (card-side conversion at mix_freq) instead of the
+   * legacy register path. lease_held: a lease was acquired at the
+   * first Start(PLAY) and releases at FreeAudio; Stop(PLAY) sets the
+   * session's PAUSED producer flag instead of releasing. The worker
+   * task is the sole producer-line writer; Start/Stop only flip the
+   * shared flags it publishes. */
+  uint8_t fabric_mode;
+  uint8_t lease_held;
+  uint16_t lease_pad;
+  ZZ9KAudioRingSession lease_session;
+  /* timer.device (UNIT_MICROHZ) lease-pacing timer; NULL in legacy
+   * mode, created by the worker when fabric_mode is set. */
+  struct MsgPort *lease_timer_port;
+  struct timerequest *lease_timer_req;
+  int8_t lease_timer_signal;
 };
 
 // TW: Driver base includes hardware address and zorro version besides library base.

@@ -832,11 +832,13 @@ class RepoToolingTests(unittest.TestCase):
 
         self.assertIn("struct z9ax *owner;", header)
         self.assertIn("Z9AXBase->owner = NULL;", source)
-        self.assertIn("Z9AXBase->owner || mhi_present_locked()", alloc_body)
+        self.assertIn(
+            "(!ahi_data->fabric_mode && mhi_present_locked())",
+            alloc_body)
         self.assertIn("Z9AXBase->owner = ahi_data;", alloc_body)
         forbid = alloc_body.index("Forbid();")
         owner_check = alloc_body.index(
-            "Z9AXBase->owner || mhi_present_locked()"
+            "(!ahi_data->fabric_mode && mhi_present_locked())"
         )
         owner_publish = alloc_body.index("Z9AXBase->owner = ahi_data;")
         irq_install = alloc_body.index(

@@ -49,6 +49,7 @@
 
 #include "zz9k/library_vectors.h"
 #include "zz9k/request.h"
+#include <zz9k/audio.h>
 #include <proto/zz9k.h>
 
 // Comment out to enable debug output:
@@ -410,6 +411,60 @@ static BOOL playback_period_ready(struct z9ax *ahi_data,
   return TRUE;
 }
 
+
+/* One lease-pacing pass (worker context, timer wake): adopt firmware
+ * credits, stage whole source-rate periods while credited space and
+ * the play direction allow (PlayerFunc/MixerFunc per period -- the
+ * same cadence the legacy path drives from the card interrupt), then
+ * publish the producer line: cursor after PCM, heartbeat on every
+ * publication (R6/R11). The worker is the sole producer-line writer;
+ * Stop(PLAY) only sets the session's PAUSED flag, which this publish
+ * carries (cursor progress suppressed, heartbeat alive, R12). A
+ * REVOKED credit snapshot (heartbeat expiry, cursor fault, foreign
+ * generation) ends staging for this lease; firmware has already
+ * freed the slot, and the stale release at FreeAudio is a no-op. */
+static void fabric_lease_pump(struct z9ax *ahi_data,
+                              struct AHIAudioCtrlDrv *AudioCtrl)
+{
+  ZZ9KAudioRingSession *session = &ahi_data->lease_session;
+  uint32_t bytes;
+
+  if (!ahi_data->lease_held || !session->mapped)
+    return;
+  if (zz9k_audio_ring_take_credits(session, 4U) ==
+      ZZ9K_AUDIO_RING_CREDIT_REVOKED) {
+    ahi_data->lease_held = 0;
+    memset(session, 0, sizeof(*session));
+    return;
+  }
+  if (AudioCtrl->ahiac_BuffSamples > BOUNCE_MAX_FRAMES)
+    return;  /* the legacy defence-in-depth bound still applies */
+  bytes = AudioCtrl->ahiac_BuffSamples << 2;
+  while (!ahi_data->play_stop &&
+         zz9k_audio_ring_free_bytes(session) >= bytes) {
+    CallHookPkt(AudioCtrl->ahiac_PlayerFunc, AudioCtrl, NULL);
+    if ((*AudioCtrl->ahiac_PreTimer)())
+      break;
+    CallHookPkt(AudioCtrl->ahiac_MixerFunc, AudioCtrl,
+                (void *)(uintptr_t)ahi_data->audio_buf_addr);
+    if (zz9k_audio_ring_write(session,
+            (const void *)(uintptr_t)ahi_data->audio_buf_addr,
+            bytes) != bytes)
+      break;  /* credit raced mid-pass; next wake retries */
+    (*AudioCtrl->ahiac_PostTimer)();
+  }
+  zz9k_audio_ring_publish(session);
+}
+
+/* (Re)arm the 10-ms UNIT_MICROHZ lease timer. */
+static void fabric_timer_post(struct z9ax *ahi_data)
+{
+  ahi_data->lease_timer_req->tr_node.io_Command = TR_ADDREQUEST;
+  ahi_data->lease_timer_req->tr_time.tv_secs = 0;
+  ahi_data->lease_timer_req->tr_time.tv_micro = 10000;
+  SendIO((struct IORequest *)ahi_data->lease_timer_req);
+}
+
 void WorkerProcess() {
   struct Process* proc = (struct Process *) FindTask(NULL);
   struct z9ax* ahi_data = proc->pr_Task.tc_UserData;
@@ -439,13 +494,53 @@ void WorkerProcess() {
 
   Signal(ahi_data->t_mainproc, 1L << ahi_data->mainproc_signal);
 
+  /* Fabric lease mode paces itself: a 10-ms UNIT_MICROHZ timer wakes
+   * the worker to adopt credits, stage source-rate periods, and
+   * refresh the lease heartbeat; the card interrupt keeps serving
+   * the record direction exactly as before. Failure to create the
+   * timer is fatal for lease mode only -- fall back is impossible
+   * mid-session (the firmware owns the output), so the lease simply
+   * never becomes active and Start() fails on its own merits. */
+  uint32_t lease_timer_sig = 0;
+  if (ahi_data->fabric_mode) {
+    ahi_data->lease_timer_port = CreateMsgPort();
+    if (ahi_data->lease_timer_port) {
+      ahi_data->lease_timer_req = (struct timerequest *)CreateIORequest(
+          (APTR)ahi_data->lease_timer_port, sizeof(struct timerequest));
+      if (ahi_data->lease_timer_req) {
+        if (OpenDevice((STRPTR)"timer.device", UNIT_MICROHZ,
+                       (struct IORequest *)ahi_data->lease_timer_req,
+                       0) == 0) {
+          lease_timer_sig = 1L << ahi_data->lease_timer_port->mp_SigBit;
+          fabric_timer_post(ahi_data);
+        }
+      }
+    }
+  }
+
   for(;;) {
-    signals = Wait(SIGBREAKF_CTRL_C | (1L<<ahi_data->enable_signal));
+    signals = Wait(SIGBREAKF_CTRL_C | (1L<<ahi_data->enable_signal) |
+                   lease_timer_sig);
     if (signals & SIGBREAKF_CTRL_C) break;
+
+    if (lease_timer_sig && (signals & lease_timer_sig)) {
+      /* Drain the replied timer request and re-arm before pacing. */
+      while (GetMsg(ahi_data->lease_timer_port))
+        ;
+      fabric_timer_post(ahi_data);
+      fabric_lease_pump(ahi_data, AudioCtrl);
+    }
+
+    if (ahi_data->fabric_mode) {
+      /* Record-only path: the card interrupt still drives capture. */
+      if (!ahi_data->record_stop) process_recording(ahi_data, AudioCtrl);
+      continue;
+    }
 
     // A pending enable_signal may have been latched by the ISR between
     // Stop()/teardown updating the direction flags and this wake-up.
     if (ahi_data->play_stop && ahi_data->record_stop) continue;
+
 
     uint32_t period_offset = ahi_data->buf_offset;
 
@@ -512,6 +607,22 @@ void WorkerProcess() {
     if (!ahi_data->record_stop) process_recording(ahi_data, AudioCtrl);
   }
 
+
+  /* Lease timer teardown: abort a pending request before freeing the
+   * port/request pair (a never-opened device leaves io_Device NULL). */
+  if (ahi_data->lease_timer_req) {
+    if (ahi_data->lease_timer_req->tr_node.io_Device) {
+      AbortIO((struct IORequest *)ahi_data->lease_timer_req);
+      WaitIO((struct IORequest *)ahi_data->lease_timer_req);
+      CloseDevice((struct IORequest *)ahi_data->lease_timer_req);
+    }
+    DeleteIORequest((struct IORequest *)ahi_data->lease_timer_req);
+    ahi_data->lease_timer_req = NULL;
+  }
+  if (ahi_data->lease_timer_port) {
+    DeleteMsgPort(ahi_data->lease_timer_port);
+    ahi_data->lease_timer_port = NULL;
+  }
   Forbid();
   if (ahi_data->enable_signal != -1) { FreeSignal(ahi_data->enable_signal); ahi_data->enable_signal = -1; }
   if (ahi_data->worker_signal != -1) { FreeSignal(ahi_data->worker_signal); ahi_data->worker_signal = -1; }
@@ -579,7 +690,11 @@ static void install_irq_server_locked(struct z9ax* ahi_data) {
 static uint16_t active_hw_interrupts(const struct z9ax* ahi_data) {
   uint16_t mask = 0;
 
-  if (!ahi_data->play_stop) mask |= ZZ_AX_AUDIO_CONFIG_PLAY;
+  /* Fabric lease mode never arms the legacy play path: the fabric
+   * compositor owns the TX ring, and firmware would strip the bit
+   * anyway. The record bit still uses the card interrupt. */
+  if (!ahi_data->fabric_mode && !ahi_data->play_stop)
+    mask |= ZZ_AX_AUDIO_CONFIG_PLAY;
   if (ahi_data->record_capable && !ahi_data->record_stop)
     mask |= ZZ_AX_AUDIO_CONFIG_RECORD;
 
@@ -691,6 +806,210 @@ static void submit_source_trim(void)
   }
 }
 
+/* ---- Audio-fabric lease mode (AHI migration) ----
+ *
+ * When the card advertises ZZ9K_CAP_AUDIO_FABRIC and the audio
+ * service's ZZ9K_SERVICE_FLAG_AUDIO_FABRIC_RATE, playback runs as a
+ * direct-ring lease producer: the worker mixes at ahiac_MixFreq into
+ * the bounce buffer, stages source-rate periods into the granted
+ * board ring, and the firmware compositor converts per-slot with the
+ * qualified kernel and mixes the lease alongside the pump (MHI /
+ * ZZPlay). The legacy register path (SWAB + TX ring + play bit) stays
+ * byte-identical for non-fabric stacks; the Amiga-side AHI/MHI
+ * interrupt-server exclusion is only skipped while lease mode runs,
+ * where firmware's ownership state remains the authority.
+ *
+ * The seqlock publisher discipline (single writer, cursor after PCM,
+ * heartbeat on every publication) is the SDK client contract; these
+ * helpers implement it with the SDK's inline session helpers, so this
+ * file also provides the two platform cache hooks those helpers call
+ * (same CacheClearE/CACRF_ClearD discipline as the SDK host layer:
+ * producer writes must reach the card before the cursor publication;
+ * the firmware-owned line is never written here, so clearing its
+ * clean lines is an invalidate without a stale writeback). */
+void zz9k_audio_ring_cache_flush(const volatile void *address,
+                                 uint32_t length)
+{
+  if (address && length != 0U)
+    CacheClearE((APTR)(uintptr_t)address, (ULONG)length, CACRF_ClearD);
+}
+
+void zz9k_audio_ring_cache_invalidate(const volatile void *address,
+                                      uint32_t length)
+{
+  if (address && length != 0U)
+    CacheClearE((APTR)(uintptr_t)address, (ULONG)length, CACRF_ClearD);
+}
+
+/* Probe the fabric plane: global capability plus the audio service's
+ * FABRIC_RATE flag (rate-bearing leases; firmware that advertises the
+ * fabric without the rate flag only grants 48-kHz bypass leases and
+ * is treated as legacy here so AHI's mix-rate table keeps working).
+ * Runs after ZZ9KBase is open; blocks on mailbox completions, so it
+ * must never run under Forbid(). */
+static int fabric_rate_capped(void)
+{
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  ZZ9KCaps caps;
+  ZZ9KQueryServicePayload *query;
+  ZZ9KServiceInfoPayload info;
+
+  if (ZZ9KQueryCaps(&caps) != ZZ9K_STATUS_OK ||
+      !(caps.capability_bits & ZZ9K_CAP_AUDIO_FABRIC))
+    return 0;
+
+  zz9k_request_init(&request, ZZ9K_OP_QUERY_SERVICE);
+  request.entry.payload_len = sizeof(*query);
+  query = (ZZ9KQueryServicePayload *)request.entry.payload.inline_data;
+  zz9k_put_be32(query->service_id, ZZ9K_SERVICE_AUDIO);
+  if (ZZ9KCall(&request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS) !=
+      ZZ9K_STATUS_OK)
+    return 0;
+  memcpy(&info, reply.payload.inline_data, sizeof(info));
+  return (zz9k_get_be32(info.flags) &
+          ZZ9K_SERVICE_FLAG_AUDIO_FABRIC_RATE) != 0;
+}
+
+/* Acquire one lease under the caller's mix rate. Tries the Zorro III
+ * direct-ring slots in order and takes the first grant; a refusal
+ * (occupied slots, conversion budget, bus policy) is a clean decline
+ * and the caller fails the Start honestly instead of silently
+ * falling back -- the firmware strips the legacy play bit while the
+ * fabric owns the output, so a silent legacy fallback would be a
+ * silent no-output. Grant validation mirrors the SDK host layer's
+ * board-window bounds check; deep Zorro II region cross-checks stay
+ * an SDK-client responsibility, and firmware only ever grants the
+ * reserved direct regions. Requires ZZ9KBase and runs outside
+ * Forbid(). Returns 1 with session mapped, 0 on any refusal. */
+static int fabric_lease_acquire(struct z9ax *ahi_data, uint32_t mix_freq)
+{
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  ZZ9KAudioRingAcquireResultPayload result;
+  ZZ9KAudioRingSession *session = &ahi_data->lease_session;
+  ZZ9KAudioRingAcquirePayload *payload;
+  uint32_t slot;
+  int status;
+
+  for (slot = 1U; slot <= ZZ9K_AUDIO_RING_SLOT_MAX; slot++) {
+    zz9k_request_init(&request, ZZ9K_OP_AUDIO_RING_ACQUIRE);
+    request.entry.payload_len = sizeof(*payload);
+    payload =
+        (ZZ9KAudioRingAcquirePayload *)request.entry.payload.inline_data;
+    zz9k_put_be32(payload->slot, slot);
+    zz9k_put_be32(payload->identity, ZZ9K_AUDIO_METER_IDENTITY_AHI);
+    zz9k_put_be32(payload->gain, 128U);
+    zz9k_put_be32(payload->flags,
+                  ZZ9K_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE);
+    zz9k_put_be32(payload->source_rate_hz, mix_freq);
+
+    status = ZZ9KCall(&request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+    if (status != ZZ9K_STATUS_OK)
+      continue;
+    memcpy(&result, reply.payload.inline_data, sizeof(result));
+
+    memset(session, 0, sizeof(*session));
+    session->grant.slot = zz9k_get_be32(result.slot);
+    session->grant.generation = zz9k_get_be32(result.generation);
+    session->grant.ring_offset = zz9k_get_be32(result.ring_offset);
+    session->grant.ring_capacity = zz9k_get_be32(result.ring_capacity);
+    session->grant.control_offset =
+        zz9k_get_be32(result.control_offset);
+    session->grant.period_bytes = zz9k_get_be32(result.period_bytes);
+    session->grant.period_us = zz9k_get_be32(result.period_us);
+    session->grant.sample_contract =
+        zz9k_get_be32(result.sample_contract);
+    session->grant.gain_applied = zz9k_get_be32(result.gain_applied);
+    session->grant.slot_count = zz9k_get_be32(result.slot_count);
+    session->grant.flags = zz9k_get_be32(result.flags);
+    session->grant.source_rate = zz9k_get_be32(result.source_rate);
+
+    /* Board-window bounds + contract sanity (R2/R3): both granted
+     * ranges must fit the board window, the contract must be the
+     * requested source-rate lease, and the echoed rate must be the
+     * mix frequency asked for. */
+    if (session->grant.sample_contract !=
+            ZZ9K_AUDIO_RING_CONTRACT_SOURCE_RATE_STEREO_S16LE ||
+        session->grant.source_rate != mix_freq ||
+        !zz9k_audio_ring_grant_valid(&session->grant) ||
+        session->grant.ring_offset +
+                session->grant.ring_capacity >
+            Z9AXBase->hw_size ||
+        session->grant.control_offset +
+                ZZ9K_AUDIO_RING_CONTROL_SIZE >
+            Z9AXBase->hw_size) {
+      /* Unusable grant: surrender it so the slot does not sit BUSY
+       * until heartbeat revocation (the SDK session layer's rule). */
+      zz9k_request_init(&request, ZZ9K_OP_AUDIO_RING_RELEASE);
+      request.entry.payload_len =
+          sizeof(ZZ9KAudioRingReleasePayload);
+      {
+        ZZ9KAudioRingReleasePayload *rel =
+            (ZZ9KAudioRingReleasePayload *)
+                request.entry.payload.inline_data;
+        zz9k_put_be32(rel->slot, session->grant.slot);
+        zz9k_put_be32(rel->generation, session->grant.generation);
+        zz9k_put_be32(rel->flags, 0U);
+      }
+      (void)ZZ9KCall(&request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+      memset(session, 0, sizeof(*session));
+      continue;
+    }
+
+    session->ring = (volatile uint8_t *)(uintptr_t)
+        (Z9AXBase->hw_addr + session->grant.ring_offset);
+    session->producer_line =
+        (volatile ZZ9KAudioRingProducerLine *)(void *)(uintptr_t)
+        (Z9AXBase->hw_addr + session->grant.control_offset);
+    session->firmware_line =
+        (volatile ZZ9KAudioRingFirmwareLine *)(void *)(uintptr_t)
+        (Z9AXBase->hw_addr + session->grant.control_offset +
+         ZZ9K_AUDIO_RING_CONTROL_LINE_SIZE);
+    session->write_cursor = 0U;
+    session->consumed_cursor = 0U;
+    session->heartbeat = 1U;
+    session->flags = ZZ9K_AUDIO_RING_PRODUCER_FLAG_PAUSED;
+    session->mapped = 1U;
+    /* First publication: paused, cursor 0, fresh heartbeat. The lease
+     * is live from acquisition even before PCM is staged (R11). */
+    zz9k_audio_ring_publish(session);
+    ahi_data->lease_held = 1;
+    return 1;
+  }
+  return 0;
+}
+
+/* Idempotent surrender under the grant's own generation (a stale
+ * generation release is a no-op by contract). Outside Forbid(). */
+static void fabric_lease_release(struct z9ax *ahi_data)
+{
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  uint32_t slot;
+  uint32_t generation;
+
+  if (!ahi_data->lease_held)
+    return;
+  slot = ahi_data->lease_session.grant.slot;
+  generation = ahi_data->lease_session.grant.generation;
+  ahi_data->lease_held = 0;
+  memset(&ahi_data->lease_session, 0,
+         sizeof(ahi_data->lease_session));
+
+  zz9k_request_init(&request, ZZ9K_OP_AUDIO_RING_RELEASE);
+  request.entry.payload_len = sizeof(ZZ9KAudioRingReleasePayload);
+  {
+    ZZ9KAudioRingReleasePayload *rel =
+        (ZZ9KAudioRingReleasePayload *)
+            request.entry.payload.inline_data;
+    zz9k_put_be32(rel->slot, slot);
+    zz9k_put_be32(rel->generation, generation);
+    zz9k_put_be32(rel->flags, 0U);
+  }
+  (void)ZZ9KCall(&request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+}
+
 static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagList asm("a1"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
   // TW: Just take the values from where init() has already stored them.
   uint32_t hw_addr = Z9AXBase->hw_addr;
@@ -782,16 +1101,45 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
 
   AudioCtrl->ahiac_DriverData = ahi_data;
 
-  // Atomic ownership claim: reject both another low-level AHI allocation and
-  // MHI before touching shared hardware. AHI's low-level API is exclusive;
-  // full duplex is AHISF_PLAY|AHISF_RECORD on this one AudioCtrl, not two
-  // independent AudioCtrls. Publishing owner and installing the ISR under the
-  // same Forbid closes both AHI/AHI and AHI/MHI TOCTOU windows. The HW-side
+  // Control-plane client (R4/R16): when zz9k.library is present AND the
+  // running firmware advertises ZZ9K_CAP_AUDIO_CONTROL, submit this
+  // owner's neutral source trim -- the reserved keep-baseline word,
+  // "no trim from this owner": the firmware answers with the operator
+  // baseline pair and does not restage the mixer. The reply is
+  // authoritative; the driver never mirrors it into DSP registers. The
+  // capability query and the trim submission block on the mailbox
+  // completion, so both run before the ownership claim, never under
+  // Forbid. The same pass decides fabric lease mode: the card must
+  // advertise the audio fabric AND the audio service's rate flag, so
+  // AHI's mix-rate table keeps working through card-side conversion.
+  ZZ9KBase = OpenLibrary((STRPTR)"zz9k.library", 0);
+  audio_control_capped = 0;
+  ahi_data->fabric_mode = 0;
+  if (ZZ9KBase) {
+    ZZ9KCaps caps;
+    if (ZZ9KQueryCaps(&caps) == ZZ9K_STATUS_OK &&
+        (caps.capability_bits & ZZ9K_CAP_AUDIO_CONTROL)) {
+      audio_control_capped = 1;
+      submit_source_trim();
+    }
+    ahi_data->fabric_mode =
+        (uint8_t)fabric_rate_capped();
+  }
+  // Atomic ownership claim: reject both another low-level AHI allocation
+  // and -- on non-fabric stacks -- MHI, before touching shared hardware.
+  // AHI's low-level API is exclusive; full duplex is AHISF_PLAY|AHISF_RECORD
+  // on this one AudioCtrl, not two independent AudioCtrls. Publishing owner
+  // and installing the ISR under the same Forbid closes both AHI/AHI and
+  // AHI/MHI TOCTOU windows. In fabric lease mode the AHI/MHI software
+  // exclusion is deliberately skipped: AHI plays through a bounded lease
+  // beside MHI's pump, and firmware's ownership state stays the authority
+  // (a legacy session still blocks the pump bind fail-closed). The HW-side
   // interrupt stays OFF until the worker is up; Start() publishes the
   // requested direction mask.
   prepare_irq_struct(ahi_data);
   Forbid();
-  if (Z9AXBase->owner || mhi_present_locked()) {
+  if (Z9AXBase->owner ||
+      (!ahi_data->fabric_mode && mhi_present_locked())) {
     Permit();
     kprintf((CONST_STRPTR)"Can't allocate! Audio hardware already owned.\n");
     if (record_buf) FreeVec(record_buf);
@@ -819,34 +1167,20 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
   Permit();
 
   Forbid();
-  // set tx buffer address
-  write_audio_param(hw_addr, 0, offset_tx>>16);
-  write_audio_param(hw_addr, 1, offset_tx&0xffff);
-
+  /* Fabric lease mode never repoints the legacy TX ring: the firmware
+   * compositor owns it, and an AP_TX_BUF_OFFS write would request a
+   * formatter re-init under the fabric's feet (the record-start wart
+   * from the two-client investigation). Record keeps its RX buffer
+   * parameters on both paths. */
+  if (!ahi_data->fabric_mode) {
+    write_audio_param(hw_addr, 0, offset_tx >> 16);
+    write_audio_param(hw_addr, 1, offset_tx & 0xffff);
+  }
   if (record_capable) {
-    write_audio_param(hw_addr, ZZ_AX_AP_RX_BUF_OFFS_HI, offset_rx>>16);
-    write_audio_param(hw_addr, ZZ_AX_AP_RX_BUF_OFFS_LO, offset_rx&0xffff);
+    write_audio_param(hw_addr, ZZ_AX_AP_RX_BUF_OFFS_HI, offset_rx >> 16);
+    write_audio_param(hw_addr, ZZ_AX_AP_RX_BUF_OFFS_LO, offset_rx & 0xffff);
   }
   Permit();
-
-  // Control-plane client (R4/R16): when zz9k.library is present AND the
-  // running firmware advertises ZZ9K_CAP_AUDIO_CONTROL, submit this
-  // owner's neutral source trim -- the reserved keep-baseline word,
-  // "no trim from this owner": the firmware answers with the operator
-  // baseline pair and does not restage the mixer. The reply is
-  // authoritative; the driver never mirrors it into DSP registers. The
-  // capability query and the trim submission block on the mailbox
-  // completion, so both run after the Permit above, never under Forbid.
-  ZZ9KBase = OpenLibrary((STRPTR)"zz9k.library", 0);
-  audio_control_capped = 0;
-  if (ZZ9KBase) {
-    ZZ9KCaps caps;
-    if (ZZ9KQueryCaps(&caps) == ZZ9K_STATUS_OK &&
-        (caps.capability_bits & ZZ9K_CAP_AUDIO_CONTROL)) {
-      audio_control_capped = 1;
-      submit_source_trim();
-    }
-  }
 
   // Old firmware (no zz9k.library, or the capability not advertised):
   // no scene module owns the master chain, so keep the legacy
@@ -860,14 +1194,17 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
     write_audio_param(hw_addr, ZZ_AX_AP_DSP_SET_LOWPASS, lpf_freq);
   }
 
-  // Zero the hardware audio ring buffer before we enable playback. The
-  // FPGA DAC starts consuming from audio_hw_buf_addr as soon as the HW
-  // audio interrupt is armed, and whatever garbage was left there by a
-  // previous MHI session, a previous AHI session, or power-on junk will
-  // be played as a short burst before the worker writes the first mixed
-  // period. ZZ_AX_AUDIO_BUFSZ is the full ring size (8 periods); zeroing all
-  // of it means the DAC plays silence until real data lands.
-  zero_hw_audio_ring(ahi_data);
+  // Zero the hardware audio ring buffer before we enable playback -- the
+  // legacy path only: a lease's grant is pre-zeroed by firmware (R5), and
+  // the legacy ring is not ours to touch in fabric mode. The FPGA DAC
+  // starts consuming from audio_hw_buf_addr as soon as the HW audio
+  // interrupt is armed, and whatever garbage was left there by a previous
+  // MHI session, a previous AHI session, or power-on junk will be played
+  // as a short burst before the worker writes the first mixed period.
+  // ZZ_AX_AUDIO_BUFSZ is the full ring size (8 periods); zeroing all of it
+  // means the DAC plays silence until real data lands.
+  if (!ahi_data->fabric_mode)
+    zero_hw_audio_ring(ahi_data);
 
   ahi_data->mainproc_signal = AllocSignal(-1);
   if (ahi_data->mainproc_signal == -1) {
@@ -970,6 +1307,13 @@ static void __attribute__((used)) intAHIsub_FreeAudio(struct AHIAudioCtrlDrv *Au
     ahi_data->worker_process = NULL;
   }
 
+  // Surrender the fabric lease while zz9k.library is still open: the
+  // worker (the sole producer-line writer) is gone, so the lease must
+  // not linger on heartbeat alone. Blocking mailbox call, outside any
+  // Forbid window; idempotent and stale-generation safe.
+  if (ahi_data->fabric_mode)
+    fabric_lease_release(ahi_data);
+
   // Release the control-plane binding opened at allocate. The release
   // is explicit: when the capability was seen, submit the reserved
   // neutral balance word -- the pinned keep-baseline release, "no trim
@@ -1023,18 +1367,54 @@ static void __attribute__((used)) intAHIsub_Stop(uint32_t Flags asm("d0"), struc
   }
 
   if (stop_play) {
-    // Clear the 30 KB Zorro-side ring outside Forbid(); AHI serializes
-    // Start/Stop calls for this driver instance, and playback is off.
-    zero_hw_audio_ring(ahi_data);
+    if (ahi_data->fabric_mode) {
+      /* Lease mode: the worker publishes the PAUSED producer flag on
+       * its next pacing pass (it is the sole producer-line writer);
+       * cursor progress is suppressed without an underrun and the
+       * heartbeat stays live (R12). The lease is released at
+       * FreeAudio, not here, so Start() resumes without a new
+       * grant. */
+      ahi_data->lease_session.flags |=
+          ZZ9K_AUDIO_RING_PRODUCER_FLAG_PAUSED;
+    } else {
+      // Clear the 30 KB Zorro-side ring outside Forbid(); AHI
+      // serializes Start/Stop calls for this driver instance, and
+      // playback is off.
+      zero_hw_audio_ring(ahi_data);
+    }
   }
 }
 
 static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
   struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
   uint16_t play_sequence = 0;
+  uint32_t result = AHIE_OK;
   if (!ahi_data) return AHIE_OK;
 
-  if (flags & AHISF_PLAY) {
+  if ((flags & AHISF_PLAY) && ahi_data->fabric_mode) {
+    /* Lease mode: acquire at the first play Start, clear PAUSED, and
+     * let the credit-paced worker take it from here. A refused
+     * acquire fails the Start honestly: the fabric owns the output,
+     * so a silent legacy fallback would be silent no-output. */
+    if (!ahi_data->lease_held) {
+      if (!fabric_lease_acquire(ahi_data,
+                                AudioCtrl->ahiac_MixFreq)) {
+        kprintf((CONST_STRPTR)"ZZ9000AX: fabric lease refused; "
+                "Start(PLAY) fails\n");
+        result = AHIE_UNKNOWN;
+      }
+    }
+    if (result == AHIE_OK) {
+      Forbid();
+      ahi_data->buf_offset = 0;
+      ahi_data->lease_session.flags &=
+          ~ZZ9K_AUDIO_RING_PRODUCER_FLAG_PAUSED;
+      ahi_data->play_stop = 0;
+      update_hw_interrupts(ahi_data);
+      Permit();
+    }
+  }
+  else if (flags & AHISF_PLAY) {
     Forbid();
     ahi_data->buf_offset = 0;
     ahi_data->play_stop = 1;
@@ -1078,8 +1458,9 @@ static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), 
     Permit();
   }
 
-  // Returns AHIE_OK if successful.
-  return AHIE_OK;
+  // AHIE_OK when every requested direction started; a refused lease
+  // reports AHIE_UNKNOWN for playback.
+  return result;
 }
 
 static int32_t __attribute__((used)) intAHIsub_GetAttr(uint32_t attr_ asm("d0"), int32_t arg_ asm("d1"), int32_t def_ asm("d2"), struct TagItem *tagList asm("a1"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {

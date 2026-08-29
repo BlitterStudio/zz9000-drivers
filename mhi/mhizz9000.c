@@ -141,6 +141,37 @@ static BOOL ahi_present_locked(struct MHI_LibBase *MhiLibBase) {
 	return FindName(IrqList, ZZ_AX_IRQ_NAME_AHI) ? TRUE : FALSE;
 }
 
+/* Fabric plane probe (AHI migration): TRUE when the running firmware
+ * advertises the audio fabric AND the audio service's FABRIC_RATE
+ * flag. On such stacks AHI plays through a bounded direct-ring lease
+ * beside this driver's pump slot, so the historic AHI/MHI software
+ * exclusion is deliberately skipped; firmware's ownership state stays
+ * the authority (a legacy AHI session still blocks the pump bind).
+ * Requires ZZ9KBase live; blocks on the mailbox completion, so it
+ * must run outside Forbid(). */
+static BOOL fabric_rate_capped(void) {
+	ZZ9KRequest request;
+	ZZ9KMailboxEntry reply;
+	ZZ9KQueryServicePayload *query;
+	ZZ9KServiceInfoPayload info;
+	ZZ9KCaps caps;
+
+	if(ZZ9KQueryCaps(&caps) != ZZ9K_STATUS_OK ||
+	   !(caps.capability_bits & ZZ9K_CAP_AUDIO_FABRIC))
+		return FALSE;
+
+	zz9k_request_init(&request, ZZ9K_OP_QUERY_SERVICE);
+	request.entry.payload_len = sizeof(*query);
+	query = (ZZ9KQueryServicePayload *)request.entry.payload.inline_data;
+	zz9k_put_be32(query->service_id, ZZ9K_SERVICE_AUDIO);
+	if(ZZ9KCall(&request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS) !=
+	   ZZ9K_STATUS_OK)
+		return FALSE;
+	memcpy(&info, reply.payload.inline_data, sizeof(info));
+	return (zz9k_get_be32(info.flags) &
+	        ZZ9K_SERVICE_FLAG_AUDIO_FABRIC_RATE) != 0;
+}
+
 BOOL UserLibInit(struct MHI_LibBase *MhiLibBase) {
 	// Must start at NULL: FindConfigDev(NULL, ...) means "search from head".
 	// Leaving cd uninitialized here is UB and, if BSS happens to hold a
@@ -1058,6 +1089,7 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 	// decide the card is free and then both attach. The HW audio bit stays
 	// off until i_MHIPlay() fires, so the newly-installed ISR is a no-op
 	// in the meantime.
+	BOOL ahi_seen = FALSE;
 	Forbid();
 	if(MHI_LibBase->NumAllocatedDecoders) {
 		Permit();
@@ -1067,14 +1099,12 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 		CloseLibrary(base);
 		return NULL;
 	}
-	if(ahi_present_locked(MHI_LibBase)) {
-		Permit();
-		KPrintF("Can't allocate! Hardware already used by AHI.\n");
-		FreeVec(mp->BufferList);
-		FreeVec(mp);
-		CloseLibrary(base);
-		return NULL;
-	}
+	// AHI's ISR presence is observed here (inside the atomic claim) but
+	// only acted on after the claim, once the firmware's fabric
+	// capability is known: on a fabric-rate stack AHI runs as a bounded
+	// lease producer beside our pump and the exclusion is skipped
+	// deliberately; otherwise the classic mutual exclusion applies.
+	ahi_seen = ahi_present_locked(MHI_LibBase);
 	install_irq_server_locked(mp);
 	MHI_LibBase->NumAllocatedDecoders++;
 	// Claim won: publish our library reference for the proto inlines.
@@ -1121,6 +1151,24 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 			mp->audio_control_capped = TRUE;
 			submit_source_trim();
 		}
+	}
+
+	// AHI/MHI exclusion decision (AHI migration): ahi_seen was observed
+	// inside the atomic claim above. On a fabric-rate stack the
+	// exclusion is deliberately skipped -- AHI plays through a bounded
+	// direct-ring lease beside this decoder's pump slot, and firmware's
+	// ownership state stays the authority. Otherwise the classic rule
+	// applies and the claim is released exactly like the capability
+	// failure above.
+	if(ahi_seen && !fabric_rate_capped()) {
+		KPrintF("Can't allocate! Hardware already used by AHI.\n");
+		Forbid();
+		unclaim_ownership_locked(mp, MHI_LibBase);
+		Permit();
+		FreeVec(mp->BufferList);
+		FreeVec(mp);
+		CloseLibrary(base);
+		return NULL;
 	}
 
 	// No mixer stamp here (R4): the output balance is the firmware's to
