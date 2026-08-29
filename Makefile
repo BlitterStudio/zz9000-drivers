@@ -1,7 +1,7 @@
 AMIGA_IMAGE ?= sacredbanana/amiga-compiler:m68k-amigaos
 AMIGA_DOCKER = ./tools/amiga-docker.sh
 
-.PHONY: all build-all package-local check-release quality rtg-tests \
+.PHONY: all build-all package-local check-release quality rtg-tests mhi-tests \
 	rtg zztop zzscanlines zzfwupdate usb-poseidon sd-boot net ZZNetStats \
 	mhi ahi ahi-duplextest ZZDiag sdk amissl
 
@@ -21,6 +21,12 @@ quality:
 
 rtg-tests:
 	$(MAKE) -C rtg/tests test
+
+mhi-tests:
+	$(CC) -std=c99 -O2 -Wall -Wextra -Werror \
+		-o mhi/transport_geometry_test mhi/transport_geometry_test.c
+	./mhi/transport_geometry_test
+	rm -f mhi/transport_geometry_test
 
 rtg:
 	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) rtg ./build.sh

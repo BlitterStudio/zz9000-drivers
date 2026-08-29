@@ -282,7 +282,9 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("ZZ_FW_CAP_Z2_APERTURE_LAYOUT", abi)
         self.assertIn("zz_z2_aperture_negotiate(aperture_info", driver)
         self.assertIn("aperture_status == ZZ_APERTURE_VALID", driver)
-        self.assertIn("ZZ_Z2_APERTURE_ACK_TOKEN", driver)
+        # Generation-aware acknowledgement (PR #74 review): the
+        # driver must echo the descriptor's own generation token.
+        self.assertIn("zz_z2_aperture_ack_token(aperture_info)", driver)
         self.assertIn("ZZ_CARD_DATA_TEMPLATE_OFFSET", driver)
         self.assertNotIn("zz_template_addr = b->MemorySize", driver)
         self.assertIn("AutoConfigBoardSize", diag)
@@ -674,6 +676,16 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("mp->Status = MHIF_STOPPED", drain)
         build = self.read("mhi/build.sh")
         self.assertIn("ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_DRAIN", build)
+
+    def test_mhi_feeder_does_not_use_vblank_timer(self):
+        source = self.read("mhi/mhizz9000.c")
+        feeder = source[
+            source.index("static void mhi_feeder(void)"):
+            source.index("/* ******************* */\n/*  END feeder process */")
+        ]
+        self.assertIn('OpenDevice((STRPTR)"timer.device", UNIT_MICROHZ,',
+                      feeder)
+        self.assertNotIn("UNIT_VBLANK", feeder)
 
     def test_mhi_buffer_completion_tracks_decoder_consumption(self):
         source = self.read("mhi/mhizz9000.c")

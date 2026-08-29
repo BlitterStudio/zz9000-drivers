@@ -271,6 +271,13 @@ jobs:
           name: mhizz9000.library
           path: mhi/mhizz9000.library
           if-no-files-found: error
+      # Diagnostic build for feeder-vs-pump hardware isolation: packaged
+      # for testers, never installed as the production library.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mhizz9000.library.decode-only
+          path: mhi/mhizz9000.library.decode-only
+          if-no-files-found: error
 
   ahi:
     name: ahi — zz9000ax.audio + duplex test
@@ -388,6 +395,10 @@ jobs:
           install -Dm755 artifacts/ZZDiag/ZZDiag                       "$INST/Tools/ZZDiag"
           install -Dm644 ahi/README.md                                 "$INST/Docs/ahi-README.md"
           install -Dm644 usb-poseidon/README.md                        "$INST/Docs/usb-poseidon-README.md"
+          # Diagnostic-only MHI build; staged under Docs, never installed
+          # as the production library.
+          install -Dm644 artifacts/mhizz9000.library.decode-only/mhizz9000.library.decode-only \
+                                                                       "$INST/Docs/mhizz9000.library.decode-only"
 
           # SDK runtime payloads + accelerated amissl.library
           install -Dm644 artifacts/sdk-payloads/Libs/zz9k.library      "$INST/Libs/zz9k.library"

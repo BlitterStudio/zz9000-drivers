@@ -64,3 +64,9 @@ m68k-amigaos-strip -s -o mhizz9000.library mhizz9000.library.debug
 # when diagnosing player behaviour.
 m68k-amigaos-gcc StartUp.c LibInit.c mhizz9000.c asmfuncs.s -m68020 -O3 -DZZ_MHI_TRACE=1 -I../include -Izz9k-headers -o mhizz9000.library.trace.debug -g -ggdb -Wall -Wextra -Wno-unused-parameter -Wno-pointer-to-int-cast -Wno-pointer-sign -nostartfiles -ldebug
 m68k-amigaos-strip -s -o mhizz9000.library.trace mhizz9000.library.trace.debug
+
+# Decode-only diagnostic: exercises the MHI feeder and accelerated decoder but
+# suppresses AX binding and drains PCM through READ. It is intentionally silent
+# and is packaged only for feeder-vs-pump hardware isolation.
+m68k-amigaos-gcc StartUp.c LibInit.c mhizz9000.c asmfuncs.s -m68020 -O3 -DZZ_MHI_TRACE=1 -DZZ_MHI_DIAG_DECODE_ONLY=1 -I../include -Izz9k-headers -o mhizz9000.library.decode-only.debug -g -ggdb -Wall -Wextra -Wno-unused-parameter -Wno-pointer-to-int-cast -Wno-pointer-sign -nostartfiles -ldebug
+m68k-amigaos-strip -s -o mhizz9000.library.decode-only mhizz9000.library.decode-only.debug

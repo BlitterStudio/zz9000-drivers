@@ -42,6 +42,7 @@
 #include "zz9000_ax.h"
 #include "zzcfg_query.h"
 #include "mhizz9000.h"
+#include "transport_geometry.h"
 
 #include "zz9k/audio.h"
 #include "zz9k/library_vectors.h"
@@ -60,28 +61,10 @@
 // allocation (there is at most one decoder).
 struct Library *ZZ9KBase;
 
-// 68k -> card transport chunk (one FEED per chunk). Small on purpose so
-// the card-side input ring refills smoothly. Application buffers are not
-// completed here: the cumulative firmware decoder cursor retires them only
-// after their compressed bytes have actually been consumed.
-#define ZZ_MHI_STAGING_BYTES   (4UL * 1024UL)
-// Card-side compressed ring. Pure tuning, NOT a liveness constraint:
-// the feeder process makes feed progress on its own, so playback works
-// for ANY application buffer size (AmigaAMP offers 16K up to
-// whole-file) and for apps that never poll. The ring sets (a) how much
-// already-counted audio survives a seek and how far the time display
-// leads the speakers (8K is ~0.5 s at 128 kbit/s, plus the ~350 ms
-// decoded PCM ring), and (b) the underrun runway against scheduling
-// hiccups: worst case 320 kbit/s drains 8K in ~200 ms while the feeder
-// refills 4K per 50 ms retry, with the PCM ring as further cushion.
-// Must stay comfortably above both the 4K feed chunk and the
-// decoder's 4K minimum-input gate (see the firmware side).
-#define ZZ_MHI_MP3_RING_BYTES  (8UL * 1024UL)
-// Card-side PCM ring the firmware pump plays from: 16 periods of 3840
-// bytes (~320 ms of 48 kHz stereo).
-#define ZZ_MHI_PCM_RING_BYTES  (61440UL)
-// Pump refill threshold: half the PCM ring.
-#define ZZ_MHI_PCM_LOW_WATER   (ZZ_MHI_PCM_RING_BYTES / 2UL)
+/* Transport geometry is selected per bus generation in
+ * transport_geometry.h. Z2 keeps the qualified compact profile. Z3 uses the
+ * same 64-KiB feed / 128-KiB compressed / 256-KiB PCM geometry as ZZPlay's
+ * passing accelerated-AHI path, avoiding the measured 4-KiB MHI mailbox storm. */
 // Public MHI has no EOF call. Sustained queue starvation therefore requests
 // a RESUMABLE drain: firmware decodes every complete frame, retains a partial
 // compressed frame, drains the real AX tail, and reports OUT_OF_DATA while
@@ -333,7 +316,7 @@ static void mhi_feed_pending(struct MhiPlayer *mp) {
 		if(!node)
 			return;
 
-		if(chunk > ZZ_MHI_STAGING_BYTES) chunk = ZZ_MHI_STAGING_BYTES;
+		if(chunk > mp->staging.length) chunk = mp->staging.length;
 
 		KPrintF("feed: node=0x%08lX idx=%lu chunk=%lu\n",
 		        (ULONG)node, (ULONG)index, (ULONG)chunk);
@@ -400,6 +383,8 @@ static void mhi_feed_pending(struct MhiPlayer *mp) {
 // Open the SDK session (and, once, the shared buffers backing it).
 static BOOL mhi_stream_open(struct MhiPlayer *mp) {
 	ZZ9KAudioStreamBeginDesc begin;
+	struct zz_mhi_transport_geometry geometry =
+		zz_mhi_transport_geometry(mp->zorro_version);
 
 	if(mp->session != 0) return TRUE;
 
@@ -413,20 +398,20 @@ static BOOL mhi_stream_open(struct MhiPlayer *mp) {
 		// (decode input, AX playback output): CARD_ONLY skips the
 		// board-window mapping entirely, which is what makes them
 		// allocatable on Z2 in the first place.
-		if(ZZ9KAllocShared(ZZ_MHI_STAGING_BYTES, 16,
+		if(ZZ9KAllocShared(geometry.staging_bytes, 16,
 		                   ZZ9K_ALLOC_HOST_WINDOW,
 		                   &mp->staging) != ZZ9K_STATUS_OK) {
 			KPrintF("stream_open: staging alloc failed\n");
 			return FALSE;
 		}
-		if(ZZ9KAllocShared(ZZ_MHI_MP3_RING_BYTES, 16,
+		if(ZZ9KAllocShared(geometry.mp3_ring_bytes, 16,
 		                   ZZ9K_ALLOC_CARD_ONLY,
 		                   &mp->mp3_ring) != ZZ9K_STATUS_OK) {
 			KPrintF("stream_open: mp3 ring alloc failed\n");
 			ZZ9KFreeShared(mp->staging.handle);
 			return FALSE;
 		}
-		if(ZZ9KAllocShared(ZZ_MHI_PCM_RING_BYTES, 16,
+		if(ZZ9KAllocShared(geometry.pcm_ring_bytes, 16,
 		                   ZZ9K_ALLOC_CARD_ONLY,
 		                   &mp->pcm_ring) != ZZ9K_STATUS_OK) {
 			KPrintF("stream_open: pcm ring alloc failed\n");
@@ -444,7 +429,7 @@ static BOOL mhi_stream_open(struct MhiPlayer *mp) {
 	        &begin, mp->mp3_ring.handle, mp->mp3_ring.length,
 	        mp->pcm_ring.handle, mp->pcm_ring.length, 0, 0,
 	        ZZ9K_AUDIO_SAMPLE_FORMAT_S16LE,
-	        ZZ_MHI_PCM_LOW_WATER, 0, 0)) {
+	        geometry.pcm_low_water_bytes, 0, 0)) {
 		KPrintF("stream_open: begin desc rejected (client side)\n");
 		return FALSE;
 	}
@@ -460,6 +445,10 @@ static BOOL mhi_stream_open(struct MhiPlayer *mp) {
 	mp->starvation_polls = 0;
 	mp->submitted_bytes = 0;
 	mp->feeds_accepted = 0;
+	KPrintF("stream geometry: staging=%lu mp3=%lu pcm=%lu low=%lu\n",
+	        (ULONG)geometry.staging_bytes, (ULONG)geometry.mp3_ring_bytes,
+	        (ULONG)geometry.pcm_ring_bytes,
+	        (ULONG)geometry.pcm_low_water_bytes);
 	KPrintF("stream_open: session=%lu\n", (ULONG)mp->session);
 	return TRUE;
 }
@@ -509,6 +498,21 @@ static void mhi_stream_close(struct MhiPlayer *mp) {
 	}
 }
 
+#ifdef ZZ_MHI_DIAG_DECODE_ONLY
+/* Diagnostic discriminator: keep the MHI feeder and firmware decoder busy
+ * while deliberately leaving the AX pump unbound. Retire decoded PCM through
+ * READ so the small MHI rings cannot fill and accidentally turn the test idle.
+ * This build is silent by design and must never replace the production target. */
+static void mhi_diag_consume_pcm(struct MhiPlayer *mp) {
+	ULONG used;
+
+	if(!mp || mp->session == 0) return;
+	used = mp->result.pcm_write - mp->result.pcm_read;
+	if(used != 0)
+		(void)ZZ9KAudioStreamRead(mp->session, used, 0, &mp->result);
+}
+#endif
+
 // Complete a deferred Play: bind the session to the AX output once the
 // card has decoded PCM and knows the sample rate. MHIPlay may legally
 // arrive BEFORE any data is queued (the legacy driver allowed it, and
@@ -539,6 +543,11 @@ static void mhi_try_bind(struct MhiPlayer *mp) {
 		   mp->result.sample_rate == 0)
 			return;
 	}
+#ifdef ZZ_MHI_DIAG_DECODE_ONLY
+	mp->play_pending = FALSE;
+	KPrintF("MHI diagnostic: decoder active, AX binding suppressed.\n");
+	return;
+#endif
 	if(ZZ9KAudioStreamPlay(mp->session, 0, &mp->result) != ZZ9K_STATUS_OK) {
 		KPrintF("mhi_try_bind: PLAY rejected.\n");
 		return;
@@ -676,10 +685,14 @@ static BOOL mhi_stream_service_drain(struct MhiPlayer *mp) {
 		return FALSE;
 	}
 
+#ifdef ZZ_MHI_DIAG_DECODE_ONLY
+	rc = ZZ9KAudioStreamRead(mp->session, 0, 0, &mp->result);
+#else
 	if(mp->play_pending)
 		rc = ZZ9KAudioStreamRead(mp->session, 0, 0, &mp->result);
 	else
 		rc = ZZ9KAudioStreamPlay(mp->session, 0, &mp->result);
+#endif
 	if(rc != ZZ9K_STATUS_OK) {
 		if(mhi_stream_status_retryable(rc))
 			return TRUE;
@@ -780,7 +793,10 @@ static void mhi_feeder(void) {
 	treq = (struct timerequest *)CreateIORequest(port,
 	                                             sizeof(struct timerequest));
 	if(!treq) goto out;
-	if(OpenDevice((STRPTR)"timer.device", UNIT_VBLANK,
+	/* Retry deadlines are real microsecond timers. The vblank timer unit
+	 * hooks the feeder into vertical-blank service while MHI is active; this
+	 * was the remaining difference from the stable ZZPlay/AHI timer path. */
+	if(OpenDevice((STRPTR)"timer.device", UNIT_MICROHZ,
 	              (struct IORequest *)treq, 0) != 0) goto out;
 	dev_open = 1;
 
@@ -813,6 +829,9 @@ static void mhi_feeder(void) {
 		   mp->Status == MHIF_PLAYING) {
 			mhi_feed_pending(mp);
 			mhi_try_bind(mp);
+#ifdef ZZ_MHI_DIAG_DECODE_ONLY
+			mhi_diag_consume_pcm(mp);
+#endif
 			drain_busy = mhi_stream_service_drain(mp);
 			busy = mp->have_unfed || mp->backpressure ||
 			       mp->play_pending || drain_busy;
@@ -1010,6 +1029,7 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 
 	mp->hw_addr = MHI_LibBase->hw_addr;
 	mp->flags   = MHI_LibBase->flags;
+	mp->zorro_version = MHI_LibBase->zorro_version;
 
 	mp->MhiTask = mhi_task;
 	mp->MhiMask = mhi_sigmask;
@@ -1112,13 +1132,13 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 	g_feeder_mp = mp;
 	mp->feeder_state = 0;
 	mp->feeder_quit = FALSE;
-	// Priority 5: the feeder must keep its retry cadence under load
-	// (busy apps, disk activity run at 0); its work per wake is a few
-	// short mailbox ops, so it cannot hog anything.
+	// Normal priority: the Z3 batched rings provide ample runway, and running
+	// this mailbox feeder above Intuition/graphics was measured to disturb
+	// native-overlay presentation while an MHI stream was active.
 	if(!CreateNewProcTags(NP_Entry, (ULONG)mhi_feeder,
 	                      NP_Name, (ULONG)"mhizz9000 feeder",
 	                      NP_StackSize, 16384,
-	                      NP_Priority, 5,
+	                      NP_Priority, ZZ_MHI_FEEDER_PRIORITY,
 	                      TAG_DONE)) {
 		mp->feeder_state = 2;
 	}
@@ -1583,7 +1603,11 @@ ULONG i_MHIQuery(REGD1( ULONG mhi_query), REGA6(struct MHI_LibBase *MHI_LibBase)
 			return (ULONG)"audio/mpeg{audio/mp3}"; // We currently only support mp3 contained in a raw MPEG stream.
 
 		case MHIQ_DECODER_NAME:
+#ifdef ZZ_MHI_DIAG_DECODE_ONLY
+			return (ULONG)"ZZ9000AX (decode-only diagnostic)";
+#else
 			return (ULONG)"ZZ9000AX (SDK core-1)";
+#endif
 
 		case MHIQ_DECODER_VERSION:
 			return (ULONG)IDSTRING;

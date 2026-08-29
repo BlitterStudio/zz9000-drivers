@@ -17,7 +17,11 @@
  * 0x1000).  The low word is also the write-only host acknowledgement. */
 #define ZZ_REG_Z2_APERTURE_INFO_HI 0x111cUL
 #define ZZ_REG_Z2_APERTURE_INFO_LO 0x111eUL
-#define ZZ_Z2_APERTURE_ACK_TOKEN   0xa501U
+/* The acknowledgement word is the descriptor's own generation: generation 2
+ * layouts are acknowledged with 0xa502, and a generation-1-only FPGA must
+ * still be acknowledged with its own 0xa501 token (PR #74 review). */
+#define ZZ_Z2_APERTURE_ACK_TOKEN_GEN1 0xa501U
+#define ZZ_Z2_APERTURE_ACK_TOKEN_GEN2 0xa502U
 
 #define ZZ_FW_CAP_Z2_APERTURE_LAYOUT (1U << 2)
 
@@ -25,14 +29,35 @@
 #define ZZ_Z2_APERTURE_INFO_MAGIC           0x5a000000UL
 #define ZZ_Z2_APERTURE_INFO_GENERATION_MASK 0x00ff0000UL
 #define ZZ_Z2_APERTURE_INFO_GENERATION_1    0x00010000UL
+#define ZZ_Z2_APERTURE_INFO_GENERATION_2    0x00020000UL
 
-#define ZZ_Z2_APERTURE_INFO_2M 0x5a010502UL
-#define ZZ_Z2_APERTURE_INFO_4M 0x5a010704UL
-#define ZZ_Z2_APERTURE_INFO_8M 0x5a010708UL
+/* Generation 2 (direct-ring carve) descriptors. */
+#define ZZ_Z2_APERTURE_INFO_2M 0x5a020502UL
+#define ZZ_Z2_APERTURE_INFO_4M 0x5a020704UL
+#define ZZ_Z2_APERTURE_INFO_8M 0x5a020708UL
+/* Generation 1 descriptors: the previously supported layout without the
+ * direct-ring reservation. Old FPGA/firmware pairs still publish these and
+ * must keep working (smaller direct-ring-less host window geometry). */
+#define ZZ_Z2_APERTURE_INFO_2M_GEN1 0x5a010502UL
+#define ZZ_Z2_APERTURE_INFO_4M_GEN1 0x5a010704UL
+#define ZZ_Z2_APERTURE_INFO_8M_GEN1 0x5a010708UL
+
+static inline uint16_t zz_z2_aperture_ack_token(uint32_t descriptor)
+{
+	return (descriptor & ZZ_Z2_APERTURE_INFO_GENERATION_MASK) ==
+	       ZZ_Z2_APERTURE_INFO_GENERATION_2 ?
+		ZZ_Z2_APERTURE_ACK_TOKEN_GEN2 : ZZ_Z2_APERTURE_ACK_TOKEN_GEN1;
+}
 
 #define ZZ_Z2_REGISTER_SPACE_SIZE 0x00010000UL
 #define ZZ_Z2_TEMPLATE_SIZE       0x00010000UL
 #define ZZ_Z2_AUDIO_SIZE          0x00010000UL
+/* Generation 2 carves a fixed 48 KiB direct-ring reservation out of the
+ * top of the old host-window region: it sits between the smaller host heap
+ * and the audio scratch, holds the single Z2 audio direct-ring grant, and
+ * is not a payload region -- clients learn its geometry only from the SDK
+ * acquire op. */
+#define ZZ_Z2_DIRECT_RING_RESERVE_SIZE 0x0000C000UL
 
 struct ZZApertureRegion {
 	uint32_t base; /* board-relative */
@@ -141,7 +166,7 @@ static inline int zz_z2_aperture_profile(uint32_t descriptor,
 		value.aperture_size = 0x00200000UL;
 		value.framebuffer = (struct ZZApertureRegion){0x00010000UL, 0x001c0000UL};
 		value.template_scratch = (struct ZZApertureRegion){0x001d0000UL, 0x00010000UL};
-		value.host_window = (struct ZZApertureRegion){0x001e0000UL, 0x00010000UL};
+		value.host_window = (struct ZZApertureRegion){0x001e0000UL, 0x00004000UL};
 		value.audio = (struct ZZApertureRegion){0x001f0000UL, 0x00010000UL};
 		break;
 	case ZZ_Z2_APERTURE_INFO_4M:
@@ -149,10 +174,35 @@ static inline int zz_z2_aperture_profile(uint32_t descriptor,
 		value.framebuffer = (struct ZZApertureRegion){0x00010000UL, 0x00388000UL};
 		value.pip = (struct ZZApertureRegion){0x00398000UL, 0x00038000UL};
 		value.template_scratch = (struct ZZApertureRegion){0x003d0000UL, 0x00010000UL};
-		value.host_window = (struct ZZApertureRegion){0x003e0000UL, 0x00010000UL};
+		value.host_window = (struct ZZApertureRegion){0x003e0000UL, 0x00004000UL};
 		value.audio = (struct ZZApertureRegion){0x003f0000UL, 0x00010000UL};
 		break;
 	case ZZ_Z2_APERTURE_INFO_8M:
+		value.aperture_size = 0x00800000UL;
+		value.framebuffer = (struct ZZApertureRegion){0x00010000UL, 0x00770000UL};
+		value.pip = (struct ZZApertureRegion){0x00780000UL, 0x00040000UL};
+		value.template_scratch = (struct ZZApertureRegion){0x007c0000UL, 0x00010000UL};
+		value.host_window = (struct ZZApertureRegion){0x007d0000UL, 0x00014000UL};
+		value.audio = (struct ZZApertureRegion){0x007f0000UL, 0x00010000UL};
+		break;
+	case ZZ_Z2_APERTURE_INFO_2M_GEN1:
+		/* Generation 1: no direct-ring reservation; the host window is
+		 * the full old top region. */
+		value.aperture_size = 0x00200000UL;
+		value.framebuffer = (struct ZZApertureRegion){0x00010000UL, 0x001c0000UL};
+		value.template_scratch = (struct ZZApertureRegion){0x001d0000UL, 0x00010000UL};
+		value.host_window = (struct ZZApertureRegion){0x001e0000UL, 0x00010000UL};
+		value.audio = (struct ZZApertureRegion){0x001f0000UL, 0x00010000UL};
+		break;
+	case ZZ_Z2_APERTURE_INFO_4M_GEN1:
+		value.aperture_size = 0x00400000UL;
+		value.framebuffer = (struct ZZApertureRegion){0x00010000UL, 0x00388000UL};
+		value.pip = (struct ZZApertureRegion){0x00398000UL, 0x00038000UL};
+		value.template_scratch = (struct ZZApertureRegion){0x003d0000UL, 0x00010000UL};
+		value.host_window = (struct ZZApertureRegion){0x003e0000UL, 0x00010000UL};
+		value.audio = (struct ZZApertureRegion){0x003f0000UL, 0x00010000UL};
+		break;
+	case ZZ_Z2_APERTURE_INFO_8M_GEN1:
 		value.aperture_size = 0x00800000UL;
 		value.framebuffer = (struct ZZApertureRegion){0x00010000UL, 0x00770000UL};
 		value.pip = (struct ZZApertureRegion){0x00780000UL, 0x00040000UL};

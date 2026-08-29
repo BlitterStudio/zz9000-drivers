@@ -85,20 +85,25 @@ AmigaOS file.
 
 SDK offload services are bounded, but no longer audio-only, on Zorro 2.
 Current matched firmware, bitstream, SDK runtime, and drivers negotiate and
-acknowledge the exact board layout before exposing one shared 64 KiB
-CPU-visible host heap. `mpega.library`, `mhizz9000.library`, ZZPlay standalone
-MP3, streamed `zz9k-view`, `zz9k-picture.datatype`, streamed archive work, and
-the accelerated `amissl.library` use compact host-window/card-only layouts on
-both shipped 2 MiB and 4 MiB profiles. The 4 MiB profile additionally provides
-one 224 KiB PIP source for video frames that fit; the 2 MiB profile has no PIP.
+acknowledge the exact board layout before exposing a shared CPU-visible host
+heap. The layout has two generations: generation 1 (previous matched sets and
+older FPGA/firmware pairs) provides a 64 KiB heap; generation 2 shrinks it to
+16 KiB on the 2 MiB and 4 MiB profiles and reserves the freed 48 KiB for the
+Z2 audio direct-ring grant. Both generations keep negotiating — a driver
+update alone never disables RTG on a generation-1 board. `mpega.library`,
+`mhizz9000.library`, ZZPlay standalone MP3, streamed `zz9k-view`,
+`zz9k-picture.datatype`, streamed archive work, and the accelerated
+`amissl.library` use compact host-window/card-only layouts on both shipped
+2 MiB and 4 MiB profiles. The 4 MiB profile additionally provides one 224 KiB
+PIP source for video frames that fit; the 2 MiB profile has no PIP.
 
 Keep firmware, bitstream, SDK payloads, and drivers from the same release on
-Zorro 2. Invalid or unacknowledged generation-1 descriptors deliberately fail
-closed. Descriptor-absent legacy 4 MiB compatibility instead retains the
-historical fixed 64 KiB host window only; legacy 2 MiB and unknown sizes reject
-it. The negotiated 64 KiB heap is shared across clients, so concurrent image,
-archive, audio, DataType, and TLS work can contend. Not every low-level SDK
-diagnostic has been converted from the legacy default shared heap. See the SDK's
+Zorro 2. Invalid or unacknowledged descriptors deliberately fail closed.
+Descriptor-absent legacy 4 MiB compatibility instead retains the historical
+fixed 64 KiB host window only; legacy 2 MiB and unknown sizes reject it. The
+negotiated heap is shared across clients, so concurrent image, archive,
+audio, DataType, and TLS work can contend. Not every low-level SDK diagnostic
+has been converted from the legacy default shared heap. See the SDK's
 [Zorro II service matrix](https://github.com/BlitterStudio/zz9000-sdk/blob/master/docs/zz9k-zorro2-services.md)
 for exact client limits and fallback behavior. An 8 MiB software profile
 exists for future work, but no 8 MiB bitstream variant is shipped.
