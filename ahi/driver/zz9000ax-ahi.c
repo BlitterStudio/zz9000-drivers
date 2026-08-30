@@ -466,9 +466,9 @@ static void fabric_lease_flush_accum(struct z9ax *ahi_data,
  * the play direction allow (PlayerFunc/MixerFunc per period -- the
  * same cadence the legacy path drives from the card interrupt), then
  * publish the producer line: cursor after PCM, heartbeat on every
- * publication (R6/R11). The worker is the sole producer-line writer;
- * Stop(PLAY) only sets the session's PAUSED flag, which this publish
- * carries (cursor progress suppressed, heartbeat alive, R12). */
+ * publication (R6/R11). Disable suppresses AHI callbacks but still
+ * publishes the heartbeat. Stop(PLAY) prevents further production and
+ * surrenders the lease, discarding both staged and ring-resident PCM. */
 static void fabric_lease_pump(struct z9ax *ahi_data,
                               struct AHIAudioCtrlDrv *AudioCtrl)
 {
@@ -516,6 +516,7 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
 
     if (lease_period != 0U && lease_period <= BOUNCE_BUFSZ &&
         ahi_data->lease_accum != NULL && !ahi_data->play_stop &&
+        ahi_data->disable_cnt == 0U &&
         AudioCtrl->ahiac_PreTimer && AudioCtrl->ahiac_MixerFunc) {
       /* Drain credited whole periods before mixing so newly available
        * ring space prevents an avoidable drop. */
@@ -1671,14 +1672,13 @@ static void __attribute__((used)) intAHIsub_Stop(uint32_t Flags asm("d0"), struc
 
   if (stop_play) {
     if (ahi_data->fabric_mode) {
-      /* Lease mode: the worker publishes the PAUSED producer flag on
-       * its next pacing pass (it is the sole producer-line writer);
-       * cursor progress is suppressed without an underrun and the
-       * heartbeat stays live (R12). The lease is released at
-       * FreeAudio, not here, so Start() resumes without a new
-       * grant. */
-      ahi_data->lease_session.flags |=
-          ZZ9K_AUDIO_RING_PRODUCER_FLAG_PAUSED;
+      /* Surrender the lease so neither its staged accumulator period
+       * nor its ring runway can survive Stop(PLAY). Start() acquires a
+       * fresh paused lease and re-primes it from the new AHI timeline.
+       * play_stop was set before Permit(), so the worker cannot stage
+       * more PCM while this blocking mailbox release runs. */
+      ahi_data->lease_accum_fill = 0U;
+      fabric_lease_release(ahi_data);
     } else {
       // Clear the 30 KB Zorro-side ring outside Forbid(); AHI
       // serializes Start/Stop calls for this driver instance, and
@@ -1695,11 +1695,11 @@ static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), 
   if (!ahi_data) return AHIE_OK;
 
   if ((flags & AHISF_PLAY) && ahi_data->fabric_mode) {
-    /* Lease mode: acquire at the first play Start (or after a
-     * mid-session revocation zeroed lease_held), clear PAUSED, and
-     * let the credit-paced worker take it from here. A refused
-     * acquire fails the Start honestly: the fabric owns the output,
-     * so a silent legacy fallback would be silent no-output. */
+    /* Lease mode: acquire at every play Start after Stop surrendered
+     * the old timeline (or after a mid-session revocation zeroed
+     * lease_held), and let the credit-paced worker take it from here.
+     * A refused acquire fails the Start honestly: the fabric owns the
+     * output, so a silent legacy fallback would be silent no-output. */
     if (!ahi_data->lease_held) {
       if (!fabric_lease_acquire(ahi_data,
                                 AudioCtrl->ahiac_MixFreq)) {
@@ -1713,8 +1713,7 @@ static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), 
       Forbid();
       ahi_data->buf_offset = 0;
       /* PAUSED stays as acquired: the worker clears it once two
-       * periods are staged (primed-ring prefill). Stop(PLAY) sets
-       * it again, so a resume re-primes the same way. */
+       * periods are staged (primed-ring prefill). */
       ahi_data->play_stop = 0;
       update_hw_interrupts(ahi_data);
       Permit();

@@ -334,6 +334,25 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("session->grant.ring_offset", acquire)
         self.assertIn("session->grant.control_offset", acquire)
 
+    def test_ahi_fabric_disable_and_stop_preserve_timeline_boundaries(self):
+        source = self.read("ahi/driver/zz9000ax-ahi.c")
+        pump = source[
+            source.index("static void fabric_lease_pump"):
+            source.index("static void fabric_timer_post")
+        ]
+        stop = source[
+            source.index("intAHIsub_Stop"):
+            source.index("intAHIsub_Start")
+        ]
+        self.assertIn("ahi_data->disable_cnt == 0U", pump)
+        self.assertLess(
+            pump.index("ahi_data->disable_cnt == 0U"),
+            pump.index("CallHookPkt(AudioCtrl->ahiac_PlayerFunc")
+        )
+        self.assertIn("ahi_data->lease_accum_fill = 0U;", stop)
+        self.assertIn("fabric_lease_release(ahi_data);", stop)
+        self.assertNotIn("ZZ9K_AUDIO_RING_PRODUCER_FLAG_PAUSED", stop)
+
     def test_build_scripts_have_shebangs_and_use_common_docker_image(self):
         scripts = (
             "tools/amiga-docker.sh",
