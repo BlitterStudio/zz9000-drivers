@@ -791,7 +791,8 @@ static void prepare_irq_struct(struct z9ax* ahi_data) {
 
   irq->is_Node.ln_Type = NT_INTERRUPT;
   irq->is_Node.ln_Pri = 126; // High priority: this ISR must react quickly.
-  irq->is_Node.ln_Name = ZZ_AX_IRQ_NAME_AHI;
+  irq->is_Node.ln_Name = ahi_data->fabric_mode
+      ? ZZ_AX_IRQ_NAME_AHI_FABRIC : ZZ_AX_IRQ_NAME_AHI;
   irq->is_Data = ahi_data;
   irq->is_Code = (void*)dev_isr;
 }

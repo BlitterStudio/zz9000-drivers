@@ -79,6 +79,7 @@ static inline uint16_t zz_ax_audio_tx_status_sequence(uint16_t status)
 #define ZZ_AX_INT2_ENV          "ENV:ZZ9K_INT2"
 
 #define ZZ_AX_IRQ_NAME_AHI      "ZZ9000AX"
+#define ZZ_AX_IRQ_NAME_AHI_FABRIC "ZZ9000AX.fabric"
 #define ZZ_AX_IRQ_NAME_MHI      "mhizz9000"
 #define ZZ_AX_IRQ_NAME_MHI_SOFT "mhizz9000s"
 

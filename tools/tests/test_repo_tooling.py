@@ -494,6 +494,7 @@ class RepoToolingTests(unittest.TestCase):
             "ZZ_AX_AUDIO_BUFSZ",
             "ZZ_AX_INT2_ENV",
             "ZZ_AX_IRQ_NAME_AHI",
+            "ZZ_AX_IRQ_NAME_AHI_FABRIC",
             "ZZ_AX_IRQ_NAME_MHI",
             "ZZ_AX_AP_DSP_SET_VOLUMES",
         ):
@@ -605,6 +606,45 @@ class RepoToolingTests(unittest.TestCase):
         assign = source.index("AudioCtrl->ahiac_BuffSamples =")
         start = source.index("intAHIsub_Start")
         self.assertLess(assign, start)
+
+    def test_ahi_mhi_coexistence_uses_active_mode_token(self):
+        header = self.read("include/zz9000_ax.h")
+        ahi = self.read("ahi/driver/zz9000ax-ahi.c")
+        mhi = self.read("mhi/mhizz9000.c")
+
+        self.assertIn("ZZ_AX_IRQ_NAME_AHI_FABRIC", header)
+        prepare = ahi[
+            ahi.index("static void prepare_irq_struct"):
+            ahi.index("static void install_irq_server_locked")
+        ]
+        self.assertIn("ahi_data->fabric_mode", prepare)
+        self.assertIn("ZZ_AX_IRQ_NAME_AHI_FABRIC", prepare)
+        self.assertIn("ZZ_AX_IRQ_NAME_AHI", prepare)
+
+        alloc = mhi[
+            mhi.index("APTR i_MHIAllocDecoder"):
+            mhi.index("void i_MHIFreeDecoder")
+        ]
+        self.assertIn("ahi_mode_locked(MHI_LibBase->flags)", alloc)
+        self.assertIn("ahi_mode == MHI_AHI_MODE_LEGACY", alloc)
+        self.assertNotIn("fabric_rate_capped", mhi)
+
+        disable = mhi[
+            mhi.index("static void disable_hw_audio"):
+            mhi.index("static void unclaim_ownership_locked")
+        ]
+        guard = disable.index("ahi_mode_locked(mp->flags)")
+        clear = disable.index("setRegister(mp, ZZ_REG_AUDIO_CONFIG, 0)")
+        self.assertLess(guard, clear)
+        self.assertIn("MHI_AHI_MODE_FABRIC", disable)
+
+        hard_isr = mhi[
+            mhi.index("ULONG cdev_isr"):
+            mhi.index("// Initialise the Interrupt server nodes")
+        ]
+        self.assertNotIn("ZZ_REG_CONFIG", hard_isr)
+        self.assertNotIn("Cause(", hard_isr)
+        self.assertIn("return 0;", hard_isr)
 
     def test_mhi_zero_length_buffer_announces_eof(self):
         source = self.read("mhi/mhizz9000.c")
