@@ -141,9 +141,14 @@ static inline uint16_t read_reg(uint32_t base, uint16_t reg)
 
 static inline void write_audio_param(uint32_t base, uint16_t param, uint16_t val)
 {
+  /* The selector/value/reset triplet is shared with MHI. Forbid pairs
+   * with MHI's setAudioParam guard so coexistence cannot interleave
+   * task-context transactions and redirect either value write. */
+  Forbid();
   *((volatile uint16_t*)(base+ZZ_REG_AUDIO_PARAM)) = param;
   *((volatile uint16_t*)(base+ZZ_REG_AUDIO_VAL))   = val;
   *((volatile uint16_t*)(base+ZZ_REG_AUDIO_PARAM)) = 0;
+  Permit();
 }
 
 static BOOL recording_supported(uint32_t hw_addr)

@@ -584,6 +584,28 @@ class RepoToolingTests(unittest.TestCase):
         ]
         self.assertNotIn("setAudioParam", release)
 
+        # Legacy selector/value/reset MMIO remains shared during
+        # fabric-mode coexistence; both helpers must use the same Exec
+        # task exclusion so their three writes cannot interleave.
+        ahi_param = ahi[
+            ahi.index("static inline void write_audio_param"):
+            ahi.index("static BOOL recording_supported")
+        ]
+        mhi_param = mhi[
+            mhi.index("static void setAudioParam"):
+            mhi.index("// Firmware-authoritative control plane")
+        ]
+        for body in (ahi_param, mhi_param):
+            forbid = body.index("Forbid();")
+            selector = body.index("ZZ_REG_AUDIO_PARAM", forbid)
+            value = body.index("ZZ_REG_AUDIO_VAL", selector)
+            reset = body.rindex("ZZ_REG_AUDIO_PARAM")
+            permit = body.index("Permit();", reset)
+            self.assertLess(forbid, selector)
+            self.assertLess(selector, value)
+            self.assertLess(value, reset)
+            self.assertLess(reset, permit)
+
         # Both drivers gate on the capability and submit the trim
         # (allocate and release).
         for source in (ahi, mhi):

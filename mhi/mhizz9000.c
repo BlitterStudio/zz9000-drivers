@@ -82,9 +82,13 @@ static void setRegister(struct MhiPlayer *mp, ULONG Register, UWORD Value) {
 }
 
 static void setAudioParam(struct MhiPlayer *mp, ULONG Param, UWORD Value) {
+	// Serialize the shared selector/value/reset triplet with AHI's
+	// write_audio_param helper while fabric-mode coexistence is active.
+	Forbid();
 	*((volatile UWORD*)(mp->hw_addr+ZZ_REG_AUDIO_PARAM)) = Param;
 	*((volatile UWORD*)(mp->hw_addr+ZZ_REG_AUDIO_VAL))	 = Value;
 	*((volatile UWORD*)(mp->hw_addr+ZZ_REG_AUDIO_PARAM)) = 0;
+	Permit();
 }
 
 // Firmware-authoritative control plane (R4/R16): submit this owner's
