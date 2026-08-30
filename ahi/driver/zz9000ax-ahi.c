@@ -496,21 +496,30 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
     acquired = fabric_lease_acquire(ahi_data,
                                     AudioCtrl->ahiac_MixFreq);
     Forbid();
-    ahi_data->lease_acquire_in_progress = 0U;
     stale = ahi_data->play_transport_generation !=
                 recovery_generation ||
             ahi_data->play_stop;
     Permit();
     if (!acquired) {
+      Forbid();
+      ahi_data->lease_acquire_in_progress = 0U;
+      Permit();
       ahi_data->lease_retry_ticks = LEASE_RETRY_TICKS;
       return;
     }
     /* Stop, or a Stop/Start pair, may complete while the mailbox call
-     * blocks. Only the epoch that began recovery may retain the grant. */
+     * blocks. Keep acquisition serialized until any stale grant is
+     * surrendered; only the epoch that began recovery may retain it. */
     if (stale) {
       fabric_lease_release(ahi_data);
+      Forbid();
+      ahi_data->lease_acquire_in_progress = 0U;
+      Permit();
       return;
     }
+    Forbid();
+    ahi_data->lease_acquire_in_progress = 0U;
+    Permit();
     ahi_data->lease_accum_fill = 0U;
     KPrintF((CONST_STRPTR)"ZZ9000AX: fabric lease recovered at %lu Hz.\n",
             (unsigned long)AudioCtrl->ahiac_MixFreq);
@@ -1747,25 +1756,31 @@ static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), 
                 "%lu Hz; Start(PLAY) fails.\n",
                 (unsigned long)AudioCtrl->ahiac_MixFreq);
         result = AHIE_UNKNOWN;
+        Forbid();
+        ahi_data->lease_acquire_in_progress = 0U;
+        Permit();
       }
-      Forbid();
-      ahi_data->lease_acquire_in_progress = 0U;
-      Permit();
     }
     if (result == AHIE_OK) {
       Forbid();
       if (ahi_data->play_transport_generation != start_generation) {
         Permit();
         /* Stop completed while Start was inspecting or acquiring the
-         * lease. Do not clear play_stop; surrender any generation
-         * obtained after Stop observed lease_held == 0. */
+         * lease. Keep other acquirers excluded until this stale grant
+         * is surrendered, and do not clear play_stop. */
         fabric_lease_release(ahi_data);
+        Forbid();
+        if (acquire_needed)
+          ahi_data->lease_acquire_in_progress = 0U;
+        Permit();
         result = AHIE_UNKNOWN;
       } else {
         ahi_data->buf_offset = 0;
         /* PAUSED stays as acquired: the worker clears it once two
          * periods are staged (primed-ring prefill). */
         ahi_data->play_stop = 0;
+        if (acquire_needed)
+          ahi_data->lease_acquire_in_progress = 0U;
         update_hw_interrupts(ahi_data);
         Permit();
       }
@@ -1801,7 +1816,8 @@ static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), 
     Permit();
   }
 
-  if ((flags & AHISF_RECORD) && ahi_data->record_capable) {
+  if ((flags & AHISF_RECORD) && ahi_data->record_capable &&
+      (!(flags & AHISF_PLAY) || result == AHIE_OK)) {
     uint16_t status;
 
     if (ahi_data->fabric_mode) {

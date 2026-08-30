@@ -374,11 +374,15 @@ class RepoToolingTests(unittest.TestCase):
         release = pump.index(
             "fabric_lease_release(ahi_data);", generation_check
         )
+        recovery_unlock = pump.index(
+            "ahi_data->lease_acquire_in_progress = 0U;", release
+        )
         recovered_log = pump.index("fabric lease recovered", release)
         self.assertLess(recovery_snapshot, acquire)
         self.assertLess(acquire, generation_check)
         self.assertLess(generation_check, release)
-        self.assertLess(release, recovered_log)
+        self.assertLess(release, recovery_unlock)
+        self.assertLess(recovery_unlock, recovered_log)
         header = self.read("ahi/driver/zz9000ax-ahi.h")
         self.assertIn("uint32_t play_transport_generation;", header)
         self.assertIn("uint8_t lease_acquire_in_progress;", header)
@@ -398,11 +402,18 @@ class RepoToolingTests(unittest.TestCase):
         start_release = start.index(
             "fabric_lease_release(ahi_data);", generation_check
         )
+        start_unlock = start.index(
+            "ahi_data->lease_acquire_in_progress = 0U;", start_release
+        )
         clear_stop = start.index("ahi_data->play_stop = 0;", start_release)
         self.assertLess(snapshot, start_acquire)
         self.assertLess(start_acquire, generation_check)
         self.assertLess(generation_check, start_release)
-        self.assertLess(start_release, clear_stop)
+        self.assertLess(start_release, start_unlock)
+        self.assertLess(start_unlock, clear_stop)
+        self.assertIn(
+            "(!(flags & AHISF_PLAY) || result == AHIE_OK)", start
+        )
 
     def test_build_scripts_have_shebangs_and_use_common_docker_image(self):
         scripts = (
