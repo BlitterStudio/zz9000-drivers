@@ -340,6 +340,10 @@ class RepoToolingTests(unittest.TestCase):
             source.index("static void fabric_lease_pump"):
             source.index("static void fabric_timer_post")
         ]
+        worker = source[
+            source.index("void WorkerProcess()"):
+            source.index("static int fabric_grant_range_valid")
+        ]
         stop = source[
             source.index("intAHIsub_Stop"):
             source.index("intAHIsub_Start")
@@ -352,6 +356,17 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("ahi_data->lease_accum_fill = 0U;", stop)
         self.assertIn("fabric_lease_release(ahi_data);", stop)
         self.assertNotIn("ZZ9K_AUDIO_RING_PRODUCER_FLAG_PAUSED", stop)
+        self.assertIn(
+            "!ahi_data->record_stop && ahi_data->disable_cnt == 0U",
+            worker
+        )
+        acquire = pump.index("fabric_lease_acquire(")
+        stopped = pump.index("if (ahi_data->play_stop)", acquire)
+        release = pump.index("fabric_lease_release(ahi_data);", stopped)
+        recovered_log = pump.index("fabric lease recovered", release)
+        self.assertLess(acquire, stopped)
+        self.assertLess(stopped, release)
+        self.assertLess(release, recovered_log)
 
     def test_build_scripts_have_shebangs_and_use_common_docker_image(self):
         scripts = (

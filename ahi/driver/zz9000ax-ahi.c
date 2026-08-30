@@ -84,6 +84,7 @@
 #define LEASE_RETRY_TICKS 50U
 
 static int fabric_lease_acquire(struct z9ax *ahi_data, uint32_t mix_freq);
+static void fabric_lease_release(struct z9ax *ahi_data);
 
 // AmigaOS scheduling is strictly preemptive priority with no aging; any
 // task at or above this priority stuck in a CPU loop will starve the mixer
@@ -485,6 +486,13 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
       ahi_data->lease_retry_ticks = LEASE_RETRY_TICKS;
       return;
     }
+    /* Stop may run while the mailbox acquire blocks. If it won that
+     * race, surrender the newly acquired generation instead of
+     * retaining a heartbeat-only lease until Start or FreeAudio. */
+    if (ahi_data->play_stop) {
+      fabric_lease_release(ahi_data);
+      return;
+    }
     ahi_data->lease_accum_fill = 0U;
     KPrintF((CONST_STRPTR)"ZZ9000AX: fabric lease recovered at %lu Hz.\n",
             (unsigned long)AudioCtrl->ahiac_MixFreq);
@@ -695,7 +703,8 @@ void WorkerProcess() {
 
     if (ahi_data->fabric_mode) {
       /* Record-only path: the card interrupt still drives capture. */
-      if (!ahi_data->record_stop) process_recording(ahi_data, AudioCtrl);
+      if (!ahi_data->record_stop && ahi_data->disable_cnt == 0U)
+        process_recording(ahi_data, AudioCtrl);
       continue;
     }
 
