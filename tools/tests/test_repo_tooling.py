@@ -333,6 +333,27 @@ class RepoToolingTests(unittest.TestCase):
         self.assertEqual(2, acquire.count("fabric_grant_range_valid("))
         self.assertIn("session->grant.ring_offset", acquire)
         self.assertIn("session->grant.control_offset", acquire)
+        self.assertIn(
+            "ring_capacity >\n"
+            "            Z9AXBase->hw_size - session->grant.ring_offset",
+            acquire
+        )
+        self.assertIn(
+            "Z9AXBase->hw_size - session->grant.control_offset",
+            acquire
+        )
+        self.assertNotIn(
+            "session->grant.ring_offset +\n"
+            "                session->grant.ring_capacity",
+            acquire
+        )
+        invalid = acquire.index("/* Unusable grant:")
+        pending = acquire.index(
+            "if (ahi_data->lease_release_pending)", invalid
+        )
+        self.assertIn("fabric_lease_release(ahi_data);",
+                      acquire[invalid:pending])
+        self.assertNotIn("(void)ZZ9KCall", acquire[invalid:pending])
 
     def test_ahi_fabric_disable_and_stop_preserve_timeline_boundaries(self):
         source = self.read("ahi/driver/zz9000ax-ahi.c")

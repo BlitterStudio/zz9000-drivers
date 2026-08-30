@@ -1202,27 +1202,19 @@ static int fabric_lease_acquire(struct z9ax *ahi_data, uint32_t mix_freq)
         !fabric_grant_range_valid(ahi_data,
                                   session->grant.control_offset,
                                   ZZ9K_AUDIO_RING_CONTROL_SIZE) ||
-        session->grant.ring_offset +
-                session->grant.ring_capacity >
-            Z9AXBase->hw_size ||
-        session->grant.control_offset +
-                ZZ9K_AUDIO_RING_CONTROL_SIZE >
-            Z9AXBase->hw_size) {
-      /* Unusable grant: surrender it so the slot does not sit BUSY
-       * until heartbeat revocation (the SDK session layer's rule). */
-      zz9k_request_init(&request, ZZ9K_OP_AUDIO_RING_RELEASE);
-      request.entry.payload_len =
-          sizeof(ZZ9KAudioRingReleasePayload);
-      {
-        ZZ9KAudioRingReleasePayload *rel =
-            (ZZ9KAudioRingReleasePayload *)
-                request.entry.payload.inline_data;
-        zz9k_put_be32(rel->slot, session->grant.slot);
-        zz9k_put_be32(rel->generation, session->grant.generation);
-        zz9k_put_be32(rel->flags, 0U);
-      }
-      (void)ZZ9KCall(&request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
-      memset(session, 0, sizeof(*session));
+        session->grant.ring_offset > Z9AXBase->hw_size ||
+        session->grant.ring_capacity >
+            Z9AXBase->hw_size - session->grant.ring_offset ||
+        session->grant.control_offset > Z9AXBase->hw_size ||
+        ZZ9K_AUDIO_RING_CONTROL_SIZE >
+            Z9AXBase->hw_size - session->grant.control_offset) {
+      /* Unusable grant: transfer its identity into the same retained,
+       * retryable release path used by Stop. Do not probe another slot
+       * while a failed cleanup may still own this one. */
+      ahi_data->lease_held = 1U;
+      fabric_lease_release(ahi_data);
+      if (ahi_data->lease_release_pending)
+        return 0;
       continue;
     }
 
