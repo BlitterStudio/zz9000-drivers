@@ -437,6 +437,22 @@ static void fabric_swap_period_le(void *buffer, uint32_t bytes)
     words[i] = (uint16_t)((words[i] >> 8) | (words[i] << 8));
 }
 
+static void fabric_lease_flush_accum(struct z9ax *ahi_data,
+                                     ZZ9KAudioRingSession *session,
+                                     uint32_t lease_period)
+{
+  while (ahi_data->lease_accum_fill >= lease_period &&
+         zz9k_audio_ring_free_bytes(session) >= lease_period) {
+    if (zz9k_audio_ring_write(session, ahi_data->lease_accum,
+                              lease_period) != lease_period)
+      break;
+    ahi_data->lease_accum_fill -= lease_period;
+    memmove(ahi_data->lease_accum,
+            ahi_data->lease_accum + lease_period,
+            ahi_data->lease_accum_fill);
+  }
+}
+
 
 
 /* One lease-pacing pass (worker context, timer wake): recover an active
@@ -496,39 +512,36 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
     if (lease_period != 0U && lease_period <= BOUNCE_BUFSZ &&
         ahi_data->lease_accum != NULL && !ahi_data->play_stop &&
         AudioCtrl->ahiac_PreTimer && AudioCtrl->ahiac_MixerFunc) {
+      /* Drain credited whole periods before mixing so newly available
+       * ring space prevents an avoidable drop. */
+      fabric_lease_flush_accum(ahi_data, session, lease_period);
       CallHookPkt(AudioCtrl->ahiac_PlayerFunc, AudioCtrl, NULL);
       if (!(*AudioCtrl->ahiac_PreTimer)()) {
         uint32_t mix_bytes = AudioCtrl->ahiac_BuffSamples << 2;
         uint32_t room = BOUNCE_BUFSZ - ahi_data->lease_accum_fill;
 
-        if (mix_bytes > room)
-          mix_bytes = room;
         if (mix_bytes != 0U) {
           CallHookPkt(AudioCtrl->ahiac_MixerFunc, AudioCtrl,
                       (void *)(uintptr_t)ahi_data->audio_buf_addr);
-          fabric_swap_period_le(
-              (void *)(uintptr_t)ahi_data->audio_buf_addr,
-              mix_bytes);
-          memcpy(ahi_data->lease_accum +
-                     ahi_data->lease_accum_fill,
-                 (const void *)(uintptr_t)
-                     ahi_data->audio_buf_addr,
-                 mix_bytes);
-          ahi_data->lease_accum_fill += mix_bytes;
+          /* Never concatenate a truncated prefix with a later mixer
+           * period. If backpressure leaves insufficient accumulator
+           * room, the complete newly mixed period is discarded after
+           * advancing AHI's Player/PostTimer timeline. */
+          if (mix_bytes == lease_period && mix_bytes <= room) {
+            fabric_swap_period_le(
+                (void *)(uintptr_t)ahi_data->audio_buf_addr,
+                mix_bytes);
+            memcpy(ahi_data->lease_accum +
+                       ahi_data->lease_accum_fill,
+                   (const void *)(uintptr_t)
+                       ahi_data->audio_buf_addr,
+                   mix_bytes);
+            ahi_data->lease_accum_fill += mix_bytes;
+          }
         }
         (*AudioCtrl->ahiac_PostTimer)();
       }
-      while (ahi_data->lease_accum_fill >= lease_period &&
-             zz9k_audio_ring_free_bytes(session) >=
-                 lease_period) {
-        if (zz9k_audio_ring_write(session, ahi_data->lease_accum,
-                lease_period) != lease_period)
-          break;
-        ahi_data->lease_accum_fill -= lease_period;
-        memmove(ahi_data->lease_accum,
-            ahi_data->lease_accum + lease_period,
-            ahi_data->lease_accum_fill);
-      }
+      fabric_lease_flush_accum(ahi_data, session, lease_period);
       if ((session->flags & ZZ9K_AUDIO_RING_PRODUCER_FLAG_PAUSED) &&
           session->write_cursor - session->consumed_cursor >=
               (uint64_t)LEASE_RUNWAY_PERIODS * lease_period) {

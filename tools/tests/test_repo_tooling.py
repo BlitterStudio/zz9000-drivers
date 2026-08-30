@@ -870,28 +870,38 @@ class RepoToolingTests(unittest.TestCase):
                       header)
 
     def test_ahi_fabric_lease_stages_little_endian_bounded(self):
-        """The lease contract is S16LE but AHI's mixer writes m68k
-        big-endian; the legacy register path let firmware swap (the
-        SWAB register). The lease pump must swap every period itself
-        before staging, and keep only a bounded runway of premixed
-        periods in flight instead of filling the whole granted ring on
-        the first wake (the hardware session caught both)."""
+        """Lease staging preserves complete mixer periods under pressure."""
         source = self.read("ahi/driver/zz9000ax-ahi.c")
+        helper_start = source.index("static void fabric_lease_flush_accum")
         pump_start = source.index("static void fabric_lease_pump")
+        helper = source[helper_start:pump_start]
         pump = source[
             pump_start:
             source.index("static void fabric_timer_post", pump_start)
         ]
-        self.assertIn("fabric_swap_period_le", pump)
-        swap = pump.index("fabric_swap_period_le(")
-        mixer = pump.index("ahiac_MixerFunc")
-        ring_write = pump.index("zz9k_audio_ring_write")
-        self.assertLess(mixer, swap)
-        self.assertLess(swap, ring_write)
+
+        self.assertIn("zz9k_audio_ring_write", helper)
+        self.assertIn("memmove", helper)
+        first_flush = pump.index("fabric_lease_flush_accum")
+        mixer = pump.index("CallHookPkt(AudioCtrl->ahiac_MixerFunc")
+        whole_guard = pump.index(
+            "mix_bytes == lease_period && mix_bytes <= room", mixer
+        )
+        swap = pump.index("fabric_swap_period_le(", whole_guard)
+        second_flush = pump.index(
+            "fabric_lease_flush_accum", first_flush + 1
+        )
+        self.assertLess(first_flush, mixer)
+        self.assertLess(mixer, whole_guard)
+        self.assertLess(whole_guard, swap)
+        self.assertLess(swap, second_flush)
+        self.assertNotIn("mix_bytes = room", pump)
         # PreTimer is the mix cadence (AHI v4 untimed-driver pacing);
-        # staging is whole grant periods under ring backpressure.
+        # a complete period is either accumulated or discarded.
         pretimer = pump.index("ahiac_PreTimer")
+        posttimer = pump.index("ahiac_PostTimer", mixer)
         self.assertLess(pretimer, mixer)
+        self.assertLess(mixer, posttimer)
         self.assertIn("lease_accum", pump)
         self.assertIn("grant.source_rate / 50U", pump)
 
