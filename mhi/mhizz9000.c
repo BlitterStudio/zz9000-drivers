@@ -1134,6 +1134,14 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 		return NULL;
 	}
 
+	// The provisional legacy token kept concurrent AHI claims fail-closed
+	// while the blocking capability query ran. Only a fully qualified MHI
+	// owner may now advertise fabric coexistence; rename the installed node
+	// under Forbid so AHI observes the mode change atomically.
+	Forbid();
+	mp->irq.is_Node.ln_Name = ZZ_AX_IRQ_NAME_MHI_FABRIC;
+	Permit();
+
 	// No mixer stamp here (R4): the output balance is the firmware's to
 	// set -- the operator baseline plus the trim submitted above -- and
 	// a register write would be rejected by the scene authority gate on

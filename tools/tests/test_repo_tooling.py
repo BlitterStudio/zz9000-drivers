@@ -880,6 +880,37 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("lease_accum", pump)
         self.assertIn("grant.source_rate / 50U", pump)
 
+    def test_ahi_revoked_fabric_lease_recovers_with_backoff(self):
+        """Active playback reacquires a revoked lease from worker context."""
+        header = self.read("ahi/driver/zz9000ax-ahi.h")
+        source = self.read("ahi/driver/zz9000ax-ahi.c")
+        pump_start = source.index("static void fabric_lease_pump")
+        pump = source[
+            pump_start:
+            source.index("static void fabric_timer_post", pump_start)
+        ]
+
+        self.assertIn("uint16_t lease_retry_ticks;", header)
+        recovery = pump.index(
+            "if (!ahi_data->lease_held || !session->mapped)"
+        )
+        reacquire = pump.index("fabric_lease_acquire(", recovery)
+        credits = pump.index("zz9k_audio_ring_take_credits", reacquire)
+        self.assertLess(recovery, reacquire)
+        self.assertLess(reacquire, credits)
+        self.assertIn(
+            "if (ahi_data->play_stop || ahi_data->lease_held)", pump
+        )
+        self.assertIn("ahi_data->lease_retry_ticks--;", pump)
+        self.assertIn(
+            "ahi_data->lease_retry_ticks = LEASE_RETRY_TICKS;", pump
+        )
+        revoked = pump.index("ZZ9K_AUDIO_RING_CREDIT_REVOKED", credits)
+        revoked_body = pump[revoked:]
+        self.assertIn("ahi_data->lease_held = 0;", revoked_body)
+        self.assertIn("ahi_data->lease_retry_ticks = 0U;", revoked_body)
+        self.assertIn("memset(session, 0, sizeof(*session));", revoked_body)
+
     def test_ahi_fabric_worker_requires_pacing_timer(self):
         """Fabric allocation must fail unless the worker can pace leases."""
         source = self.read("ahi/driver/zz9000ax-ahi.c")
@@ -908,7 +939,9 @@ class RepoToolingTests(unittest.TestCase):
 
     def test_ahi_exclusive_owner_is_claimed_before_hardware_mutation(self):
         header = self.read("ahi/driver/zz9000ax-ahi.h")
+        shared = self.read("include/zz9000_ax.h")
         source = self.read("ahi/driver/zz9000ax-ahi.c")
+        mhi_source = self.read("mhi/mhizz9000.c")
         alloc_body = source[
             source.index("intAHIsub_AllocAudio"):
             source.index("static void __attribute__((used)) intAHIsub_FreeAudio")
@@ -919,19 +952,22 @@ class RepoToolingTests(unittest.TestCase):
         ]
         destroy_body = source[
             source.index("void destroy_interrupt"):
-            source.index("static BOOL mhi_present_locked")
+            source.index("#define Z9AX_MHI_MODE_NONE")
         ]
 
         self.assertIn("struct z9ax *owner;", header)
+        self.assertIn("ZZ_AX_IRQ_NAME_MHI_FABRIC", shared)
         self.assertIn("Z9AXBase->owner = NULL;", source)
-        self.assertIn(
-            "(!ahi_data->fabric_mode && mhi_present_locked())",
-            alloc_body)
+        self.assertIn("mhi_mode = mhi_mode_locked();", alloc_body)
+        owner_condition = (
+            "(mhi_mode != Z9AX_MHI_MODE_NONE &&\n"
+            "       (!ahi_data->fabric_mode || "
+            "mhi_mode != Z9AX_MHI_MODE_FABRIC))"
+        )
+        self.assertIn(owner_condition, alloc_body)
         self.assertIn("Z9AXBase->owner = ahi_data;", alloc_body)
         forbid = alloc_body.index("Forbid();")
-        owner_check = alloc_body.index(
-            "(!ahi_data->fabric_mode && mhi_present_locked())"
-        )
+        owner_check = alloc_body.index(owner_condition)
         owner_publish = alloc_body.index("Z9AXBase->owner = ahi_data;")
         irq_install = alloc_body.index(
             "install_irq_server_locked(ahi_data);", owner_publish
@@ -954,6 +990,27 @@ class RepoToolingTests(unittest.TestCase):
             free_body.index("disable_hw_interrupt(ahi_data);"),
             free_body.index("destroy_interrupt(ahi_data);")
         )
+
+        prepare = mhi_source[
+            mhi_source.index("static void prepare_irq_structs"):
+            mhi_source.index("static void install_irq_server_locked")
+        ]
+        self.assertIn(
+            "mp->irq.is_Node.ln_Name = ZZ_AX_IRQ_NAME_MHI;", prepare
+        )
+        caps_gate = mhi_source.index("const ULONG required_caps")
+        legacy_reject = mhi_source.index(
+            "if(ahi_mode == MHI_AHI_MODE_LEGACY)", caps_gate
+        )
+        promote = mhi_source.index(
+            "mp->irq.is_Node.ln_Name = ZZ_AX_IRQ_NAME_MHI_FABRIC",
+            legacy_reject
+        )
+        promote_window = mhi_source[legacy_reject:promote + 100]
+        self.assertIn("Forbid();", promote_window)
+        self.assertIn("Permit();", promote_window)
+        self.assertLess(caps_gate, legacy_reject)
+        self.assertLess(legacy_reject, promote)
 
     def test_ahi_duplex_tool_uses_one_control_for_both_directions(self):
         source = self.read("ahi/duplextest/ZZAXDuplexTest.c")

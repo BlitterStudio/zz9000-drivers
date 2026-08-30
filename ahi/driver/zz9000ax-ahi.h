@@ -41,7 +41,7 @@ struct z9ax {
    * shared flags it publishes. */
   uint8_t fabric_mode;
   uint8_t lease_held;
-  uint16_t lease_pad;
+  uint16_t lease_retry_ticks; /* rate-limits revoked-lease reacquire */
   ZZ9KAudioRingSession lease_session;
   uint8_t *lease_accum;       /* whole-period staging accumulator */
   uint32_t lease_accum_fill;  /* bytes buffered in lease_accum */

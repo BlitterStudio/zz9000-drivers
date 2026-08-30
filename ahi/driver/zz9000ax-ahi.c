@@ -79,6 +79,11 @@
 // Lease-mode startup headroom: two periods = 40 ms. Absolute deadline
 // pacing keeps production locked to the compositor after playback begins.
 #define LEASE_RUNWAY_PERIODS 2U
+// A revoked active lease is retried by the 50-Hz worker at most once
+// per second; Stop(PLAY) cancels recovery by setting play_stop.
+#define LEASE_RETRY_TICKS 50U
+
+static int fabric_lease_acquire(struct z9ax *ahi_data, uint32_t mix_freq);
 
 // AmigaOS scheduling is strictly preemptive priority with no aging; any
 // task at or above this priority stuck in a CPU loop will starve the mixer
@@ -434,29 +439,42 @@ static void fabric_swap_period_le(void *buffer, uint32_t bytes)
 
 
 
-/* One lease-pacing pass (worker context, timer wake): adopt firmware
+/* One lease-pacing pass (worker context, timer wake): recover an active
+ * revoked lease with a rate-bounded mailbox acquire, adopt firmware
  * credits, stage whole source-rate periods while credited space and
  * the play direction allow (PlayerFunc/MixerFunc per period -- the
  * same cadence the legacy path drives from the card interrupt), then
  * publish the producer line: cursor after PCM, heartbeat on every
  * publication (R6/R11). The worker is the sole producer-line writer;
  * Stop(PLAY) only sets the session's PAUSED flag, which this publish
- * carries (cursor progress suppressed, heartbeat alive, R12). A
- * REVOKED credit snapshot (heartbeat expiry, cursor fault, foreign
- * generation) ends staging for this lease; firmware has already
- * freed the slot, and the stale release at FreeAudio is a no-op. */
+ * carries (cursor progress suppressed, heartbeat alive, R12). */
 static void fabric_lease_pump(struct z9ax *ahi_data,
                               struct AHIAudioCtrlDrv *AudioCtrl)
 {
   ZZ9KAudioRingSession *session = &ahi_data->lease_session;
 
-  if (!ahi_data->lease_held || !session->mapped)
-    return;
+  if (!ahi_data->lease_held || !session->mapped) {
+    if (ahi_data->play_stop || ahi_data->lease_held)
+      return;
+    if (ahi_data->lease_retry_ticks != 0U) {
+      ahi_data->lease_retry_ticks--;
+      return;
+    }
+    if (!fabric_lease_acquire(ahi_data, AudioCtrl->ahiac_MixFreq)) {
+      ahi_data->lease_retry_ticks = LEASE_RETRY_TICKS;
+      return;
+    }
+    ahi_data->lease_accum_fill = 0U;
+    KPrintF((CONST_STRPTR)"ZZ9000AX: fabric lease recovered at %lu Hz.\n",
+            (unsigned long)AudioCtrl->ahiac_MixFreq);
+  }
   if (zz9k_audio_ring_take_credits(session, 4U) ==
       ZZ9K_AUDIO_RING_CREDIT_REVOKED) {
-    KPrintF((CONST_STRPTR)"ZZ9000AX: fabric lease REVOKED; staging "
-            "stopped (heartbeat/cursor/generation).\n");
+    KPrintF((CONST_STRPTR)"ZZ9000AX: fabric lease REVOKED; recovery "
+            "scheduled (heartbeat/cursor/generation).\n");
     ahi_data->lease_held = 0;
+    ahi_data->lease_retry_ticks = 0U;
+    ahi_data->lease_accum_fill = 0U;
     memset(session, 0, sizeof(*session));
     return;
   }
@@ -881,12 +899,14 @@ void destroy_interrupt(struct z9ax* ahi_data) {
   Permit();
 }
 
-// Check whether MHI has its ISR installed on our shared interrupt level.
-// MUST be called with Forbid() already active so that the caller can combine
-// the check with AddIntServer() into a single atomic claim step. The
-// intuition IntVects[] server list can be mutated by AddIntServer/
-// RemIntServer from any task, so walking it unprotected would be unsafe.
-static BOOL mhi_present_locked(void) {
+// Identify the mode of an active MHI owner from its installed IRQ node.
+// The fabric name is published only after the current MHI has proved the
+// matched firmware capabilities. Older binaries and provisional/current
+// fallback owners retain the legacy name. MUST run under Forbid().
+#define Z9AX_MHI_MODE_NONE   0U
+#define Z9AX_MHI_MODE_LEGACY 1U
+#define Z9AX_MHI_MODE_FABRIC 2U
+static uint8_t mhi_mode_locked(void) {
   struct List *IrqList;
   if(Z9AXBase->flags & ZZ_AX_DEVF_INT2MODE) {
     IrqList = (struct List *)SysBase->IntVects[INTB_PORTS].iv_Data;
@@ -894,7 +914,11 @@ static BOOL mhi_present_locked(void) {
   else {
     IrqList = (struct List *)SysBase->IntVects[INTB_EXTER].iv_Data;
   }
-  return FindName(IrqList, (CONST_STRPTR)ZZ_AX_IRQ_NAME_MHI) ? TRUE : FALSE;
+  if (FindName(IrqList, (CONST_STRPTR)ZZ_AX_IRQ_NAME_MHI_FABRIC))
+    return Z9AX_MHI_MODE_FABRIC;
+  if (FindName(IrqList, (CONST_STRPTR)ZZ_AX_IRQ_NAME_MHI))
+    return Z9AX_MHI_MODE_LEGACY;
+  return Z9AX_MHI_MODE_NONE;
 }
 
 // Firmware-authoritative control plane (R4/R16): submit this owner's
@@ -1104,6 +1128,7 @@ static int fabric_lease_acquire(struct z9ax *ahi_data, uint32_t mix_freq)
     /* First publication: paused, cursor 0, fresh heartbeat. The lease
      * is live from acquisition even before PCM is staged (R11). */
     zz9k_audio_ring_publish(session);
+    ahi_data->lease_retry_ticks = 0U;
     ahi_data->lease_held = 1;
     return 1;
   }
@@ -1289,21 +1314,22 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
     ahi_data->fabric_mode =
         (uint8_t)fabric_rate_capped();
   }
-  // Atomic ownership claim: reject both another low-level AHI allocation
-  // and -- on non-fabric stacks -- MHI, before touching shared hardware.
-  // AHI's low-level API is exclusive; full duplex is AHISF_PLAY|AHISF_RECORD
-  // on this one AudioCtrl, not two independent AudioCtrls. Publishing owner
-  // and installing the ISR under the same Forbid closes both AHI/AHI and
-  // AHI/MHI TOCTOU windows. In fabric lease mode the AHI/MHI software
-  // exclusion is deliberately skipped: AHI plays through a bounded lease
-  // beside MHI's pump, and firmware's ownership state stays the authority
-  // (a legacy session still blocks the pump bind fail-closed). The HW-side
-  // interrupt stays OFF until the worker is up; Start() publishes the
-  // requested direction mask.
+  // Atomic ownership claim: reject another low-level AHI allocation and
+  // any MHI owner that cannot prove fabric compatibility before touching
+  // shared hardware. AHI's low-level API is exclusive; full duplex is
+  // AHISF_PLAY|AHISF_RECORD on one AudioCtrl, not two independent
+  // AudioCtrls. Publishing owner and installing the ISR under the same
+  // Forbid closes both AHI/AHI and AHI/MHI TOCTOU windows. Only two
+  // qualified fabric tokens may coexist; legacy/current-fallback MHI
+  // retains the classic exclusion. The HW-side interrupt stays OFF until
+  // the worker is up; Start() publishes the requested direction mask.
+  uint8_t mhi_mode;
   prepare_irq_struct(ahi_data);
   Forbid();
+  mhi_mode = mhi_mode_locked();
   if (Z9AXBase->owner || Z9AXBase->allocating != ahi_data ||
-      (!ahi_data->fabric_mode && mhi_present_locked())) {
+      (mhi_mode != Z9AX_MHI_MODE_NONE &&
+       (!ahi_data->fabric_mode || mhi_mode != Z9AX_MHI_MODE_FABRIC))) {
     if (Z9AXBase->allocating == ahi_data)
       Z9AXBase->allocating = NULL;
     Permit();
