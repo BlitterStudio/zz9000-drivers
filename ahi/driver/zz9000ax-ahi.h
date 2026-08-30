@@ -27,6 +27,7 @@ struct z9ax {
   struct AHIRecordMessage record_message;
   uint16_t play_stop;
   uint16_t record_stop;
+  uint32_t play_transport_generation; /* Stop epoch guarding Start acquire */
   uint8_t flags;
   uint8_t irq_installed;
   uint8_t fabric_token_installed;
@@ -36,11 +37,9 @@ struct z9ax {
    * advertised ZZ9K_CAP_AUDIO_FABRIC plus the audio service's
    * FABRIC_RATE flag at allocate, so playback runs as a direct-ring
    * lease producer (card-side conversion at mix_freq) instead of the
-   * legacy register path. lease_held: a lease was acquired at the
-   * first Start(PLAY) and releases at FreeAudio; Stop(PLAY) sets the
-   * session's PAUSED producer flag instead of releasing. The worker
-   * task is the sole producer-line writer; Start/Stop only flip the
-   * shared flags it publishes. */
+   * legacy register path. lease_held tracks the current grant; Stop
+   * surrenders it and increments play_transport_generation so a
+   * blocking Start/recovery acquire cannot undo the completed Stop. */
   uint8_t fabric_mode;
   uint8_t lease_held;
   uint16_t lease_retry_ticks; /* rate-limits revoked-lease reacquire */

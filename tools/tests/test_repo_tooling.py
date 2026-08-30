@@ -348,6 +348,10 @@ class RepoToolingTests(unittest.TestCase):
             source.index("intAHIsub_Stop"):
             source.index("intAHIsub_Start")
         ]
+        start = source[
+            source.index("intAHIsub_Start"):
+            source.index("intAHIsub_GetAttr")
+        ]
         self.assertIn("ahi_data->disable_cnt == 0U", pump)
         self.assertLess(
             pump.index("ahi_data->disable_cnt == 0U"),
@@ -367,6 +371,25 @@ class RepoToolingTests(unittest.TestCase):
         self.assertLess(acquire, stopped)
         self.assertLess(stopped, release)
         self.assertLess(release, recovered_log)
+        header = self.read("ahi/driver/zz9000ax-ahi.h")
+        self.assertIn("uint32_t play_transport_generation;", header)
+        self.assertIn("ahi_data->play_transport_generation++;", stop)
+        snapshot = start.index(
+            "start_generation = ahi_data->play_transport_generation;"
+        )
+        start_acquire = start.index("fabric_lease_acquire(", snapshot)
+        generation_check = start.index(
+            "ahi_data->play_transport_generation != start_generation",
+            start_acquire
+        )
+        start_release = start.index(
+            "fabric_lease_release(ahi_data);", generation_check
+        )
+        clear_stop = start.index("ahi_data->play_stop = 0;", start_release)
+        self.assertLess(snapshot, start_acquire)
+        self.assertLess(start_acquire, generation_check)
+        self.assertLess(generation_check, start_release)
+        self.assertLess(start_release, clear_stop)
 
     def test_build_scripts_have_shebangs_and_use_common_docker_image(self):
         scripts = (

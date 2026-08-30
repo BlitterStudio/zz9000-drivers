@@ -1672,6 +1672,7 @@ static void __attribute__((used)) intAHIsub_Stop(uint32_t Flags asm("d0"), struc
     Forbid();
     if (Flags & AHISF_PLAY) {
       ahi_data->play_stop = 1;
+      ahi_data->play_transport_generation++;
       ahi_data->buf_offset = 0;
     }
     if (Flags & AHISF_RECORD) ahi_data->record_stop = 1;
@@ -1700,10 +1701,14 @@ static void __attribute__((used)) intAHIsub_Stop(uint32_t Flags asm("d0"), struc
 static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
   struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
   uint16_t play_sequence = 0;
+  uint32_t start_generation = 0U;
   uint32_t result = AHIE_OK;
   if (!ahi_data) return AHIE_OK;
 
   if ((flags & AHISF_PLAY) && ahi_data->fabric_mode) {
+    Forbid();
+    start_generation = ahi_data->play_transport_generation;
+    Permit();
     /* Lease mode: acquire at every play Start after Stop surrendered
      * the old timeline (or after a mid-session revocation zeroed
      * lease_held), and let the credit-paced worker take it from here.
@@ -1720,12 +1725,21 @@ static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), 
     }
     if (result == AHIE_OK) {
       Forbid();
-      ahi_data->buf_offset = 0;
-      /* PAUSED stays as acquired: the worker clears it once two
-       * periods are staged (primed-ring prefill). */
-      ahi_data->play_stop = 0;
-      update_hw_interrupts(ahi_data);
-      Permit();
+      if (ahi_data->play_transport_generation != start_generation) {
+        Permit();
+        /* Stop completed while Start was inspecting or acquiring the
+         * lease. Do not clear play_stop; surrender any generation
+         * obtained after Stop observed lease_held == 0. */
+        fabric_lease_release(ahi_data);
+        result = AHIE_UNKNOWN;
+      } else {
+        ahi_data->buf_offset = 0;
+        /* PAUSED stays as acquired: the worker clears it once two
+         * periods are staged (primed-ring prefill). */
+        ahi_data->play_stop = 0;
+        update_hw_interrupts(ahi_data);
+        Permit();
+      }
     }
   }
   else if (flags & AHISF_PLAY) {
