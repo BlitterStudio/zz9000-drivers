@@ -362,6 +362,10 @@ class RepoToolingTests(unittest.TestCase):
         release_fn = source[
             release_start:source.index("intAHIsub_AllocAudio", release_start)
         ]
+        free_audio = source[
+            source.index("intAHIsub_FreeAudio"):
+            source.index("intAHIsub_Stop")
+        ]
         self.assertIn("ahi_data->disable_cnt == 0U", pump)
         self.assertLess(
             pump.index("ahi_data->disable_cnt == 0U"),
@@ -399,6 +403,12 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("uint8_t lease_release_pending;", header)
         self.assertIn("uint32_t lease_release_slot;", header)
         self.assertIn("uint32_t lease_release_generation;", header)
+        self.assertIn("uint8_t lease_release_in_progress;", header)
+        final_release = free_audio.index("fabric_lease_release(ahi_data);")
+        worker_stop = free_audio.index("SIGBREAKF_CTRL_C", final_release)
+        self.assertLess(final_release, worker_stop)
+        self.assertIn("release_attempt < 3U", free_audio)
+        self.assertIn("if (ahi_data->lease_release_in_progress)", release_fn)
         self.assertIn("if (ahi_data->lease_release_pending)", pump)
         self.assertIn("ahi_data->lease_release_pending ||", start)
         self.assertIn(

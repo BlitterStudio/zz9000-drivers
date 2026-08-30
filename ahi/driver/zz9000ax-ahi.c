@@ -1260,6 +1260,13 @@ static void fabric_lease_release(struct z9ax *ahi_data)
   ZZ9KRequest request;
   ZZ9KMailboxEntry reply;
   int status;
+  Forbid();
+  if (ahi_data->lease_release_in_progress) {
+    Permit();
+    return;
+  }
+  ahi_data->lease_release_in_progress = 1U;
+  Permit();
 
   if (ahi_data->lease_held) {
     ahi_data->lease_release_slot =
@@ -1271,8 +1278,12 @@ static void fabric_lease_release(struct z9ax *ahi_data)
     memset(&ahi_data->lease_session, 0,
            sizeof(ahi_data->lease_session));
   }
-  if (!ahi_data->lease_release_pending)
+  if (!ahi_data->lease_release_pending) {
+    Forbid();
+    ahi_data->lease_release_in_progress = 0U;
+    Permit();
     return;
+  }
 
   zz9k_request_init(&request, ZZ9K_OP_AUDIO_RING_RELEASE);
   request.entry.payload_len = sizeof(ZZ9KAudioRingReleasePayload);
@@ -1294,6 +1305,9 @@ static void fabric_lease_release(struct z9ax *ahi_data)
             (unsigned long)ahi_data->lease_release_slot,
             (unsigned long)ahi_data->lease_release_generation,
             (long)status);
+    Forbid();
+    ahi_data->lease_release_in_progress = 0U;
+    Permit();
     return;
   }
 
@@ -1306,6 +1320,9 @@ static void fabric_lease_release(struct z9ax *ahi_data)
   ahi_data->lease_release_generation = 0U;
   ahi_data->lease_retry_deadline.tv_secs = 0;
   ahi_data->lease_retry_deadline.tv_micro = 0;
+  Forbid();
+  ahi_data->lease_release_in_progress = 0U;
+  Permit();
 }
 
 static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagList asm("a1"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
@@ -1661,10 +1678,25 @@ static void __attribute__((used)) intAHIsub_FreeAudio(struct AHIAudioCtrlDrv *Au
   if (!AudioCtrl->ahiac_DriverData) return;
 
   struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
+  uint32_t release_attempt;
 
   // Make sure the worker's mix loop won't try to touch hardware after we tear down.
   ahi_data->play_stop = 1;
   ahi_data->record_stop = 1;
+
+  /* Surrender while the worker still owns timer.device, because a
+   * failed mailbox completion records an elapsed-time retry deadline.
+   * Retry the idempotent generation a bounded number of times before
+   * joining the worker; an unavailable firmware will still revoke the
+   * now-heartbeatless generation after teardown. */
+  if (ahi_data->fabric_mode) {
+    for (release_attempt = 0U;
+         release_attempt < 3U &&
+             (ahi_data->lease_held ||
+              ahi_data->lease_release_pending);
+         release_attempt++)
+      fabric_lease_release(ahi_data);
+  }
 
   // Stop the worker while our named ISR still advertises ownership to MHI.
   // Both directions are stopped and the hardware interrupt is disabled, so a
@@ -1680,13 +1712,6 @@ static void __attribute__((used)) intAHIsub_FreeAudio(struct AHIAudioCtrlDrv *Au
     }
     ahi_data->worker_process = NULL;
   }
-
-  // Surrender the fabric lease while zz9k.library is still open: the
-  // worker (the sole producer-line writer) is gone, so the lease must
-  // not linger on heartbeat alone. Blocking mailbox call, outside any
-  // Forbid window; idempotent and stale-generation safe.
-  if (ahi_data->fabric_mode)
-    fabric_lease_release(ahi_data);
 
   // Release the control-plane binding opened at allocate. The release
   // is explicit: when the capability was seen, submit the reserved
