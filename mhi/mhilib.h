@@ -31,6 +31,7 @@ struct MhiPlayer {
 	ULONG Status;
 
 	struct Interrupt irq;
+	struct Interrupt irq_fabric_token;
 	struct Interrupt sirq;
 
 	ULONG hw_addr;
@@ -43,6 +44,7 @@ struct MhiPlayer {
 	                               plane at allocate: gates the
 	                               release-time trim submit, the legacy
 	                               LPF stamp, and the app mixer API */
+	UBYTE fabric_token_installed;
 
 	/*
 	 * SDK audio-stream session state. Decode runs on the card's second

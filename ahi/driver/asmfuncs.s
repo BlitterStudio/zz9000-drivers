@@ -7,6 +7,11 @@ _dev_isr:
     move.l #0,d0
     rts
 
+    .globl  _dev_token_isr
+_dev_token_isr:
+    moveq.l #0,d0
+    rts
+
 #------------------------------------------------------------------------------
 # Assembler frames for C library functions that need to preserve all registers.
 #------------------------------------------------------------------------------

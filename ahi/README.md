@@ -14,10 +14,21 @@ split across two drivers that share the same FPGA card:
 | AHI subdriver       | `ahi/driver/` | `zz9000ax.audio`       | Generic PCM via AHI (MODs, samples, emulators, ScummVM, Eagleplayer, …). |
 | MHI library         | `mhi/`        | `mhizz9000.library`    | Hardware MP3 decoding via MHI-aware players (AmigaAmp, etc.). |
 
-Only one of the two can own the card at a time. The driver that wins
-attaches an interrupt server with a well-known name (`ZZ9000AX` for
-AHI, `mhizz9000` for MHI); the other side notices the name on the
-shared interrupt list and refuses to allocate.
+On firmware that predates the audio fabric, only one of the two can
+own the card at a time: the driver that wins attaches an interrupt
+server with a well-known name (`ZZ9000AX` for AHI, `mhizz9000` for
+MHI); the other side notices the name on the shared interrupt list
+and refuses to allocate.
+
+On matched firmware advertising the audio fabric and its rate flag,
+AHI playback instead runs as a **fabric lease producer**: the driver
+mixes at the selected AHI rate into a granted card-side ring and the
+firmware compositor converts and mixes it beside every other producer
+— so AHI sound effects, modules, and emulators play **at the same
+time** as MHI/ZZPlay music. The legacy register path remains the
+byte-identical fallback for non-fabric stacks, and AHI's own
+low-level exclusivity (one `AllocAudio` owner) is unchanged on both
+paths.
 
 Build and install locations are covered in the [main README](../README.md).
 

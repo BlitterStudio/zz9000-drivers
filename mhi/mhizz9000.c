@@ -82,9 +82,13 @@ static void setRegister(struct MhiPlayer *mp, ULONG Register, UWORD Value) {
 }
 
 static void setAudioParam(struct MhiPlayer *mp, ULONG Param, UWORD Value) {
+	// Serialize the shared selector/value/reset triplet with AHI's
+	// write_audio_param helper while fabric-mode coexistence is active.
+	Forbid();
 	*((volatile UWORD*)(mp->hw_addr+ZZ_REG_AUDIO_PARAM)) = Param;
 	*((volatile UWORD*)(mp->hw_addr+ZZ_REG_AUDIO_VAL))	 = Value;
 	*((volatile UWORD*)(mp->hw_addr+ZZ_REG_AUDIO_PARAM)) = 0;
+	Permit();
 }
 
 // Firmware-authoritative control plane (R4/R16): submit this owner's
@@ -124,21 +128,27 @@ static void submit_source_trim(void) {
 /*  END ZZ9000AX parameter access */
 /* ****************************** */
 
-// Check whether AHI has its ISR installed on our shared interrupt level.
-// MUST be called with Forbid() already active so the caller can combine
-// this check with AddIntServer() into a single atomic claim step --
-// otherwise AHI and MHI can both win the check and then both attach.
-// The IntVects[] server list can be mutated by any task, so walking it
-// unprotected would be unsafe in its own right.
-static BOOL ahi_present_locked(struct MHI_LibBase *MhiLibBase) {
+// Identify the mode of an active AHI owner from its installed IRQ nodes.
+// Qualified AHI publishes a fabric sentinel in addition to the legacy node
+// retained for old MHI binaries; check fabric first. Fallback and old AHI
+// publish only the legacy node. MUST run under Forbid().
+#define MHI_AHI_MODE_NONE   0U
+#define MHI_AHI_MODE_LEGACY 1U
+#define MHI_AHI_MODE_FABRIC 2U
+static UBYTE ahi_mode_locked(ULONG flags) {
 	struct List *IrqList;
-	if(MhiLibBase->flags & ZZ_AX_DEVF_INT2MODE) {
+
+	if(flags & ZZ_AX_DEVF_INT2MODE) {
 		IrqList = (struct List *)SysBase->IntVects[INTB_PORTS].iv_Data;
 	}
 	else {
 		IrqList = (struct List *)SysBase->IntVects[INTB_EXTER].iv_Data;
 	}
-	return FindName(IrqList, ZZ_AX_IRQ_NAME_AHI) ? TRUE : FALSE;
+	if(FindName(IrqList, ZZ_AX_IRQ_NAME_AHI_FABRIC))
+		return MHI_AHI_MODE_FABRIC;
+	if(FindName(IrqList, ZZ_AX_IRQ_NAME_AHI))
+		return MHI_AHI_MODE_LEGACY;
+	return MHI_AHI_MODE_NONE;
 }
 
 BOOL UserLibInit(struct MHI_LibBase *MhiLibBase) {
@@ -916,16 +926,12 @@ ULONG cdev_sisr(struct MhiPlayer *mp asm("a1")) {
 }
 
 extern ULONG dev_isr(struct MhiPlayer *mp asm("a1"));
+extern ULONG dev_token_isr(void);
 ULONG cdev_isr(struct MhiPlayer *mp asm("a1")) {
-	UWORD status = *(UWORD*)(mp->hw_addr+ZZ_REG_CONFIG);
-
-	// audio interrupt signal set? (ZZ_REG_CONFIG bit 1, mask 0x02)
-	if(status & 2) {
-		// Ack/clear audio interrupt.
-		*(USHORT*)(mp->hw_addr+ZZ_REG_CONFIG) = 8|32;
-		// Cause soft interrupt to do the rest.
-		Cause(&mp->sirq);
-	}
+	// Mailbox feeder progress does not use the hardware audio IRQ. Keep
+	// this server inert: when fabric AHI records concurrently, reading or
+	// acknowledging the shared interrupt here can steal its capture wake.
+	(void)mp;
 	return 0;
 }
 
@@ -942,15 +948,24 @@ static void prepare_irq_structs(struct MhiPlayer *mp) {
 	mp->sirq.is_Data = mp;
 	mp->sirq.is_Code = (void*)dev_sisr;
 
+	// Keep the real node visible to pre-fabric AHI binaries for the
+	// decoder's full lifetime. A qualified fabric sentinel is added only
+	// after the capability checks below have succeeded.
 	mp->irq.is_Node.ln_Type = NT_INTERRUPT;
 	mp->irq.is_Node.ln_Pri  = 126; // High priority: this ISR must react quickly.
 	mp->irq.is_Node.ln_Name = ZZ_AX_IRQ_NAME_MHI;
 	mp->irq.is_Data = mp;
 	mp->irq.is_Code = (void*)dev_isr;
+
+	mp->irq_fabric_token.is_Node.ln_Type = NT_INTERRUPT;
+	mp->irq_fabric_token.is_Node.ln_Pri = 125;
+	mp->irq_fabric_token.is_Node.ln_Name = ZZ_AX_IRQ_NAME_MHI_FABRIC;
+	mp->irq_fabric_token.is_Data = mp;
+	mp->irq_fabric_token.is_Code = (void*)dev_token_isr;
 }
 
 // Install the hard interrupt server. MUST be called under Forbid() so the
-// caller can combine it with ahi_present_locked() atomically.
+// caller can combine it with ahi_mode_locked() atomically.
 static void install_irq_server_locked(struct MhiPlayer *mp) {
 	if (mp->flags & ZZ_AX_DEVF_INT2MODE) {
 		AddIntServer(INTB_PORTS, &mp->irq);
@@ -959,13 +974,13 @@ static void install_irq_server_locked(struct MhiPlayer *mp) {
 	}
 }
 
-// Keep the HW-side audio interrupt OFF. Feed/drain progress belongs to the
-// feeder process, and on the firmware side flipping this bit also
-// silences/clears the TX ring -- a needless dropout. The disable is kept as
-// hygiene on Stop/Pause/Free so an earlier AHI session cannot leave the
-// interrupt armed while MHI owns the card.
+// Keep the HW-side audio interrupt OFF when MHI is the only owner.
+// With a fabric AHI peer the shared register belongs to AHI's playback/
+// capture directions, so Stop/Pause/Free must not clear it. MUST run
+// under Forbid() so the IRQ-name ownership token cannot change mid-check.
 static void disable_hw_audio(struct MhiPlayer *mp) {
-	setRegister(mp, ZZ_REG_AUDIO_CONFIG, 0);
+	if(ahi_mode_locked(mp->flags) != MHI_AHI_MODE_FABRIC)
+		setRegister(mp, ZZ_REG_AUDIO_CONFIG, 0);
 }
 
 // Undo the atomic ownership claim in i_MHIAllocDecoder (the hard-IRQ
@@ -976,10 +991,15 @@ static void disable_hw_audio(struct MhiPlayer *mp) {
 static void unclaim_ownership_locked(struct MhiPlayer *mp,
                                      struct MHI_LibBase *MHI_LibBase) {
 	if (mp->flags & ZZ_AX_DEVF_INT2MODE) {
+		if(mp->fabric_token_installed)
+			RemIntServer(INTB_PORTS, &mp->irq_fabric_token);
 		RemIntServer(INTB_PORTS, &mp->irq);
 	} else {
+		if(mp->fabric_token_installed)
+			RemIntServer(INTB_EXTER, &mp->irq_fabric_token);
 		RemIntServer(INTB_EXTER, &mp->irq);
 	}
+	mp->fabric_token_installed = FALSE;
 	if(MHI_LibBase->NumAllocatedDecoders)
 		MHI_LibBase->NumAllocatedDecoders--;
 	ZZ9KBase = NULL;   // unpublish with the ownership release
@@ -1051,13 +1071,12 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 	// AddIntServer our hard ISR directly.
 	prepare_irq_structs(mp);
 
-	// Atomic ownership claim: in one Forbid() window, verify (a) no other
-	// MHI decoder is already allocated and (b) AHI hasn't installed its
-	// ISR, then install our own hard-IRQ server. Doing all three under one
-	// Forbid closes the TOCTOU that would otherwise let AHI and MHI both
-	// decide the card is free and then both attach. The HW audio bit stays
-	// off until i_MHIPlay() fires, so the newly-installed ISR is a no-op
-	// in the meantime.
+	// Atomic ownership claim: in one Forbid() window, verify no other MHI
+	// decoder exists, classify any active AHI owner, then install our hard
+	// IRQ token. This closes the TOCTOU that would otherwise let both
+	// drivers decide independently whether coexistence is safe. The MHI
+	// hard ISR is inert; mailbox feeder progress does not depend on it.
+	UBYTE ahi_mode = MHI_AHI_MODE_NONE;
 	Forbid();
 	if(MHI_LibBase->NumAllocatedDecoders) {
 		Permit();
@@ -1067,14 +1086,10 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 		CloseLibrary(base);
 		return NULL;
 	}
-	if(ahi_present_locked(MHI_LibBase)) {
-		Permit();
-		KPrintF("Can't allocate! Hardware already used by AHI.\n");
-		FreeVec(mp->BufferList);
-		FreeVec(mp);
-		CloseLibrary(base);
-		return NULL;
-	}
+	// AHI's installed IRQ name is read inside the atomic claim. Only the
+	// fabric-specific token permits coexistence; the legacy token covers
+	// old binaries and current AHI instances whose fabric probe fell back.
+	ahi_mode = ahi_mode_locked(MHI_LibBase->flags);
 	install_irq_server_locked(mp);
 	MHI_LibBase->NumAllocatedDecoders++;
 	// Claim won: publish our library reference for the proto inlines.
@@ -1122,6 +1137,33 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 			submit_source_trim();
 		}
 	}
+
+	// AHI/MHI exclusion decision (AHI migration): the active AHI IRQ
+	// token was observed inside the atomic claim above. Only the
+	// fabric-specific token proves that this AHI instance is lease-backed;
+	// a legacy token retains the classic exclusion.
+	if(ahi_mode == MHI_AHI_MODE_LEGACY) {
+		KPrintF("Can't allocate! Hardware already used by AHI.\n");
+		Forbid();
+		unclaim_ownership_locked(mp, MHI_LibBase);
+		Permit();
+		FreeVec(mp->BufferList);
+		FreeVec(mp);
+		CloseLibrary(base);
+		return NULL;
+	}
+
+	// The legacy node kept concurrent and pre-fabric AHI claims fail-closed
+	// while the blocking capability query ran, and remains installed for
+	// mixed-version protection. Add the qualified inert sentinel under
+	// Forbid so current AHI observes fabric compatibility atomically.
+	Forbid();
+	if (mp->flags & ZZ_AX_DEVF_INT2MODE)
+		AddIntServer(INTB_PORTS, &mp->irq_fabric_token);
+	else
+		AddIntServer(INTB_EXTER, &mp->irq_fabric_token);
+	mp->fabric_token_installed = TRUE;
+	Permit();
 
 	// No mixer stamp here (R4): the output balance is the firmware's to
 	// set -- the operator baseline plus the trim submitted above -- and
@@ -1203,11 +1245,9 @@ void i_MHIFreeDecoder(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibB
 		mhi_wake_feeder(mp);
 		while(mp->feeder_task) Delay(1);
 	}
-	// Permit-to-0 dispatches any soft IRQ still queued on the SoftInts
-	// list; it runs cdev_sisr on still-valid mp, sees Status==STOPPED, and
-	// returns without touching the list or mp fields. No new soft IRQs can
-	// be Cause()d because the hard ISR is disarmed by disable_hw_audio --
-	// even though the ISR node is still installed, the HW won't fire it.
+	// Permit-to-0 dispatches any queued soft IRQ while mp is still valid.
+	// No new soft IRQ can be caused: MHI's installed hard ISR is inert and
+	// exists only as the ownership token.
 
 	// --- Phase 2: decoder teardown while MHI still owns the card. ---
 	// The ISR node is still on the interrupt-server list, so ahi_present/
@@ -1241,7 +1281,7 @@ void i_MHIFreeDecoder(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibB
 	if(mp->audio_control_capped) submit_source_trim();
 
 	// --- Phase 3: atomically release ownership. ---
-	// Only now do we give up the card: remove the IRQ node, decrement
+	// Only now do we give up the card: remove both ownership nodes, decrement
 	// NumAllocatedDecoders AND unpublish ZZ9KBase inside a single Forbid
 	// window so any racing AllocDecoder / AHI AllocAudio sees all state
 	// changes together. Our library reference is captured and closed
@@ -1253,10 +1293,15 @@ void i_MHIFreeDecoder(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibB
 
 		Forbid();
 		if (mp->flags & ZZ_AX_DEVF_INT2MODE) {
+			if(mp->fabric_token_installed)
+				RemIntServer(INTB_PORTS, &mp->irq_fabric_token);
 			RemIntServer(INTB_PORTS, &mp->irq);
 		} else {
+			if(mp->fabric_token_installed)
+				RemIntServer(INTB_EXTER, &mp->irq_fabric_token);
 			RemIntServer(INTB_EXTER, &mp->irq);
 		}
+		mp->fabric_token_installed = FALSE;
 		if(MHI_LibBase->NumAllocatedDecoders) MHI_LibBase->NumAllocatedDecoders--;
 		base = ZZ9KBase;
 		ZZ9KBase = NULL;

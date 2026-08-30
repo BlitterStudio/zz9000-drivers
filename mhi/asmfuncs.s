@@ -7,6 +7,11 @@ _dev_isr:
     moveq.l #0,d0       /* Set Z flag to continue to process other servers */
     rts
 
+    .globl  _dev_token_isr
+_dev_token_isr:
+    moveq.l #0,d0       /* Inert ownership sentinel */
+    rts
+
     .globl  _dev_sisr
 _dev_sisr:
 	move.l  a6,-(sp)    /* software interrupts must preserve A6 */

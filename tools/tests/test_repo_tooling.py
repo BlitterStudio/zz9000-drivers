@@ -226,6 +226,17 @@ class RepoToolingTests(unittest.TestCase):
             "Calibration committed - Save to persist",
         ):
             self.assertIn(token, source)
+        helper = source[
+            source.index("static UWORD audio_balanced_level"):
+            source.index("static BOOL audio_control_capped")
+        ]
+        balance = source[
+            source.index("case AUDGAD_BTN_BALANCE"):
+            source.index("case AUDGAD_BTN_SAVE")
+        ]
+        self.assertIn("balanced > ZZTOP_AUDIO_LEVEL_MAX", helper)
+        self.assertEqual(2, balance.count("audio_balanced_level("))
+        self.assertNotIn("(3UL * audio_ceiling", balance)
         self.assertIn("audio_ceiling_paula_present", cfg_header)
         self.assertIn("audio_ceiling_ax_present", cfg_header)
         self.assertIn('"audio_ceiling_paula"', cfg_source)
@@ -289,6 +300,193 @@ class RepoToolingTests(unittest.TestCase):
         self.assertNotIn("zz_template_addr = b->MemorySize", driver)
         self.assertIn("AutoConfigBoardSize", diag)
         self.assertIn("INVALID (descriptor/profile/AutoConfig mismatch)", diag)
+
+
+    def test_ahi_z2_fabric_grants_stay_in_direct_ring_reservation(self):
+        header = self.read("ahi/driver/zz9000ax-ahi.h")
+        source = self.read("ahi/driver/zz9000ax-ahi.c")
+        alloc = source[
+            source.index("intAHIsub_AllocAudio"):
+            source.index("static void __attribute__((used)) intAHIsub_FreeAudio")
+        ]
+        range_start = source.index("static int fabric_grant_range_valid")
+        acquire_start = source.index(
+            "static int fabric_lease_acquire", range_start
+        )
+        range_check = source[range_start:acquire_start]
+        acquire = source[
+            acquire_start:
+            source.index("static void fabric_lease_release", acquire_start)
+        ]
+        self.assertIn("ZZ_Z2_APERTURE_INFO_GENERATION_2", alloc)
+        self.assertIn("ZZ_Z2_DIRECT_RING_RESERVE_SIZE", alloc)
+        self.assertIn("layout.host_window.base + layout.host_window.size",
+                      alloc)
+        self.assertIn("ahi_data->z2_direct_ring_base = direct_base;", alloc)
+        self.assertIn("ahi_data->z2_direct_ring_size = direct_size;", alloc)
+        self.assertIn("zorro != 2 ||", alloc)
+        self.assertIn("size > ahi_data->z2_direct_ring_size", range_check)
+        self.assertIn("offset < ahi_data->z2_direct_ring_base", range_check)
+        self.assertIn(
+            "offset - ahi_data->z2_direct_ring_base <=", range_check
+        )
+        self.assertEqual(2, acquire.count("fabric_grant_range_valid("))
+        self.assertIn("session->grant.ring_offset", acquire)
+        self.assertIn("session->grant.control_offset", acquire)
+        self.assertIn(
+            "ring_capacity >\n"
+            "            Z9AXBase->hw_size - session->grant.ring_offset",
+            acquire
+        )
+        self.assertIn(
+            "Z9AXBase->hw_size - session->grant.control_offset",
+            acquire
+        )
+        self.assertNotIn(
+            "session->grant.ring_offset +\n"
+            "                session->grant.ring_capacity",
+            acquire
+        )
+        invalid = acquire.index("/* Unusable grant:")
+        pending = acquire.index(
+            "if (ahi_data->lease_release_pending)", invalid
+        )
+        self.assertIn("fabric_lease_release(ahi_data);",
+                      acquire[invalid:pending])
+        self.assertNotIn("(void)ZZ9KCall", acquire[invalid:pending])
+        timeout = acquire.index("if (status == ZZ9K_STATUS_TIMEOUT)")
+        timeout_return = acquire.index("return 0;", timeout)
+        next_slot = acquire.index("continue;", timeout)
+        self.assertLess(timeout_return, next_slot)
+        self.assertIn(
+            "ahi_data->lease_acquire_uncertain = 1U;",
+            acquire[timeout:timeout_return]
+        )
+        self.assertIn(
+            "GetSysTime(&ahi_data->lease_retry_deadline);",
+            acquire[timeout:timeout_return]
+        )
+
+    def test_ahi_fabric_disable_and_stop_preserve_timeline_boundaries(self):
+        source = self.read("ahi/driver/zz9000ax-ahi.c")
+        pump = source[
+            source.index("static void fabric_lease_pump"):
+            source.index("static void fabric_timer_post")
+        ]
+        worker = source[
+            source.index("void WorkerProcess()"):
+            source.index("static int fabric_grant_range_valid")
+        ]
+        stop = source[
+            source.index("intAHIsub_Stop"):
+            source.index("intAHIsub_Start")
+        ]
+        start = source[
+            source.index("intAHIsub_Start"):
+            source.index("intAHIsub_GetAttr")
+        ]
+        acquire_fn = source.index(
+            "static int fabric_lease_acquire("
+            "struct z9ax *ahi_data, uint32_t mix_freq)\n{"
+        )
+        release_start = source.index(
+            "static void fabric_lease_release", acquire_fn
+        )
+        release_fn = source[
+            release_start:source.index("intAHIsub_AllocAudio", release_start)
+        ]
+        free_audio = source[
+            source.index("intAHIsub_FreeAudio"):
+            source.index("intAHIsub_Stop")
+        ]
+        self.assertIn("ahi_data->disable_cnt == 0U", pump)
+        self.assertLess(
+            pump.index("ahi_data->disable_cnt == 0U"),
+            pump.index("CallHookPkt(AudioCtrl->ahiac_PlayerFunc")
+        )
+        self.assertIn("ahi_data->lease_accum_fill = 0U;", stop)
+        self.assertIn("fabric_lease_release(ahi_data);", stop)
+        self.assertNotIn("ZZ9K_AUDIO_RING_PRODUCER_FLAG_PAUSED", stop)
+        self.assertIn(
+            "!ahi_data->record_stop && ahi_data->disable_cnt == 0U",
+            worker
+        )
+        recovery_snapshot = pump.index(
+            "recovery_generation = ahi_data->play_transport_generation;"
+        )
+        acquire = pump.index("fabric_lease_acquire(", recovery_snapshot)
+        generation_check = pump.index(
+            "ahi_data->play_transport_generation !=", acquire
+        )
+        release = pump.index(
+            "fabric_lease_release(ahi_data);", generation_check
+        )
+        recovery_unlock = pump.index(
+            "ahi_data->lease_acquire_in_progress = 0U;", release
+        )
+        recovered_log = pump.index("fabric lease recovered", release)
+        self.assertLess(recovery_snapshot, acquire)
+        self.assertLess(acquire, generation_check)
+        self.assertLess(generation_check, release)
+        self.assertLess(release, recovery_unlock)
+        self.assertLess(recovery_unlock, recovered_log)
+        header = self.read("ahi/driver/zz9000ax-ahi.h")
+        self.assertIn("uint32_t play_transport_generation;", header)
+        self.assertIn("uint8_t lease_acquire_in_progress;", header)
+        self.assertIn("uint8_t lease_release_pending;", header)
+        self.assertIn("uint32_t lease_release_slot;", header)
+        self.assertIn("uint32_t lease_release_generation;", header)
+        self.assertIn("uint8_t lease_release_in_progress;", header)
+        self.assertIn("uint8_t lease_acquire_uncertain;", header)
+        self.assertIn("ahi_data->lease_release_in_progress ||", start)
+        self.assertIn("ahi_data->lease_acquire_uncertain ||", start)
+        final_release = free_audio.index("fabric_lease_release(ahi_data);")
+        worker_stop = free_audio.index("SIGBREAKF_CTRL_C", final_release)
+        self.assertLess(final_release, worker_stop)
+        self.assertIn("release_attempt < 3U", free_audio)
+        self.assertIn("if (ahi_data->lease_release_in_progress)", release_fn)
+        self.assertIn("if (ahi_data->lease_release_pending)", pump)
+        self.assertIn("ahi_data->lease_release_pending ||", start)
+        self.assertIn(
+            "status = ZZ9KCall(&request, &reply", release_fn
+        )
+        self.assertIn("if (status != ZZ9K_STATUS_OK)", release_fn)
+        status_check = release_fn.index("if (status != ZZ9K_STATUS_OK)")
+        clear_pending = release_fn.index(
+            "ahi_data->lease_release_pending = 0U;", status_check
+        )
+        self.assertNotIn(
+            "lease_release_pending = 0U;",
+            release_fn[status_check:clear_pending]
+        )
+        self.assertIn("if (ahi_data->lease_acquire_in_progress)", pump)
+        self.assertIn("ahi_data->lease_acquire_in_progress = 1U;", pump)
+        self.assertIn("ahi_data->lease_acquire_in_progress = 0U;", pump)
+        self.assertIn("ahi_data->lease_acquire_in_progress) {", start)
+        self.assertIn("ahi_data->play_transport_generation++;", stop)
+        snapshot = start.index(
+            "start_generation = ahi_data->play_transport_generation;"
+        )
+        start_acquire = start.index("fabric_lease_acquire(", snapshot)
+        generation_check = start.index(
+            "ahi_data->play_transport_generation != start_generation",
+            start_acquire
+        )
+        start_release = start.index(
+            "fabric_lease_release(ahi_data);", generation_check
+        )
+        start_unlock = start.index(
+            "ahi_data->lease_acquire_in_progress = 0U;", start_release
+        )
+        clear_stop = start.index("ahi_data->play_stop = 0;", start_release)
+        self.assertLess(snapshot, start_acquire)
+        self.assertLess(start_acquire, generation_check)
+        self.assertLess(generation_check, start_release)
+        self.assertLess(start_release, start_unlock)
+        self.assertLess(start_unlock, clear_stop)
+        self.assertIn(
+            "(!(flags & AHISF_PLAY) || result == AHIE_OK)", start
+        )
 
     def test_build_scripts_have_shebangs_and_use_common_docker_image(self):
         scripts = (
@@ -494,6 +692,7 @@ class RepoToolingTests(unittest.TestCase):
             "ZZ_AX_AUDIO_BUFSZ",
             "ZZ_AX_INT2_ENV",
             "ZZ_AX_IRQ_NAME_AHI",
+            "ZZ_AX_IRQ_NAME_AHI_FABRIC",
             "ZZ_AX_IRQ_NAME_MHI",
             "ZZ_AX_AP_DSP_SET_VOLUMES",
         ):
@@ -572,6 +771,28 @@ class RepoToolingTests(unittest.TestCase):
         ]
         self.assertNotIn("setAudioParam", release)
 
+        # Legacy selector/value/reset MMIO remains shared during
+        # fabric-mode coexistence; both helpers must use the same Exec
+        # task exclusion so their three writes cannot interleave.
+        ahi_param = ahi[
+            ahi.index("static inline void write_audio_param"):
+            ahi.index("static BOOL recording_supported")
+        ]
+        mhi_param = mhi[
+            mhi.index("static void setAudioParam"):
+            mhi.index("// Firmware-authoritative control plane")
+        ]
+        for body in (ahi_param, mhi_param):
+            forbid = body.index("Forbid();")
+            selector = body.index("ZZ_REG_AUDIO_PARAM", forbid)
+            value = body.index("ZZ_REG_AUDIO_VAL", selector)
+            reset = body.rindex("ZZ_REG_AUDIO_PARAM")
+            permit = body.index("Permit();", reset)
+            self.assertLess(forbid, selector)
+            self.assertLess(selector, value)
+            self.assertLess(value, reset)
+            self.assertLess(reset, permit)
+
         # Both drivers gate on the capability and submit the trim
         # (allocate and release).
         for source in (ahi, mhi):
@@ -605,6 +826,49 @@ class RepoToolingTests(unittest.TestCase):
         assign = source.index("AudioCtrl->ahiac_BuffSamples =")
         start = source.index("intAHIsub_Start")
         self.assertLess(assign, start)
+
+    def test_ahi_mhi_coexistence_uses_active_mode_token(self):
+        header = self.read("include/zz9000_ax.h")
+        ahi = self.read("ahi/driver/zz9000ax-ahi.c")
+        mhi = self.read("mhi/mhizz9000.c")
+
+        self.assertIn("ZZ_AX_IRQ_NAME_AHI_FABRIC", header)
+        prepare = ahi[
+            ahi.index("static void prepare_irq_struct"):
+            ahi.index("static void install_irq_server_locked")
+        ]
+        install = ahi[
+            ahi.index("static void install_irq_server_locked"):
+            ahi.index("static uint16_t active_hw_interrupts")
+        ]
+        self.assertIn("ahi_data->fabric_mode", install)
+        self.assertIn("ZZ_AX_IRQ_NAME_AHI_FABRIC", prepare)
+        self.assertIn("ZZ_AX_IRQ_NAME_AHI", prepare)
+
+        alloc = mhi[
+            mhi.index("APTR i_MHIAllocDecoder"):
+            mhi.index("void i_MHIFreeDecoder")
+        ]
+        self.assertIn("ahi_mode_locked(MHI_LibBase->flags)", alloc)
+        self.assertIn("ahi_mode == MHI_AHI_MODE_LEGACY", alloc)
+        self.assertNotIn("fabric_rate_capped", mhi)
+
+        disable = mhi[
+            mhi.index("static void disable_hw_audio"):
+            mhi.index("static void unclaim_ownership_locked")
+        ]
+        guard = disable.index("ahi_mode_locked(mp->flags)")
+        clear = disable.index("setRegister(mp, ZZ_REG_AUDIO_CONFIG, 0)")
+        self.assertLess(guard, clear)
+        self.assertIn("MHI_AHI_MODE_FABRIC", disable)
+
+        hard_isr = mhi[
+            mhi.index("ULONG cdev_isr"):
+            mhi.index("// Initialise the Interrupt server nodes")
+        ]
+        self.assertNotIn("ZZ_REG_CONFIG", hard_isr)
+        self.assertNotIn("Cause(", hard_isr)
+        self.assertIn("return 0;", hard_isr)
 
     def test_mhi_zero_length_buffer_announces_eof(self):
         source = self.read("mhi/mhizz9000.c")
@@ -814,9 +1078,115 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("uint16_t play_sequence;",
                       header)
 
-    def test_ahi_exclusive_owner_is_claimed_before_hardware_mutation(self):
+    def test_ahi_fabric_lease_stages_little_endian_bounded(self):
+        """Lease staging preserves complete mixer periods under pressure."""
+        source = self.read("ahi/driver/zz9000ax-ahi.c")
+        helper_start = source.index("static void fabric_lease_flush_accum")
+        pump_start = source.index("static void fabric_lease_pump")
+        helper = source[helper_start:pump_start]
+        pump = source[
+            pump_start:
+            source.index("static void fabric_timer_post", pump_start)
+        ]
+
+        self.assertIn("zz9k_audio_ring_write", helper)
+        self.assertIn("memmove", helper)
+        first_flush = pump.index("fabric_lease_flush_accum")
+        mixer = pump.index("CallHookPkt(AudioCtrl->ahiac_MixerFunc")
+        whole_guard = pump.index(
+            "mix_bytes == lease_period && mix_bytes <= room", mixer
+        )
+        swap = pump.index("fabric_swap_period_le(", whole_guard)
+        second_flush = pump.index(
+            "fabric_lease_flush_accum", first_flush + 1
+        )
+        self.assertLess(first_flush, mixer)
+        self.assertLess(mixer, whole_guard)
+        self.assertLess(whole_guard, swap)
+        self.assertLess(swap, second_flush)
+        self.assertNotIn("mix_bytes = room", pump)
+        # PreTimer is the mix cadence (AHI v4 untimed-driver pacing);
+        # a complete period is either accumulated or discarded.
+        pretimer = pump.index("ahiac_PreTimer")
+        posttimer = pump.index("ahiac_PostTimer", mixer)
+        self.assertLess(pretimer, mixer)
+        self.assertLess(mixer, posttimer)
+        self.assertIn("lease_accum", pump)
+        self.assertIn("grant.source_rate / 50U", pump)
+
+    def test_ahi_revoked_fabric_lease_recovers_with_backoff(self):
+        """Active playback reacquires a revoked lease from worker context."""
         header = self.read("ahi/driver/zz9000ax-ahi.h")
         source = self.read("ahi/driver/zz9000ax-ahi.c")
+        pump_start = source.index("static void fabric_lease_pump")
+        pump = source[
+            pump_start:
+            source.index("static void fabric_timer_post", pump_start)
+        ]
+
+        self.assertIn("struct timeval lease_retry_deadline;", header)
+        recovery = pump.index(
+            "if (!ahi_data->lease_held || !session->mapped)"
+        )
+        reacquire = pump.index("fabric_lease_acquire(", recovery)
+        credits = pump.index("zz9k_audio_ring_take_credits", reacquire)
+        self.assertLess(recovery, reacquire)
+        self.assertLess(reacquire, credits)
+        self.assertIn(
+            "if (ahi_data->play_stop || ahi_data->lease_held)", pump
+        )
+        self.assertIn("GetSysTime(&now);", pump)
+        self.assertIn(
+            "now.tv_secs < ahi_data->lease_retry_deadline.tv_secs", pump
+        )
+        self.assertIn(
+            "GetSysTime(&ahi_data->lease_retry_deadline);", pump
+        )
+        self.assertIn(
+            "lease_retry_deadline.tv_secs += LEASE_RETRY_SECONDS", pump
+        )
+        revoked = pump.index("ZZ9K_AUDIO_RING_CREDIT_REVOKED", credits)
+        revoked_body = pump[revoked:]
+        self.assertIn("ahi_data->lease_held = 0;", revoked_body)
+        self.assertIn(
+            "ahi_data->lease_retry_deadline.tv_secs = 0;", revoked_body
+        )
+        self.assertIn("memset(session, 0, sizeof(*session));", revoked_body)
+
+    def test_ahi_fabric_worker_requires_pacing_timer(self):
+        """Fabric allocation must fail unless the worker can pace leases."""
+        source = self.read("ahi/driver/zz9000ax-ahi.c")
+        worker = source[
+            source.index("void WorkerProcess()"):
+            source.index("// TW: C interrupt service routine")
+        ]
+        timer_setup = worker.index("ahi_data->lease_timer_port = CreateMsgPort()")
+        fatal_gate = worker.index(
+            "if (ahi_data->fabric_mode && !lease_timer_sig)"
+        )
+        failure_return = worker.index("return;", fatal_gate)
+        success_handshake = worker.index(
+            "Signal(ahi_data->t_mainproc", failure_return
+        )
+        self.assertLess(timer_setup, fatal_gate)
+        self.assertLess(worker.index("fabric_timer_post(ahi_data)"),
+                        success_handshake)
+        setup = worker[timer_setup:fatal_gate]
+        self.assertIn("DeleteIORequest", setup)
+        self.assertIn("DeleteMsgPort", setup)
+        failure = worker[fatal_gate:success_handshake]
+        self.assertIn("ahi_data->worker_process = NULL", failure)
+        self.assertIn("Signal((struct Task *)ahi_data->t_mainproc", failure)
+        self.assertIn("return;", failure)
+
+    def test_ahi_exclusive_owner_is_claimed_before_hardware_mutation(self):
+        header = self.read("ahi/driver/zz9000ax-ahi.h")
+        mhi_header = self.read("mhi/mhilib.h")
+        shared = self.read("include/zz9000_ax.h")
+        source = self.read("ahi/driver/zz9000ax-ahi.c")
+        mhi_source = self.read("mhi/mhizz9000.c")
+        ahi_asm = self.read("ahi/driver/asmfuncs.s")
+        mhi_asm = self.read("mhi/asmfuncs.s")
         alloc_body = source[
             source.index("intAHIsub_AllocAudio"):
             source.index("static void __attribute__((used)) intAHIsub_FreeAudio")
@@ -827,17 +1197,22 @@ class RepoToolingTests(unittest.TestCase):
         ]
         destroy_body = source[
             source.index("void destroy_interrupt"):
-            source.index("static BOOL mhi_present_locked")
+            source.index("#define Z9AX_MHI_MODE_NONE")
         ]
 
         self.assertIn("struct z9ax *owner;", header)
+        self.assertIn("ZZ_AX_IRQ_NAME_MHI_FABRIC", shared)
         self.assertIn("Z9AXBase->owner = NULL;", source)
-        self.assertIn("Z9AXBase->owner || mhi_present_locked()", alloc_body)
+        self.assertIn("mhi_mode = mhi_mode_locked();", alloc_body)
+        owner_condition = (
+            "(mhi_mode != Z9AX_MHI_MODE_NONE &&\n"
+            "       (!ahi_data->fabric_mode || "
+            "mhi_mode != Z9AX_MHI_MODE_FABRIC))"
+        )
+        self.assertIn(owner_condition, alloc_body)
         self.assertIn("Z9AXBase->owner = ahi_data;", alloc_body)
         forbid = alloc_body.index("Forbid();")
-        owner_check = alloc_body.index(
-            "Z9AXBase->owner || mhi_present_locked()"
-        )
+        owner_check = alloc_body.index(owner_condition)
         owner_publish = alloc_body.index("Z9AXBase->owner = ahi_data;")
         irq_install = alloc_body.index(
             "install_irq_server_locked(ahi_data);", owner_publish
@@ -859,6 +1234,61 @@ class RepoToolingTests(unittest.TestCase):
         self.assertLess(
             free_body.index("disable_hw_interrupt(ahi_data);"),
             free_body.index("destroy_interrupt(ahi_data);")
+        )
+
+        ahi_prepare = source[
+            source.index("static void prepare_irq_struct"):
+            source.index("static void install_irq_server_locked")
+        ]
+        ahi_install = source[
+            source.index("static void install_irq_server_locked"):
+            source.index("static uint16_t active_hw_interrupts")
+        ]
+        self.assertIn(
+            "irq->is_Node.ln_Name = ZZ_AX_IRQ_NAME_AHI;", ahi_prepare
+        )
+        self.assertIn(
+            "fabric->is_Node.ln_Name = ZZ_AX_IRQ_NAME_AHI_FABRIC;",
+            ahi_prepare
+        )
+        self.assertIn("fabric->is_Code = (void*)dev_token_isr;", ahi_prepare)
+        self.assertIn("AddIntServer(INTB_PORTS, fabric);", ahi_install)
+        self.assertIn("RemIntServer(INTB_PORTS, fabric);", destroy_body)
+        self.assertIn("struct Interrupt irq_fabric_token;", header)
+        self.assertIn("_dev_token_isr:", ahi_asm)
+
+        prepare = mhi_source[
+            mhi_source.index("static void prepare_irq_structs"):
+            mhi_source.index("static void install_irq_server_locked")
+        ]
+        self.assertIn(
+            "mp->irq.is_Node.ln_Name = ZZ_AX_IRQ_NAME_MHI;", prepare
+        )
+        self.assertIn(
+            "mp->irq_fabric_token.is_Node.ln_Name = "
+            "ZZ_AX_IRQ_NAME_MHI_FABRIC;", prepare
+        )
+        self.assertIn(
+            "mp->irq_fabric_token.is_Code = (void*)dev_token_isr;", prepare
+        )
+        caps_gate = mhi_source.index("const ULONG required_caps")
+        legacy_reject = mhi_source.index(
+            "if(ahi_mode == MHI_AHI_MODE_LEGACY)", caps_gate
+        )
+        promote = mhi_source.index(
+            "AddIntServer(INTB_PORTS, &mp->irq_fabric_token)",
+            legacy_reject
+        )
+        promote_window = mhi_source[legacy_reject:promote + 250]
+        self.assertIn("Forbid();", promote_window)
+        self.assertIn("mp->fabric_token_installed = TRUE;", promote_window)
+        self.assertIn("Permit();", promote_window)
+        self.assertLess(caps_gate, legacy_reject)
+        self.assertLess(legacy_reject, promote)
+        self.assertIn("struct Interrupt irq_fabric_token;", mhi_header)
+        self.assertIn("_dev_token_isr:", mhi_asm)
+        self.assertIn(
+            "RemIntServer(INTB_PORTS, &mp->irq_fabric_token)", mhi_source
         )
 
     def test_ahi_duplex_tool_uses_one_control_for_both_directions(self):
