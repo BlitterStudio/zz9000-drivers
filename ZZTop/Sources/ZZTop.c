@@ -2753,6 +2753,14 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 #define ZZTOP_AUDIO_CEILING_MIN 1
 #define ZZTOP_AUDIO_CEILING_MAX 4095
 
+static UWORD audio_balanced_level(UWORD ceiling)
+{
+	ULONG balanced = (3UL * ceiling) / 8UL;
+
+	return (UWORD)(balanced > ZZTOP_AUDIO_LEVEL_MAX
+		? ZZTOP_AUDIO_LEVEL_MAX : balanced);
+}
+
 static BOOL audio_control_capped = FALSE;
 static BOOL audio_metering_capped = FALSE;
 
@@ -4077,10 +4085,10 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 							break;
 						}
 						case AUDGAD_BTN_BALANCE: {
-							UWORD bal_paula = (UWORD)(
-								(3UL * audio_ceiling_paula) / 8UL);
-							UWORD bal_ax = (UWORD)(
-								(3UL * audio_ceiling_ax) / 8UL);
+							UWORD bal_paula =
+								audio_balanced_level(audio_ceiling_paula);
+							UWORD bal_ax =
+								audio_balanced_level(audio_ceiling_ax);
 							int bst = audio_scene_write_commit(
 								scene,
 								ZZ9K_AUDIO_SCENE_PARAM_BASELINE,
