@@ -164,6 +164,21 @@ char dummies[128];
 struct ExecBase *SysBase;
 static struct ConfigDev *reserved_cd = NULL;
 static struct BlitterRegisterCache blitter_register_cache;
+enum GFXDataByteCacheSlot {
+	GFXDATA_BYTE_U8_0,
+	GFXDATA_BYTE_U8_1,
+	GFXDATA_BYTE_MASK,
+	GFXDATA_BYTE_MINTERM,
+	GFXDATA_BYTE_CACHE_COUNT
+};
+
+struct GFXDataByteCache {
+	volatile struct GFXData *owner;
+	uint8 value[GFXDATA_BYTE_CACHE_COUNT];
+	uint8 valid;
+};
+
+static struct GFXDataByteCache gfxdata_byte_cache;
 static BOOL zz_overlay_hooks_enabled = FALSE;
 struct ZZBitMap;
 struct ZZZ2PIPAllocationRequest {
@@ -477,6 +492,44 @@ static inline void zzwrite32(volatile uint16_t* reg, uint32_t value) {
 	uint16_t *v = (uint16_t *)&value;
 	reg[0] = v[0];
 	reg[1] = v[1];
+}
+static inline void gfxdata_byte_cache_reset(void) {
+	gfxdata_byte_cache.owner = NULL;
+	gfxdata_byte_cache.valid = 0;
+}
+
+static inline void writeGfxDataByte(volatile struct GFXData *gfxdata,
+	volatile uint8 *field, uint8 slot, uint8 value) {
+	uint8 bit = (uint8)(1U << slot);
+
+	if (gfxdata_byte_cache.owner != gfxdata) {
+		gfxdata_byte_cache.owner = gfxdata;
+		gfxdata_byte_cache.valid = 0;
+	}
+
+	if (!(gfxdata_byte_cache.valid & bit) ||
+		gfxdata_byte_cache.value[slot] != value) {
+		*field = value;
+		gfxdata_byte_cache.value[slot] = value;
+		gfxdata_byte_cache.valid |= bit;
+	}
+}
+
+/* u8_user[2] is firmware-owned by codec operations and u8_user[3] has no
+ * repeated cross-command value worth caching. Keep those writes direct. */
+static inline void writeGfxDataU8(volatile struct GFXData *gfxdata,
+	uint8 index, uint8 value) {
+	writeGfxDataByte(gfxdata, &gfxdata->u8_user[index], index, value);
+}
+
+static inline void writeGfxDataMask(volatile struct GFXData *gfxdata,
+	uint8 value) {
+	writeGfxDataByte(gfxdata, &gfxdata->mask, GFXDATA_BYTE_MASK, value);
+}
+
+static inline void writeGfxDataMinterm(volatile struct GFXData *gfxdata,
+	uint8 value) {
+	writeGfxDataByte(gfxdata, &gfxdata->minterm, GFXDATA_BYTE_MINTERM, value);
 }
 
 // Assuming that it takes longer to write the same value through slow ZorroII register access again
@@ -1054,6 +1107,7 @@ int __attribute__((used)) InitCard(__REGA0(struct BoardInfo* b), __REGA1(char **
 
 	apply_card_settings(b, tool_types);
 	blitter_cache_reset(&blitter_register_cache);
+	gfxdata_byte_cache_reset();
 
 	return 1;
 }
@@ -1211,7 +1265,8 @@ void SetPanning(__REGA0(struct BoardInfo *b), __REGA1(UBYTE *addr), __REGD0(UWOR
 		gfxdata->x[0] = x_offset;
 		gfxdata->y[0] = y_offset;
 		gfxdata->x[1] = width;
-		gfxdata->u8_user[GFXDATA_U8_COLORMODE] = (uint8)panning_colormode(mnt_colormode(format & 0xFF));
+		writeGfxDataU8(gfxdata, GFXDATA_U8_COLORMODE,
+			(uint8)panning_colormode(mnt_colormode(format & 0xFF)));
 		zzwrite16(&registers->blitter_dma_op, OP_PAN);
 	} else {
 		uint32_t offset = ((uint32_t)addr - (uint32_t)b->MemoryBase);
@@ -1250,7 +1305,7 @@ void SetColorArray(__REGA0(struct BoardInfo *b), __REGD0(UWORD start), __REGD1(U
 		}
 		gfxdata->user[0] = start;
 		gfxdata->user[1] = count;
-		gfxdata->u8_user[0] = (start >= 256) ? 1 : 0;
+		writeGfxDataU8(gfxdata, 0, (start >= 256) ? 1 : 0);
 		zzwrite16(&registers->blitter_dma_op, OP_SET_PALETTE);
 	} else {
 		int op = (start >= 256) ? 19 : 3;
@@ -1495,8 +1550,8 @@ static inline void fill_rect_accel(struct BoardInfo *b, struct RenderInfo *r,
 		gfxdata->offset[GFXDATA_DST] = ((uint32_t)r->Memory - (uint32_t)b->MemoryBase);
 		gfxdata->pitch[GFXDATA_DST] = (r->BytesPerRow >> 2);
 
-		gfxdata->u8_user[GFXDATA_U8_COLORMODE] = (uint8_t)colormode;
-		gfxdata->mask = mask;
+		writeGfxDataU8(gfxdata, GFXDATA_U8_COLORMODE, (uint8_t)colormode);
+		writeGfxDataMask(gfxdata, mask);
 
 		gfxdata->rgb[0] = color;
 		gfxdata->x[0] = x;
@@ -1562,8 +1617,8 @@ void InvertRect(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __R
 		gfxdata->offset[GFXDATA_DST] = (uint32_t)r->Memory - (uint32_t)b->MemoryBase;
 		gfxdata->pitch[GFXDATA_DST] = (r->BytesPerRow >> 2);
 
-		gfxdata->u8_user[GFXDATA_U8_COLORMODE] = (uint8_t)colormode;
-		gfxdata->mask = mask;
+		writeGfxDataU8(gfxdata, GFXDATA_U8_COLORMODE, (uint8_t)colormode);
+		writeGfxDataMask(gfxdata, mask);
 
 		gfxdata->x[0] = x;
 		gfxdata->x[1] = w;
@@ -1628,10 +1683,10 @@ void BlitRect(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 		gfxdata->y[1] = h;
 
 		// RGBFormat is the format of the source (and destination); this format shall not be taken from the RenderInfo.
-		gfxdata->u8_user[GFXDATA_U8_COLORMODE] = (uint8_t)colormode;
+		writeGfxDataU8(gfxdata, GFXDATA_U8_COLORMODE, (uint8_t)colormode);
 
 		// Mask is a bitmask that defines which (logical) planes are affected by the copy for planar or chunky bitmaps. It can be ignored for direct color modes.
-		gfxdata->mask = mask;
+		writeGfxDataMask(gfxdata, mask);
 
 		// Source and destination rectangle may be overlapping, a proper copy operation shall be performed in either case.
 		zzwrite16(&registers->blitter_dma_op, OP_COPYRECT);
@@ -1691,10 +1746,10 @@ void BlitRectNoMaskComplete(__REGA0(struct BoardInfo *b), __REGA1(struct RenderI
 		gfxdata->y[1] = h;
 
 		// The mode is in register d6, it uses the Amiga Blitter MinTerms encoding of the graphics.library.
-		gfxdata->minterm = minterm;
+		writeGfxDataMinterm(gfxdata, minterm);
 
 		// The common RGBFormat of source and destination is in register d7, it shall not be taken from the source or destination RenderInfo.
-		gfxdata->u8_user[GFXDATA_U8_COLORMODE] = (uint8_t)colormode;
+		writeGfxDataU8(gfxdata, GFXDATA_U8_COLORMODE, (uint8_t)colormode);
 
 		zzwrite16(&registers->blitter_dma_op, OP_COPYRECT_NOMASK);
 	} else {
@@ -1776,9 +1831,9 @@ void BlitTemplate(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), _
 		gfxdata->rgb[0] = t->FgPen;
 		gfxdata->rgb[1] = t->BgPen;
 
-		gfxdata->u8_user[GFXDATA_U8_COLORMODE] = (uint8_t)colormode;
-		gfxdata->u8_user[GFXDATA_U8_DRAWMODE] = t->DrawMode;
-		gfxdata->mask = mask;
+		writeGfxDataU8(gfxdata, GFXDATA_U8_COLORMODE, (uint8_t)colormode);
+		writeGfxDataU8(gfxdata, GFXDATA_U8_DRAWMODE, t->DrawMode);
+		writeGfxDataMask(gfxdata, mask);
 
 		zzwrite16(&registers->blitter_dma_op, OP_RECT_TEMPLATE);
 	} else {
@@ -1843,10 +1898,10 @@ void BlitPattern(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __
 		gfxdata->rgb[0] = pat->FgPen;
 		gfxdata->rgb[1] = pat->BgPen;
 
-		gfxdata->u8_user[GFXDATA_U8_COLORMODE] = (uint8_t)colormode;
-		gfxdata->u8_user[GFXDATA_U8_DRAWMODE] = pat->DrawMode;
+		writeGfxDataU8(gfxdata, GFXDATA_U8_COLORMODE, (uint8_t)colormode);
+		writeGfxDataU8(gfxdata, GFXDATA_U8_DRAWMODE, pat->DrawMode);
 		gfxdata->user[0] = (1 << pat->Size);
-		gfxdata->mask = mask;
+		writeGfxDataMask(gfxdata, mask);
 
 		zzwrite16(&registers->blitter_dma_op, OP_RECT_PATTERN);
 	} else {
@@ -1980,8 +2035,8 @@ void DrawLine(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 		gfxdata->offset[GFXDATA_DST] = (uint32_t)r->Memory - (uint32_t)b->MemoryBase;
 		gfxdata->pitch[GFXDATA_DST] = (r->BytesPerRow >> 2);
 
-		gfxdata->u8_user[GFXDATA_U8_COLORMODE] = (uint8_t)colormode;
-		gfxdata->u8_user[GFXDATA_U8_DRAWMODE] = l->DrawMode;
+		writeGfxDataU8(gfxdata, GFXDATA_U8_COLORMODE, (uint8_t)colormode);
+		writeGfxDataU8(gfxdata, GFXDATA_U8_DRAWMODE, l->DrawMode);
 		gfxdata->u8_user[GFXDATA_U8_LINE_PATTERN_OFFSET] = line_pat_off;
 		gfxdata->u8_user[GFXDATA_U8_LINE_PADDING] = l->pad;
 
@@ -1998,7 +2053,7 @@ void DrawLine(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 		gfxdata->user[2] = ((line_pat_off << 8) | l->pad);
 		gfxdata->user[3] = err_seed;
 
-		gfxdata->mask = mask;
+		writeGfxDataMask(gfxdata, mask);
 
 		zzwrite16(&registers->blitter_dma_op, OP_DRAWLINE);
 	} else {
@@ -2167,7 +2222,7 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 		bitmap_format = zz_z2_pip_request.format;
 	} else {
 		dmy_cache
-		gfxdata->u8_user[1] = 1;
+		writeGfxDataU8(gfxdata, 1, 1);
 		gfxdata->offset[1] = size;
 		zzwrite16(&registers->blitter_acc_op, ACC_OP_ALLOC_SURFACE);
 		card_offset = gfxdata->offset[0];
@@ -2179,7 +2234,7 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 	if (!zbm) {
 		if (z3) {
 			gfxdata->offset[0] = card_offset;
-			gfxdata->u8_user[0] = 0;
+			writeGfxDataU8(gfxdata, 0, 0);
 			zzwrite16(&registers->blitter_acc_op, ACC_OP_FREE_SURFACE);
 		}
 		return NULL;
@@ -2221,7 +2276,7 @@ BOOL ZZ_FreeBitMap(__REGA0(struct BoardInfo *b), __REGA1(struct BitMap *bm), __R
 		MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
 		dmy_cache
 		gfxdata->offset[0] = zbm->card_offset;
-		gfxdata->u8_user[0] = 0;
+		writeGfxDataU8(gfxdata, 0, 0);
 		zzwrite16(&registers->blitter_acc_op, ACC_OP_FREE_SURFACE);
 	} else if (zz_z2_layout_active(b) &&
 		zbm->card_offset == b->CardData[ZZ_CARD_DATA_PIP_OFFSET]) {
@@ -2757,8 +2812,8 @@ void BlitPlanar2Chunky(__REGA0(struct BoardInfo *b), __REGA1(struct BitMap *bm),
 		gfxdata->pitch[GFXDATA_DST] = (r->BytesPerRow >> 2);
 		gfxdata->pitch[GFXDATA_SRC] = line_size;
 
-		gfxdata->mask = mask;
-		gfxdata->minterm = minterm;
+		writeGfxDataMask(gfxdata, mask);
+		writeGfxDataMinterm(gfxdata, minterm);
 	} else {
 		writeBlitterDstOffset(registers, offset);
 		writeBlitterDstPitch(registers, r->BytesPerRow >> 2);
@@ -2847,9 +2902,10 @@ void BlitPlanar2Direct(__REGA0(struct BoardInfo *b), __REGA1(struct BitMap *bm),
 		gfxdata->pitch[GFXDATA_SRC] = line_size;
 		gfxdata->rgb[0] = clut->ColorMask;
 
-		gfxdata->u8_user[GFXDATA_U8_COLORMODE] = (uint8_t)mnt_colormode(r->RGBFormat);
-		gfxdata->mask = mask;
-		gfxdata->minterm = minterm;
+		writeGfxDataU8(gfxdata, GFXDATA_U8_COLORMODE,
+			(uint8_t)mnt_colormode(r->RGBFormat));
+		writeGfxDataMask(gfxdata, mask);
+		writeGfxDataMinterm(gfxdata, minterm);
 	} else {
 		writeBlitterDstOffset(registers, offset);
 		writeBlitterDstPitch(registers, r->BytesPerRow >> 2);
