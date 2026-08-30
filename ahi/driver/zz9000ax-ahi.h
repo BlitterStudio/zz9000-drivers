@@ -7,6 +7,7 @@ struct z9ax {
   struct Library *ahi_base;
   struct Process *worker_process;
   struct Interrupt irq;
+  struct Interrupt irq_fabric_token;
   uint32_t hw_addr;
   uint32_t audio_buf_addr;
   uint32_t record_buf_addr;
@@ -28,6 +29,7 @@ struct z9ax {
   uint16_t record_stop;
   uint8_t flags;
   uint8_t irq_installed;
+  uint8_t fabric_token_installed;
   uint8_t record_capable;
   uint8_t tx_status_capable;
   /* Audio-fabric lease mode (AHI migration). fabric_mode: the card

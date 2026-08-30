@@ -628,7 +628,11 @@ class RepoToolingTests(unittest.TestCase):
             ahi.index("static void prepare_irq_struct"):
             ahi.index("static void install_irq_server_locked")
         ]
-        self.assertIn("ahi_data->fabric_mode", prepare)
+        install = ahi[
+            ahi.index("static void install_irq_server_locked"):
+            ahi.index("static uint16_t active_hw_interrupts")
+        ]
+        self.assertIn("ahi_data->fabric_mode", install)
         self.assertIn("ZZ_AX_IRQ_NAME_AHI_FABRIC", prepare)
         self.assertIn("ZZ_AX_IRQ_NAME_AHI", prepare)
 
@@ -950,9 +954,12 @@ class RepoToolingTests(unittest.TestCase):
 
     def test_ahi_exclusive_owner_is_claimed_before_hardware_mutation(self):
         header = self.read("ahi/driver/zz9000ax-ahi.h")
+        mhi_header = self.read("mhi/mhilib.h")
         shared = self.read("include/zz9000_ax.h")
         source = self.read("ahi/driver/zz9000ax-ahi.c")
         mhi_source = self.read("mhi/mhizz9000.c")
+        ahi_asm = self.read("ahi/driver/asmfuncs.s")
+        mhi_asm = self.read("mhi/asmfuncs.s")
         alloc_body = source[
             source.index("intAHIsub_AllocAudio"):
             source.index("static void __attribute__((used)) intAHIsub_FreeAudio")
@@ -1002,6 +1009,27 @@ class RepoToolingTests(unittest.TestCase):
             free_body.index("destroy_interrupt(ahi_data);")
         )
 
+        ahi_prepare = source[
+            source.index("static void prepare_irq_struct"):
+            source.index("static void install_irq_server_locked")
+        ]
+        ahi_install = source[
+            source.index("static void install_irq_server_locked"):
+            source.index("static uint16_t active_hw_interrupts")
+        ]
+        self.assertIn(
+            "irq->is_Node.ln_Name = ZZ_AX_IRQ_NAME_AHI;", ahi_prepare
+        )
+        self.assertIn(
+            "fabric->is_Node.ln_Name = ZZ_AX_IRQ_NAME_AHI_FABRIC;",
+            ahi_prepare
+        )
+        self.assertIn("fabric->is_Code = (void*)dev_token_isr;", ahi_prepare)
+        self.assertIn("AddIntServer(INTB_PORTS, fabric);", ahi_install)
+        self.assertIn("RemIntServer(INTB_PORTS, fabric);", destroy_body)
+        self.assertIn("struct Interrupt irq_fabric_token;", header)
+        self.assertIn("_dev_token_isr:", ahi_asm)
+
         prepare = mhi_source[
             mhi_source.index("static void prepare_irq_structs"):
             mhi_source.index("static void install_irq_server_locked")
@@ -1009,19 +1037,32 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn(
             "mp->irq.is_Node.ln_Name = ZZ_AX_IRQ_NAME_MHI;", prepare
         )
+        self.assertIn(
+            "mp->irq_fabric_token.is_Node.ln_Name = "
+            "ZZ_AX_IRQ_NAME_MHI_FABRIC;", prepare
+        )
+        self.assertIn(
+            "mp->irq_fabric_token.is_Code = (void*)dev_token_isr;", prepare
+        )
         caps_gate = mhi_source.index("const ULONG required_caps")
         legacy_reject = mhi_source.index(
             "if(ahi_mode == MHI_AHI_MODE_LEGACY)", caps_gate
         )
         promote = mhi_source.index(
-            "mp->irq.is_Node.ln_Name = ZZ_AX_IRQ_NAME_MHI_FABRIC",
+            "AddIntServer(INTB_PORTS, &mp->irq_fabric_token)",
             legacy_reject
         )
-        promote_window = mhi_source[legacy_reject:promote + 100]
+        promote_window = mhi_source[legacy_reject:promote + 250]
         self.assertIn("Forbid();", promote_window)
+        self.assertIn("mp->fabric_token_installed = TRUE;", promote_window)
         self.assertIn("Permit();", promote_window)
         self.assertLess(caps_gate, legacy_reject)
         self.assertLess(legacy_reject, promote)
+        self.assertIn("struct Interrupt irq_fabric_token;", mhi_header)
+        self.assertIn("_dev_token_isr:", mhi_asm)
+        self.assertIn(
+            "RemIntServer(INTB_PORTS, &mp->irq_fabric_token)", mhi_source
+        )
 
     def test_ahi_duplex_tool_uses_one_control_for_both_directions(self):
         source = self.read("ahi/duplextest/ZZAXDuplexTest.c")

@@ -798,21 +798,32 @@ void cdev_isr(struct z9ax* data asm("a1")) {
   }
 }
 
-// TW: dev_isr is now an external asm wrapper.
+// TW: dev_isr is the hardware wrapper; dev_token_isr is an inert
+// ownership sentinel for mixed-version driver installations.
 extern uint32_t dev_isr(struct z9ax* data asm("a1"));
+extern uint32_t dev_token_isr(void);
 
 // Fill in the Interrupt server node so it's ready to be added to the
 // int-server list. Kept separate from the actual AddIntServer call so the
 // install can be performed atomically under the AllocAudio ownership Forbid().
 static void prepare_irq_struct(struct z9ax* ahi_data) {
   struct Interrupt* irq = &ahi_data->irq;
+  struct Interrupt* fabric = &ahi_data->irq_fabric_token;
 
+  /* Keep the real node legacy-visible so pre-fabric MHI binaries
+   * continue to reject AHI. New MHI checks the qualified sentinel
+   * first and may coexist only when it is also fabric-qualified. */
   irq->is_Node.ln_Type = NT_INTERRUPT;
   irq->is_Node.ln_Pri = 126; // High priority: this ISR must react quickly.
-  irq->is_Node.ln_Name = ahi_data->fabric_mode
-      ? ZZ_AX_IRQ_NAME_AHI_FABRIC : ZZ_AX_IRQ_NAME_AHI;
+  irq->is_Node.ln_Name = ZZ_AX_IRQ_NAME_AHI;
   irq->is_Data = ahi_data;
   irq->is_Code = (void*)dev_isr;
+
+  fabric->is_Node.ln_Type = NT_INTERRUPT;
+  fabric->is_Node.ln_Pri = 125;
+  fabric->is_Node.ln_Name = ZZ_AX_IRQ_NAME_AHI_FABRIC;
+  fabric->is_Data = ahi_data;
+  fabric->is_Code = (void*)dev_token_isr;
 }
 
 // Install the interrupt server. MUST be called with Forbid() already active
@@ -820,16 +831,24 @@ static void prepare_irq_struct(struct z9ax* ahi_data) {
 // and AddIntServer into one atomic claim step.
 static void install_irq_server_locked(struct z9ax* ahi_data) {
   struct Interrupt* irq = &ahi_data->irq;
+  struct Interrupt* fabric = &ahi_data->irq_fabric_token;
 #ifdef REAL_HARDWARE
   if (ahi_data->flags & ZZ_AX_DEVF_INT2MODE) {
     AddIntServer(INTB_PORTS, irq);
+    if (ahi_data->fabric_mode)
+      AddIntServer(INTB_PORTS, fabric);
   } else {
     AddIntServer(INTB_EXTER, irq);
+    if (ahi_data->fabric_mode)
+      AddIntServer(INTB_EXTER, fabric);
   }
 #else
   AddIntServer(INTB_VERTB, irq); // for debugging
+  if (ahi_data->fabric_mode)
+    AddIntServer(INTB_VERTB, fabric);
 #endif
   ahi_data->irq_installed = 1;
+  ahi_data->fabric_token_installed = ahi_data->fabric_mode;
 }
 
 static uint16_t active_hw_interrupts(const struct z9ax* ahi_data) {
@@ -875,6 +894,7 @@ static void zero_hw_audio_ring(struct z9ax* ahi_data) {
 
 void destroy_interrupt(struct z9ax* ahi_data) {
   struct Interrupt* irq = &ahi_data->irq;
+  struct Interrupt* fabric = &ahi_data->irq_fabric_token;
 
   if (!ahi_data->irq_installed) return;
 
@@ -886,23 +906,30 @@ void destroy_interrupt(struct z9ax* ahi_data) {
   Forbid();
 #ifdef REAL_HARDWARE
   if (ahi_data->flags & ZZ_AX_DEVF_INT2MODE) {
+    if (ahi_data->fabric_token_installed)
+      RemIntServer(INTB_PORTS, fabric);
     RemIntServer(INTB_PORTS, irq);
   } else {
+    if (ahi_data->fabric_token_installed)
+      RemIntServer(INTB_EXTER, fabric);
     RemIntServer(INTB_EXTER, irq);
   }
 #else
+  if (ahi_data->fabric_token_installed)
+    RemIntServer(INTB_VERTB, fabric);
   RemIntServer(INTB_VERTB, irq);
 #endif
+  ahi_data->fabric_token_installed = 0;
   ahi_data->irq_installed = 0;
   if (Z9AXBase && Z9AXBase->owner == ahi_data)
     Z9AXBase->owner = NULL;
   Permit();
 }
 
-// Identify the mode of an active MHI owner from its installed IRQ node.
-// The fabric name is published only after the current MHI has proved the
-// matched firmware capabilities. Older binaries and provisional/current
-// fallback owners retain the legacy name. MUST run under Forbid().
+// Identify the mode of an active MHI owner from its installed IRQ nodes.
+// Qualified MHI publishes a fabric sentinel in addition to the legacy node
+// retained for old AHI binaries; check fabric first. Fallback and old MHI
+// publish only the legacy node. MUST run under Forbid().
 #define Z9AX_MHI_MODE_NONE   0U
 #define Z9AX_MHI_MODE_LEGACY 1U
 #define Z9AX_MHI_MODE_FABRIC 2U
