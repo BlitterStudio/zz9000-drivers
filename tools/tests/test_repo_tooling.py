@@ -822,9 +822,10 @@ class RepoToolingTests(unittest.TestCase):
         periods in flight instead of filling the whole granted ring on
         the first wake (the hardware session caught both)."""
         source = self.read("ahi/driver/zz9000ax-ahi.c")
+        pump_start = source.index("static void fabric_lease_pump")
         pump = source[
-            source.index("static void fabric_lease_pump"):
-            source.index("/* (Re)arm the 10-ms UNIT_MICROHZ")
+            pump_start:
+            source.index("static void fabric_timer_post", pump_start)
         ]
         self.assertIn("fabric_swap_period_le", pump)
         swap = pump.index("fabric_swap_period_le(")
@@ -838,6 +839,32 @@ class RepoToolingTests(unittest.TestCase):
         self.assertLess(pretimer, mixer)
         self.assertIn("lease_accum", pump)
         self.assertIn("grant.source_rate / 50U", pump)
+
+    def test_ahi_fabric_worker_requires_pacing_timer(self):
+        """Fabric allocation must fail unless the worker can pace leases."""
+        source = self.read("ahi/driver/zz9000ax-ahi.c")
+        worker = source[
+            source.index("void WorkerProcess()"):
+            source.index("// TW: C interrupt service routine")
+        ]
+        timer_setup = worker.index("ahi_data->lease_timer_port = CreateMsgPort()")
+        fatal_gate = worker.index(
+            "if (ahi_data->fabric_mode && !lease_timer_sig)"
+        )
+        failure_return = worker.index("return;", fatal_gate)
+        success_handshake = worker.index(
+            "Signal(ahi_data->t_mainproc", failure_return
+        )
+        self.assertLess(timer_setup, fatal_gate)
+        self.assertLess(worker.index("fabric_timer_post(ahi_data)"),
+                        success_handshake)
+        setup = worker[timer_setup:fatal_gate]
+        self.assertIn("DeleteIORequest", setup)
+        self.assertIn("DeleteMsgPort", setup)
+        failure = worker[fatal_gate:success_handshake]
+        self.assertIn("ahi_data->worker_process = NULL", failure)
+        self.assertIn("Signal((struct Task *)ahi_data->t_mainproc", failure)
+        self.assertIn("return;", failure)
 
     def test_ahi_exclusive_owner_is_claimed_before_hardware_mutation(self):
         header = self.read("ahi/driver/zz9000ax-ahi.h")

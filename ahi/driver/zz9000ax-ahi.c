@@ -586,33 +586,62 @@ void WorkerProcess() {
 
   uint32_t signals = 0;
 
-  Signal(ahi_data->t_mainproc, 1L << ahi_data->mainproc_signal);
-
-  /* Fabric lease mode paces itself: a 10-ms UNIT_MICROHZ timer wakes
-   * the worker to adopt credits, stage source-rate periods, and
-   * refresh the lease heartbeat; the card interrupt keeps serving
-   * the record direction exactly as before. Failure to create the
-   * timer is fatal for lease mode only -- fall back is impossible
-   * mid-session (the firmware owns the output), so the lease simply
-   * never becomes active and Start() fails on its own merits. */
+  /* Fabric lease mode paces itself: a UNIT_MICROHZ timer wakes the
+   * worker to adopt credits, stage source-rate periods, and refresh
+   * the lease heartbeat; the card interrupt keeps serving the record
+   * direction exactly as before. The pacing timer is part of worker
+   * initialization -- without it nothing ever calls
+   * fabric_lease_pump, so a session that reported success would
+   * produce no audio and lose its lease heartbeat. Bring the port,
+   * request, and device up (and post the first request) before the
+   * success handshake below; any failure aborts init so AllocAudio
+   * takes its existing failure path instead of starting a silent
+   * session. */
   uint32_t lease_timer_sig = 0;
   if (ahi_data->fabric_mode) {
     ahi_data->lease_timer_port = CreateMsgPort();
     if (ahi_data->lease_timer_port) {
       ahi_data->lease_timer_req = (struct timerequest *)CreateIORequest(
           (APTR)ahi_data->lease_timer_port, sizeof(struct timerequest));
+    }
+    if (ahi_data->lease_timer_req &&
+        OpenDevice((STRPTR)"timer.device", UNIT_MICROHZ,
+                   (struct IORequest *)ahi_data->lease_timer_req, 0) == 0) {
+      lease_timer_sig = 1L << ahi_data->lease_timer_port->mp_SigBit;
+      TimerBase = ahi_data->lease_timer_req->tr_node.io_Device;
+      GetSysTime(&ahi_data->lease_timer_deadline);
+      fabric_timer_post(ahi_data);
+    } else {
+      /* Clean up whatever the failed setup left behind: nothing may
+       * outlive this worker, and AllocAudio's failure path owns the
+       * rest of the teardown. */
       if (ahi_data->lease_timer_req) {
-        if (OpenDevice((STRPTR)"timer.device", UNIT_MICROHZ,
-                       (struct IORequest *)ahi_data->lease_timer_req,
-                       0) == 0) {
-          lease_timer_sig = 1L << ahi_data->lease_timer_port->mp_SigBit;
-          TimerBase = ahi_data->lease_timer_req->tr_node.io_Device;
-          GetSysTime(&ahi_data->lease_timer_deadline);
-          fabric_timer_post(ahi_data);
-        }
+        DeleteIORequest((struct IORequest *)ahi_data->lease_timer_req);
+        ahi_data->lease_timer_req = NULL;
+      }
+      if (ahi_data->lease_timer_port) {
+        DeleteMsgPort(ahi_data->lease_timer_port);
+        ahi_data->lease_timer_port = NULL;
       }
     }
   }
+
+  // Fabric mode without a live pacing timer is fatal: bail out before
+  // the success handshake so AllocAudio fails instead of starting a
+  // session that could never produce audio.
+  if (ahi_data->fabric_mode && !lease_timer_sig) {
+    FreeSignal(ahi_data->enable_signal); ahi_data->enable_signal = -1;
+    FreeSignal(ahi_data->worker_signal); ahi_data->worker_signal = -1;
+#ifndef REAL_HARDWARE
+    if (glob_buf) FreeVec(glob_buf);
+#endif
+    // Clear worker_process so AllocAudio can detect the failure after the handshake.
+    ahi_data->worker_process = NULL;
+    Signal((struct Task *)ahi_data->t_mainproc, 1L << ahi_data->mainproc_signal);
+    return;
+  }
+
+  Signal(ahi_data->t_mainproc, 1L << ahi_data->mainproc_signal);
 
   for(;;) {
     signals = Wait(SIGBREAKF_CTRL_C | (1L<<ahi_data->enable_signal) |
@@ -1382,10 +1411,13 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
     goto fail;
   }
 
-  // Wait for worker to finish its early init (signal allocation, etc.)
+  // Wait for the worker's handshake: it signals only after its early
+  // init is done -- signal allocation, and in fabric mode the pacing
+  // timer port/request/device with the first request posted.
   Wait(1L << ahi_data->mainproc_signal);
 
-  // Worker may have failed to allocate its signals; it clears itself in that case.
+  // Worker may have failed to allocate its signals or bring up the
+  // fabric pacing timer; it clears itself in that case.
   if (!ahi_data->worker_process) {
     kprintf((CONST_STRPTR)"ZZ9000AX: worker failed to init\n");
     goto fail;
@@ -1401,9 +1433,10 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
 fail:
   // Invariant at this label: the worker has NOT been fully brought up.
   // Either mainproc_signal allocation failed, CreateNewProcTags failed,
-  // or the worker signalled back with worker_process cleared (signal alloc
-  // failed). We must never reach fail: with a live worker, otherwise it
-  // would be orphaned.
+  // or the worker signalled back with worker_process cleared (signal
+  // alloc failed, or the fabric pacing timer could not be opened). We
+  // must never reach fail: with a live worker, otherwise it would be
+  // orphaned.
   // The interrupt server was already installed as part of the atomic claim
   // earlier, so we must release it here before freeing ahi_data; otherwise
   // RemIntServer would walk a freed node next time something probes.
