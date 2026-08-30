@@ -354,6 +354,18 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("fabric_lease_release(ahi_data);",
                       acquire[invalid:pending])
         self.assertNotIn("(void)ZZ9KCall", acquire[invalid:pending])
+        timeout = acquire.index("if (status == ZZ9K_STATUS_TIMEOUT)")
+        timeout_return = acquire.index("return 0;", timeout)
+        next_slot = acquire.index("continue;", timeout)
+        self.assertLess(timeout_return, next_slot)
+        self.assertIn(
+            "ahi_data->lease_acquire_uncertain = 1U;",
+            acquire[timeout:timeout_return]
+        )
+        self.assertIn(
+            "GetSysTime(&ahi_data->lease_retry_deadline);",
+            acquire[timeout:timeout_return]
+        )
 
     def test_ahi_fabric_disable_and_stop_preserve_timeline_boundaries(self):
         source = self.read("ahi/driver/zz9000ax-ahi.c")
@@ -425,6 +437,9 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("uint32_t lease_release_slot;", header)
         self.assertIn("uint32_t lease_release_generation;", header)
         self.assertIn("uint8_t lease_release_in_progress;", header)
+        self.assertIn("uint8_t lease_acquire_uncertain;", header)
+        self.assertIn("ahi_data->lease_release_in_progress ||", start)
+        self.assertIn("ahi_data->lease_acquire_uncertain ||", start)
         final_release = free_audio.index("fabric_lease_release(ahi_data);")
         worker_stop = free_audio.index("SIGBREAKF_CTRL_C", final_release)
         self.assertLess(final_release, worker_stop)

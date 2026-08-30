@@ -489,6 +489,7 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
     ahi_data->lease_retry_deadline.tv_secs = 0;
     ahi_data->lease_retry_deadline.tv_micro = 0;
   }
+  ahi_data->lease_acquire_uncertain = 0U;
   if (ahi_data->lease_release_pending) {
     fabric_lease_release(ahi_data);
     return;
@@ -1168,6 +1169,14 @@ static int fabric_lease_acquire(struct z9ax *ahi_data, uint32_t mix_freq)
     if (status != ZZ9K_STATUS_OK) {
       KPrintF((CONST_STRPTR)"ZZ9000AX: lease acquire slot %lu refused: "
               "status %ld.\n", (unsigned long)slot, (long)status);
+      if (status == ZZ9K_STATUS_TIMEOUT) {
+        /* Applied-but-unacknowledged: do not probe another slot or let
+         * Start retry until the heartbeatless grant can be revoked. */
+        ahi_data->lease_acquire_uncertain = 1U;
+        GetSysTime(&ahi_data->lease_retry_deadline);
+        ahi_data->lease_retry_deadline.tv_secs += LEASE_RETRY_SECONDS;
+        return 0;
+      }
       continue;
     }
     memcpy(&result, reply.payload.inline_data, sizeof(result));
@@ -1791,14 +1800,14 @@ static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), 
   if ((flags & AHISF_PLAY) && ahi_data->fabric_mode) {
     Forbid();
     start_generation = ahi_data->play_transport_generation;
-    if (!ahi_data->lease_held) {
-      if (ahi_data->lease_release_pending ||
-          ahi_data->lease_acquire_in_progress) {
-        result = AHIE_UNKNOWN;
-      } else {
-        ahi_data->lease_acquire_in_progress = 1U;
-        acquire_needed = 1;
-      }
+    if (ahi_data->lease_release_pending ||
+        ahi_data->lease_release_in_progress ||
+        ahi_data->lease_acquire_uncertain ||
+        ahi_data->lease_acquire_in_progress) {
+      result = AHIE_UNKNOWN;
+    } else if (!ahi_data->lease_held) {
+      ahi_data->lease_acquire_in_progress = 1U;
+      acquire_needed = 1;
     }
     Permit();
     /* Lease mode: acquire at every play Start after Stop surrendered

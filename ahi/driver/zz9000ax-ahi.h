@@ -43,6 +43,7 @@ struct z9ax {
   uint8_t fabric_mode;
   uint8_t lease_held;
   uint8_t lease_acquire_in_progress; /* serializes Start/recovery install */
+  uint8_t lease_acquire_uncertain; /* timed-out acquire may have applied */
   uint8_t lease_release_pending; /* blocks acquire until confirmed */
   uint8_t lease_release_in_progress; /* serializes mailbox release */
   uint32_t lease_release_slot;
