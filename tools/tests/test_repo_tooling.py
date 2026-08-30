@@ -1051,7 +1051,7 @@ class RepoToolingTests(unittest.TestCase):
             source.index("static void fabric_timer_post", pump_start)
         ]
 
-        self.assertIn("uint16_t lease_retry_ticks;", header)
+        self.assertIn("struct timeval lease_retry_deadline;", header)
         recovery = pump.index(
             "if (!ahi_data->lease_held || !session->mapped)"
         )
@@ -1062,14 +1062,22 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn(
             "if (ahi_data->play_stop || ahi_data->lease_held)", pump
         )
-        self.assertIn("ahi_data->lease_retry_ticks--;", pump)
+        self.assertIn("GetSysTime(&now);", pump)
         self.assertIn(
-            "ahi_data->lease_retry_ticks = LEASE_RETRY_TICKS;", pump
+            "now.tv_secs < ahi_data->lease_retry_deadline.tv_secs", pump
+        )
+        self.assertIn(
+            "GetSysTime(&ahi_data->lease_retry_deadline);", pump
+        )
+        self.assertIn(
+            "lease_retry_deadline.tv_secs += LEASE_RETRY_SECONDS", pump
         )
         revoked = pump.index("ZZ9K_AUDIO_RING_CREDIT_REVOKED", credits)
         revoked_body = pump[revoked:]
         self.assertIn("ahi_data->lease_held = 0;", revoked_body)
-        self.assertIn("ahi_data->lease_retry_ticks = 0U;", revoked_body)
+        self.assertIn(
+            "ahi_data->lease_retry_deadline.tv_secs = 0;", revoked_body
+        )
         self.assertIn("memset(session, 0, sizeof(*session));", revoked_body)
 
     def test_ahi_fabric_worker_requires_pacing_timer(self):

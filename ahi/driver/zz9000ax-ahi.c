@@ -79,9 +79,9 @@
 // Lease-mode startup headroom: two periods = 40 ms. Absolute deadline
 // pacing keeps production locked to the compositor after playback begins.
 #define LEASE_RUNWAY_PERIODS 2U
-// A revoked active lease is retried by the 50-Hz worker at most once
-// per second; Stop(PLAY) cancels recovery by setting play_stop.
-#define LEASE_RETRY_TICKS 50U
+// A revoked active lease is retried by the worker at most once per
+// elapsed second; Stop(PLAY) cancels recovery by setting play_stop.
+#define LEASE_RETRY_SECONDS 1
 
 static int fabric_lease_acquire(struct z9ax *ahi_data, uint32_t mix_freq);
 static void fabric_lease_release(struct z9ax *ahi_data);
@@ -477,13 +477,20 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
   uint32_t recovery_generation;
   int acquired;
   int stale;
+  struct timeval now;
 
   if (!ahi_data->lease_held || !session->mapped) {
     if (ahi_data->play_stop || ahi_data->lease_held)
       return;
-    if (ahi_data->lease_retry_ticks != 0U) {
-      ahi_data->lease_retry_ticks--;
-      return;
+    if (ahi_data->lease_retry_deadline.tv_secs != 0 ||
+        ahi_data->lease_retry_deadline.tv_micro != 0) {
+      GetSysTime(&now);
+      if (now.tv_secs < ahi_data->lease_retry_deadline.tv_secs ||
+          (now.tv_secs == ahi_data->lease_retry_deadline.tv_secs &&
+           now.tv_micro < ahi_data->lease_retry_deadline.tv_micro))
+        return;
+      ahi_data->lease_retry_deadline.tv_secs = 0;
+      ahi_data->lease_retry_deadline.tv_micro = 0;
     }
     Forbid();
     if (ahi_data->lease_acquire_in_progress) {
@@ -504,7 +511,8 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
       Forbid();
       ahi_data->lease_acquire_in_progress = 0U;
       Permit();
-      ahi_data->lease_retry_ticks = LEASE_RETRY_TICKS;
+      GetSysTime(&ahi_data->lease_retry_deadline);
+      ahi_data->lease_retry_deadline.tv_secs += LEASE_RETRY_SECONDS;
       return;
     }
     /* Stop, or a Stop/Start pair, may complete while the mailbox call
@@ -529,7 +537,8 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
     KPrintF((CONST_STRPTR)"ZZ9000AX: fabric lease REVOKED; recovery "
             "scheduled (heartbeat/cursor/generation).\n");
     ahi_data->lease_held = 0;
-    ahi_data->lease_retry_ticks = 0U;
+    ahi_data->lease_retry_deadline.tv_secs = 0;
+    ahi_data->lease_retry_deadline.tv_micro = 0;
     ahi_data->lease_accum_fill = 0U;
     memset(session, 0, sizeof(*session));
     return;
@@ -1230,7 +1239,8 @@ static int fabric_lease_acquire(struct z9ax *ahi_data, uint32_t mix_freq)
     /* First publication: paused, cursor 0, fresh heartbeat. The lease
      * is live from acquisition even before PCM is staged (R11). */
     zz9k_audio_ring_publish(session);
-    ahi_data->lease_retry_ticks = 0U;
+    ahi_data->lease_retry_deadline.tv_secs = 0;
+    ahi_data->lease_retry_deadline.tv_micro = 0;
     ahi_data->lease_held = 1;
     return 1;
   }
