@@ -352,6 +352,16 @@ class RepoToolingTests(unittest.TestCase):
             source.index("intAHIsub_Start"):
             source.index("intAHIsub_GetAttr")
         ]
+        acquire_fn = source.index(
+            "static int fabric_lease_acquire("
+            "struct z9ax *ahi_data, uint32_t mix_freq)\n{"
+        )
+        release_start = source.index(
+            "static void fabric_lease_release", acquire_fn
+        )
+        release_fn = source[
+            release_start:source.index("intAHIsub_AllocAudio", release_start)
+        ]
         self.assertIn("ahi_data->disable_cnt == 0U", pump)
         self.assertLess(
             pump.index("ahi_data->disable_cnt == 0U"),
@@ -386,10 +396,27 @@ class RepoToolingTests(unittest.TestCase):
         header = self.read("ahi/driver/zz9000ax-ahi.h")
         self.assertIn("uint32_t play_transport_generation;", header)
         self.assertIn("uint8_t lease_acquire_in_progress;", header)
+        self.assertIn("uint8_t lease_release_pending;", header)
+        self.assertIn("uint32_t lease_release_slot;", header)
+        self.assertIn("uint32_t lease_release_generation;", header)
+        self.assertIn("if (ahi_data->lease_release_pending)", pump)
+        self.assertIn("ahi_data->lease_release_pending ||", start)
+        self.assertIn(
+            "status = ZZ9KCall(&request, &reply", release_fn
+        )
+        self.assertIn("if (status != ZZ9K_STATUS_OK)", release_fn)
+        status_check = release_fn.index("if (status != ZZ9K_STATUS_OK)")
+        clear_pending = release_fn.index(
+            "ahi_data->lease_release_pending = 0U;", status_check
+        )
+        self.assertNotIn(
+            "lease_release_pending = 0U;",
+            release_fn[status_check:clear_pending]
+        )
         self.assertIn("if (ahi_data->lease_acquire_in_progress)", pump)
         self.assertIn("ahi_data->lease_acquire_in_progress = 1U;", pump)
         self.assertIn("ahi_data->lease_acquire_in_progress = 0U;", pump)
-        self.assertIn("if (ahi_data->lease_acquire_in_progress)", start)
+        self.assertIn("ahi_data->lease_acquire_in_progress) {", start)
         self.assertIn("ahi_data->play_transport_generation++;", stop)
         snapshot = start.index(
             "start_generation = ahi_data->play_transport_generation;"

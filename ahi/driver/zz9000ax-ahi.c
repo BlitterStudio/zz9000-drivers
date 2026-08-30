@@ -479,19 +479,23 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
   int stale;
   struct timeval now;
 
+  if (ahi_data->lease_retry_deadline.tv_secs != 0 ||
+      ahi_data->lease_retry_deadline.tv_micro != 0) {
+    GetSysTime(&now);
+    if (now.tv_secs < ahi_data->lease_retry_deadline.tv_secs ||
+        (now.tv_secs == ahi_data->lease_retry_deadline.tv_secs &&
+         now.tv_micro < ahi_data->lease_retry_deadline.tv_micro))
+      return;
+    ahi_data->lease_retry_deadline.tv_secs = 0;
+    ahi_data->lease_retry_deadline.tv_micro = 0;
+  }
+  if (ahi_data->lease_release_pending) {
+    fabric_lease_release(ahi_data);
+    return;
+  }
   if (!ahi_data->lease_held || !session->mapped) {
     if (ahi_data->play_stop || ahi_data->lease_held)
       return;
-    if (ahi_data->lease_retry_deadline.tv_secs != 0 ||
-        ahi_data->lease_retry_deadline.tv_micro != 0) {
-      GetSysTime(&now);
-      if (now.tv_secs < ahi_data->lease_retry_deadline.tv_secs ||
-          (now.tv_secs == ahi_data->lease_retry_deadline.tv_secs &&
-           now.tv_micro < ahi_data->lease_retry_deadline.tv_micro))
-        return;
-      ahi_data->lease_retry_deadline.tv_secs = 0;
-      ahi_data->lease_retry_deadline.tv_micro = 0;
-    }
     Forbid();
     if (ahi_data->lease_acquire_in_progress) {
       Permit();
@@ -1248,21 +1252,27 @@ static int fabric_lease_acquire(struct z9ax *ahi_data, uint32_t mix_freq)
 }
 
 /* Idempotent surrender under the grant's own generation (a stale
- * generation release is a no-op by contract). Outside Forbid(). */
+ * generation release is a no-op by contract). Outside Forbid().
+ * A failed mailbox completion retains the identity and blocks any
+ * subsequent acquire until a timer-paced retry is confirmed. */
 static void fabric_lease_release(struct z9ax *ahi_data)
 {
   ZZ9KRequest request;
   ZZ9KMailboxEntry reply;
-  uint32_t slot;
-  uint32_t generation;
+  int status;
 
-  if (!ahi_data->lease_held)
+  if (ahi_data->lease_held) {
+    ahi_data->lease_release_slot =
+        ahi_data->lease_session.grant.slot;
+    ahi_data->lease_release_generation =
+        ahi_data->lease_session.grant.generation;
+    ahi_data->lease_release_pending = 1U;
+    ahi_data->lease_held = 0;
+    memset(&ahi_data->lease_session, 0,
+           sizeof(ahi_data->lease_session));
+  }
+  if (!ahi_data->lease_release_pending)
     return;
-  slot = ahi_data->lease_session.grant.slot;
-  generation = ahi_data->lease_session.grant.generation;
-  ahi_data->lease_held = 0;
-  memset(&ahi_data->lease_session, 0,
-         sizeof(ahi_data->lease_session));
 
   zz9k_request_init(&request, ZZ9K_OP_AUDIO_RING_RELEASE);
   request.entry.payload_len = sizeof(ZZ9KAudioRingReleasePayload);
@@ -1270,14 +1280,32 @@ static void fabric_lease_release(struct z9ax *ahi_data)
     ZZ9KAudioRingReleasePayload *rel =
         (ZZ9KAudioRingReleasePayload *)
             request.entry.payload.inline_data;
-    zz9k_put_be32(rel->slot, slot);
-    zz9k_put_be32(rel->generation, generation);
+    zz9k_put_be32(rel->slot, ahi_data->lease_release_slot);
+    zz9k_put_be32(rel->generation,
+                  ahi_data->lease_release_generation);
     zz9k_put_be32(rel->flags, 0U);
   }
-  (void)ZZ9KCall(&request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+  status = ZZ9KCall(&request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+  if (status != ZZ9K_STATUS_OK) {
+    GetSysTime(&ahi_data->lease_retry_deadline);
+    ahi_data->lease_retry_deadline.tv_secs += LEASE_RETRY_SECONDS;
+    KPrintF((CONST_STRPTR)"ZZ9000AX: fabric lease release deferred "
+            "(slot %lu gen %lu, status %ld).\n",
+            (unsigned long)ahi_data->lease_release_slot,
+            (unsigned long)ahi_data->lease_release_generation,
+            (long)status);
+    return;
+  }
 
   KPrintF((CONST_STRPTR)"ZZ9000AX: fabric lease released (slot %lu "
-          "gen %lu).\n", (unsigned long)slot, (unsigned long)generation);
+          "gen %lu).\n",
+          (unsigned long)ahi_data->lease_release_slot,
+          (unsigned long)ahi_data->lease_release_generation);
+  ahi_data->lease_release_pending = 0U;
+  ahi_data->lease_release_slot = 0U;
+  ahi_data->lease_release_generation = 0U;
+  ahi_data->lease_retry_deadline.tv_secs = 0;
+  ahi_data->lease_retry_deadline.tv_micro = 0;
 }
 
 static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagList asm("a1"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
@@ -1747,7 +1775,8 @@ static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), 
     Forbid();
     start_generation = ahi_data->play_transport_generation;
     if (!ahi_data->lease_held) {
-      if (ahi_data->lease_acquire_in_progress) {
+      if (ahi_data->lease_release_pending ||
+          ahi_data->lease_acquire_in_progress) {
         result = AHIE_UNKNOWN;
       } else {
         ahi_data->lease_acquire_in_progress = 1U;

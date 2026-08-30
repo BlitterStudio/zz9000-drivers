@@ -43,6 +43,9 @@ struct z9ax {
   uint8_t fabric_mode;
   uint8_t lease_held;
   uint8_t lease_acquire_in_progress; /* serializes Start/recovery install */
+  uint8_t lease_release_pending; /* blocks acquire until confirmed */
+  uint32_t lease_release_slot;
+  uint32_t lease_release_generation;
   struct timeval lease_retry_deadline; /* elapsed-time recovery backoff */
   ZZ9KAudioRingSession lease_session;
   uint32_t z2_direct_ring_base; /* negotiated generation-2 carve-out */
