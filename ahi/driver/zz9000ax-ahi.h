@@ -42,6 +42,7 @@ struct z9ax {
    * blocking Start/recovery acquire cannot undo the completed Stop. */
   uint8_t fabric_mode;
   uint8_t lease_held;
+  uint8_t lease_acquire_in_progress; /* serializes Start/recovery install */
   uint16_t lease_retry_ticks; /* rate-limits revoked-lease reacquire */
   ZZ9KAudioRingSession lease_session;
   uint32_t z2_direct_ring_base; /* negotiated generation-2 carve-out */

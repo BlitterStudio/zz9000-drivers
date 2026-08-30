@@ -474,6 +474,9 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
                               struct AHIAudioCtrlDrv *AudioCtrl)
 {
   ZZ9KAudioRingSession *session = &ahi_data->lease_session;
+  uint32_t recovery_generation;
+  int acquired;
+  int stale;
 
   if (!ahi_data->lease_held || !session->mapped) {
     if (ahi_data->play_stop || ahi_data->lease_held)
@@ -482,14 +485,29 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
       ahi_data->lease_retry_ticks--;
       return;
     }
-    if (!fabric_lease_acquire(ahi_data, AudioCtrl->ahiac_MixFreq)) {
+    Forbid();
+    if (ahi_data->lease_acquire_in_progress) {
+      Permit();
+      return;
+    }
+    ahi_data->lease_acquire_in_progress = 1U;
+    recovery_generation = ahi_data->play_transport_generation;
+    Permit();
+    acquired = fabric_lease_acquire(ahi_data,
+                                    AudioCtrl->ahiac_MixFreq);
+    Forbid();
+    ahi_data->lease_acquire_in_progress = 0U;
+    stale = ahi_data->play_transport_generation !=
+                recovery_generation ||
+            ahi_data->play_stop;
+    Permit();
+    if (!acquired) {
       ahi_data->lease_retry_ticks = LEASE_RETRY_TICKS;
       return;
     }
-    /* Stop may run while the mailbox acquire blocks. If it won that
-     * race, surrender the newly acquired generation instead of
-     * retaining a heartbeat-only lease until Start or FreeAudio. */
-    if (ahi_data->play_stop) {
+    /* Stop, or a Stop/Start pair, may complete while the mailbox call
+     * blocks. Only the epoch that began recovery may retain the grant. */
+    if (stale) {
       fabric_lease_release(ahi_data);
       return;
     }
@@ -1702,19 +1720,27 @@ static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), 
   struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
   uint16_t play_sequence = 0;
   uint32_t start_generation = 0U;
+  int acquire_needed = 0;
   uint32_t result = AHIE_OK;
   if (!ahi_data) return AHIE_OK;
 
   if ((flags & AHISF_PLAY) && ahi_data->fabric_mode) {
     Forbid();
     start_generation = ahi_data->play_transport_generation;
+    if (!ahi_data->lease_held) {
+      if (ahi_data->lease_acquire_in_progress) {
+        result = AHIE_UNKNOWN;
+      } else {
+        ahi_data->lease_acquire_in_progress = 1U;
+        acquire_needed = 1;
+      }
+    }
     Permit();
     /* Lease mode: acquire at every play Start after Stop surrendered
      * the old timeline (or after a mid-session revocation zeroed
      * lease_held), and let the credit-paced worker take it from here.
-     * A refused acquire fails the Start honestly: the fabric owns the
-     * output, so a silent legacy fallback would be silent no-output. */
-    if (!ahi_data->lease_held) {
+     * Only one blocking acquire may install the shared session. */
+    if (acquire_needed) {
       if (!fabric_lease_acquire(ahi_data,
                                 AudioCtrl->ahiac_MixFreq)) {
         KPrintF((CONST_STRPTR)"ZZ9000AX: fabric lease refused at "
@@ -1722,6 +1748,9 @@ static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), 
                 (unsigned long)AudioCtrl->ahiac_MixFreq);
         result = AHIE_UNKNOWN;
       }
+      Forbid();
+      ahi_data->lease_acquire_in_progress = 0U;
+      Permit();
     }
     if (result == AHIE_OK) {
       Forbid();

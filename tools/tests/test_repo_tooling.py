@@ -364,15 +364,28 @@ class RepoToolingTests(unittest.TestCase):
             "!ahi_data->record_stop && ahi_data->disable_cnt == 0U",
             worker
         )
-        acquire = pump.index("fabric_lease_acquire(")
-        stopped = pump.index("if (ahi_data->play_stop)", acquire)
-        release = pump.index("fabric_lease_release(ahi_data);", stopped)
+        recovery_snapshot = pump.index(
+            "recovery_generation = ahi_data->play_transport_generation;"
+        )
+        acquire = pump.index("fabric_lease_acquire(", recovery_snapshot)
+        generation_check = pump.index(
+            "ahi_data->play_transport_generation !=", acquire
+        )
+        release = pump.index(
+            "fabric_lease_release(ahi_data);", generation_check
+        )
         recovered_log = pump.index("fabric lease recovered", release)
-        self.assertLess(acquire, stopped)
-        self.assertLess(stopped, release)
+        self.assertLess(recovery_snapshot, acquire)
+        self.assertLess(acquire, generation_check)
+        self.assertLess(generation_check, release)
         self.assertLess(release, recovered_log)
         header = self.read("ahi/driver/zz9000ax-ahi.h")
         self.assertIn("uint32_t play_transport_generation;", header)
+        self.assertIn("uint8_t lease_acquire_in_progress;", header)
+        self.assertIn("if (ahi_data->lease_acquire_in_progress)", pump)
+        self.assertIn("ahi_data->lease_acquire_in_progress = 1U;", pump)
+        self.assertIn("ahi_data->lease_acquire_in_progress = 0U;", pump)
+        self.assertIn("if (ahi_data->lease_acquire_in_progress)", start)
         self.assertIn("ahi_data->play_transport_generation++;", stop)
         snapshot = start.index(
             "start_generation = ahi_data->play_transport_generation;"
