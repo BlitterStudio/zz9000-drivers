@@ -301,6 +301,39 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("AutoConfigBoardSize", diag)
         self.assertIn("INVALID (descriptor/profile/AutoConfig mismatch)", diag)
 
+
+    def test_ahi_z2_fabric_grants_stay_in_direct_ring_reservation(self):
+        header = self.read("ahi/driver/zz9000ax-ahi.h")
+        source = self.read("ahi/driver/zz9000ax-ahi.c")
+        alloc = source[
+            source.index("intAHIsub_AllocAudio"):
+            source.index("static void __attribute__((used)) intAHIsub_FreeAudio")
+        ]
+        range_start = source.index("static int fabric_grant_range_valid")
+        acquire_start = source.index(
+            "static int fabric_lease_acquire", range_start
+        )
+        range_check = source[range_start:acquire_start]
+        acquire = source[
+            acquire_start:
+            source.index("static void fabric_lease_release", acquire_start)
+        ]
+        self.assertIn("ZZ_Z2_APERTURE_INFO_GENERATION_2", alloc)
+        self.assertIn("ZZ_Z2_DIRECT_RING_RESERVE_SIZE", alloc)
+        self.assertIn("layout.host_window.base + layout.host_window.size",
+                      alloc)
+        self.assertIn("ahi_data->z2_direct_ring_base = direct_base;", alloc)
+        self.assertIn("ahi_data->z2_direct_ring_size = direct_size;", alloc)
+        self.assertIn("zorro != 2 ||", alloc)
+        self.assertIn("size > ahi_data->z2_direct_ring_size", range_check)
+        self.assertIn("offset < ahi_data->z2_direct_ring_base", range_check)
+        self.assertIn(
+            "offset - ahi_data->z2_direct_ring_base <=", range_check
+        )
+        self.assertEqual(2, acquire.count("fabric_grant_range_valid("))
+        self.assertIn("session->grant.ring_offset", acquire)
+        self.assertIn("session->grant.control_offset", acquire)
+
     def test_build_scripts_have_shebangs_and_use_common_docker_image(self):
         scripts = (
             "tools/amiga-docker.sh",

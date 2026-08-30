@@ -1067,17 +1067,31 @@ static int fabric_rate_capped(void)
           ZZ9K_SERVICE_FLAG_AUDIO_FABRIC_RATE) != 0;
 }
 
+static int fabric_grant_range_valid(const struct z9ax *ahi_data,
+                                    uint32_t offset, uint32_t size)
+{
+  if (ahi_data->zorro_version != 2U)
+    return 1;
+  if (ahi_data->z2_direct_ring_size !=
+          ZZ_Z2_DIRECT_RING_RESERVE_SIZE ||
+      size > ahi_data->z2_direct_ring_size ||
+      offset < ahi_data->z2_direct_ring_base)
+    return 0;
+  return offset - ahi_data->z2_direct_ring_base <=
+      ahi_data->z2_direct_ring_size - size;
+}
+
 /* Acquire one lease under the caller's mix rate. Tries the Zorro III
  * direct-ring slots in order and takes the first grant; a refusal
  * (occupied slots, conversion budget, bus policy) is a clean decline
  * and the caller fails the Start honestly instead of silently
  * falling back -- the firmware strips the legacy play bit while the
  * fabric owns the output, so a silent legacy fallback would be a
- * silent no-output. Grant validation mirrors the SDK host layer's
- * board-window bounds check; deep Zorro II region cross-checks stay
- * an SDK-client responsibility, and firmware only ever grants the
- * reserved direct regions. Requires ZZ9KBase and runs outside
- * Forbid(). Returns 1 with session mapped, 0 on any refusal. */
+ * silent no-output. Every grant must fit the board window; Zorro II
+ * additionally requires a negotiated generation-2 layout and keeps
+ * both granted ranges inside its reserved direct-ring carve-out.
+ * Requires ZZ9KBase and runs outside Forbid(). Returns 1 with session
+ * mapped, 0 on any refusal. */
 static int fabric_lease_acquire(struct z9ax *ahi_data, uint32_t mix_freq)
 {
   ZZ9KRequest request;
@@ -1132,6 +1146,12 @@ static int fabric_lease_acquire(struct z9ax *ahi_data, uint32_t mix_freq)
             ZZ9K_AUDIO_RING_CONTRACT_SOURCE_RATE_STEREO_S16LE ||
         session->grant.source_rate != mix_freq ||
         !zz9k_audio_ring_grant_valid(&session->grant) ||
+        !fabric_grant_range_valid(ahi_data,
+                                  session->grant.ring_offset,
+                                  session->grant.ring_capacity) ||
+        !fabric_grant_range_valid(ahi_data,
+                                  session->grant.control_offset,
+                                  ZZ9K_AUDIO_RING_CONTROL_SIZE) ||
         session->grant.ring_offset +
                 session->grant.ring_capacity >
             Z9AXBase->hw_size ||
@@ -1314,6 +1334,18 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
     }
     if (status == ZZ_APERTURE_VALID)
       offset_tx = zz_aperture_memory_offset(layout.audio.base);
+    if (status == ZZ_APERTURE_VALID &&
+        (layout.descriptor & ZZ_Z2_APERTURE_INFO_GENERATION_MASK) ==
+            ZZ_Z2_APERTURE_INFO_GENERATION_2) {
+      uint32_t direct_base =
+          layout.host_window.base + layout.host_window.size;
+      uint32_t direct_size = layout.audio.base - direct_base;
+
+      if (direct_size == ZZ_Z2_DIRECT_RING_RESERVE_SIZE) {
+        ahi_data->z2_direct_ring_base = direct_base;
+        ahi_data->z2_direct_ring_size = direct_size;
+      }
+    }
   }
   uint32_t offset_rx = offset_tx + ZZ_AX_RX_BUFFER_DELTA;
   ahi_data->audio_hw_buf_addr = hw_addr + 0x10000 + offset_tx;
@@ -1357,7 +1389,10 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
       submit_source_trim();
     }
     ahi_data->fabric_mode =
-        (uint8_t)fabric_rate_capped();
+        (uint8_t)(fabric_rate_capped() &&
+                  (zorro != 2 ||
+                   ahi_data->z2_direct_ring_size ==
+                       ZZ_Z2_DIRECT_RING_RESERVE_SIZE));
   }
   // Atomic ownership claim: reject another low-level AHI allocation and
   // any MHI owner that cannot prove fabric compatibility before touching

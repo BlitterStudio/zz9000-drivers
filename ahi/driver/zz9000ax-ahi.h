@@ -45,6 +45,8 @@ struct z9ax {
   uint8_t lease_held;
   uint16_t lease_retry_ticks; /* rate-limits revoked-lease reacquire */
   ZZ9KAudioRingSession lease_session;
+  uint32_t z2_direct_ring_base; /* negotiated generation-2 carve-out */
+  uint32_t z2_direct_ring_size;
   uint8_t *lease_accum;       /* whole-period staging accumulator */
   uint32_t lease_accum_fill;  /* bytes buffered in lease_accum */
   /* timer.device (UNIT_MICROHZ) lease-pacing timer; NULL in legacy
