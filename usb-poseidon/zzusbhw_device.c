@@ -287,6 +287,7 @@ static uint8_t IsoPayload[ZZUSB_ISO_DATA_MAX];
 static uint32_t SimpleIsoBatchId = 1;
 
 #define ZZ_WORK_SLOTS 32
+#define ZZUSB_MAINT_POLL_US 25U
 
 struct ZZWorkSlot {
     struct zzusb_engine_request lifecycle;
@@ -310,7 +311,7 @@ static struct ZZUSBUnit *ForegroundMailboxUnit;
 static void execute_io(struct Library *dev, struct IOUsbHWReq *ior);
 static int process_work_queue(void);
 static int rt_iso_pending_for_unit(const struct ZZUSBUnit *unit);
-static uint16_t rt_iso_service_limit_ms(const struct ZZUSBUnit *unit);
+static uint32_t rt_iso_service_limit_us(const struct ZZUSBUnit *unit);
 static void service_rt_iso_during_work(struct ZZUSBBase *base,
                                        struct ZZUSBUnit *unit);
 
@@ -782,6 +783,20 @@ static int worker_wait_us(uint32_t microseconds)
     return 1;
 }
 
+static int worker_now_us(uint64_t *now_us)
+{
+    struct timerequest *request = WorkerTimerRequest;
+
+    if (!request || !now_us)
+        return 0;
+    request->tr_node.io_Command = TR_GETSYSTIME;
+    if (DoIO((struct IORequest *)request) != 0)
+        return 0;
+    *now_us = (uint64_t)request->tr_time.tv_secs * 1000000ULL +
+              request->tr_time.tv_micro;
+    return 1;
+}
+
 static int worker_wait_iso_event(uint32_t microseconds)
 {
     struct timerequest *request = WorkerTimerRequest;
@@ -823,9 +838,8 @@ static int send_usb_cmd_wire(volatile uint8_t *base,
     struct ZZUSBProtocolExtension ext;
     uint32_t request_id = 0;
     uint32_t max_data = use_v2 ? ZZUSB_V2_DATA_MAX : ZZUSB_MAX_XFER;
-    uint32_t elapsed_ms;
-    uint32_t outer_limit_ms;
-    uint16_t service_elapsed_ms = 0;
+    uint32_t elapsed_us;
+    uint32_t outer_limit_us;
 
     if (data_out_len > max_data)
         return ZZUSB_STATUS_BADPARAM;
@@ -886,9 +900,15 @@ static int send_usb_cmd_wire(volatile uint8_t *base,
         uint32_t firmware_ms = cmd->timeout_ms
                                ? (uint32_t)cmd->timeout_ms
                                : ZZUSB_PROXY_MAX_TIMEOUT_MS;
-        outer_limit_ms = firmware_ms + 150U;
+        outer_limit_us = (firmware_ms + 150U) * 1000U;
 
-        for (elapsed_ms = 0; elapsed_ms < outer_limit_ms; elapsed_ms++) {
+        for (elapsed_us = 0; elapsed_us < outer_limit_us;) {
+            uint32_t wait_us = 1000U;
+            int service_rt = ForegroundMailboxBase == base &&
+                             ForegroundMailboxUnit &&
+                             rt_iso_pending_for_unit(
+                                 ForegroundMailboxUnit);
+
             CacheClearE((APTR)result,
                         use_v2 ? ZZUSB_V2_HEADER_SIZE : ZZUSB_CMD_SIZE,
                         CACRF_ClearD);
@@ -896,16 +916,20 @@ static int send_usb_cmd_wire(volatile uint8_t *base,
                 break;
             if (honor_abort && active_work_aborted())
                 break;
-            if (!worker_wait_us(1000U))
+            if (service_rt) {
+                wait_us = rt_iso_service_limit_us(
+                    ForegroundMailboxUnit);
+                if (wait_us > 1000U)
+                    wait_us = 1000U;
+            }
+            if (wait_us > outer_limit_us - elapsed_us)
+                wait_us = outer_limit_us - elapsed_us;
+            if (!worker_wait_us(wait_us))
                 break;
-            if (ForegroundMailboxBase == base && ForegroundMailboxUnit &&
-                rt_iso_pending_for_unit(ForegroundMailboxUnit) &&
-                ++service_elapsed_ms >=
-                    rt_iso_service_limit_ms(ForegroundMailboxUnit)) {
+            elapsed_us += wait_us;
+            if (service_rt)
                 service_rt_iso_during_work(PollBase,
                                            ForegroundMailboxUnit);
-                service_elapsed_ms = 0;
-            }
         }
     }
 
@@ -915,19 +939,27 @@ static int send_usb_cmd_wire(volatile uint8_t *base,
     if (result->status == ZZUSB_STATUS_PENDING) {
         if (honor_abort && active_work_aborted()) {
             while (result->status == ZZUSB_STATUS_PENDING &&
-                   elapsed_ms < outer_limit_ms) {
-                if (!worker_wait_us(1000U))
+                   elapsed_us < outer_limit_us) {
+                uint32_t wait_us = 1000U;
+                int service_rt = ForegroundMailboxBase == base &&
+                                 ForegroundMailboxUnit &&
+                                 rt_iso_pending_for_unit(
+                                     ForegroundMailboxUnit);
+
+                if (service_rt) {
+                    wait_us = rt_iso_service_limit_us(
+                        ForegroundMailboxUnit);
+                    if (wait_us > 1000U)
+                        wait_us = 1000U;
+                }
+                if (wait_us > outer_limit_us - elapsed_us)
+                    wait_us = outer_limit_us - elapsed_us;
+                if (!worker_wait_us(wait_us))
                     break;
-                elapsed_ms++;
-                if (ForegroundMailboxBase == base &&
-                    ForegroundMailboxUnit &&
-                    rt_iso_pending_for_unit(ForegroundMailboxUnit) &&
-                    ++service_elapsed_ms >=
-                        rt_iso_service_limit_ms(ForegroundMailboxUnit)) {
+                elapsed_us += wait_us;
+                if (service_rt)
                     service_rt_iso_during_work(PollBase,
                                                ForegroundMailboxUnit);
-                    service_elapsed_ms = 0;
-                }
                 CacheClearE((APTR)result,
                             use_v2 ? ZZUSB_V2_HEADER_SIZE : ZZUSB_CMD_SIZE,
                             CACRF_ClearD);
@@ -1040,8 +1072,8 @@ static int send_usb_cmd_sideband(
             (base + 0xa000 + ZZUSB_MAINT_HEADER_OFFSET + ZZUSB_CMD_SIZE);
     struct ZZUSBProtocolExtension ext;
     uint32_t request_id;
-    uint32_t elapsed_ms;
-    uint32_t outer_limit_ms;
+    uint32_t elapsed_us;
+    uint32_t outer_limit_us;
     uint32_t response_length;
     uint16_t status;
 
@@ -1078,14 +1110,19 @@ static int send_usb_cmd_sideband(
     cmd->status = ZZUSB_STATUS_PENDING;
     CacheClearU();
 
-    outer_limit_ms = (cmd->timeout_ms ? cmd->timeout_ms :
-                      ZZUSB_PROXY_MAX_TIMEOUT_MS) + 150U;
-    for (elapsed_ms = 0; elapsed_ms < outer_limit_ms; elapsed_ms++) {
+    outer_limit_us = ((cmd->timeout_ms ? cmd->timeout_ms :
+                       ZZUSB_PROXY_MAX_TIMEOUT_MS) + 150U) * 1000U;
+    for (elapsed_us = 0; elapsed_us < outer_limit_us;) {
+        uint32_t wait_us = ZZUSB_MAINT_POLL_US;
+
         CacheClearE((APTR)result, ZZUSB_V2_HEADER_SIZE, CACRF_ClearD);
         if (result->status != ZZUSB_STATUS_PENDING)
             break;
-        if (!worker_wait_us(1000U))
+        if (wait_us > outer_limit_us - elapsed_us)
+            wait_us = outer_limit_us - elapsed_us;
+        if (!worker_wait_us(wait_us))
             break;
+        elapsed_us += wait_us;
     }
     CacheClearE((APTR)result, ZZUSB_V2_HEADER_SIZE, CACRF_ClearD);
     if (result->status == ZZUSB_STATUS_PENDING) {
@@ -1409,7 +1446,8 @@ static void execute_simple_iso(struct ZZUSBUnit *unit,
     uint16_t status;
     uint32_t total_actual = 0;
     uint32_t timeout_ms;
-    uint32_t elapsed_ms = 0;
+    uint64_t started_us;
+    uint64_t now_us;
     unsigned packet_count;
     unsigned wire_length;
     int queued = 0;
@@ -1461,6 +1499,10 @@ static void execute_simple_iso(struct ZZUSBUnit *unit,
     timeout_ms = (ior->iouh_Flags & UHFF_NAKTIMEOUT) ?
                  (ior->iouh_NakTimeout ? ior->iouh_NakTimeout : 1000U) :
                  1000U;
+    if (!worker_now_us(&started_us)) {
+        status = ZZUSB_STATUS_HOSTERROR;
+        goto simple_iso_complete;
+    }
 
     for (;;) {
         volatile struct ZZUSBCommand *result;
@@ -1470,7 +1512,7 @@ static void execute_simple_iso(struct ZZUSBUnit *unit,
 
         if (PollBase && rt_iso_pending_for_unit(unit)) {
             service_rt_iso_during_work(PollBase, unit);
-            wait_us = (uint32_t)rt_iso_service_limit_ms(unit) * 1000U;
+            wait_us = rt_iso_service_limit_us(unit);
         }
         if (active_work_aborted()) {
             status = ZZUSB_STATUS_CANCELLED;
@@ -1500,22 +1542,21 @@ static void execute_simple_iso(struct ZZUSBUnit *unit,
         }
         if (status != ZZUSB_STATUS_NAK)
             break;
-        if (elapsed_ms >= timeout_ms) {
+        if (!worker_now_us(&now_us)) {
+            status = ZZUSB_STATUS_HOSTERROR;
+            break;
+        }
+        if (now_us - started_us >= (uint64_t)timeout_ms * 1000ULL) {
             status = ZZUSB_STATUS_TIMEOUT;
             break;
         }
-        {
-            int wait_result = worker_wait_iso_event(wait_us);
-
-            if (wait_result < 0) {
-                status = ZZUSB_STATUS_HOSTERROR;
-                break;
-            }
-            if (wait_result > 0)
-                elapsed_ms += (wait_us + 999U) / 1000U;
+        if (worker_wait_iso_event(wait_us) < 0) {
+            status = ZZUSB_STATUS_HOSTERROR;
+            break;
         }
     }
 
+simple_iso_complete:
     if (queued)
         stop_iso_request(base, unit, ior);
     if (status != ZZUSB_STATUS_OK) {
@@ -2045,14 +2086,14 @@ static int rt_iso_pending_for_unit(const struct ZZUSBUnit *unit)
     return 0;
 }
 
-static uint16_t rt_iso_service_limit_ms(const struct ZZUSBUnit *unit)
+static uint32_t rt_iso_service_limit_us(const struct ZZUSBUnit *unit)
 {
-    uint16_t shortest_ms = 8;
+    uint32_t shortest_us = 8000U;
 
     for (unsigned index = 0; index < ZZ_RT_ISO_SLOTS; index++) {
         const struct ZZRTIsoSlot *slot = &RTIsoSlots[index];
         uint32_t safe_microframes;
-        uint32_t candidate_ms;
+        uint32_t candidate_us;
 
         if (slot->unit != unit ||
             slot->lifecycle.state != ZZUSB_RT_RUNNING)
@@ -2060,13 +2101,11 @@ static uint16_t rt_iso_service_limit_ms(const struct ZZUSBUnit *unit)
         safe_microframes = slot->duration_microframes *
             (slot->lifecycle.in_flight > 1 ?
              slot->lifecycle.in_flight - 1U : 1U);
-        candidate_ms = safe_microframes / 8U;
-        if (!candidate_ms)
-            candidate_ms = 1;
-        if (candidate_ms < shortest_ms)
-            shortest_ms = (uint16_t)candidate_ms;
+        candidate_us = safe_microframes * 125U;
+        if (candidate_us < shortest_us)
+            shortest_us = candidate_us;
     }
-    return shortest_ms;
+    return shortest_us;
 }
 
 static void poll_rt_iso(struct ZZUSBUnit *unit)

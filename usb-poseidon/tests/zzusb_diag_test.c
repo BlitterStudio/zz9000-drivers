@@ -13,6 +13,7 @@ int main(void)
 {
     struct zzusb_driver_diag_snapshot snapshot;
     struct zzusb_engine_request request;
+    uint32_t first_generation;
 
     zzusb_engine_diag_reset();
     for (uint32_t i = 1; i <= 200u; i++) {
@@ -33,6 +34,8 @@ int main(void)
     CHECK(zzusb_engine_diag_snapshot(&snapshot, 0x31fu, 11u, 4u));
     CHECK(snapshot.magic == ZZUSB_DRIVER_DIAG_MAGIC);
     CHECK(snapshot.version == ZZUSB_DRIVER_DIAG_VERSION);
+    CHECK(!(snapshot.generation & 1u));
+    first_generation = snapshot.generation;
     CHECK(snapshot.event_count == ZZUSB_DRIVER_DIAG_EVENT_COUNT);
     CHECK(snapshot.next_sequence == 200u);
     CHECK(snapshot.lost_events == 136u);
@@ -54,6 +57,8 @@ int main(void)
     CHECK(zzusb_engine_complete(&request, 77u, 12u,
                                 ZZUSB_ENGINE_STATUS_TIMEOUT));
     CHECK(zzusb_engine_diag_snapshot(&snapshot, 0x31fu, 12u, 4u));
+    CHECK(!(snapshot.generation & 1u));
+    CHECK(snapshot.generation > first_generation);
     CHECK(snapshot.counters[ZZUSB_DRIVER_COUNT_REQUEST] == 1u);
     CHECK(snapshot.counters[ZZUSB_DRIVER_COUNT_TIMEOUT] == 1u);
     CHECK(snapshot.counters[ZZUSB_DRIVER_COUNT_LATE_COMPLETION] == 1u);

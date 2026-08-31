@@ -21,29 +21,58 @@ static void diag_barrier(void)
 {
     __asm__ __volatile__("" ::: "memory");
 }
+/*
+ * Driver request mutation is serialized. Readers use this odd/even
+ * generation to reject snapshots interrupted by AbortIO or poll-task work.
+ */
+static uint32_t diag_mutation_begin(void)
+{
+    uint32_t generation = engine_diag.mutation_generation + 1U;
+
+    engine_diag.mutation_generation = generation;
+    diag_barrier();
+    return generation;
+}
+
+static void diag_mutation_end(uint32_t generation)
+{
+    diag_barrier();
+    engine_diag.mutation_generation = generation + 1U;
+}
+
 
 void zzusb_engine_diag_reset(void)
 {
-    memset(&engine_diag, 0, sizeof(engine_diag));
+    uint32_t generation = diag_mutation_begin();
+
+    engine_diag.next_sequence = 0;
+    engine_diag.lost_events = 0;
+    memset((void *)engine_diag.counters, 0, sizeof(engine_diag.counters));
+    memset(engine_diag.events, 0, sizeof(engine_diag.events));
+    diag_mutation_end(generation);
 }
 
 void zzusb_engine_diag_count(enum zzusb_driver_diag_counter counter)
 {
     if ((unsigned)counter < ZZUSB_DRIVER_DIAG_COUNTER_COUNT) {
+        uint32_t generation = diag_mutation_begin();
+
         engine_diag.counters[counter]++;
-        diag_barrier();
-        engine_diag.mutation_generation++;
+        diag_mutation_end(generation);
     }
 }
 
 int zzusb_engine_diag_high_water(uint32_t depth)
 {
+    uint32_t generation = diag_mutation_begin();
+
     if (depth <=
-        engine_diag.counters[ZZUSB_DRIVER_COUNT_QUEUE_HIGH_WATER])
+        engine_diag.counters[ZZUSB_DRIVER_COUNT_QUEUE_HIGH_WATER]) {
+        diag_mutation_end(generation);
         return 0;
+    }
     engine_diag.counters[ZZUSB_DRIVER_COUNT_QUEUE_HIGH_WATER] = depth;
-    diag_barrier();
-    engine_diag.mutation_generation++;
+    diag_mutation_end(generation);
     return 1;
 }
 
@@ -55,6 +84,7 @@ void zzusb_engine_diag_record(uint16_t type, uint16_t status,
                               uint16_t schedule, uint32_t detail,
                               uint32_t timestamp)
 {
+    uint32_t generation = diag_mutation_begin();
     uint32_t sequence = ++engine_diag.next_sequence;
     struct zzusb_driver_diag_event *event =
         &engine_diag.events[(sequence - 1U) %
@@ -76,8 +106,7 @@ void zzusb_engine_diag_record(uint16_t type, uint16_t status,
     event->schedule = schedule;
     diag_barrier();
     event->sequence = sequence;
-    diag_barrier();
-    engine_diag.mutation_generation++;
+    diag_mutation_end(generation);
 }
 
 int zzusb_engine_diag_snapshot(struct zzusb_driver_diag_snapshot *snapshot,
@@ -90,6 +119,9 @@ int zzusb_engine_diag_snapshot(struct zzusb_driver_diag_snapshot *snapshot,
 
     while (retries--) {
         uint32_t before = engine_diag.mutation_generation;
+        if (before & 1U)
+            continue;
+        diag_barrier();
         uint32_t next = engine_diag.next_sequence;
         uint32_t count = next < ZZUSB_DRIVER_DIAG_EVENT_COUNT
                        ? next : ZZUSB_DRIVER_DIAG_EVENT_COUNT;
@@ -119,7 +151,7 @@ int zzusb_engine_diag_snapshot(struct zzusb_driver_diag_snapshot *snapshot,
         snapshot->event_count = (uint16_t)encoded;
         diag_barrier();
         if (before == engine_diag.mutation_generation) {
-            snapshot->generation = before << 1;
+            snapshot->generation = before;
             return 1;
         }
     }
