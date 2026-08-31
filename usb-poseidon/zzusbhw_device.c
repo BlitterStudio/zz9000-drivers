@@ -582,6 +582,7 @@ static int queue_int_ior(struct ZZUSBUnit *unit,
             }
             slot->unit = unit;
             slot->ior = ior;
+            slot->abort_requested = 0;
             slot->idle_polls = 0;
             /* Preserve an already armed persistent firmware endpoint. */
             return 1;
@@ -2649,8 +2650,11 @@ static void hotplug_poll_task(void)
         for (int u = 0; u < ZZ_NUM_PORTS; u++)
             if (PollBase->zz_Units[u].zz_Enabled)
                 poll_rt_iso(&PollBase->zz_Units[u]);
-        if (process_work_queue())
-            any_pending = 1;
+        while (process_work_queue()) {
+            for (int u = 0; u < ZZ_NUM_PORTS; u++)
+                if (PollBase->zz_Units[u].zz_Enabled)
+                    poll_rt_iso(&PollBase->zz_Units[u]);
+        }
 
         for (int u = 0; u < ZZ_NUM_PORTS; u++) {
             struct ZZUSBUnit *unit = &PollBase->zz_Units[u];
