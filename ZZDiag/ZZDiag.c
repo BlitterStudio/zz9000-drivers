@@ -142,15 +142,20 @@ static void print_driver_usb_events(
 static void print_firmware_usb_events(const UBYTE *snapshot)
 {
     ULONG count = read_be32(snapshot + ZZUSB_DIAG_OFF_EVENT_COUNT);
+    ULONG next = read_be32(snapshot + ZZUSB_DIAG_OFF_EVENT_NEXT) %
+                 ZZUSB_DIAG_EVENT_COUNT;
+    ULONG oldest;
     ULONG first;
     ULONG i;
 
     if (count > ZZUSB_DIAG_EVENT_COUNT)
         count = ZZUSB_DIAG_EVENT_COUNT;
+    oldest = count == ZZUSB_DIAG_EVENT_COUNT ? next : 0UL;
     first = count > 8UL ? count - 8UL : 0UL;
     for (i = first; i < count; i++) {
+        ULONG physical = (oldest + i) % ZZUSB_DIAG_EVENT_COUNT;
         const UBYTE *event = snapshot + ZZUSB_DIAG_OFF_EVENTS +
-                            i * ZZUSB_DIAG_EVENT_SIZE;
+                            physical * ZZUSB_DIAG_EVENT_SIZE;
         printf("USBFirmwareEvent       = seq=%lu id=%lu epoch=%lu "
                "type=%u status=0x%02x addr=%u ep=%u dir=0x%02x "
                "topo=0x%04x sched=0x%04x detail=0x%08lx\n",

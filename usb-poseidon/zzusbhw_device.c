@@ -991,8 +991,9 @@ static int send_usb_cmd_wire(volatile uint8_t *base,
     return result->status;
 }
 
-static void negotiate_usb_proxy(volatile uint8_t *base,
-                                struct ZZUSBProtocolState *state)
+static int negotiate_usb_proxy(volatile uint8_t *base,
+                               struct ZZUSBProtocolState *state,
+                               int allow_legacy)
 {
     struct ZZUSBCommand query;
     int status;
@@ -1011,29 +1012,34 @@ static void negotiate_usb_proxy(volatile uint8_t *base,
         (state->capabilities & ZZUSB_CAP_BASE) == ZZUSB_CAP_BASE) {
         state->mode = ZZUSB_PROTOCOL_V2;
         state->quarantined = 0;
-    } else {
-        state->next_request_id = 1;
-        state->controller_epoch = 0;
-        state->capabilities = 0;
-        state->mode = ZZUSB_PROTOCOL_LEGACY;
-        state->quarantined = 0;
+        return 1;
     }
+
+    state->next_request_id = 1;
+    state->controller_epoch = 0;
+    state->capabilities = 0;
+    state->mode = ZZUSB_PROTOCOL_LEGACY;
+    state->quarantined = allow_legacy ? 0 : 1;
+    return 0;
 }
 
 /*
- * A quarantined proxy rejects every command through send_usb_cmd,
- * including the reset that would otherwise be the only way back.
- * Re-run the capability negotiation so a controlled reset can
- * re-establish the channel: a live firmware answers the query and
- * the v2 fence is restored; a silent one degrades to the legacy
- * mailbox exactly as at first boot.
+ * Never overwrite a quarantined in-flight mailbox. Once its status becomes
+ * terminal, a v2 QUERY_CAPS may establish a fresh request-ID/epoch fence.
+ * Recovery never falls back to unfenced legacy traffic.
  */
 static void recover_quarantined_proxy(volatile uint8_t *base)
 {
     struct ZZUSBProtocolState *state = protocol_state_for(base);
+    volatile struct ZZUSBCommand *result =
+        (volatile struct ZZUSBCommand *)(base + 0xa000);
 
-    if (state && state->quarantined)
-        negotiate_usb_proxy(base, state);
+    if (!state || !state->quarantined)
+        return;
+    CacheClearE((APTR)result, ZZUSB_V2_HEADER_SIZE, CACRF_ClearD);
+    if (result->status == ZZUSB_STATUS_PENDING)
+        return;
+    negotiate_usb_proxy(base, state, 0);
 }
 
 static int send_usb_cmd(volatile uint8_t *base, struct ZZUSBCommand *cmd,
@@ -2502,7 +2508,7 @@ static void hotplug_poll_task(void)
         if (!ProtocolNegotiated) {
             negotiate_usb_proxy((volatile uint8_t *)
                                 PollBase->zz_Units[0].zz_Registers,
-                                &ProtocolStates[0]);
+                                &ProtocolStates[0], 1);
             ProtocolNegotiated = 1;
         }
     }
