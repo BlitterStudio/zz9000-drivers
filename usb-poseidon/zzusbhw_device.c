@@ -227,6 +227,7 @@ struct ZZIntPendingSlot {
     struct ZZUSBUnit *unit;
     struct IOUsbHWReq *ior;
     uint8_t armed;
+    uint8_t abort_requested;
 };
 
 static struct ZZIntPendingSlot IntPendingSlots[ZZ_INT_PENDING_SLOTS];
@@ -540,6 +541,7 @@ static void clear_int_slot(struct ZZIntPendingSlot *slot)
     slot->unit = NULL;
     slot->ior = NULL;
     slot->armed = 0;
+    slot->abort_requested = 0;
 }
 
 static void reset_int_slots(void)
@@ -802,6 +804,7 @@ static int send_usb_cmd_wire(volatile uint8_t *base,
     uint32_t request_id = 0;
     uint32_t max_data = use_v2 ? ZZUSB_V2_DATA_MAX : ZZUSB_MAX_XFER;
     uint32_t elapsed_ms;
+    uint32_t outer_limit_ms;
 
     if (data_out_len > max_data)
         return ZZUSB_STATUS_BADPARAM;
@@ -860,7 +863,7 @@ static int send_usb_cmd_wire(volatile uint8_t *base,
         uint32_t firmware_ms = cmd->timeout_ms
                                ? (uint32_t)cmd->timeout_ms
                                : ZZUSB_PROXY_MAX_TIMEOUT_MS;
-        uint32_t outer_limit_ms = firmware_ms + 150U;
+        outer_limit_ms = firmware_ms + 150U;
 
         if (!WorkerTimerRequest) {
             if (state)
@@ -885,6 +888,17 @@ static int send_usb_cmd_wire(volatile uint8_t *base,
                 CACRF_ClearD);
     if (result->status == ZZUSB_STATUS_PENDING) {
         if (active_work_aborted()) {
+            while (result->status == ZZUSB_STATUS_PENDING &&
+                   elapsed_ms < outer_limit_ms) {
+                if (!worker_wait_us(1000U))
+                    break;
+                elapsed_ms++;
+                CacheClearE((APTR)result,
+                            use_v2 ? ZZUSB_V2_HEADER_SIZE : ZZUSB_CMD_SIZE,
+                            CACRF_ClearD);
+            }
+            if (result->status == ZZUSB_STATUS_PENDING && state)
+                state->quarantined = 1;
             zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_CANCELLATION);
             zzusb_engine_diag_record(ZZUSB_DRIVER_EVENT_MAILBOX,
                                      ZZUSB_ENGINE_STATUS_CANCELLED,
@@ -1031,6 +1045,50 @@ static int send_usb_cmd(volatile uint8_t *base, struct ZZUSBCommand *cmd,
         return ZZUSB_STATUS_HOSTERROR;
     return send_usb_cmd_wire(base, cmd, data_out, data_out_len, state,
                              state && state->mode == ZZUSB_PROTOCOL_V2, 0);
+}
+
+static int periodic_stop_retired(uint16_t status)
+{
+    return status == ZZUSB_STATUS_OK ||
+           status == ZZUSB_STATUS_NAK ||
+           status == ZZUSB_STATUS_OFFLINE ||
+           status == ZZUSB_STATUS_STALE;
+}
+
+static uint16_t stop_periodic_slot(struct ZZIntPendingSlot *slot)
+{
+    struct ZZUSBCommand cmd;
+    struct ZZUSBProtocolState *state;
+    volatile uint8_t *base;
+    struct IOUsbHWReq *ior;
+    uint16_t status;
+
+    if (!slot || !slot->armed)
+        return ZZUSB_STATUS_OK;
+    if (!slot->unit || !slot->ior)
+        return ZZUSB_STATUS_BADPARAM;
+
+    ior = slot->ior;
+    base = (volatile uint8_t *)slot->unit->zz_Registers;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.cmd = ZZUSB_CMD_PERIODIC_STOP;
+    cmd.dev_addr = ior->iouh_DevAddr;
+    cmd.endpoint = ior->iouh_Endpoint;
+    cmd.direction = (ior->iouh_Dir == UHDIR_IN) ? 0x80 : 0x00;
+    cmd.max_pkt_size = ior->iouh_MaxPktSize;
+    cmd.speed = request_speed(slot->unit, ior);
+    cmd.interval = ior->iouh_Interval;
+    cmd.reserved = generation_for_unit(slot->unit);
+    cmd.timeout_ms = 100;
+    fill_split_fields(&cmd, slot->unit, ior);
+    status = send_usb_cmd(base, &cmd, NULL, 0);
+    slot->armed = 0;
+    if (!periodic_stop_retired(status)) {
+        state = protocol_state_for(base);
+        if (state)
+            state->quarantined = 1;
+    }
+    return status;
 }
 
 static BYTE map_proxy_status(uint16_t status)
@@ -2219,10 +2277,10 @@ static void update_port_state(struct ZZUSBUnit *unit,
 }
 
 /*
- * Arm each interrupt endpoint once, then reap only after the firmware
- * raises the coalesced USB event interrupt. The firmware owns the EHCI
- * periodic descriptor between Poseidon IORs; NAK and no-data responses
- * remain non-terminal.
+ * Arm each pending interrupt IOR once, then reap only after the firmware
+ * raises the coalesced USB event interrupt. NAK and no-data responses remain
+ * non-terminal; terminal completion stops the firmware endpoint before the
+ * Poseidon IOR and its slot are released.
  */
 static void poll_int_pending(struct ZZUSBBase *base_dev,
                              struct ZZUSBUnit *unit,
@@ -2236,7 +2294,7 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
         struct IOUsbHWReq *ior;
         struct ZZUSBCommand cmd;
         uint16_t status;
-
+        uint16_t stop_status;
         ObtainSemaphore(&base_dev->zz_Lock);
         if (!slot->ior || slot->unit != unit) {
             ReleaseSemaphore(&base_dev->zz_Lock);
@@ -2256,7 +2314,15 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
         cmd.timeout_ms = 100;
         fill_split_fields(&cmd, unit, ior);
 
-        if (!slot->armed) {
+        if (slot->abort_requested) {
+            stop_periodic_slot(slot);
+            ior->iouh_Actual = 0;
+            ior->iouh_Req.io_Error = IOERR_ABORTED;
+            clear_int_slot(slot);
+            reply_now = ior;
+        }
+
+        if (!reply_now && !slot->armed) {
             cmd.cmd = ZZUSB_CMD_PERIODIC_ARM;
             status = send_usb_cmd(
                 base, &cmd,
@@ -2306,11 +2372,17 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
                         ior->iouh_Data, actual);
                 ior->iouh_Actual = actual;
                 ior->iouh_Req.io_Error = 0;
+                stop_status = stop_periodic_slot(slot);
+                if (!periodic_stop_retired(stop_status)) {
+                    ior->iouh_Actual = 0;
+                    ior->iouh_Req.io_Error = map_proxy_status(stop_status);
+                }
                 clear_int_slot(slot);
                 reply_now = ior;
             } else if (action == ZZUSB_INTERRUPT_FAIL) {
                 ior->iouh_Actual = 0;
                 ior->iouh_Req.io_Error = map_proxy_status(status);
+                stop_periodic_slot(slot);
                 clear_int_slot(slot);
                 reply_now = ior;
             }
@@ -3578,6 +3650,7 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
             struct ZZIntPendingSlot *slot = &IntPendingSlots[i];
             struct IOUsbHWReq *pending = slot->ior;
             if (!pending || slot->unit != unit) continue;
+            stop_periodic_slot(slot);
             clear_int_slot(slot);
             pending->iouh_Actual = 0;
             pending->iouh_Req.io_Error = IOERR_ABORTED;
@@ -3881,11 +3954,21 @@ static uint32_t __attribute__((used)) abort_io(struct Library *dev asm("a6"), st
     {
         struct ZZIntPendingSlot *slot = find_int_slot_for_ior(ior);
         if (slot && slot->unit == unit) {
-            clear_int_slot(slot);
-            found = 1;
+            if (slot->armed) {
+                slot->abort_requested = 1;
+                found = 2;
+            } else {
+                clear_int_slot(slot);
+                found = 1;
+            }
         }
     }
     ReleaseSemaphore(&ZZBase->zz_Lock);
+    if (found == 2) {
+        if (ZZBase->zz_PollTask && ZZBase->zz_PollSignal)
+            Signal(ZZBase->zz_PollTask, ZZBase->zz_PollSignal);
+        return IOERR_ABORTED;
+    }
 
     if (found) {
         ior->iouh_Actual = 0;
