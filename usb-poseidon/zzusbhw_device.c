@@ -779,19 +779,21 @@ static int worker_wait_iso_event(uint32_t microseconds)
 {
     struct timerequest *request = WorkerTimerRequest;
     ULONG event_mask = PollBase ? PollBase->zz_PollSignal : 0;
+    int timer_completed;
 
     if (!request || !WorkerTimerMask)
-        return 0;
+        return -1;
     SetSignal(0, WorkerTimerMask);
     request->tr_node.io_Command = TR_ADDREQUEST;
     request->tr_time.tv_secs = microseconds / 1000000UL;
     request->tr_time.tv_micro = microseconds % 1000000UL;
     SendIO((struct IORequest *)request);
     Wait(WorkerTimerMask | event_mask);
-    if (!CheckIO((struct IORequest *)request))
+    timer_completed = CheckIO((struct IORequest *)request) != NULL;
+    if (!timer_completed)
         AbortIO((struct IORequest *)request);
     WaitIO((struct IORequest *)request);
-    return 1;
+    return timer_completed;
 }
 
 static int active_work_aborted(void)
@@ -804,7 +806,7 @@ static int send_usb_cmd_wire(volatile uint8_t *base,
                              struct ZZUSBCommand *cmd,
                              void *data_out, uint32_t data_out_len,
                              struct ZZUSBProtocolState *state,
-                             int use_v2, int is_query)
+                             int use_v2, int is_query, int honor_abort)
 {
     volatile struct ZZUSBCommand *result =
         (volatile struct ZZUSBCommand*)(base + 0xa000);
@@ -887,7 +889,7 @@ static int send_usb_cmd_wire(volatile uint8_t *base,
                         CACRF_ClearD);
             if (result->status != ZZUSB_STATUS_PENDING)
                 break;
-            if (active_work_aborted())
+            if (honor_abort && active_work_aborted())
                 break;
             if (!worker_wait_us(1000U))
                 break;
@@ -898,7 +900,7 @@ static int send_usb_cmd_wire(volatile uint8_t *base,
                 use_v2 ? ZZUSB_V2_HEADER_SIZE : ZZUSB_CMD_SIZE,
                 CACRF_ClearD);
     if (result->status == ZZUSB_STATUS_PENDING) {
-        if (active_work_aborted()) {
+        if (honor_abort && active_work_aborted()) {
             while (result->status == ZZUSB_STATUS_PENDING &&
                    elapsed_ms < outer_limit_ms) {
                 if (!worker_wait_us(1000U))
@@ -1017,7 +1019,7 @@ static int negotiate_usb_proxy(volatile uint8_t *base,
     memset(&query, 0, sizeof(query));
     query.cmd = ZZUSB_CMD_QUERY_CAPS;
     query.timeout_ms = 100;
-    status = send_usb_cmd_wire(base, &query, NULL, 0, state, 1, 1);
+    status = send_usb_cmd_wire(base, &query, NULL, 0, state, 1, 1, 0);
     if (status == ZZUSB_STATUS_OK &&
         state->controller_epoch != 0 &&
         (state->capabilities & ZZUSB_CAP_BASE) == ZZUSB_CAP_BASE) {
@@ -1053,15 +1055,31 @@ static void recover_quarantined_proxy(volatile uint8_t *base)
     negotiate_usb_proxy(base, state, 0);
 }
 
-static int send_usb_cmd(volatile uint8_t *base, struct ZZUSBCommand *cmd,
-                        void *data_out, uint32_t data_out_len)
+static int send_usb_cmd_scoped(volatile uint8_t *base,
+                               struct ZZUSBCommand *cmd,
+                               void *data_out, uint32_t data_out_len,
+                               int honor_abort)
 {
     struct ZZUSBProtocolState *state = protocol_state_for(base);
 
     if (state && state->quarantined)
         return ZZUSB_STATUS_HOSTERROR;
-    return send_usb_cmd_wire(base, cmd, data_out, data_out_len, state,
-                             state && state->mode == ZZUSB_PROTOCOL_V2, 0);
+    return send_usb_cmd_wire(
+        base, cmd, data_out, data_out_len, state,
+        state && state->mode == ZZUSB_PROTOCOL_V2, 0, honor_abort);
+}
+
+static int send_usb_cmd(volatile uint8_t *base, struct ZZUSBCommand *cmd,
+                        void *data_out, uint32_t data_out_len)
+{
+    return send_usb_cmd_scoped(base, cmd, data_out, data_out_len, 1);
+}
+
+static int send_usb_cmd_maintenance(
+    volatile uint8_t *base, struct ZZUSBCommand *cmd,
+    void *data_out, uint32_t data_out_len)
+{
+    return send_usb_cmd_scoped(base, cmd, data_out, data_out_len, 0);
 }
 
 static int periodic_stop_retired(uint16_t status)
@@ -1315,11 +1333,16 @@ static void execute_simple_iso(struct ZZUSBUnit *unit,
             status = ZZUSB_STATUS_TIMEOUT;
             break;
         }
-        if (!worker_wait_iso_event(10000U)) {
-            status = ZZUSB_STATUS_HOSTERROR;
-            break;
+        {
+            int wait_result = worker_wait_iso_event(10000U);
+
+            if (wait_result < 0) {
+                status = ZZUSB_STATUS_HOSTERROR;
+                break;
+            }
+            if (wait_result > 0)
+                elapsed_ms += 10U;
         }
-        elapsed_ms += 10U;
     }
 
     if (queued)
@@ -1533,8 +1556,9 @@ static uint16_t queue_rt_iso_batch(struct ZZRTIsoSlot *slot)
         return ZZUSB_STATUS_BADPARAM;
     }
     fill_rt_iso_command(&cmd, slot, ZZUSB_CMD_ISO_QUEUE, wire_length);
-    status = send_usb_cmd((volatile uint8_t *)slot->unit->zz_Registers,
-                          &cmd, IsoWire, wire_length);
+    status = send_usb_cmd_maintenance(
+        (volatile uint8_t *)slot->unit->zz_Registers,
+        &cmd, IsoWire, wire_length);
     if (status != ZZUSB_STATUS_OK) {
         zzusb_rt_complete(&slot->lifecycle, batch_id);
         if (!slot->direction_in)
@@ -1630,8 +1654,9 @@ static uint16_t reap_rt_iso_batch(struct ZZRTIsoSlot *slot)
 
     fill_rt_iso_command(&cmd, slot, ZZUSB_CMD_ISO_REAP,
                         ZZUSB_V2_DATA_MAX);
-    status = send_usb_cmd((volatile uint8_t *)slot->unit->zz_Registers,
-                          &cmd, NULL, 0);
+    status = send_usb_cmd_maintenance(
+        (volatile uint8_t *)slot->unit->zz_Registers,
+        &cmd, NULL, 0);
     if (status != ZZUSB_STATUS_OK)
         return status;
     result = (volatile struct ZZUSBCommand *)(
@@ -1682,8 +1707,9 @@ static uint16_t stop_rt_iso_slot(struct ZZRTIsoSlot *slot)
         return ZZUSB_STATUS_BADPARAM;
     }
     fill_rt_iso_command(&cmd, slot, ZZUSB_CMD_ISO_STOP, 0);
-    status = send_usb_cmd((volatile uint8_t *)slot->unit->zz_Registers,
-                          &cmd, NULL, 0);
+    status = send_usb_cmd_maintenance(
+        (volatile uint8_t *)slot->unit->zz_Registers,
+        &cmd, NULL, 0);
     if (status != ZZUSB_STATUS_OK && status != ZZUSB_STATUS_NAK)
         return status;
     rt_cancel_contexts(slot, ZZUSB_RT_FLAG_PACKET_ERROR);
