@@ -288,12 +288,14 @@ struct ZZWorkSlot {
     struct ZZUSBUnit *unit;
     struct IOUsbHWReq *ior;
     uint32_t sequence;
+    uint32_t enqueue_seq;
 };
 
 static struct ZZWorkSlot WorkSlots[ZZ_WORK_SLOTS];
 static struct zzusb_driver_diag_snapshot DriverDiagSnapshot;
 static struct ZZWorkSlot *ActiveWorkSlot;
 static uint32_t WorkSequence = 1;
+static uint32_t EnqueueSequence = 1;
 static struct timerequest *WorkerTimerRequest;
 static ULONG WorkerTimerMask;
 static uint8_t ProtocolNegotiated;
@@ -871,6 +873,8 @@ static int send_usb_cmd_wire(volatile uint8_t *base,
                         CACRF_ClearD);
             if (result->status != ZZUSB_STATUS_PENDING)
                 break;
+            if (active_work_aborted())
+                break;
             if (!worker_wait_us(1000U))
                 break;
         }
@@ -880,6 +884,20 @@ static int send_usb_cmd_wire(volatile uint8_t *base,
                 use_v2 ? ZZUSB_V2_HEADER_SIZE : ZZUSB_CMD_SIZE,
                 CACRF_ClearD);
     if (result->status == ZZUSB_STATUS_PENDING) {
+        if (active_work_aborted()) {
+            zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_CANCELLATION);
+            zzusb_engine_diag_record(ZZUSB_DRIVER_EVENT_MAILBOX,
+                                     ZZUSB_ENGINE_STATUS_CANCELLED,
+                                     request_id, state->controller_epoch,
+                                     (uint16_t)cmd->dev_addr,
+                                     (uint8_t)cmd->endpoint,
+                                     (uint8_t)cmd->direction,
+                                     (uint16_t)((cmd->split_hub_addr << 8) |
+                                                (cmd->split_hub_port & 0xffU)),
+                                     cmd->flags, cmd->timeout_ms,
+                                     WorkSequence);
+            return ZZUSB_STATUS_CANCELLED;
+        }
         if (state)
             state->quarantined = 1;
         zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_TIMEOUT);
@@ -986,6 +1004,22 @@ static void negotiate_usb_proxy(volatile uint8_t *base,
         state->mode = ZZUSB_PROTOCOL_LEGACY;
         state->quarantined = 0;
     }
+}
+
+/*
+ * A quarantined proxy rejects every command through send_usb_cmd,
+ * including the reset that would otherwise be the only way back.
+ * Re-run the capability negotiation so a controlled reset can
+ * re-establish the channel: a live firmware answers the query and
+ * the v2 fence is restored; a silent one degrades to the legacy
+ * mailbox exactly as at first boot.
+ */
+static void recover_quarantined_proxy(volatile uint8_t *base)
+{
+    struct ZZUSBProtocolState *state = protocol_state_for(base);
+
+    if (state && state->quarantined)
+        negotiate_usb_proxy(base, state);
 }
 
 static int send_usb_cmd(volatile uint8_t *base, struct ZZUSBCommand *cmd,
@@ -2726,6 +2760,7 @@ static void handle_roothub_control(struct ZZUSBUnit *unit,
                         rcmd.cmd = ZZUSB_CMD_RESET_PORT;
                         rcmd.timeout_ms = 5000;
                         fill_root_reset_hint(&rcmd, unit);
+                        recover_quarantined_proxy(rbase);
 
                         uint16_t rstatus = send_usb_cmd(rbase, &rcmd, NULL, 0);
                         uint16_t fw_speed = 0;
@@ -3121,6 +3156,7 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
             cmd.cmd = ZZUSB_CMD_RESET_PORT;
             cmd.timeout_ms = 5000;
             fill_root_reset_hint(&cmd, unit);
+            recover_quarantined_proxy(base);
 
             uint16_t status = send_usb_cmd(base, &cmd, NULL, 0);
             uint16_t fw_speed = 0;
@@ -3440,6 +3476,10 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
             enum { BULK_CHUNK = 16384 };
 
             while (remaining > 0) {
+                if (active_work_aborted()) {
+                    status = ZZUSB_STATUS_CANCELLED;
+                    break;
+                }
                 uint32_t chunk = (remaining > BULK_CHUNK)
                                  ? BULK_CHUNK : remaining;
 
@@ -3617,6 +3657,7 @@ static int enqueue_work(struct ZZUSBBase *base, struct ZZUSBUnit *unit,
         available->unit = unit;
         available->ior = ior;
         available->sequence = 0;
+        available->enqueue_seq = EnqueueSequence++;
         zzusb_engine_queue(&available->lifecycle);
         ior->iouh_Actual = 0;
         ior->iouh_Req.io_Error = 0;
@@ -3665,11 +3706,12 @@ static int process_work_queue(void)
 
     Forbid();
     for (int i = 0; i < ZZ_WORK_SLOTS; i++) {
-        if (WorkSlots[i].ior &&
-            WorkSlots[i].lifecycle.state == ZZUSB_REQ_QUEUED) {
-            slot = &WorkSlots[i];
-            break;
-        }
+        struct ZZWorkSlot *candidate = &WorkSlots[i];
+
+        if (candidate->ior &&
+            candidate->lifecycle.state == ZZUSB_REQ_QUEUED &&
+            (!slot || candidate->enqueue_seq < slot->enqueue_seq))
+            slot = candidate;
     }
     if (!slot) {
         Permit();
