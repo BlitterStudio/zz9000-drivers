@@ -9,4 +9,4 @@ fi
 export PATH=/opt/amiga/bin:"$PATH"
 
 m68k-amigaos-gcc ZZDiag.c -m68030 -O2 -o ZZDiag \
-    -Wall -Wextra -Wno-unused-parameter -I../include -lamiga -noixemul
+    -Wall -Wextra -Wno-unused-parameter -I../include -I../usb-poseidon -lamiga -noixemul

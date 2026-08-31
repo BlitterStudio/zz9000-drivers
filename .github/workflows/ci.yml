@@ -59,7 +59,7 @@ jobs:
             firmware_ref=master
           fi
           printf 'ref=%s\n' "$firmware_ref" >> "$GITHUB_OUTPUT"
-      - name: Checkout firmware (for its ZZ9000.CFG key set)
+      - name: Checkout firmware (for shared contracts)
         uses: actions/checkout@v6
         with:
           repository: BlitterStudio/zz9000-firmware
@@ -72,7 +72,9 @@ jobs:
         run: |
           make rtg-tests
           make -C common/tests test
+          make -C usb-poseidon/tests test
           python3 -m unittest tools/tests/test_repo_tooling.py
+          python3 -m unittest tools/tests/test_usb_proxy_contract.py
           tools/check-cfg-keys.sh "$ZZ9K_FIRMWARE_DIR"
           tools/check-quality.sh
           tools/check-release.sh --quick
@@ -169,8 +171,9 @@ jobs:
           docker run --rm -v "$PWD":/src -w /src/usb-poseidon "$AMIGA_IMAGE" \
             m68k-amigaos-gcc -m68020 -mtune=68020-60 -msoft-float -s \
               -Wall -Wextra -Wno-unused-parameter -fomit-frame-pointer \
-              -nostdlib -nostartfiles -O2 -I. \
-              -o zzusbhw.device zzusbhw_device.c -lgcc -lc
+              -nostdlib -nostartfiles -O2 -I. -I../include \
+              -o zzusbhw.device zzusbhw_device.c zzusb_engine.c zzusb_iso.c \
+              -lgcc -lc
       - uses: actions/upload-artifact@v7
         with:
           name: zzusbhw.device
@@ -244,7 +247,7 @@ jobs:
         run: |
           docker run --rm -v "$PWD":/src -w /src/ZZDiag "$AMIGA_IMAGE" \
             m68k-amigaos-gcc ZZDiag.c -m68030 -O2 -o ZZDiag \
-              -Wall -Wextra -Wno-unused-parameter -I../include \
+              -Wall -Wextra -Wno-unused-parameter -I../include -I../usb-poseidon \
               -lamiga -noixemul
       - uses: actions/upload-artifact@v7
         with:
@@ -395,6 +398,7 @@ jobs:
           install -Dm755 artifacts/ZZDiag/ZZDiag                       "$INST/Tools/ZZDiag"
           install -Dm644 ahi/README.md                                 "$INST/Docs/ahi-README.md"
           install -Dm644 usb-poseidon/README.md                        "$INST/Docs/usb-poseidon-README.md"
+          install -Dm644 docs/usb-qualification-matrix.md               "$INST/Docs/usb-qualification-matrix.md"
           # Diagnostic-only MHI build; staged under Docs, never installed
           # as the production library.
           install -Dm644 artifacts/mhizz9000.library.decode-only/mhizz9000.library.decode-only \

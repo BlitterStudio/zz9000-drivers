@@ -26,6 +26,8 @@ install -Dm755 net/ZZNetStats/ZZNetStats        "$inst/Tools/ZZNetStats"
 install -Dm755 ZZDiag/ZZDiag                    "$inst/Tools/ZZDiag"
 install -Dm644 ahi/README.md                    "$inst/Docs/ahi-README.md"
 install -Dm644 usb-poseidon/README.md           "$inst/Docs/usb-poseidon-README.md"
+install -Dm644 docs/usb-qualification-matrix.md \
+                                               "$inst/Docs/usb-qualification-matrix.md"
 # Diagnostic-only MHI build (feeder-vs-pump hardware isolation); staged
 # under Docs, deliberately never installed as the production library.
 if [ -f mhi/mhizz9000.library.decode-only ]; then

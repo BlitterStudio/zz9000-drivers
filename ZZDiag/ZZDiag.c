@@ -12,16 +12,20 @@
  */
 
 #include <exec/types.h>
+#include <exec/io.h>
 #include <proto/dos.h>
-
+#include <proto/exec.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "zz9000_hw.h"
 #include "zz9000_aperture.h"
 
-#define ZZDIAG_VERSION "1.11"
-#define ZZDIAG_DATE    "15.08.2026"
+#include "zzusbhw.h"
+#include "zzusb_engine.h"
+#define ZZDIAG_VERSION "1.12"
+#define ZZDIAG_DATE    "31.08.2026"
 
 #define ZZDIAG_CAPTURE_ROWS 320U
 
@@ -30,6 +34,213 @@ static const char zzdiag_capture_ppm_header[] =
 
 static const char version[] __attribute__((used)) =
     "$VER: ZZDiag " ZZDIAG_VERSION " (" ZZDIAG_DATE ")\r\n";
+
+static UBYTE FirmwareDiagSnapshot[ZZUSB_DIAG_SIZE];
+static struct zzusb_driver_diag_snapshot DriverDiagSnapshot;
+
+static const char *const usb_diag_counter_names[] = {
+    "request", "completion", "timeout", "late", "cancel", "reset",
+    "host/ehci", "recovery", "stale", "queue_high_water",
+    "periodic_arm", "periodic_reap", "iso_queue", "iso_reap"
+};
+
+static UWORD read_be16(const UBYTE *src)
+{
+    return (UWORD)(((UWORD)src[0] << 8) | src[1]);
+}
+
+static ULONG read_be32(const volatile UBYTE *src)
+{
+    return ((ULONG)src[0] << 24) |
+           ((ULONG)src[1] << 16) |
+           ((ULONG)src[2] << 8) |
+           src[3];
+}
+
+static int read_driver_usb_diag(struct zzusb_driver_diag_snapshot *snapshot)
+{
+    struct MsgPort *port;
+    struct IOUsbHWReq *request;
+    int ok = 0;
+
+    port = CreateMsgPort();
+    if (!port)
+        return 0;
+    request = (struct IOUsbHWReq *)CreateIORequest(
+        port, sizeof(struct IOUsbHWReq));
+    if (!request) {
+        DeleteMsgPort(port);
+        return 0;
+    }
+    if (OpenDevice((CONST_STRPTR)DEVICE_NAME, 0,
+                   (struct IORequest *)request, 0) == 0) {
+        memset(snapshot, 0, sizeof(*snapshot));
+        request->iouh_Req.io_Command = ZZUSB_UHCMD_GET_DIAGNOSTICS;
+        request->iouh_Data = snapshot;
+        request->iouh_Length = sizeof(*snapshot);
+        if (DoIO((struct IORequest *)request) == 0 &&
+            request->iouh_Actual == sizeof(*snapshot) &&
+            snapshot->magic == ZZUSB_DRIVER_DIAG_MAGIC)
+            ok = 1;
+        CloseDevice((struct IORequest *)request);
+    }
+    DeleteIORequest((struct IORequest *)request);
+    DeleteMsgPort(port);
+    return ok;
+}
+
+static int read_firmware_usb_diag(ULONG board_addr, UBYTE *snapshot)
+{
+    volatile const UBYTE *page =
+        (volatile const UBYTE *)(board_addr + 0xa000UL +
+                                 ZZUSB_DIAG_OFFSET);
+    unsigned attempt;
+
+    for (attempt = 0; attempt < 8U; attempt++) {
+        ULONG before = read_be32(page + ZZUSB_DIAG_OFF_GENERATION);
+        ULONG after;
+        unsigned i;
+
+        if (before & 1UL)
+            continue;
+        for (i = 0; i < ZZUSB_DIAG_SIZE; i++)
+            snapshot[i] = page[i];
+        after = read_be32(page + ZZUSB_DIAG_OFF_GENERATION);
+        if (before == after &&
+            before == read_be32(snapshot + ZZUSB_DIAG_OFF_GENERATION) &&
+            read_be32(snapshot + ZZUSB_DIAG_OFF_MAGIC) ==
+                ZZUSB_DIAG_MAGIC)
+            return 1;
+    }
+    return 0;
+}
+
+static void print_driver_usb_events(
+    const struct zzusb_driver_diag_snapshot *snapshot)
+{
+    unsigned first = snapshot->event_count > 8U
+                   ? snapshot->event_count - 8U : 0U;
+    unsigned i;
+
+    for (i = first; i < snapshot->event_count; i++) {
+        const struct zzusb_driver_diag_event *event =
+            &snapshot->events[i];
+        printf("USBDriverEvent         = seq=%lu id=%lu epoch=%lu "
+               "type=%u status=0x%02x addr=%u ep=%u dir=0x%02x "
+               "topo=0x%04x sched=0x%04x detail=0x%08lx\n",
+               (unsigned long)event->sequence,
+               (unsigned long)event->request_id,
+               (unsigned long)event->controller_epoch,
+               (unsigned)event->type, (unsigned)event->status,
+               (unsigned)event->address, (unsigned)event->endpoint,
+               (unsigned)event->direction, (unsigned)event->topology,
+               (unsigned)event->schedule,
+               (unsigned long)event->detail);
+    }
+}
+
+static void print_firmware_usb_events(const UBYTE *snapshot)
+{
+    ULONG count = read_be32(snapshot + ZZUSB_DIAG_OFF_EVENT_COUNT);
+    ULONG first;
+    ULONG i;
+
+    if (count > ZZUSB_DIAG_EVENT_COUNT)
+        count = ZZUSB_DIAG_EVENT_COUNT;
+    first = count > 8UL ? count - 8UL : 0UL;
+    for (i = first; i < count; i++) {
+        const UBYTE *event = snapshot + ZZUSB_DIAG_OFF_EVENTS +
+                            i * ZZUSB_DIAG_EVENT_SIZE;
+        printf("USBFirmwareEvent       = seq=%lu id=%lu epoch=%lu "
+               "type=%u status=0x%02x addr=%u ep=%u dir=0x%02x "
+               "topo=0x%04x sched=0x%04x detail=0x%08lx\n",
+               (unsigned long)read_be32(
+                   event + ZZUSB_DIAG_EVT_OFF_SEQUENCE),
+               (unsigned long)read_be32(
+                   event + ZZUSB_DIAG_EVT_OFF_REQUEST),
+               (unsigned long)read_be32(
+                   event + ZZUSB_DIAG_EVT_OFF_EPOCH),
+               (unsigned)read_be16(event + ZZUSB_DIAG_EVT_OFF_TYPE),
+               (unsigned)read_be16(event + ZZUSB_DIAG_EVT_OFF_STATUS),
+               (unsigned)read_be16(event + ZZUSB_DIAG_EVT_OFF_ADDRESS),
+               (unsigned)event[ZZUSB_DIAG_EVT_OFF_ENDPOINT],
+               (unsigned)event[ZZUSB_DIAG_EVT_OFF_DIRECTION],
+               (unsigned)read_be16(event + ZZUSB_DIAG_EVT_OFF_TOPOLOGY),
+               (unsigned)read_be16(event + ZZUSB_DIAG_EVT_OFF_SCHEDULE),
+               (unsigned long)read_be32(
+                   event + ZZUSB_DIAG_EVT_OFF_DETAIL));
+    }
+}
+
+static void print_usb_diagnostics(ULONG board_addr)
+{
+    ULONG firmware_epoch;
+    unsigned i;
+
+    if (!read_driver_usb_diag(&DriverDiagSnapshot)) {
+        printf("USBDriverDiagnostics    = unsupported/unavailable\n");
+        printf("USBFirmwareDiagnostics  = unsupported (driver capability unknown)\n");
+        return;
+    }
+
+    printf("USBDriverDiagVersion    = %u\n",
+           (unsigned)DriverDiagSnapshot.version);
+    printf("USBDriverCapabilities   = 0x%08lx\n",
+           (unsigned long)DriverDiagSnapshot.capabilities);
+    printf("USBDriverEpoch          = %lu\n",
+           (unsigned long)DriverDiagSnapshot.controller_epoch);
+    printf("USBDriverGeneration     = %lu\n",
+           (unsigned long)DriverDiagSnapshot.generation);
+    printf("USBDriverEvents         = %u retained, %lu lost\n",
+           (unsigned)DriverDiagSnapshot.event_count,
+           (unsigned long)DriverDiagSnapshot.lost_events);
+
+    if (!(DriverDiagSnapshot.capabilities & ZZUSB_CAP_DIAGNOSTICS)) {
+        printf("USBFirmwareDiagnostics  = unsupported (legacy firmware)\n");
+        return;
+    }
+    if (!read_firmware_usb_diag(board_addr, FirmwareDiagSnapshot)) {
+        printf("USBFirmwareDiagnostics  = incoherent/unavailable\n");
+        return;
+    }
+
+    printf("USBFirmwareDiagVersion  = %u\n",
+           (unsigned)read_be16(FirmwareDiagSnapshot +
+                               ZZUSB_DIAG_OFF_VERSION));
+    printf("USBFirmwareCapabilities = 0x%08lx\n",
+           (unsigned long)read_be32(FirmwareDiagSnapshot +
+                                    ZZUSB_DIAG_OFF_CAPABILITIES));
+    firmware_epoch = read_be32(FirmwareDiagSnapshot +
+                               ZZUSB_DIAG_OFF_EPOCH);
+    printf("USBFirmwareEpoch        = %lu\n",
+           (unsigned long)firmware_epoch);
+    printf("USBEpochCorrelation     = %s\n",
+           firmware_epoch == DriverDiagSnapshot.controller_epoch
+               ? "matched" : "MISMATCH");
+    printf("USBFirmwareQueueState   = 0x%08lx\n",
+           (unsigned long)read_be32(FirmwareDiagSnapshot +
+                                    ZZUSB_DIAG_OFF_QUEUE_STATE));
+    printf("USBFirmwareScheduleBits = 0x%08lx\n",
+           (unsigned long)read_be32(FirmwareDiagSnapshot +
+                                    ZZUSB_DIAG_OFF_SCHEDULE_BITS));
+    printf("USBFirmwareEvents       = %lu retained, %lu lost\n",
+           (unsigned long)read_be32(FirmwareDiagSnapshot +
+                                    ZZUSB_DIAG_OFF_EVENT_COUNT),
+           (unsigned long)read_be32(FirmwareDiagSnapshot +
+                                    ZZUSB_DIAG_OFF_LOST_EVENTS));
+
+    for (i = 0; i < sizeof(usb_diag_counter_names) /
+                        sizeof(usb_diag_counter_names[0]); i++) {
+        printf("USBCounter %-15s = driver:%lu firmware:%lu\n",
+               usb_diag_counter_names[i],
+               (unsigned long)DriverDiagSnapshot.counters[i],
+               (unsigned long)read_be32(
+                   FirmwareDiagSnapshot + ZZUSB_DIAG_OFF_COUNTERS +
+                   i * 4U));
+    }
+    print_driver_usb_events(&DriverDiagSnapshot);
+    print_firmware_usb_events(FirmwareDiagSnapshot);
+}
 
 static void print_version_word(const char *name, UWORD raw)
 {
@@ -626,6 +837,7 @@ int main(int argc, char **argv)
     printf("ZorroVersion           = %u\n", (unsigned)board.zorro_version);
     printf("Product                = 0x%04x\n", (unsigned)board.product);
     print_aperture_layout(&board);
+    print_usb_diagnostics(board.address);
     printf("Samples                = %d\n", samples);
     printf("DelayTicks             = %d\n", delay_ticks);
 
