@@ -30,4 +30,9 @@ static inline enum zzusb_interrupt_action zzusb_interrupt_classify(
     return ZZUSB_INTERRUPT_COMPLETE;
 }
 
+static inline int zzusb_interrupt_rearm_on_replace(int armed, int is_in)
+{
+    return armed && !is_in;
+}
+
 #endif

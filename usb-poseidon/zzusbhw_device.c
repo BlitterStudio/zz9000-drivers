@@ -230,6 +230,7 @@ struct ZZIntPendingSlot {
     uint8_t armed;
     uint8_t abort_requested;
     uint8_t idle_polls;
+    uint8_t rearm_required;
 };
 
 static struct ZZIntPendingSlot IntPendingSlots[ZZ_INT_PENDING_SLOTS];
@@ -545,6 +546,7 @@ static void clear_int_slot(struct ZZIntPendingSlot *slot)
     slot->armed = 0;
     slot->abort_requested = 0;
     slot->idle_polls = 0;
+    slot->rearm_required = 0;
 }
 
 static void reset_int_slots(void)
@@ -579,12 +581,14 @@ static int queue_int_ior(struct ZZUSBUnit *unit,
                     *replaced = slot->ior;
                 slot->ior->iouh_Actual = 0;
                 slot->ior->iouh_Req.io_Error = IOERR_ABORTED;
+                if (zzusb_interrupt_rearm_on_replace(
+                        slot->armed, ior->iouh_Dir == UHDIR_IN))
+                    slot->rearm_required = 1;
             }
             slot->unit = unit;
             slot->ior = ior;
             slot->abort_requested = 0;
             slot->idle_polls = 0;
-            /* Preserve an already armed persistent firmware endpoint. */
             return 1;
         }
         if (!slot->ior && !free_slot)
@@ -2447,6 +2451,17 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
             reply_now = ior;
         }
 
+        if (!reply_now && slot->rearm_required) {
+            stop_status = stop_periodic_slot(slot);
+            slot->rearm_required = 0;
+            if (!periodic_stop_retired(stop_status)) {
+                ior->iouh_Actual = 0;
+                ior->iouh_Req.io_Error = map_proxy_status(stop_status);
+                clear_int_slot(slot);
+                reply_now = ior;
+            }
+        }
+
         if (!reply_now && !slot->armed) {
             cmd.cmd = ZZUSB_CMD_PERIODIC_ARM;
             status = send_usb_cmd(
@@ -3488,9 +3503,6 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
                      */
                     cmd.timeout_ms = 250;
                 }
-                if (rt_iso_pending_for_unit(unit) &&
-                    (cmd.timeout_ms == 0 || cmd.timeout_ms > 8))
-                    cmd.timeout_ms = 8;
                 fill_split_fields(&cmd, unit, ior);
 
                 cmd.setup_bRequestType = ior->iouh_SetupData.bmRequestType;
@@ -3698,10 +3710,10 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
                 cmd.max_pkt_size = ior->iouh_MaxPktSize;
                 cmd.speed = request_speed(unit, ior);
                 cmd.data_length = chunk;
-                cmd.timeout_ms = realtime_active ? 8 :
-                    ((ior->iouh_Flags & UHFF_NAKTIMEOUT)
-                     ? (ior->iouh_NakTimeout ? ior->iouh_NakTimeout : 500)
-                     : 500);
+                cmd.timeout_ms =
+                    (ior->iouh_Flags & UHFF_NAKTIMEOUT)
+                    ? (ior->iouh_NakTimeout ? ior->iouh_NakTimeout : 500)
+                    : 500;
                 fill_split_fields(&cmd, unit, ior);
 
                 status = send_usb_cmd(base, &cmd,
