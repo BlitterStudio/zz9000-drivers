@@ -3086,23 +3086,16 @@ static void handle_roothub_control(struct ZZUSBUnit *unit,
 static int handle_roothub_int(struct ZZUSBUnit *unit,
                               int unit_index,
                               struct IOUsbHWReq *ior,
-                              volatile uint8_t *base,
                               struct IOUsbHWReq **aborted,
                               int *aborted_count,
                               int aborted_max)
 {
     if (ior->iouh_Endpoint == 1 && ior->iouh_Data) {
         /*
-         * Re-check port state on every hub-INT poll unless
-         * Poseidon hasn't yet acked the previous transition
-         * (zz_PortChange != 0). This is how we pick up both
-         * hot-plug and hot-unplug — without refreshing here,
-         * once the port was known occupied we'd never see the
-         * C_PORT_CONNECTION transition going the other way.
+         * Port checks use the poll task's timer request. Queue a quiet
+         * root-hub IOR and signal that task instead of waiting from the
+         * Poseidon caller; an already-latched change needs no mailbox.
          */
-        if (unit->zz_PortChange == 0) {
-            update_port_state(unit, base, aborted, aborted_count, aborted_max);
-        }
         if (unit->zz_PortChange == 0) {
             struct IOUsbHWReq *old = RootHubIntPending[unit_index];
             if (old && old != ior) {
@@ -3114,7 +3107,7 @@ static int handle_roothub_int(struct ZZUSBUnit *unit,
             }
             ior->iouh_Req.io_Flags &= ~IOF_QUICK;
             RootHubIntPending[unit_index] = ior;
-            RootHubPollDelay[unit_index] = ZZ_RH_POLL_DELAY_TICKS;
+            RootHubPollDelay[unit_index] = 0;
             trace_int_status(unit, "RH_INT_WAIT", ior);
             return 1;
         }
@@ -3585,7 +3578,7 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
             if (((rh_addr == 0 && ior->iouh_DevAddr == 0) || ior->iouh_DevAddr == rh_addr)
                 && ior->iouh_Endpoint == 1) {
                 int unit_index = (int)(unit - &ZZBase->zz_Units[0]);
-                if (handle_roothub_int(unit, unit_index, ior, base,
+                if (handle_roothub_int(unit, unit_index, ior,
                                        aborted_replies, &aborted_count,
                                        ABORTED_REPLY_MAX)) {
                     deferred = 1;
