@@ -1742,6 +1742,7 @@ static void finish_reset_rt_iso_for_unit(struct ZZUSBUnit *unit)
             rt_cancel_contexts(slot, ZZUSB_RT_FLAG_PACKET_ERROR);
             zzusb_rt_finish_stop(&slot->lifecycle);
         }
+        slot->generation = generation_for_unit(unit);
     }
 }
 
@@ -1864,6 +1865,30 @@ static int rt_iso_pending_for_unit(const struct ZZUSBUnit *unit)
             RTIsoSlots[index].lifecycle.state == ZZUSB_RT_RUNNING)
             return 1;
     return 0;
+}
+
+static uint16_t rt_iso_service_limit_ms(const struct ZZUSBUnit *unit)
+{
+    uint16_t shortest_ms = 8;
+
+    for (unsigned index = 0; index < ZZ_RT_ISO_SLOTS; index++) {
+        const struct ZZRTIsoSlot *slot = &RTIsoSlots[index];
+        uint32_t safe_microframes;
+        uint32_t candidate_ms;
+
+        if (slot->unit != unit ||
+            slot->lifecycle.state != ZZUSB_RT_RUNNING)
+            continue;
+        safe_microframes = slot->duration_microframes *
+            (slot->lifecycle.in_flight > 1 ?
+             slot->lifecycle.in_flight - 1U : 1U);
+        candidate_ms = safe_microframes / 8U;
+        if (!candidate_ms)
+            candidate_ms = 1;
+        if (candidate_ms < shortest_ms)
+            shortest_ms = (uint16_t)candidate_ms;
+    }
+    return shortest_ms;
 }
 
 static void poll_rt_iso(struct ZZUSBUnit *unit)
@@ -2582,13 +2607,17 @@ static uint16_t send_usb_cmd_with_rt_service(
 
     if (!PollBase || !rt_iso_pending_for_unit(unit))
         return send_usb_cmd(base, cmd, data_out, data_out_len);
+    service_rt_iso_during_work(PollBase, unit);
+    if (active_work_aborted())
+        return ZZUSB_STATUS_CANCELLED;
     remaining_ms = original_timeout ? original_timeout :
                                       ZZUSB_PROXY_MAX_TIMEOUT_MS;
     if (remaining_ms > ZZUSB_PROXY_MAX_TIMEOUT_MS)
         remaining_ms = ZZUSB_PROXY_MAX_TIMEOUT_MS;
     for (;;) {
         uint16_t slice_ms = rt_iso_pending_for_unit(unit) ?
-            zzusb_engine_rt_slice_ms(remaining_ms) :
+            zzusb_engine_rt_slice_ms(
+                remaining_ms, rt_iso_service_limit_ms(unit)) :
             (uint16_t)remaining_ms;
 
         cmd->timeout_ms = slice_ms;

@@ -17,9 +17,14 @@ _Static_assert(sizeof(struct zzusb_driver_diag_event) == 32,
                "driver diagnostic event size changed");
 
 
-uint16_t zzusb_engine_rt_slice_ms(uint32_t remaining_ms)
+uint16_t zzusb_engine_rt_slice_ms(uint32_t remaining_ms,
+                                  uint32_t service_limit_ms)
 {
-    return (uint16_t)(remaining_ms > 8U ? 8U : remaining_ms);
+    uint32_t limit = service_limit_ms ? service_limit_ms : 1U;
+
+    if (limit > 8U)
+        limit = 8U;
+    return (uint16_t)(remaining_ms > limit ? limit : remaining_ms);
 }
 
 int zzusb_engine_rt_retry_status(uint16_t status)
