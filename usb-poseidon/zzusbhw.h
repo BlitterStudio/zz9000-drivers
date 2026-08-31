@@ -175,6 +175,11 @@ struct ZZUSBProtocolExtension {
 #define ZZUSB_V2_DATA_MAX      16384
 #define ZZUSB_DIAG_SIZE        4096
 #define ZZUSB_DIAG_OFFSET      (ZZUSB_APERTURE_SIZE - ZZUSB_DIAG_SIZE)
+#define ZZUSB_MAINT_HEADER_OFFSET (ZZUSB_DATA_OFFSET + ZZUSB_V2_DATA_MAX)
+#define ZZUSB_MAINT_DATA_OFFSET   (ZZUSB_MAINT_HEADER_OFFSET + \
+                                   ZZUSB_V2_HEADER_SIZE)
+#define ZZUSB_MAINT_DATA_MAX      (ZZUSB_DIAG_OFFSET - \
+                                   ZZUSB_MAINT_DATA_OFFSET)
 #define ZZUSB_DIAG_PAGE_SIZE    4096
 #define ZZUSB_DIAG_MAGIC             0x5a554447UL
 #define ZZUSB_DIAG_VERSION           1
@@ -220,11 +225,13 @@ struct ZZUSBProtocolExtension {
 #define ZZUSB_CAP_ISO_REALTIME     (1UL << 7)
 #define ZZUSB_CAP_EVENT_IRQ        (1UL << 8)
 #define ZZUSB_CAP_PRECISE_ERRORS   (1UL << 9)
+#define ZZUSB_CAP_MAINTENANCE      (1UL << 10)
 #define ZZUSB_CAP_BASE (ZZUSB_CAP_PROTOCOL_V2 | ZZUSB_CAP_REQUEST_ID | \
                         ZZUSB_CAP_CONTROLLER_EPOCH | ZZUSB_CAP_VALIDATION | \
                         ZZUSB_CAP_DIAGNOSTICS | ZZUSB_CAP_PERIODIC | \
                         ZZUSB_CAP_ISO_SIMPLE | ZZUSB_CAP_ISO_REALTIME | \
-                        ZZUSB_CAP_EVENT_IRQ | ZZUSB_CAP_PRECISE_ERRORS)
+                        ZZUSB_CAP_EVENT_IRQ | ZZUSB_CAP_PRECISE_ERRORS | \
+                        ZZUSB_CAP_MAINTENANCE)
 
 typedef char ZZUSBCommand_size_must_match_protocol[
     (sizeof(struct ZZUSBCommand) == ZZUSB_CMD_SIZE) ? 1 : -1];

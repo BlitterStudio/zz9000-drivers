@@ -158,9 +158,6 @@ int zzusb_engine_retire(struct zzusb_engine_request *request,
 int zzusb_engine_claim_reply(struct zzusb_engine_request *request);
 int zzusb_engine_release_buffer(struct zzusb_engine_request *request);
 enum zzusb_error_class zzusb_engine_classify_status(uint16_t status);
-uint16_t zzusb_engine_rt_slice_ms(uint32_t remaining_ms,
-                                  uint32_t service_limit_ms);
-int zzusb_engine_rt_retry_status(uint16_t status);
 void zzusb_engine_diag_reset(void);
 void zzusb_engine_diag_count(enum zzusb_driver_diag_counter counter);
 int zzusb_engine_diag_high_water(uint32_t depth);

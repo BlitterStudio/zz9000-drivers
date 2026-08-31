@@ -58,6 +58,9 @@ static void test_packet_plans(void)
     count = zzusb_iso_plan_realtime(1024, 1, 1, lengths,
                                     ZZUSB_ISO_MAX_PACKETS, &duration);
     assert(count == 15);
+    count = zzusb_iso_limit_packet_count(
+        lengths, count, 3968);
+    assert(count == 3);
     assert(duration == 15);
     count = zzusb_iso_plan_realtime(192, 1, 0, lengths,
                                     ZZUSB_ISO_MAX_PACKETS, &duration);

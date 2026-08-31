@@ -110,6 +110,26 @@ unsigned zzusb_iso_plan_realtime(uint16_t encoded_max_packet,
     return count;
 }
 
+unsigned zzusb_iso_limit_packet_count(const uint16_t *packet_lengths,
+                                      unsigned packet_count,
+                                      unsigned wire_capacity)
+{
+    uint32_t total_data = 0;
+    unsigned count;
+
+    if (!packet_lengths || packet_count > ZZUSB_ISO_MAX_PACKETS)
+        return 0;
+    for (count = 0; count < packet_count; count++) {
+        unsigned next = count + 1U;
+
+        total_data += packet_lengths[count];
+        if (ZZUSB_ISO_HEADER_SIZE + next * ZZUSB_ISO_PACKET_SIZE +
+                total_data > wire_capacity)
+            break;
+    }
+    return count;
+}
+
 unsigned zzusb_iso_build_queue(uint8_t *wire, unsigned capacity,
                                uint32_t batch_id, uint16_t flags,
                                uint16_t start_frame,
