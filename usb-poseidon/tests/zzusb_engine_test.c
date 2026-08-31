@@ -23,6 +23,13 @@ int main(void)
     int replies = 0;
     int releases = 0;
 
+    CHECK(zzusb_engine_rt_slice_ms(1000) == 8);
+    CHECK(zzusb_engine_rt_slice_ms(8) == 8);
+    CHECK(zzusb_engine_rt_slice_ms(3) == 3);
+    CHECK(zzusb_engine_rt_retry_status(ZZUSB_ENGINE_STATUS_TIMEOUT));
+    CHECK(zzusb_engine_rt_retry_status(ZZUSB_ENGINE_STATUS_NAK));
+    CHECK(!zzusb_engine_rt_retry_status(ZZUSB_ENGINE_STATUS_STALL));
+
     zzusb_engine_init(&request);
     CHECK(zzusb_engine_queue(&request));
     CHECK(zzusb_engine_abort(&request));

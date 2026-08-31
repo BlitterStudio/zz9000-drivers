@@ -16,6 +16,17 @@ static struct zzusb_engine_diag_state engine_diag;
 _Static_assert(sizeof(struct zzusb_driver_diag_event) == 32,
                "driver diagnostic event size changed");
 
+
+uint16_t zzusb_engine_rt_slice_ms(uint32_t remaining_ms)
+{
+    return (uint16_t)(remaining_ms > 8U ? 8U : remaining_ms);
+}
+
+int zzusb_engine_rt_retry_status(uint16_t status)
+{
+    return status == ZZUSB_ENGINE_STATUS_TIMEOUT ||
+           status == ZZUSB_ENGINE_STATUS_NAK;
+}
 static void diag_barrier(void)
 {
     __asm__ __volatile__("" ::: "memory");

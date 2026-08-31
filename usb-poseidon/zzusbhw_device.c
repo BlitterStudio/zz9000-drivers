@@ -1859,12 +1859,16 @@ static void poll_rt_iso(struct ZZUSBUnit *unit)
             fill_rt_iso_pipeline(slot);
             continue;
         }
-        status = reap_rt_iso_batch(slot);
-        if (status == ZZUSB_STATUS_OK) {
-            fill_rt_iso_pipeline(slot);
-        } else if (status != ZZUSB_STATUS_NAK &&
-                   status != ZZUSB_STATUS_BUSY) {
-            stop_rt_iso_slot(slot);
+        while (slot->lifecycle.in_flight) {
+            status = reap_rt_iso_batch(slot);
+            if (status == ZZUSB_STATUS_OK) {
+                fill_rt_iso_pipeline(slot);
+                continue;
+            }
+            if (status != ZZUSB_STATUS_NAK &&
+                status != ZZUSB_STATUS_BUSY)
+                stop_rt_iso_slot(slot);
+            break;
         }
     }
 }
@@ -2541,6 +2545,43 @@ static void service_rt_iso_during_work(struct ZZUSBBase *base,
     poll_rt_iso(unit);
     ObtainSemaphore(&base->zz_Lock);
 }
+
+static uint16_t send_usb_cmd_with_rt_service(
+    volatile uint8_t *base, struct ZZUSBCommand *cmd,
+    void *data_out, uint32_t data_out_len, struct ZZUSBUnit *unit)
+{
+    uint32_t original_timeout = cmd->timeout_ms;
+    uint32_t remaining_ms;
+    uint16_t status;
+
+    if (!PollBase || !rt_iso_pending_for_unit(unit))
+        return send_usb_cmd(base, cmd, data_out, data_out_len);
+    remaining_ms = original_timeout ? original_timeout :
+                                      ZZUSB_PROXY_MAX_TIMEOUT_MS;
+    if (remaining_ms > ZZUSB_PROXY_MAX_TIMEOUT_MS)
+        remaining_ms = ZZUSB_PROXY_MAX_TIMEOUT_MS;
+    for (;;) {
+        uint16_t slice_ms = rt_iso_pending_for_unit(unit) ?
+            zzusb_engine_rt_slice_ms(remaining_ms) :
+            (uint16_t)remaining_ms;
+
+        cmd->timeout_ms = slice_ms;
+        status = send_usb_cmd(base, cmd, data_out, data_out_len);
+        if (!zzusb_engine_rt_retry_status(status) ||
+            remaining_ms <= slice_ms)
+            break;
+        remaining_ms -= slice_ms;
+        if (active_work_aborted()) {
+            status = ZZUSB_STATUS_CANCELLED;
+            break;
+        }
+        if (rt_iso_pending_for_unit(unit))
+            service_rt_iso_during_work(PollBase, unit);
+    }
+    cmd->timeout_ms = original_timeout;
+    return status;
+}
+
 static int poll_roothub_pending(struct ZZUSBBase *base_dev,
                                 struct ZZUSBUnit *unit,
                                 int unit_index)
@@ -3511,9 +3552,9 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
                 cmd.setup_wIndex = ior->iouh_SetupData.wIndex;
                 cmd.setup_wLength = ior->iouh_SetupData.wLength;
 
-                status = send_usb_cmd(base, &cmd,
-                                      (!setup_in) ? ior->iouh_Data : NULL,
-                                      (!setup_in) ? ior->iouh_Length : 0);
+                status = send_usb_cmd_with_rt_service(
+                    base, &cmd, (!setup_in) ? ior->iouh_Data : NULL,
+                    (!setup_in) ? ior->iouh_Length : 0, unit);
 
                 if (status == ZZUSB_STATUS_OK) {
                     volatile struct ZZUSBCommand *result =
@@ -3690,7 +3731,7 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
              * recovery path. Raising this again requires Vivado AXI QoS
              * tuning (lever #5) or a larger shared buffer (lever #3).
              */
-            enum { BULK_CHUNK = 16384, RT_BULK_CHUNK = 4096 };
+            enum { BULK_CHUNK = 16384 };
             int realtime_active = rt_iso_pending_for_unit(unit);
 
             while (remaining > 0) {
@@ -3698,8 +3739,15 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
                     status = ZZUSB_STATUS_CANCELLED;
                     break;
                 }
+                /*
+                 * A realtime retry must cover at most one USB packet:
+                 * a timed-out qTD then has either completed atomically or
+                 * transferred nothing, so resubmission cannot duplicate a
+                 * partially completed bulk payload.
+                 */
+                uint32_t rt_packet = ior->iouh_MaxPktSize & 0x07ffU;
                 uint32_t limit = realtime_active ?
-                                 RT_BULK_CHUNK : BULK_CHUNK;
+                    (rt_packet ? rt_packet : 64U) : BULK_CHUNK;
                 uint32_t chunk = remaining > limit ? limit : remaining;
 
                 memset(&cmd, 0, sizeof(cmd));
@@ -3716,9 +3764,11 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
                     : 500;
                 fill_split_fields(&cmd, unit, ior);
 
-                status = send_usb_cmd(base, &cmd,
-                                      (ior->iouh_Dir == UHDIR_OUT && user_buf) ? user_buf : NULL,
-                                      (ior->iouh_Dir == UHDIR_OUT) ? chunk : 0);
+                status = send_usb_cmd_with_rt_service(
+                    base, &cmd,
+                    (ior->iouh_Dir == UHDIR_OUT && user_buf) ?
+                        user_buf : NULL,
+                    (ior->iouh_Dir == UHDIR_OUT) ? chunk : 0, unit);
 
                 if (status != ZZUSB_STATUS_OK) {
                     break;      /* error — fall through to error handling */
