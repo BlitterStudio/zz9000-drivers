@@ -34,7 +34,10 @@ static void test_packet_plans(void)
     assert(zzusb_iso_payload_size(64) == 64);
     assert(zzusb_iso_payload_size(0x13ff) == 3069);
     assert(zzusb_iso_payload_size(0) == 0);
-    assert(zzusb_iso_payload_size(0x1400) == 0);
+    assert(zzusb_iso_payload_size(0x1400) == 3072);
+    assert(zzusb_iso_payload_size(0x0401) == 0);
+    assert(zzusb_iso_payload_size(0x1c00) == 0);
+    assert(zzusb_iso_payload_size(0x2400) == 0);
 
     count = zzusb_iso_plan_simple(15840, 1024, lengths,
                                   ZZUSB_ISO_MAX_PACKETS);

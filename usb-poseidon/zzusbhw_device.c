@@ -183,6 +183,7 @@ struct ExecBase* SysBase;
 #define SWAP16(x) ((uint16_t)((uint16_t)(x) << 8) | ((uint16_t)(x) >> 8))
 #define ZZ_RH_POLL_DELAY_TICKS 10
 #define ZZ_INT_PENDING_SLOTS 32
+#define ZZ_INT_IDLE_REPLY_POLLS 10
 #define ZZ_ABORTED_REPLY_SLOTS (ZZ_INT_PENDING_SLOTS + ZZ_NUM_PORTS + 16)
 #ifndef UHCF_USB20
 #define UHCF_USB20 (1UL << 0)
@@ -228,6 +229,7 @@ struct ZZIntPendingSlot {
     struct IOUsbHWReq *ior;
     uint8_t armed;
     uint8_t abort_requested;
+    uint8_t idle_polls;
 };
 
 static struct ZZIntPendingSlot IntPendingSlots[ZZ_INT_PENDING_SLOTS];
@@ -542,6 +544,7 @@ static void clear_int_slot(struct ZZIntPendingSlot *slot)
     slot->ior = NULL;
     slot->armed = 0;
     slot->abort_requested = 0;
+    slot->idle_polls = 0;
 }
 
 static void reset_int_slots(void)
@@ -579,6 +582,7 @@ static int queue_int_ior(struct ZZUSBUnit *unit,
             }
             slot->unit = unit;
             slot->ior = ior;
+            slot->idle_polls = 0;
             /* Preserve an already armed persistent firmware endpoint. */
             return 1;
         }
@@ -592,6 +596,8 @@ static int queue_int_ior(struct ZZUSBUnit *unit,
     free_slot->unit = unit;
     free_slot->ior = ior;
     free_slot->armed = 0;
+    free_slot->abort_requested = 0;
+    free_slot->idle_polls = 0;
     return 1;
 }
 
@@ -2282,6 +2288,112 @@ static void update_port_state(struct ZZUSBUnit *unit,
     }
 }
 
+static void poll_int_pending_legacy(struct ZZUSBBase *base_dev,
+                                    struct ZZUSBUnit *unit)
+{
+    volatile uint8_t *base = (volatile uint8_t *)unit->zz_Registers;
+
+    for (int slot_index = 0; slot_index < ZZ_INT_PENDING_SLOTS;
+         slot_index++) {
+        struct ZZIntPendingSlot *slot = &IntPendingSlots[slot_index];
+        struct IOUsbHWReq *reply_now = NULL;
+        struct IOUsbHWReq *ior;
+        struct ZZUSBCommand cmd;
+        uint16_t status;
+        uint32_t actual = 0;
+        int idle_in = 0;
+
+        ObtainSemaphore(&base_dev->zz_Lock);
+        if (!slot->ior || slot->unit != unit) {
+            ReleaseSemaphore(&base_dev->zz_Lock);
+            continue;
+        }
+        ior = slot->ior;
+        if (slot->abort_requested) {
+            ior->iouh_Actual = 0;
+            ior->iouh_Req.io_Error = IOERR_ABORTED;
+            clear_int_slot(slot);
+            reply_now = ior;
+            goto legacy_done;
+        }
+
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.cmd = ZZUSB_CMD_INT_XFER;
+        cmd.dev_addr = ior->iouh_DevAddr;
+        cmd.endpoint = ior->iouh_Endpoint;
+        cmd.direction = ior->iouh_Dir == UHDIR_IN ? 0x80 : 0;
+        cmd.max_pkt_size = ior->iouh_MaxPktSize;
+        cmd.speed = request_speed(unit, ior);
+        cmd.data_length = ior->iouh_Length;
+        cmd.interval = ior->iouh_Interval;
+        cmd.timeout_ms = 1000;
+        fill_split_fields(&cmd, unit, ior);
+        status = send_usb_cmd(
+            base, &cmd,
+            ior->iouh_Dir == UHDIR_OUT ? ior->iouh_Data : NULL,
+            ior->iouh_Dir == UHDIR_OUT ? ior->iouh_Length : 0);
+
+        if (status == ZZUSB_STATUS_OK) {
+            volatile struct ZZUSBCommand *result =
+                (volatile struct ZZUSBCommand *)(base + 0xa000);
+            actual = result->actual_length;
+            if (actual > ior->iouh_Length)
+                actual = ior->iouh_Length;
+            trace_hub_int_data(
+                unit, ior, actual,
+                (volatile uint8_t *)(base + 0xa000 + ZZUSB_DATA_OFFSET));
+            idle_in = ior->iouh_Dir == UHDIR_IN && actual == 0;
+            if (ior->iouh_Dir == UHDIR_IN && actual > 0 && actual <= 2 &&
+                is_zero_report(
+                    (volatile uint8_t *)(base + 0xa000 +
+                                         ZZUSB_DATA_OFFSET),
+                    actual))
+                idle_in = 1;
+        } else if (ior->iouh_Dir == UHDIR_IN &&
+                   status != ZZUSB_STATUS_OFFLINE) {
+            idle_in = 1;
+        }
+
+        if (idle_in) {
+            if (slot->idle_polls < 0xff)
+                slot->idle_polls++;
+            if (slot->idle_polls >= ZZ_INT_IDLE_REPLY_POLLS) {
+                if (ior->iouh_Data && ior->iouh_Length) {
+                    if (actual)
+                        safe_copy(
+                            (void *)(base + 0xa000 + ZZUSB_DATA_OFFSET),
+                            ior->iouh_Data, actual);
+                    else
+                        safe_zero(ior->iouh_Data, ior->iouh_Length);
+                }
+                ior->iouh_Actual = actual;
+                ior->iouh_Req.io_Error = 0;
+                clear_int_slot(slot);
+                reply_now = ior;
+            }
+        } else if (status == ZZUSB_STATUS_OK) {
+            if (ior->iouh_Dir == UHDIR_IN && ior->iouh_Data && actual)
+                safe_copy((void *)(base + 0xa000 + ZZUSB_DATA_OFFSET),
+                          ior->iouh_Data, actual);
+            ior->iouh_Actual = actual;
+            ior->iouh_Req.io_Error = 0;
+            clear_int_slot(slot);
+            reply_now = ior;
+        } else {
+            ior->iouh_Actual = 0;
+            ior->iouh_Req.io_Error = map_proxy_status(status);
+            clear_int_slot(slot);
+            reply_now = ior;
+        }
+
+legacy_done:
+        ReleaseSemaphore(&base_dev->zz_Lock);
+        if (reply_now && !(reply_now->iouh_Req.io_Flags & IOF_QUICK))
+            ReplyMsg(&reply_now->iouh_Req.io_Message);
+        return;
+    }
+}
+
 /*
  * Arm each pending interrupt IOR once, then reap only after the firmware
  * raises the coalesced USB event interrupt. NAK and no-data responses remain
@@ -2293,6 +2405,12 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
                              int reap_events)
 {
     volatile uint8_t *base = (volatile uint8_t*)unit->zz_Registers;
+    struct ZZUSBProtocolState *state = protocol_state_for(base);
+
+    if (!state || !(state->capabilities & ZZUSB_CAP_PERIODIC)) {
+        poll_int_pending_legacy(base_dev, unit);
+        return;
+    }
 
     for (int slot_index = 0; slot_index < ZZ_INT_PENDING_SLOTS; slot_index++) {
         struct ZZIntPendingSlot *slot = &IntPendingSlots[slot_index];
@@ -2400,6 +2518,13 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
     }
 }
 
+static void service_rt_iso_during_work(struct ZZUSBBase *base,
+                                       struct ZZUSBUnit *unit)
+{
+    ReleaseSemaphore(&base->zz_Lock);
+    poll_rt_iso(unit);
+    ObtainSemaphore(&base->zz_Lock);
+}
 static int poll_roothub_pending(struct ZZUSBBase *base_dev,
                                 struct ZZUSBUnit *unit,
                                 int unit_index)
@@ -2521,6 +2646,9 @@ static void hotplug_poll_task(void)
         reap_events = USBEventPending != 0;
         USBEventPending = 0;
         Enable();
+        for (int u = 0; u < ZZ_NUM_PORTS; u++)
+            if (PollBase->zz_Units[u].zz_Enabled)
+                poll_rt_iso(&PollBase->zz_Units[u]);
         if (process_work_queue())
             any_pending = 1;
 
@@ -2533,7 +2661,6 @@ static void hotplug_poll_task(void)
             }
 
             poll_int_pending(PollBase, unit, reap_events);
-            poll_rt_iso(unit);
 
             if (int_pending_for_unit(unit))
                 any_pending = 1;
@@ -3364,6 +3491,9 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
                      */
                     cmd.timeout_ms = 250;
                 }
+                if (rt_iso_pending_for_unit(unit) &&
+                    (cmd.timeout_ms == 0 || cmd.timeout_ms > 8))
+                    cmd.timeout_ms = 8;
                 fill_split_fields(&cmd, unit, ior);
 
                 cmd.setup_bRequestType = ior->iouh_SetupData.bmRequestType;
@@ -3551,15 +3681,17 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
              * recovery path. Raising this again requires Vivado AXI QoS
              * tuning (lever #5) or a larger shared buffer (lever #3).
              */
-            enum { BULK_CHUNK = 16384 };
+            enum { BULK_CHUNK = 16384, RT_BULK_CHUNK = 4096 };
+            int realtime_active = rt_iso_pending_for_unit(unit);
 
             while (remaining > 0) {
                 if (active_work_aborted()) {
                     status = ZZUSB_STATUS_CANCELLED;
                     break;
                 }
-                uint32_t chunk = (remaining > BULK_CHUNK)
-                                 ? BULK_CHUNK : remaining;
+                uint32_t limit = realtime_active ?
+                                 RT_BULK_CHUNK : BULK_CHUNK;
+                uint32_t chunk = remaining > limit ? limit : remaining;
 
                 memset(&cmd, 0, sizeof(cmd));
                 cmd.cmd = ZZUSB_CMD_BULK_XFER;
@@ -3569,9 +3701,10 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
                 cmd.max_pkt_size = ior->iouh_MaxPktSize;
                 cmd.speed = request_speed(unit, ior);
                 cmd.data_length = chunk;
-                cmd.timeout_ms = (ior->iouh_Flags & UHFF_NAKTIMEOUT)
-                                 ? (ior->iouh_NakTimeout ? ior->iouh_NakTimeout : 500)
-                                 : 500;
+                cmd.timeout_ms = realtime_active ? 8 :
+                    ((ior->iouh_Flags & UHFF_NAKTIMEOUT)
+                     ? (ior->iouh_NakTimeout ? ior->iouh_NakTimeout : 500)
+                     : 500);
                 fill_split_fields(&cmd, unit, ior);
 
                 status = send_usb_cmd(base, &cmd,
@@ -3613,6 +3746,8 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
                         break;
                     }
                 }
+                if (realtime_active && !active_work_aborted())
+                    service_rt_iso_during_work(ZZBase, unit);
             }
 
             if (status == ZZUSB_STATUS_OK) {

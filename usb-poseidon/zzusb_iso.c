@@ -35,7 +35,8 @@ uint16_t zzusb_iso_payload_size(uint16_t encoded_max_packet)
     uint16_t base = encoded_max_packet & 0x07ffU;
     unsigned multiplier = 1U + ((encoded_max_packet >> 11) & 3U);
 
-    if (!base || multiplier > 3U || encoded_max_packet > 0x13ffU)
+    if (!base || base > 1024U || multiplier > 3U ||
+        (encoded_max_packet & 0xe000U) != 0)
         return 0;
     return (uint16_t)(base * multiplier);
 }
