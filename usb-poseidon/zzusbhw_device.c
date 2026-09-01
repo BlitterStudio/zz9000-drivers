@@ -2037,18 +2037,8 @@ static uint16_t stop_rt_iso_slot(struct ZZRTIsoSlot *slot)
     status = send_usb_cmd_maintenance(
         (volatile uint8_t *)slot->unit->zz_Registers,
         &cmd, NULL, 0, NULL, 0);
-    if (!stop_status_retired(status)) {
-        struct ZZUSBProtocolState *state = protocol_state_for(
-            (volatile uint8_t *)slot->unit->zz_Registers);
-
-        if (!state || !state->quarantined)
-            return status;
-        /*
-         * A quarantined transport cannot accept ISO_STOP and will be reset
-         * before reuse. Retire host-owned callbacks and contexts locally so
-         * removal cannot remain stuck behind the rejected command.
-         */
-    }
+    if (!stop_status_retired(status))
+        return status;
     rt_cancel_contexts(slot, ZZUSB_RT_FLAG_PACKET_ERROR);
     zzusb_rt_finish_stop(&slot->lifecycle);
     return ZZUSB_STATUS_OK;
@@ -2164,17 +2154,7 @@ static BYTE start_rt_iso_handler(struct ZZUSBUnit *unit,
         return UHIOERR_BADPARAMS;
     status = fill_rt_iso_pipeline(slot);
     if (rt_iso_refill_terminal(status)) {
-        uint16_t stop_status = stop_rt_iso_slot(slot);
-
-        if (stop_status != ZZUSB_STATUS_OK) {
-            struct ZZUSBProtocolState *state = protocol_state_for(
-                (volatile uint8_t *)slot->unit->zz_Registers);
-
-            if (state)
-                state->quarantined = 1;
-            rt_cancel_contexts(slot, ZZUSB_RT_FLAG_PACKET_ERROR);
-            zzusb_rt_finish_stop(&slot->lifecycle);
-        }
+        stop_rt_iso_slot(slot);
         return map_proxy_status(status);
     }
     if (!slot->lifecycle.in_flight) {
@@ -2225,7 +2205,8 @@ static int rt_iso_pending_for_unit(const struct ZZUSBUnit *unit)
 {
     for (unsigned index = 0; index < ZZ_RT_ISO_SLOTS; index++)
         if (RTIsoSlots[index].unit == unit &&
-            RTIsoSlots[index].lifecycle.state == ZZUSB_RT_RUNNING)
+            (RTIsoSlots[index].lifecycle.state == ZZUSB_RT_RUNNING ||
+             RTIsoSlots[index].lifecycle.state == ZZUSB_RT_STOPPING))
             return 1;
     return 0;
 }
@@ -2285,13 +2266,16 @@ static void poll_rt_iso(struct ZZUSBUnit *unit)
         struct ZZRTIsoSlot *slot = &RTIsoSlots[index];
         uint16_t status;
 
-        if (slot->unit != unit ||
-            slot->lifecycle.state != ZZUSB_RT_RUNNING)
+        if (slot->unit != unit)
+            continue;
+        if (slot->lifecycle.state == ZZUSB_RT_STOPPING) {
+            stop_rt_iso_slot(slot);
+            continue;
+        }
+        if (slot->lifecycle.state != ZZUSB_RT_RUNNING)
             continue;
         if (!unit->zz_PortPresent) {
-            zzusb_rt_begin_stop(&slot->lifecycle);
-            rt_cancel_contexts(slot, ZZUSB_RT_FLAG_PACKET_ERROR);
-            zzusb_rt_finish_stop(&slot->lifecycle);
+            stop_rt_iso_slot(slot);
             continue;
         }
         if (!slot->lifecycle.in_flight) {
