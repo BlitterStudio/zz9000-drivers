@@ -3327,9 +3327,15 @@ static void hotplug_poll_task(void)
         reap_events = USBEventPending != 0;
         USBEventPending = 0;
         Enable();
-        for (int u = 0; u < ZZ_NUM_PORTS; u++)
-            if (PollBase->zz_Units[u].zz_Enabled)
-                poll_rt_iso(&PollBase->zz_Units[u]);
+        for (int u = 0; u < ZZ_NUM_PORTS; u++) {
+            struct ZZUSBUnit *unit = &PollBase->zz_Units[u];
+
+            if (!unit->zz_Enabled)
+                continue;
+            recover_quarantined_proxy(
+                (volatile uint8_t *)unit->zz_Registers);
+            poll_rt_iso(unit);
+        }
         process_work_queue();
 
         for (int u = 0; u < ZZ_NUM_PORTS; u++) {
