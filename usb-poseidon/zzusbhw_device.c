@@ -1149,7 +1149,7 @@ static int send_usb_cmd_sideband(
     volatile uint8_t *base, struct ZZUSBCommand *cmd,
     void *data_out, uint32_t data_out_len,
     void *data_in, uint32_t data_in_capacity,
-    struct ZZUSBProtocolState *state)
+    struct ZZUSBProtocolState *state, uint32_t service_limit_us)
 {
     volatile struct ZZUSBCommand *result =
         (volatile struct ZZUSBCommand *)
@@ -1199,6 +1199,8 @@ static int send_usb_cmd_sideband(
 
     outer_limit_us = ((cmd->timeout_ms ? cmd->timeout_ms :
                        ZZUSB_PROXY_MAX_TIMEOUT_MS) + 150U) * 1000U;
+    if (service_limit_us && outer_limit_us > service_limit_us)
+        outer_limit_us = service_limit_us;
     for (elapsed_us = 0; elapsed_us < outer_limit_us;) {
         uint32_t wait_us = ZZUSB_MAINT_POLL_US;
 
@@ -1354,10 +1356,11 @@ static int send_usb_cmd_maintenance(
     uint32_t response_length;
     int status;
 
-    if (ForegroundMailboxBase == base)
+    if (ForegroundMailboxBase == base && ForegroundMailboxUnit)
         return send_usb_cmd_sideband(
             base, cmd, data_out, data_out_len,
-            data_in, data_in_capacity, state);
+            data_in, data_in_capacity, state,
+            rt_iso_service_limit_us(ForegroundMailboxUnit));
 
     status = send_usb_cmd_scoped(base, cmd, data_out, data_out_len, 0);
     if (status != ZZUSB_STATUS_OK)
