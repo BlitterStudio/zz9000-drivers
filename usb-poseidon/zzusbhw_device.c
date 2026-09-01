@@ -1031,7 +1031,6 @@ static int send_usb_cmd_wire(volatile uint8_t *base,
             }
             if (result->status == ZZUSB_STATUS_PENDING && state)
                 state->quarantined = 1;
-            zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_CANCELLATION);
             zzusb_engine_diag_record(ZZUSB_DRIVER_EVENT_MAILBOX,
                                      ZZUSB_ENGINE_STATUS_CANCELLED,
                                      request_id, state->controller_epoch,
