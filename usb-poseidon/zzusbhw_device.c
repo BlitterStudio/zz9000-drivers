@@ -232,6 +232,7 @@ struct ZZIntPendingSlot {
     uint8_t idle_polls;
     uint8_t rearm_required;
     uint8_t stop_pending;
+    uint8_t arm_in_progress;
 };
 
 static struct ZZIntPendingSlot IntPendingSlots[ZZ_INT_PENDING_SLOTS];
@@ -594,6 +595,7 @@ static void clear_int_slot(struct ZZIntPendingSlot *slot)
     slot->armed = 0;
     slot->abort_requested = 0;
     slot->idle_polls = 0;
+    slot->arm_in_progress = 0;
     slot->rearm_required = 0;
     slot->stop_pending = 0;
 }
@@ -625,8 +627,9 @@ static int queue_int_ior(struct ZZUSBUnit *unit,
 
     for (int i = 0; i < ZZ_INT_PENDING_SLOTS; i++) {
         struct ZZIntPendingSlot *slot = &IntPendingSlots[i];
+
         if (int_slot_matches(slot, unit, ior)) {
-            if (slot->stop_pending)
+            if (slot->stop_pending || slot->arm_in_progress)
                 return 0;
             if (slot->ior && slot->ior != ior) {
                 if (replaced)
@@ -654,8 +657,10 @@ static int queue_int_ior(struct ZZUSBUnit *unit,
     free_slot->unit = unit;
     free_slot->ior = ior;
     free_slot->armed = 0;
+    free_slot->arm_in_progress = 0;
     free_slot->abort_requested = 0;
     free_slot->idle_polls = 0;
+    free_slot->rearm_required = 0;
     free_slot->stop_pending = 0;
     return 1;
 }
@@ -2955,6 +2960,7 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
 
         if (!reply_now && !slot->stop_pending && !slot->armed) {
             cmd.cmd = ZZUSB_CMD_PERIODIC_ARM;
+            slot->arm_in_progress = 1;
             status = send_usb_cmd_with_rt_service(
                 base, &cmd,
                 (ior->iouh_Dir == UHDIR_OUT) ? ior->iouh_Data : NULL,
@@ -2977,11 +2983,23 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
                 ReleaseSemaphore(&base_dev->zz_Lock);
                 continue;
             }
+            slot->arm_in_progress = 0;
             if (status != ZZUSB_STATUS_OK) {
                 ior->iouh_Actual = 0;
-                ior->iouh_Req.io_Error = map_proxy_status(status);
-                clear_int_slot(slot);
-                reply_now = ior;
+                ior->iouh_Req.io_Error = slot->abort_requested ?
+                    IOERR_ABORTED : map_proxy_status(status);
+                if (state->quarantined) {
+                    /*
+                     * The deadline cannot distinguish a rejected ARM from
+                     * one consumed by firmware. Retain the endpoint identity
+                     * and conservatively stop it after mailbox recovery.
+                     */
+                    slot->armed = 1;
+                    slot->stop_pending = 1;
+                } else {
+                    clear_int_slot(slot);
+                    reply_now = ior;
+                }
             } else {
                 slot->armed = 1;
                 zzusb_engine_diag_count(
@@ -2989,8 +3007,8 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
             }
         }
 
-        if (!reply_now && !slot->stop_pending &&
-            slot->armed && reap_events) {
+        if (!reply_now && !slot->abort_requested &&
+            !slot->stop_pending && slot->armed && reap_events) {
             volatile struct ZZUSBCommand *result;
             uint32_t actual;
             int zero_report = 0;
@@ -4648,7 +4666,6 @@ static void abort_unit_work(struct ZZUSBUnit *unit)
     for (int i = 0; i < reply_count; i++)
         ReplyMsg(&replies[i]->iouh_Req.io_Message);
 }
-
 static void __attribute__((used)) begin_io(
     struct Library *dev asm("a6"), struct IOUsbHWReq *ior asm("a1"))
 {
@@ -4711,7 +4728,7 @@ static uint32_t __attribute__((used)) abort_io(struct Library *dev asm("a6"), st
     {
         struct ZZIntPendingSlot *slot = find_int_slot_for_ior(ior);
         if (slot && slot->unit == unit) {
-            if (slot->armed) {
+            if (slot->armed || slot->arm_in_progress) {
                 slot->abort_requested = 1;
                 found = 2;
             } else {

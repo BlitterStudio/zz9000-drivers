@@ -14,7 +14,7 @@ Automated evidence is not promoted into a physical-device claim.
 | Firmware | 2.9; Arm GNU Toolchain 13.2.Rel1; `ZZ9000OS.elf` SHA-256 `3ae18a153b913b95df7737fba6f47131d125e9b8ac620501a3c26533b46d8d3c` |
 | Default boot image | `BOOT-sdk-docker.bin` SHA-256 `ddf41c4ea750f062686cd2032ab18c49b12d1e063d6161fa0291d55d717ca996` |
 | Zorro III release archive | SHA-256 `d5da172745db4745136370636b5a8907088f35d688e30f53dfe68d1c7c07464e` |
-| Driver | `zzusbhw.device` 2.2; `m68k-amigaos-gcc` 6.5.0b; SHA-256 `2fe2aea71450a16091b992dfddfe358f7f980a110f7a4b95115312d21e34afee` |
+| Driver | `zzusbhw.device` 2.2; `m68k-amigaos-gcc` 6.5.0b; SHA-256 `3009c51eacb9999c5d9070c01b6af90a747e0bbbd1d95cf6ee941dbeb9b8af07` |
 | Diagnostics | `ZZDiag` 1.12; SHA-256 `1cef828dd8ee257e9068dd82bd10991ccd6952d194c197895c54a6045923a3e2` |
 | Poseidon reference | Commercial Poseidon 4.5 runtime required. Read-only source reference `bc56025c33345739963e65ce8253f747be9ab6bd` remained clean. Installed Amiga files were unavailable for checksum capture. |
 
