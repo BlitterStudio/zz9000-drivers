@@ -2276,6 +2276,26 @@ static BYTE remove_rt_iso_handler(struct ZZUSBUnit *unit,
     return 0;
 }
 
+static void rollback_aborted_iso_work(struct ZZUSBUnit *unit,
+                                      struct IOUsbHWReq *ior)
+{
+    struct IOUsbHWRTIso *handler =
+        (struct IOUsbHWRTIso *)ior->iouh_Data;
+    struct ZZRTIsoSlot *slot = find_rt_iso_slot(handler);
+
+    if (!slot || slot->unit != unit)
+        return;
+    if (ior->iouh_Req.io_Command == UHCMD_ADDISOHANDLER &&
+        slot->lifecycle.state == ZZUSB_RT_ADDED) {
+        handler->urti_DriverPrivate1 = NULL;
+        if (zzusb_rt_remove(&slot->lifecycle))
+            memset(slot, 0, sizeof(*slot));
+    } else if (ior->iouh_Req.io_Command == UHCMD_STARTRTISO &&
+               slot->lifecycle.state == ZZUSB_RT_RUNNING) {
+        zzusb_rt_begin_stop(&slot->lifecycle);
+    }
+}
+
 static int rt_iso_pending_for_unit(const struct ZZUSBUnit *unit)
 {
     for (unsigned index = 0; index < ZZ_RT_ISO_SLOTS; index++)
@@ -4667,6 +4687,7 @@ static int process_work_queue(void)
 
     Forbid();
     if (slot->lifecycle.abort_requested) {
+        rollback_aborted_iso_work(slot->unit, ior);
         ior->iouh_Actual = 0;
         ior->iouh_Req.io_Error = IOERR_ABORTED;
         slot->completion_status = ZZUSB_STATUS_CANCELLED;
