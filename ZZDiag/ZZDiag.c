@@ -109,7 +109,15 @@ static int read_firmware_usb_diag(ULONG board_addr, UBYTE *snapshot)
         if (before == after &&
             before == read_be32(snapshot + ZZUSB_DIAG_OFF_GENERATION) &&
             read_be32(snapshot + ZZUSB_DIAG_OFF_MAGIC) ==
-                ZZUSB_DIAG_MAGIC)
+                ZZUSB_DIAG_MAGIC &&
+            read_be16(snapshot + ZZUSB_DIAG_OFF_VERSION) ==
+                ZZUSB_DIAG_VERSION &&
+            read_be16(snapshot + ZZUSB_DIAG_OFF_HEADER_SIZE) ==
+                ZZUSB_DIAG_OFF_EVENTS &&
+            read_be32(snapshot + ZZUSB_DIAG_OFF_TOTAL_SIZE) ==
+                ZZUSB_DIAG_PAGE_SIZE &&
+            read_be32(snapshot + ZZUSB_DIAG_OFF_TOTAL_SIZE) ==
+                ZZUSB_DIAG_SIZE)
             return 1;
     }
     return 0;
