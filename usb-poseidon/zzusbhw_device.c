@@ -1081,8 +1081,11 @@ static int send_usb_cmd_wire(volatile uint8_t *base,
     {
         uint32_t response_length = result->actual_length;
 
-        if (response_length > max_data)
-            response_length = max_data;
+        if (response_length > max_data) {
+            if (state)
+                state->quarantined = 1;
+            return ZZUSB_STATUS_HOSTERROR;
+        }
         if (response_length)
             CacheClearE((APTR)(base + 0xa000 + ZZUSB_DATA_OFFSET),
                         response_length, CACRF_ClearD);
