@@ -3049,6 +3049,23 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
                 ReleaseSemaphore(&base_dev->zz_Lock);
                 continue;
             }
+            if (slot->abort_requested) {
+                ior->iouh_Actual = 0;
+                ior->iouh_Req.io_Error = IOERR_ABORTED;
+                stop_status = stop_periodic_slot(slot);
+                if (slot->ior != ior || slot->unit != unit) {
+                    ReleaseSemaphore(&base_dev->zz_Lock);
+                    continue;
+                }
+                if (stop_status_retired(stop_status)) {
+                    clear_int_slot(slot);
+                    reply_now = ior;
+                } else {
+                    slot->stop_pending = 1;
+                    slot->abort_requested = 0;
+                }
+                goto periodic_slot_done;
+            }
             result = (volatile struct ZZUSBCommand*)(base + 0xa000);
             actual = status == ZZUSB_STATUS_OK ? result->actual_length : 0;
             if (actual > ior->iouh_Length)
@@ -3109,6 +3126,7 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
             }
         }
 
+periodic_slot_done:
         ReleaseSemaphore(&base_dev->zz_Lock);
         if (reply_now && !(reply_now->iouh_Req.io_Flags & IOF_QUICK))
             ReplyMsg(&reply_now->iouh_Req.io_Message);
