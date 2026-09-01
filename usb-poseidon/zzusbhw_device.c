@@ -296,6 +296,7 @@ struct ZZWorkSlot {
     struct IOUsbHWReq *ior;
     uint32_t sequence;
     uint32_t enqueue_seq;
+    uint16_t completion_status;
 };
 
 static struct ZZWorkSlot WorkSlots[ZZ_WORK_SLOTS];
@@ -1367,6 +1368,8 @@ static uint16_t stop_periodic_slot(struct ZZIntPendingSlot *slot)
 
 static BYTE map_proxy_status(uint16_t status)
 {
+    if (ActiveWorkSlot)
+        ActiveWorkSlot->completion_status = status;
     switch (zzusb_engine_classify_status(status)) {
     case ZZUSB_ERROR_NONE:          return UHIOERR_NO_ERROR;
     case ZZUSB_ERROR_NAK:           return UHIOERR_NAK;
@@ -1881,12 +1884,18 @@ static void rt_deliver_in_packet(
                 ZZUSB_RT_FLAG_OVERRUN |
                 ZZUSB_RT_FLAG_PACKET_ERROR;
         request.ubr_Length = segment;
+        segments++;
+        if (remaining > segment &&
+            (!(request.ubr_Flags & UBFF_CONTBUFFER) ||
+             segments >= ZZUSB_ISO_MAX_PACKETS || !segment))
+            request.ubr_Flags |=
+                ZZUSB_RT_FLAG_OVERRUN |
+                ZZUSB_RT_FLAG_PACKET_ERROR;
         if (slot->handler->urti_InDoneHook)
             CallHookPkt(slot->handler->urti_InDoneHook,
                         (APTR)slot, &request);
         copied += segment;
         remaining -= segment;
-        segments++;
     } while (remaining && (request.ubr_Flags & UBFF_CONTBUFFER) &&
              segments < ZZUSB_ISO_MAX_PACKETS && request.ubr_Length);
 }
@@ -1953,8 +1962,18 @@ static uint16_t stop_rt_iso_slot(struct ZZRTIsoSlot *slot)
     status = send_usb_cmd_maintenance(
         (volatile uint8_t *)slot->unit->zz_Registers,
         &cmd, NULL, 0, NULL, 0);
-    if (!stop_status_retired(status))
-        return status;
+    if (!stop_status_retired(status)) {
+        struct ZZUSBProtocolState *state = protocol_state_for(
+            (volatile uint8_t *)slot->unit->zz_Registers);
+
+        if (!state || !state->quarantined)
+            return status;
+        /*
+         * A quarantined transport cannot accept ISO_STOP and will be reset
+         * before reuse. Retire host-owned callbacks and contexts locally so
+         * removal cannot remain stuck behind the rejected command.
+         */
+    }
     rt_cancel_contexts(slot, ZZUSB_RT_FLAG_PACKET_ERROR);
     zzusb_rt_finish_stop(&slot->lifecycle);
     return ZZUSB_STATUS_OK;
@@ -4302,6 +4321,7 @@ static int process_work_queue(void)
     zzusb_engine_begin(&slot->lifecycle, slot->sequence,
                        ProtocolStates[0].controller_epoch);
     ActiveWorkSlot = slot;
+    slot->completion_status = ZZUSB_STATUS_OK;
     ior = slot->ior;
     Permit();
 
@@ -4314,12 +4334,14 @@ static int process_work_queue(void)
     if (slot->lifecycle.abort_requested) {
         ior->iouh_Actual = 0;
         ior->iouh_Req.io_Error = IOERR_ABORTED;
+        slot->completion_status = ZZUSB_STATUS_CANCELLED;
+    } else if (ior->iouh_Req.io_Error != 0 &&
+               slot->completion_status == ZZUSB_STATUS_OK) {
+        slot->completion_status = ZZUSB_STATUS_HOSTERROR;
     }
     zzusb_engine_complete(&slot->lifecycle, slot->sequence,
                           slot->lifecycle.controller_epoch,
-                          ior->iouh_Req.io_Error == 0
-                            ? ZZUSB_ENGINE_STATUS_OK
-                            : ZZUSB_ENGINE_STATUS_HOSTERROR);
+                          slot->completion_status);
     reply = zzusb_engine_claim_reply(&slot->lifecycle);
     zzusb_engine_release_buffer(&slot->lifecycle);
     ActiveWorkSlot = NULL;
