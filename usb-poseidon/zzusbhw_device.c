@@ -2241,6 +2241,8 @@ static uint32_t rt_iso_service_limit_us(const struct ZZUSBUnit *unit)
             slot->lifecycle.state != ZZUSB_RT_RUNNING)
             continue;
         safe_microframes = rt_iso_buffered_safe_microframes(slot);
+        if (!safe_microframes)
+            safe_microframes = 1U;
         candidate_us = safe_microframes * 125U;
         if (candidate_us < shortest_us)
             shortest_us = candidate_us;
@@ -3444,9 +3446,7 @@ static void handle_roothub_control(struct ZZUSBUnit *unit,
                         volatile struct ZZUSBCommand *rresult =
                             (volatile struct ZZUSBCommand*)(rbase + 0xa000);
                         fw_speed = rresult->speed;
-                        if (rstatus == ZZUSB_STATUS_OK ||
-                            rstatus == ZZUSB_STATUS_OFFLINE)
-                            finish_reset_rt_iso_for_unit(unit);
+                        finish_reset_rt_iso_for_unit(unit);
                         if (rstatus == ZZUSB_STATUS_OK ||
                             rstatus == ZZUSB_STATUS_OFFLINE)
                             record_reset_success(unit, rstatus);
@@ -3836,9 +3836,7 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
             volatile struct ZZUSBCommand *result =
                 (volatile struct ZZUSBCommand*)(base + 0xa000);
             fw_speed = result->speed;
-            if (status == ZZUSB_STATUS_OK ||
-                status == ZZUSB_STATUS_OFFLINE)
-                finish_reset_rt_iso_for_unit(unit);
+            finish_reset_rt_iso_for_unit(unit);
             if (status == ZZUSB_STATUS_OK ||
                 status == ZZUSB_STATUS_OFFLINE)
                 record_reset_success(unit, status);
