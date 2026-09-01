@@ -12,6 +12,8 @@ struct zzusb_engine_diag_state {
 };
 
 static struct zzusb_engine_diag_state engine_diag;
+static zzusb_engine_diag_critical_fn diag_critical_enter;
+static zzusb_engine_diag_critical_fn diag_critical_leave;
 
 _Static_assert(sizeof(struct zzusb_driver_diag_event) == 32,
                "driver diagnostic event size changed");
@@ -21,15 +23,25 @@ static void diag_barrier(void)
 {
     __asm__ __volatile__("" ::: "memory");
 }
+
+void zzusb_engine_diag_set_critical(
+    zzusb_engine_diag_critical_fn enter,
+    zzusb_engine_diag_critical_fn leave)
+{
+    diag_critical_enter = enter;
+    diag_critical_leave = leave;
+}
 /*
  * Driver request mutation is serialized. Readers use this odd/even
  * generation to reject snapshots interrupted by AbortIO or poll-task work.
  */
 static uint32_t diag_mutation_begin(void)
 {
-    uint32_t generation = engine_diag.mutation_generation + 1U;
+    uint32_t generation;
 
-    engine_diag.mutation_generation = generation;
+    if (diag_critical_enter)
+        diag_critical_enter();
+    generation = engine_diag.mutation_generation + 1U;
     diag_barrier();
     return generation;
 }
@@ -38,6 +50,8 @@ static void diag_mutation_end(uint32_t generation)
 {
     diag_barrier();
     engine_diag.mutation_generation = generation + 1U;
+    if (diag_critical_leave)
+        diag_critical_leave();
 }
 
 

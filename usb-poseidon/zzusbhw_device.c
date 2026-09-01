@@ -386,6 +386,16 @@ static uint32_t active_diag_request_id(void)
     return ActiveWorkSlot ? ActiveWorkSlot->lifecycle.request_id : 0U;
 }
 
+static void diag_enter_critical(void)
+{
+    Forbid();
+}
+
+static void diag_leave_critical(void)
+{
+    Permit();
+}
+
 static uint16_t diag_topology(struct IOUsbHWReq *ior)
 {
     return (uint16_t)(((uint16_t)ior->iouh_SplitHubAddr << 8) |
@@ -2414,6 +2424,8 @@ static struct Library* __attribute__((used)) init_device(uint8_t *seg_list asm("
     memset(IsoWire, 0, sizeof(IsoWire));
     memset(IsoPayload, 0, sizeof(IsoPayload));
     SimpleIsoBatchId = 1;
+    zzusb_engine_diag_set_critical(
+        diag_enter_critical, diag_leave_critical);
     zzusb_engine_diag_reset();
 
     PollBase = ZZBase;
@@ -2862,6 +2874,8 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
                 actual = ior->iouh_Length;
 
             if (status == ZZUSB_STATUS_OK) {
+                zzusb_engine_diag_count(
+                    ZZUSB_DRIVER_COUNT_INTERRUPT_REAP);
                 trace_hub_int_data(
                     unit, ior, actual,
                     (volatile uint8_t*)(base + 0xa000 +

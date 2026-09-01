@@ -9,12 +9,29 @@
             __FILE__, __LINE__, #expr); return EXIT_FAILURE; \
 } } while (0)
 
+static unsigned critical_enters;
+static unsigned critical_leaves;
+static unsigned critical_depth;
+
+static void enter_critical(void)
+{
+    critical_enters++;
+    critical_depth++;
+}
+
+static void leave_critical(void)
+{
+    critical_leaves++;
+    critical_depth--;
+}
+
 int main(void)
 {
     struct zzusb_driver_diag_snapshot snapshot;
     struct zzusb_engine_request request;
     uint32_t first_generation;
 
+    zzusb_engine_diag_set_critical(enter_critical, leave_critical);
     zzusb_engine_diag_reset();
     for (uint32_t i = 1; i <= 200u; i++) {
         zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_REQUEST);
@@ -64,6 +81,9 @@ int main(void)
     CHECK(snapshot.counters[ZZUSB_DRIVER_COUNT_LATE_COMPLETION] == 1u);
     CHECK(snapshot.counters[ZZUSB_DRIVER_COUNT_COMPLETION] == 1u);
 
+    CHECK(critical_enters == critical_leaves);
+    CHECK(critical_enters != 0);
+    CHECK(critical_depth == 0);
     puts("USB driver diagnostic ring contract satisfied");
     return EXIT_SUCCESS;
 }
