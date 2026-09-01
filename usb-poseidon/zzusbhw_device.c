@@ -1835,7 +1835,7 @@ simple_iso_complete:
             packets[index].actual) {
             safe_copy(IsoWire + batch.metadata_size +
                       packets[index].offset,
-                      (uint8_t *)ior->iouh_Data + packets[index].offset,
+                      (uint8_t *)ior->iouh_Data + total_actual,
                       packets[index].actual);
         }
         total_actual += packets[index].actual;
