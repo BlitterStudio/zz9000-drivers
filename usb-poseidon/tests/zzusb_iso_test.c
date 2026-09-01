@@ -142,6 +142,14 @@ static void test_wire_round_trip(void)
     }
 
     put_be16_test(wire + ZZUSB_ISO_HEADER_SIZE +
+                  ZZUSB_ISO_PKT_OFF_STATUS, 0x0100);
+    assert(!zzusb_iso_parse_reap(wire,
+                                 metadata_size + sizeof(payload), 1,
+                                 &batch, packets, 3));
+    put_be16_test(wire + ZZUSB_ISO_HEADER_SIZE +
+                  ZZUSB_ISO_PKT_OFF_STATUS, ZZUSB_ISO_PACKET_OK);
+
+    put_be16_test(wire + ZZUSB_ISO_HEADER_SIZE +
                   ZZUSB_ISO_PKT_OFF_ACTUAL, 5);
     assert(!zzusb_iso_parse_reap(wire,
                                  metadata_size + sizeof(payload), 1,

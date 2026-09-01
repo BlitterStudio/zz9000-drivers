@@ -215,11 +215,14 @@ int zzusb_iso_parse_reap(const uint8_t *wire, unsigned wire_length,
         const uint8_t *entry = wire + ZZUSB_ISO_HEADER_SIZE +
                                index * ZZUSB_ISO_PACKET_SIZE;
         struct zzusb_iso_packet_result *packet = &packets[index];
+        uint16_t packet_status = read_be16(
+            entry + ZZUSB_ISO_PKT_OFF_STATUS);
 
         packet->requested = read_be16(entry + ZZUSB_ISO_PKT_OFF_REQUESTED);
         packet->actual = read_be16(entry + ZZUSB_ISO_PKT_OFF_ACTUAL);
-        packet->status = (uint8_t)read_be16(
-            entry + ZZUSB_ISO_PKT_OFF_STATUS);
+        if (packet_status > ZZUSB_ISO_PACKET_BABBLE)
+            return 0;
+        packet->status = (uint8_t)packet_status;
         packet->frame = read_be16(entry + ZZUSB_ISO_PKT_OFF_FRAME) & 0x07ffU;
         packet->offset = read_be32(entry + ZZUSB_ISO_PKT_OFF_DATA);
         packet->microframe = entry[ZZUSB_ISO_PKT_OFF_UFRAME];
