@@ -1455,6 +1455,37 @@ static BYTE map_proxy_status(uint16_t status)
     default:                        return UHIOERR_HOSTERROR;
     }
 }
+static uint16_t proxy_status_for_io_error(BYTE error)
+{
+    if (error == 0)
+        return ZZUSB_STATUS_OK;
+    if (error == IOERR_ABORTED)
+        return ZZUSB_STATUS_CANCELLED;
+    if (error == IOERR_NOCMD)
+        return ZZUSB_STATUS_UNSUPPORTED;
+    if (error == UHIOERR_NAK)
+        return ZZUSB_STATUS_NAK;
+    if (error == UHIOERR_STALL)
+        return ZZUSB_STATUS_STALL;
+    if (error == UHIOERR_TIMEOUT)
+        return ZZUSB_STATUS_TIMEOUT;
+    if (error == UHIOERR_USBOFFLINE)
+        return ZZUSB_STATUS_OFFLINE;
+    if (error == UHIOERR_CRCERROR)
+        return ZZUSB_STATUS_CRC;
+    if (error == UHIOERR_BABBLE)
+        return ZZUSB_STATUS_BABBLE;
+    if (error == UHIOERR_OVERFLOW)
+        return ZZUSB_STATUS_OVERRUN;
+    if (error == UHIOERR_RUNTPACKET)
+        return ZZUSB_STATUS_UNDERRUN;
+    if (error == UHIOERR_BADPARAMS ||
+        error == UHIOERR_PKTTOOLARGE)
+        return ZZUSB_STATUS_BADPARAM;
+    if (error == UHIOERR_OUTOFMEMORY)
+        return ZZUSB_STATUS_NOMEM;
+    return ZZUSB_STATUS_HOSTERROR;
+}
 
 static ULONG iso_public_capabilities(struct ZZUSBUnit *unit)
 {
@@ -4635,7 +4666,8 @@ static int process_work_queue(void)
         slot->completion_status = ZZUSB_STATUS_CANCELLED;
     } else if (ior->iouh_Req.io_Error != 0 &&
                slot->completion_status == ZZUSB_STATUS_OK) {
-        slot->completion_status = ZZUSB_STATUS_HOSTERROR;
+        slot->completion_status =
+            proxy_status_for_io_error(ior->iouh_Req.io_Error);
     }
     zzusb_engine_complete(&slot->lifecycle, slot->sequence,
                           slot->lifecycle.controller_epoch,
