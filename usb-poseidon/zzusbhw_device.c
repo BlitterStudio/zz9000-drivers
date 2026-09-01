@@ -1943,6 +1943,7 @@ static uint16_t reap_rt_iso_batch(struct ZZRTIsoSlot *slot)
     struct ZZUSBCommand cmd;
     struct zzusb_iso_batch_result batch;
     struct zzusb_iso_packet_result packets[ZZUSB_ISO_MAX_PACKETS];
+    uint16_t expected_lengths[ZZUSB_ISO_MAX_PACKETS];
     struct ZZRTIsoBatchContext *context;
     uint32_t actual_length;
     uint16_t status;
@@ -1962,7 +1963,14 @@ static uint16_t reap_rt_iso_batch(struct ZZRTIsoSlot *slot)
             &batch, packets, ZZUSB_ISO_MAX_PACKETS))
         return ZZUSB_STATUS_HOSTERROR;
     context = find_rt_batch_context(slot, batch.batch_id);
-    if (!context || context->packet_count != batch.packet_count ||
+    if (!context || context->packet_count != batch.packet_count)
+        return ZZUSB_STATUS_HOSTERROR;
+    for (unsigned index = 0; index < batch.packet_count; index++)
+        expected_lengths[index] = slot->direction_in
+            ? slot->packet_lengths[index]
+            : (uint16_t)context->requests[index].ubr_Length;
+    if (!zzusb_iso_layout_matches(
+            &batch, packets, expected_lengths, context->packet_count) ||
         !zzusb_rt_complete(&slot->lifecycle, batch.batch_id))
         return ZZUSB_STATUS_HOSTERROR;
 
@@ -3977,7 +3985,13 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
                 } else {
                     trace_control_status(unit, "CTRL_FAIL", ior, status);
                     ior->iouh_Actual = 0;
-                    ior->iouh_Req.io_Error = map_proxy_status(status);
+                    if (status == ZZUSB_STATUS_STALL &&
+                        ior->iouh_SetupData.bmRequestType == 0x21 &&
+                        ior->iouh_SetupData.bRequest == 0x0a)
+                        ior->iouh_Req.io_Error = 0;
+                    else
+                        ior->iouh_Req.io_Error =
+                            map_proxy_status(status);
                 }
             }
         }
