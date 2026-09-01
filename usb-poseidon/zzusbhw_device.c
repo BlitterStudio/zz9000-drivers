@@ -313,6 +313,7 @@ static struct ZZUSBUnit *ForegroundMailboxUnit;
 
 static void execute_io(struct Library *dev, struct IOUsbHWReq *ior);
 static int process_work_queue(void);
+static int work_queue_pending(void);
 static int rt_iso_pending_for_unit(const struct ZZUSBUnit *unit);
 static uint32_t rt_iso_service_limit_us(const struct ZZUSBUnit *unit);
 static int rt_iso_refill_terminal(uint16_t status);
@@ -1637,8 +1638,23 @@ static void execute_simple_iso(struct ZZUSBUnit *unit,
     }
 
 simple_iso_complete:
-    if (queued)
-        stop_iso_request(base, unit, ior);
+    if (queued) {
+        uint16_t stop_status = stop_iso_request(base, unit, ior);
+
+        if (!stop_status_retired(stop_status)) {
+            struct ZZUSBProtocolState *state = protocol_state_for(base);
+
+            if (state)
+                state->quarantined = 1;
+            /*
+             * Fence the unretired batch from subsequent endpoint reuse.
+             * Recovery negotiates a fresh mailbox fence; the next request
+             * also carries this new device generation.
+             */
+            bump_unit_generation(unit);
+            status = stop_status;
+        }
+    }
     if (status != ZZUSB_STATUS_OK) {
         ior->iouh_Req.io_Error = map_proxy_status(status);
         return;
@@ -3132,11 +3148,7 @@ static void hotplug_poll_task(void)
         for (int u = 0; u < ZZ_NUM_PORTS; u++)
             if (PollBase->zz_Units[u].zz_Enabled)
                 poll_rt_iso(&PollBase->zz_Units[u]);
-        while (process_work_queue()) {
-            for (int u = 0; u < ZZ_NUM_PORTS; u++)
-                if (PollBase->zz_Units[u].zz_Enabled)
-                    poll_rt_iso(&PollBase->zz_Units[u]);
-        }
+        process_work_queue();
 
         for (int u = 0; u < ZZ_NUM_PORTS; u++) {
             struct ZZUSBUnit *unit = &PollBase->zz_Units[u];
@@ -3153,6 +3165,9 @@ static void hotplug_poll_task(void)
             if (rt_iso_pending_for_unit(unit))
                 any_pending = 1;
         }
+
+        if (work_queue_pending())
+            continue;
 
         if (!any_pending) {
             Wait(mask);
