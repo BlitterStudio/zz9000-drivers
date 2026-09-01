@@ -30,6 +30,7 @@ check_file installer/ZZ9000Installer/Devs/Picasso96Settings-Z3
 check_file installer/ZZ9000Installer/Devs/NetInterfaces/ZZ9000Net
 check_file ahi/README.md
 check_file usb-poseidon/README.md
+check_file docs/usb-qualification-matrix.md
 check_file sdk/README.md
 check_file sdk/SDK_REF
 check_file amissl/README.md

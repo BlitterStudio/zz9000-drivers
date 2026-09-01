@@ -26,6 +26,8 @@
 #include <exec/tasks.h>
 #include <exec/io.h>
 #include <exec/execbase.h>
+#include <exec/interrupts.h>
+#include <hardware/intbits.h>
 
 #include <libraries/expansion.h>
 
@@ -34,11 +36,88 @@
 
 #include <proto/exec.h>
 #include <proto/expansion.h>
+#include <proto/utility.h>
 
 #include <stdint.h>
 #include <string.h>
 
 #include "zzusbhw.h"
+#include "zzusb_engine.h"
+#include "zzusb_interrupt.h"
+#include "zzusb_iso.h"
+#include "zzcfg_query.h"
+
+/*
+ * Older AmigaOS NDKs stop at UHCMD_BULKXFER. Keep the wire-visible
+ * Poseidon RT ISO ABI local so this driver still builds with that SDK.
+ */
+#ifndef UHCMD_ADDISOHANDLER
+struct IOUsbHWRTIso
+{
+    struct Node *urti_Node;
+    struct Hook *urti_InReqHook;
+    struct Hook *urti_OutReqHook;
+    struct Hook *urti_InDoneHook;
+    struct Hook *urti_OutDoneHook;
+    ULONG urti_OutPrefetch;
+    APTR urti_DriverPrivate1;
+    APTR urti_DriverPrivate2;
+};
+
+struct IOUsbHWBufferReq
+{
+    UBYTE *ubr_Buffer;
+    ULONG ubr_Length;
+    UWORD ubr_Frame;
+    UWORD ubr_Flags;
+};
+
+#define UHCMD_ADDISOHANDLER (CMD_NONSTD + 7)
+#define UHCMD_REMISOHANDLER (CMD_NONSTD + 8)
+#define UHCMD_STARTRTISO    (CMD_NONSTD + 9)
+#define UHCMD_STOPRTISO     (CMD_NONSTD + 10)
+#endif
+
+#ifndef UHIOERR_BABBLE
+#define UHIOERR_BABBLE 13
+#endif
+
+_Static_assert(ZZUSB_STATUS_OK == ZZUSB_ENGINE_STATUS_OK,
+               "engine/proxy status drift");
+_Static_assert(ZZUSB_STATUS_PENDING == ZZUSB_ENGINE_STATUS_PENDING,
+               "engine/proxy status drift");
+_Static_assert(ZZUSB_STATUS_ERROR == ZZUSB_ENGINE_STATUS_ERROR,
+               "engine/proxy status drift");
+_Static_assert(ZZUSB_STATUS_TIMEOUT == ZZUSB_ENGINE_STATUS_TIMEOUT,
+               "engine/proxy status drift");
+_Static_assert(ZZUSB_STATUS_STALL == ZZUSB_ENGINE_STATUS_STALL,
+               "engine/proxy status drift");
+_Static_assert(ZZUSB_STATUS_NAK == ZZUSB_ENGINE_STATUS_NAK,
+               "engine/proxy status drift");
+_Static_assert(ZZUSB_STATUS_CRC == ZZUSB_ENGINE_STATUS_CRC,
+               "engine/proxy status drift");
+_Static_assert(ZZUSB_STATUS_BABBLE == ZZUSB_ENGINE_STATUS_BABBLE,
+               "engine/proxy status drift");
+_Static_assert(ZZUSB_STATUS_OVERRUN == ZZUSB_ENGINE_STATUS_OVERRUN,
+               "engine/proxy status drift");
+_Static_assert(ZZUSB_STATUS_UNDERRUN == ZZUSB_ENGINE_STATUS_UNDERRUN,
+               "engine/proxy status drift");
+_Static_assert(ZZUSB_STATUS_OFFLINE == ZZUSB_ENGINE_STATUS_OFFLINE,
+               "engine/proxy status drift");
+_Static_assert(ZZUSB_STATUS_BADPARAM == ZZUSB_ENGINE_STATUS_BADPARAM,
+               "engine/proxy status drift");
+_Static_assert(ZZUSB_STATUS_UNSUPPORTED == ZZUSB_ENGINE_STATUS_UNSUPPORTED,
+               "engine/proxy status drift");
+_Static_assert(ZZUSB_STATUS_STALE == ZZUSB_ENGINE_STATUS_STALE,
+               "engine/proxy status drift");
+_Static_assert(ZZUSB_STATUS_CANCELLED == ZZUSB_ENGINE_STATUS_CANCELLED,
+               "engine/proxy status drift");
+_Static_assert(ZZUSB_STATUS_HOSTERROR == ZZUSB_ENGINE_STATUS_HOSTERROR,
+               "engine/proxy status drift");
+_Static_assert(ZZUSB_STATUS_BUSY == ZZUSB_ENGINE_STATUS_BUSY,
+               "engine/proxy status drift");
+_Static_assert(ZZUSB_STATUS_NOMEM == ZZUSB_ENGINE_STATUS_NOMEM,
+               "engine/proxy status drift");
 
 struct ExecBase* SysBase;
 
@@ -52,7 +131,7 @@ struct ExecBase* SysBase;
  * routines parse it consistently.
  */
 #define DEVICE_ID_STRING DEVICE_NAME " " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) \
-    " (17.05.2026) Poseidon USB driver for ZZ9000 " \
+    " (31.08.2026) Poseidon USB driver for ZZ9000 " \
     "(C) Copyright 2026 Dimitris Panokostas"
 
 /* USB request constants (from usb.h) */
@@ -103,8 +182,8 @@ struct ExecBase* SysBase;
 
 #define SWAP16(x) ((uint16_t)((uint16_t)(x) << 8) | ((uint16_t)(x) >> 8))
 #define ZZ_RH_POLL_DELAY_TICKS 10
-#define ZZ_INT_IDLE_REPLY_POLLS 10
 #define ZZ_INT_PENDING_SLOTS 32
+#define ZZ_INT_IDLE_REPLY_POLLS 10
 #define ZZ_ABORTED_REPLY_SLOTS (ZZ_INT_PENDING_SLOTS + ZZ_NUM_PORTS + 16)
 #ifndef UHCF_USB20
 #define UHCF_USB20 (1UL << 0)
@@ -112,11 +191,26 @@ struct ExecBase* SysBase;
 #ifndef UHA_Capabilities
 #define UHA_Capabilities (UHA_Dummy + 0x21)
 #endif
+#ifndef UHCF_ISO
+#define UHCF_ISO (1UL << 1)
+#endif
+#ifndef UHCF_RT_ISO
+#define UHCF_RT_ISO (1UL << 2)
+#endif
+#ifndef UBFF_CONTBUFFER
+#define UBFF_CONTBUFFER 1U
+#endif
 #ifndef UHA_RootHubAddr
 #define UHA_RootHubAddr (UHA_Dummy + 0x22)
 #endif
 
 static struct ZZUSBBase *PollBase;
+static struct Interrupt USBEventInterrupt;
+static volatile uint8_t USBEventPending;
+static uint8_t USBEventIRQInstalled;
+static uint8_t USBEventIRQInt2;
+static uint16_t UnitGeneration[ZZ_NUM_PORTS];
+struct Library *UtilityBase;
 
 /*
  * Saved seglist for expunge. Stored as a static rather than a struct
@@ -133,12 +227,123 @@ static uint8_t RootHubPollDelay[ZZ_NUM_PORTS];
 struct ZZIntPendingSlot {
     struct ZZUSBUnit *unit;
     struct IOUsbHWReq *ior;
+    uint8_t armed;
+    uint8_t abort_requested;
     uint8_t idle_polls;
+    uint8_t rearm_required;
+    uint8_t stop_pending;
+    uint8_t arm_in_progress;
+    uint16_t arm_generation;
 };
 
 static struct ZZIntPendingSlot IntPendingSlots[ZZ_INT_PENDING_SLOTS];
+static uint8_t LegacyIntPollCursor[ZZ_NUM_PORTS];
+
+enum ZZUSBProtocolMode {
+    ZZUSB_PROTOCOL_LEGACY = 0,
+    ZZUSB_PROTOCOL_V2 = 2
+};
+
+struct ZZUSBProtocolState {
+    volatile uint8_t *registers;
+    uint32_t next_request_id;
+    uint32_t controller_epoch;
+    uint32_t capabilities;
+    uint8_t mode;
+    uint8_t quarantined;
+    uint8_t maintenance_quarantined;
+};
+
+static struct ZZUSBProtocolState ProtocolStates[ZZ_NUM_PORTS];
+
+#define ZZ_RT_ISO_SLOTS 8
+
+struct ZZRTIsoBatchContext {
+    struct IOUsbHWBufferReq requests[ZZUSB_ISO_MAX_PACKETS];
+    uint32_t batch_id;
+    uint32_t prefetched_bytes;
+    uint8_t packet_count;
+    uint32_t duration_microframes;
+};
+
+struct ZZRTIsoSlot {
+    struct zzusb_rt_lifecycle lifecycle;
+    struct ZZRTIsoBatchContext batches[ZZUSB_ISO_PIPELINE_DEPTH];
+    struct ZZUSBUnit *unit;
+    struct IOUsbHWRTIso *handler;
+    uint16_t packet_lengths[ZZUSB_ISO_MAX_PACKETS];
+    uint16_t flags;
+    uint16_t generation;
+    uint16_t address;
+    uint16_t endpoint;
+    uint16_t max_packet;
+    uint16_t interval;
+    uint16_t speed;
+    uint16_t split_hub_addr;
+    uint16_t split_hub_port;
+    uint32_t duration_microframes;
+    uint8_t direction_in;
+    uint8_t packet_count;
+};
+
+static struct ZZRTIsoSlot RTIsoSlots[ZZ_RT_ISO_SLOTS];
+static uint8_t IsoWire[ZZUSB_V2_DATA_MAX];
+static uint8_t IsoPayload[ZZUSB_ISO_DATA_MAX];
+static uint32_t SimpleIsoBatchId = 1;
+struct ZZSimpleIsoCleanup {
+    struct ZZUSBUnit *unit;
+    struct ZZUSBCommand stop_cmd;
+    uint8_t pending;
+};
+
+static struct ZZSimpleIsoCleanup
+    SimpleIsoCleanup[ZZ_NUM_PORTS];
+
+#define ZZ_WORK_SLOTS 32
+#define ZZUSB_MAINT_POLL_US 25U
+
+struct ZZWorkSlot {
+    struct zzusb_engine_request lifecycle;
+    struct ZZUSBUnit *unit;
+    struct IOUsbHWReq *ior;
+    uint32_t sequence;
+    uint32_t enqueue_seq;
+    uint16_t completion_status;
+};
+
+static struct ZZWorkSlot WorkSlots[ZZ_WORK_SLOTS];
+static struct zzusb_driver_diag_snapshot DriverDiagSnapshot;
+static struct ZZWorkSlot *ActiveWorkSlot;
+static uint32_t WorkSequence = 1;
+static uint32_t EnqueueSequence = 1;
+static struct timerequest *WorkerTimerRequest;
+static ULONG WorkerTimerMask;
+static uint8_t ProtocolNegotiated;
+static volatile uint8_t *ForegroundMailboxBase;
+static struct ZZUSBUnit *ForegroundMailboxUnit;
+
+static void execute_io(struct Library *dev, struct IOUsbHWReq *ior);
+static int process_work_queue(void);
+static int work_queue_pending(void);
+static int rt_iso_pending_for_unit(const struct ZZUSBUnit *unit);
+static uint32_t rt_iso_service_limit_us(const struct ZZUSBUnit *unit);
+static int rt_iso_refill_terminal(uint16_t status);
+static void service_rt_iso_during_work(struct ZZUSBBase *base,
+                                       struct ZZUSBUnit *unit);
+static uint16_t send_usb_cmd_with_rt_service(
+    volatile uint8_t *base, struct ZZUSBCommand *cmd,
+    void *data_out, uint32_t data_out_len, struct ZZUSBUnit *unit);
+static uint16_t send_usb_cmd_with_rt_wait(
+    volatile uint8_t *base, struct ZZUSBCommand *cmd,
+    void *data_out, uint32_t data_out_len, struct ZZUSBUnit *unit);
 
 static uint16_t request_speed(struct ZZUSBUnit *unit, struct IOUsbHWReq *ior);
+static void fill_int_arm_command(struct ZZUSBCommand *cmd,
+                                 struct ZZUSBUnit *unit,
+                                 struct IOUsbHWReq *ior);
+static int int_arm_parameters_changed(struct ZZUSBUnit *unit,
+                                      struct IOUsbHWReq *old_ior,
+                                      struct IOUsbHWReq *new_ior);
 static int write_tag_ulong(struct TagItem *tag, ULONG value);
 static int write_tag_str(struct TagItem *tag, const char *value);
 
@@ -176,11 +381,9 @@ const char device_id_string[] = DEVICE_ID_STRING;
  */
 static const char __attribute__((used)) version_tag[] =
     "$VER: " DEVICE_NAME " " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION)
-    " (17.05.2026) Poseidon USB driver for ZZ9000 "
+    " (31.08.2026) Poseidon USB driver for ZZ9000 "
     "(C) Copyright 2026 Dimitris Panokostas";
 
-typedef char ZZUSBCommand_size_must_match_protocol[
-    (sizeof(struct ZZUSBCommand) == ZZUSB_CMD_SIZE) ? 1 : -1];
 
 static struct ExecBase *get_sysbase(void)
 {
@@ -197,47 +400,54 @@ static void dstr(void* regs, char* str)
     }
 }
 
-/* Push a single hex nibble / byte / longword to serial. */
-static void dhex4(void* regs, uint32_t v)
+static uint32_t active_diag_request_id(void)
 {
-    const char hex[] = "0123456789ABCDEF";
-    *((volatile uint16_t*)((uint8_t*)regs + 0xF0)) = hex[v & 0xF];
+    return ActiveWorkSlot ? ActiveWorkSlot->lifecycle.request_id : 0U;
 }
-static void dhex8(void* regs, uint32_t v)
+
+static void diag_enter_critical(void)
 {
-    dhex4(regs, v >> 4);
-    dhex4(regs, v);
+    Forbid();
 }
-static void dhex16(void* regs, uint32_t v)
+
+static void diag_leave_critical(void)
 {
-    dhex8(regs, v >> 8);
-    dhex8(regs, v);
+    Permit();
 }
-static void __attribute__((unused)) dhex32(void* regs, uint32_t v)
+
+static void record_reset_success(struct ZZUSBUnit *unit, uint16_t status)
 {
-    dhex8(regs, v >> 24);
-    dhex8(regs, v >> 16);
-    dhex8(regs, v >> 8);
-    dhex8(regs, v);
+    zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_RESET);
+    zzusb_engine_diag_record(
+        ZZUSB_DRIVER_EVENT_RESET, status, active_diag_request_id(),
+        ProtocolStates[0].controller_epoch, 0, 0, 0, 0,
+        unit ? unit->zz_Speed : 0,
+        unit ? ((uint32_t)unit->zz_PortStatus << 16) |
+               unit->zz_PortChange : 0,
+        WorkSequence);
+}
+
+static uint16_t diag_topology(struct IOUsbHWReq *ior)
+{
+    return (uint16_t)(((uint16_t)ior->iouh_SplitHubAddr << 8) |
+                      ((uint16_t)ior->iouh_SplitHubPort & 0xffU));
 }
 
 static void trace_port_state(struct ZZUSBUnit *unit, char *tag)
 {
-    void *regs = unit->zz_Registers;
+    uint32_t detail = ((uint32_t)unit->zz_PortStatus << 16) |
+                      unit->zz_PortChange;
+    uint16_t schedule = (uint16_t)unit->zz_Speed |
+                        (unit->zz_PortPresent ? 0x0100U : 0U) |
+                        (unit->zz_PortDead ? 0x0200U : 0U);
 
-    dstr(regs, "[zzusbhw] ");
-    dstr(regs, tag);
-    dstr(regs, " ps=");
-    dhex16(regs, unit->zz_PortStatus);
-    dstr(regs, " ch=");
-    dhex16(regs, unit->zz_PortChange);
-    dstr(regs, " sp=");
-    dhex8(regs, unit->zz_Speed);
-    dstr(regs, " pr=");
-    dhex8(regs, unit->zz_PortPresent ? 1 : 0);
-    dstr(regs, " dead=");
-    dhex8(regs, unit->zz_PortDead ? 1 : 0);
-    dstr(regs, "\r\n");
+    (void)tag;
+    zzusb_engine_diag_record(ZZUSB_DRIVER_EVENT_PORT,
+                             ZZUSB_ENGINE_STATUS_OK,
+                             active_diag_request_id(),
+                             ProtocolStates[0].controller_epoch,
+                             0, 0, 0, 0, schedule, detail,
+                             WorkSequence);
 }
 
 static void trace_port_state_status(struct ZZUSBUnit *unit,
@@ -245,19 +455,15 @@ static void trace_port_state_status(struct ZZUSBUnit *unit,
                                     uint16_t status,
                                     uint16_t speed)
 {
-    void *regs = unit->zz_Registers;
+    uint32_t detail = ((uint32_t)unit->zz_PortStatus << 16) |
+                      unit->zz_PortChange;
 
-    dstr(regs, "[zzusbhw] ");
-    dstr(regs, tag);
-    dstr(regs, " rc=");
-    dhex16(regs, status);
-    dstr(regs, " fwsp=");
-    dhex8(regs, speed);
-    dstr(regs, " ps=");
-    dhex16(regs, unit->zz_PortStatus);
-    dstr(regs, " ch=");
-    dhex16(regs, unit->zz_PortChange);
-    dstr(regs, "\r\n");
+    (void)tag;
+    zzusb_engine_diag_record(ZZUSB_DRIVER_EVENT_PORT, status,
+                             active_diag_request_id(),
+                             ProtocolStates[0].controller_epoch,
+                             0, 0, 0, 0, speed, detail,
+                             WorkSequence);
 }
 
 static void trace_control_status(struct ZZUSBUnit *unit,
@@ -265,50 +471,35 @@ static void trace_control_status(struct ZZUSBUnit *unit,
                                  struct IOUsbHWReq *ior,
                                  uint16_t status)
 {
-    void *regs = unit->zz_Registers;
+    uint32_t detail =
+        ((uint32_t)ior->iouh_SetupData.bmRequestType << 24) |
+        ((uint32_t)ior->iouh_SetupData.bRequest << 16) |
+        ior->iouh_Flags;
 
-    dstr(regs, "[zzusbhw] ");
-    dstr(regs, tag);
-    dstr(regs, " st=");
-    dhex16(regs, status);
-    dstr(regs, " dev=");
-    dhex8(regs, ior->iouh_DevAddr);
-    dstr(regs, " req=");
-    dhex8(regs, ior->iouh_SetupData.bmRequestType);
-    dstr(regs, "/");
-    dhex8(regs, ior->iouh_SetupData.bRequest);
-    dstr(regs, " fl=");
-    dhex16(regs, ior->iouh_Flags);
-    dstr(regs, " sp=");
-    dhex8(regs, request_speed(unit, ior));
-    dstr(regs, " split=");
-    dhex8(regs, (ior->iouh_Flags & UHFF_SPLITTRANS) ? 1 : 0);
-    dstr(regs, " hub=");
-    dhex8(regs, ior->iouh_SplitHubAddr);
-    dstr(regs, " port=");
-    dhex8(regs, ior->iouh_SplitHubPort);
-    dstr(regs, "\r\n");
+    (void)tag;
+    zzusb_engine_diag_record(ZZUSB_DRIVER_EVENT_CONTROL, status,
+                             active_diag_request_id(),
+                             ProtocolStates[0].controller_epoch,
+                             ior->iouh_DevAddr, ior->iouh_Endpoint,
+                             ior->iouh_Dir == UHDIR_IN ? 0x80U : 0U,
+                             diag_topology(ior), ior->iouh_Interval,
+                             detail | request_speed(unit, ior),
+                             WorkSequence);
 }
 
-static void __attribute__((unused)) trace_int_status(struct ZZUSBUnit *unit,
-                                                     char *tag,
-                                                     struct IOUsbHWReq *ior)
+static void trace_int_status(struct ZZUSBUnit *unit, char *tag,
+                             struct IOUsbHWReq *ior)
 {
-    void *regs = unit->zz_Registers;
-
-    dstr(regs, "[zzusbhw] ");
-    dstr(regs, tag);
-    dstr(regs, " dev=");
-    dhex8(regs, ior->iouh_DevAddr);
-    dstr(regs, " ep=");
-    dhex8(regs, ior->iouh_Endpoint);
-    dstr(regs, " len=");
-    dhex16(regs, ior->iouh_Length);
-    dstr(regs, " fl=");
-    dhex16(regs, ior->iouh_Flags);
-    dstr(regs, " split=");
-    dhex8(regs, (ior->iouh_Flags & UHFF_SPLITTRANS) ? 1 : 0);
-    dstr(regs, "\r\n");
+    (void)unit;
+    (void)tag;
+    zzusb_engine_diag_record(ZZUSB_DRIVER_EVENT_INTERRUPT,
+                             ZZUSB_ENGINE_STATUS_PENDING,
+                             active_diag_request_id(),
+                             ProtocolStates[0].controller_epoch,
+                             ior->iouh_DevAddr, ior->iouh_Endpoint,
+                             ior->iouh_Dir == UHDIR_IN ? 0x80U : 0U,
+                             diag_topology(ior), ior->iouh_Interval,
+                             ior->iouh_Length, WorkSequence);
 }
 
 static void trace_hub_int_data(struct ZZUSBUnit *unit,
@@ -316,35 +507,27 @@ static void trace_hub_int_data(struct ZZUSBUnit *unit,
                                uint32_t actual,
                                volatile uint8_t *data)
 {
-    void *regs = unit->zz_Registers;
+    uint32_t detail;
 
+    (void)unit;
     if (ior->iouh_Dir != UHDIR_IN || ior->iouh_Length > 2 || actual == 0)
         return;
-    for (uint32_t i = 0; i < actual && i < 2; i++) {
-        if (data[i] != 0)
-            goto nonzero;
-    }
-    return;
-
-nonzero:
-    dstr(regs, "[zzusbhw] INT_DATA dev=");
-    dhex8(regs, ior->iouh_DevAddr);
-    dstr(regs, " ep=");
-    dhex8(regs, ior->iouh_Endpoint);
-    dstr(regs, " act=");
-    dhex16(regs, actual);
-    dstr(regs, " d=");
+    detail = actual << 16;
     for (uint32_t i = 0; i < actual && i < 2; i++)
-        dhex8(regs, data[i]);
-    dstr(regs, "\r\n");
+        detail |= (uint32_t)data[i] << (8U * (1U - i));
+    if ((detail & 0xffffU) == 0)
+        return;
+
+    zzusb_engine_diag_record(ZZUSB_DRIVER_EVENT_INTERRUPT,
+                             ZZUSB_ENGINE_STATUS_OK,
+                             active_diag_request_id(),
+                             ProtocolStates[0].controller_epoch,
+                             ior->iouh_DevAddr, ior->iouh_Endpoint,
+                             0x80U, diag_topology(ior),
+                             ior->iouh_Interval, detail,
+                             WorkSequence);
 }
 
-static int is_hid_set_idle(struct IOUsbHWReq *ior)
-{
-    return ior->iouh_SetupData.bmRequestType == 0x21 &&
-           ior->iouh_SetupData.bRequest == 0x0a &&
-           ior->iouh_Length == 0;
-}
 
 /*
  * Alignment-safe memcpy. Replaces AmigaOS CopyMem, which has been
@@ -418,13 +601,20 @@ static void clear_int_slot(struct ZZIntPendingSlot *slot)
 {
     slot->unit = NULL;
     slot->ior = NULL;
+    slot->armed = 0;
+    slot->abort_requested = 0;
     slot->idle_polls = 0;
+    slot->arm_in_progress = 0;
+    slot->rearm_required = 0;
+    slot->stop_pending = 0;
+    slot->arm_generation = 0;
 }
 
 static void reset_int_slots(void)
 {
     for (int i = 0; i < ZZ_INT_PENDING_SLOTS; i++)
         clear_int_slot(&IntPendingSlots[i]);
+    memset(LegacyIntPollCursor, 0, sizeof(LegacyIntPollCursor));
 }
 
 static struct ZZIntPendingSlot *find_int_slot_for_ior(struct IOUsbHWReq *ior)
@@ -447,15 +637,23 @@ static int queue_int_ior(struct ZZUSBUnit *unit,
 
     for (int i = 0; i < ZZ_INT_PENDING_SLOTS; i++) {
         struct ZZIntPendingSlot *slot = &IntPendingSlots[i];
+
         if (int_slot_matches(slot, unit, ior)) {
+            if (slot->stop_pending || slot->arm_in_progress)
+                return 0;
             if (slot->ior && slot->ior != ior) {
                 if (replaced)
                     *replaced = slot->ior;
                 slot->ior->iouh_Actual = 0;
                 slot->ior->iouh_Req.io_Error = IOERR_ABORTED;
+                if (zzusb_interrupt_rearm_on_replace(
+                        slot->armed, ior->iouh_Dir == UHDIR_IN,
+                        int_arm_parameters_changed(unit, slot->ior, ior)))
+                    slot->rearm_required = 1;
             }
             slot->unit = unit;
             slot->ior = ior;
+            slot->abort_requested = 0;
             slot->idle_polls = 0;
             return 1;
         }
@@ -468,7 +666,13 @@ static int queue_int_ior(struct ZZUSBUnit *unit,
 
     free_slot->unit = unit;
     free_slot->ior = ior;
+    free_slot->armed = 0;
+    free_slot->arm_in_progress = 0;
+    free_slot->abort_requested = 0;
     free_slot->idle_polls = 0;
+    free_slot->rearm_required = 0;
+    free_slot->stop_pending = 0;
+    free_slot->arm_generation = 0;
     return 1;
 }
 
@@ -479,6 +683,48 @@ static int int_pending_for_unit(struct ZZUSBUnit *unit)
             return 1;
     }
     return 0;
+}
+
+static uint16_t generation_for_unit(struct ZZUSBUnit *unit)
+{
+    if (PollBase) {
+        for (int i = 0; i < ZZ_NUM_PORTS; i++)
+            if (&PollBase->zz_Units[i] == unit)
+                return UnitGeneration[i] ? UnitGeneration[i] : 1;
+    }
+    return 1;
+}
+
+static void bump_unit_generation(struct ZZUSBUnit *unit)
+{
+    if (!PollBase)
+        return;
+    for (int i = 0; i < ZZ_NUM_PORTS; i++) {
+        if (&PollBase->zz_Units[i] != unit)
+            continue;
+        UnitGeneration[i]++;
+        if (!UnitGeneration[i])
+            UnitGeneration[i] = 1;
+        return;
+    }
+}
+static void finish_reset_periodic_for_unit(struct ZZUSBUnit *unit)
+{
+    for (int slot = 0; slot < ZZ_INT_PENDING_SLOTS; slot++) {
+        if (IntPendingSlots[slot].unit != unit)
+            continue;
+        IntPendingSlots[slot].armed = 0;
+        IntPendingSlots[slot].arm_in_progress = 0;
+        IntPendingSlots[slot].arm_generation = 0;
+    }
+}
+
+static void finish_reset_simple_iso_for_unit(struct ZZUSBUnit *unit)
+{
+    for (int slot = 0; slot < ZZ_NUM_PORTS; slot++)
+        if (SimpleIsoCleanup[slot].unit == unit)
+            memset(&SimpleIsoCleanup[slot], 0,
+                   sizeof(SimpleIsoCleanup[slot]));
 }
 
 static int is_addr0_ep0(struct IOUsbHWReq *ior)
@@ -543,6 +789,34 @@ static void fill_split_fields(struct ZZUSBCommand *cmd,
     }
 }
 
+static void fill_int_arm_command(struct ZZUSBCommand *cmd,
+                                 struct ZZUSBUnit *unit,
+                                 struct IOUsbHWReq *ior)
+{
+    memset(cmd, 0, sizeof(*cmd));
+    cmd->cmd = ZZUSB_CMD_PERIODIC_ARM;
+    cmd->dev_addr = ior->iouh_DevAddr;
+    cmd->endpoint = ior->iouh_Endpoint;
+    cmd->direction = ior->iouh_Dir == UHDIR_IN ? 0x80 : 0;
+    cmd->max_pkt_size = ior->iouh_MaxPktSize;
+    cmd->speed = request_speed(unit, ior);
+    cmd->data_length = ior->iouh_Length;
+    cmd->interval = ior->iouh_Interval;
+    fill_split_fields(cmd, unit, ior);
+}
+
+static int int_arm_parameters_changed(struct ZZUSBUnit *unit,
+                                      struct IOUsbHWReq *old_ior,
+                                      struct IOUsbHWReq *new_ior)
+{
+    struct ZZUSBCommand old_cmd;
+    struct ZZUSBCommand new_cmd;
+
+    fill_int_arm_command(&old_cmd, unit, old_ior);
+    fill_int_arm_command(&new_cmd, unit, new_ior);
+    return memcmp(&old_cmd, &new_cmd, sizeof(old_cmd)) != 0;
+}
+
 static void fill_root_reset_hint(struct ZZUSBCommand *cmd,
                                  struct ZZUSBUnit *unit)
 {
@@ -577,79 +851,1676 @@ static int is_zero_report(volatile uint8_t *buf, uint32_t len)
     return 1;
 }
 
-static int send_usb_cmd(volatile uint8_t *base, struct ZZUSBCommand *cmd,
-                        void *data_out, uint32_t data_out_len)
+static struct ZZUSBProtocolState *protocol_state_for(
+    volatile uint8_t *base)
+{
+    for (int i = 0; i < ZZ_NUM_PORTS; ++i) {
+        if (ProtocolStates[i].registers == base)
+            return &ProtocolStates[i];
+    }
+    return NULL;
+}
+static uint32_t usb_proxy_data_limit(volatile uint8_t *base)
+{
+    struct ZZUSBProtocolState *state = protocol_state_for(base);
+
+    return state && state->mode == ZZUSB_PROTOCOL_V2 ?
+        ZZUSB_V2_DATA_MAX : ZZUSB_MAX_XFER;
+}
+
+static uint32_t next_request_id(struct ZZUSBProtocolState *state)
+{
+    uint32_t id = state->next_request_id++;
+
+    if (id == 0) {
+        id = 1;
+        state->next_request_id = 2;
+    }
+    return id;
+}
+
+static int worker_wait_us(uint32_t microseconds)
+{
+    struct timerequest *request = WorkerTimerRequest;
+
+    if (!request || !WorkerTimerMask)
+        return 0;
+    SetSignal(0, WorkerTimerMask);
+    request->tr_node.io_Command = TR_ADDREQUEST;
+    request->tr_time.tv_secs = microseconds / 1000000UL;
+    request->tr_time.tv_micro = microseconds % 1000000UL;
+    SendIO((struct IORequest *)request);
+    Wait(WorkerTimerMask);
+    WaitIO((struct IORequest *)request);
+    return 1;
+}
+
+static int worker_now_us(uint64_t *now_us)
+{
+    struct timerequest *request = WorkerTimerRequest;
+
+    if (!request || !now_us)
+        return 0;
+    request->tr_node.io_Command = TR_GETSYSTIME;
+    if (DoIO((struct IORequest *)request) != 0)
+        return 0;
+    *now_us = (uint64_t)request->tr_time.tv_secs * 1000000ULL +
+              request->tr_time.tv_micro;
+    return 1;
+}
+
+static int worker_wait_iso_event(uint32_t microseconds)
+{
+    struct timerequest *request = WorkerTimerRequest;
+    ULONG event_mask = PollBase ? PollBase->zz_PollSignal : 0;
+    int timer_completed;
+
+    if (!request || !WorkerTimerMask)
+        return -1;
+    SetSignal(0, WorkerTimerMask);
+    request->tr_node.io_Command = TR_ADDREQUEST;
+    request->tr_time.tv_secs = microseconds / 1000000UL;
+    request->tr_time.tv_micro = microseconds % 1000000UL;
+    SendIO((struct IORequest *)request);
+    Wait(WorkerTimerMask | event_mask);
+    timer_completed = CheckIO((struct IORequest *)request) != NULL;
+    if (!timer_completed)
+        AbortIO((struct IORequest *)request);
+    WaitIO((struct IORequest *)request);
+    return timer_completed;
+}
+
+static int active_work_aborted(void)
+{
+    return ActiveWorkSlot &&
+           ActiveWorkSlot->lifecycle.abort_requested;
+}
+
+static int send_usb_cmd_wire(volatile uint8_t *base,
+                             struct ZZUSBCommand *cmd,
+                             void *data_out, uint32_t data_out_len,
+                             struct ZZUSBProtocolState *state,
+                             int use_v2, int is_query, int honor_abort)
 {
     volatile struct ZZUSBCommand *result =
         (volatile struct ZZUSBCommand*)(base + 0xa000);
-    volatile int delay;
+    volatile struct ZZUSBProtocolExtension *result_ext =
+        (volatile struct ZZUSBProtocolExtension*)
+            (base + 0xa000 + ZZUSB_CMD_SIZE);
+    struct ZZUSBProtocolExtension ext;
+    uint32_t request_id = 0;
+    uint32_t max_data = use_v2 ? ZZUSB_V2_DATA_MAX : ZZUSB_MAX_XFER;
+    uint32_t elapsed_us;
+    uint32_t outer_limit_us;
+
+    if (data_out_len > max_data)
+        return ZZUSB_STATUS_BADPARAM;
+    if (!WorkerTimerRequest || !WorkerTimerMask)
+        return ZZUSB_STATUS_HOSTERROR;
+
+    switch (cmd->cmd) {
+    case ZZUSB_CMD_CONTROL_XFER:
+        cmd->xfer_type = ZZUSB_XFER_CONTROL;
+        break;
+    case ZZUSB_CMD_BULK_XFER:
+        cmd->xfer_type = ZZUSB_XFER_BULK;
+        break;
+    case ZZUSB_CMD_INT_XFER:
+        cmd->xfer_type = ZZUSB_XFER_INTERRUPT;
+        break;
+    case ZZUSB_CMD_PERIODIC_ARM:
+    case ZZUSB_CMD_PERIODIC_REAP:
+    case ZZUSB_CMD_PERIODIC_STOP:
+        cmd->xfer_type = ZZUSB_XFER_INTERRUPT;
+        break;
+    case ZZUSB_CMD_ISO_XFER:
+    case ZZUSB_CMD_ISO_QUEUE:
+    case ZZUSB_CMD_ISO_REAP:
+    case ZZUSB_CMD_ISO_STOP:
+        cmd->xfer_type = ZZUSB_XFER_ISO;
+        break;
+    default:
+        break;
+    }
 
     cmd->status = ZZUSB_STATUS_PENDING;
-    /*
-     * Use safe_copy for everything. AmigaOS CopyMem has been observed
-     * to silently no-op on this toolchain when either src or dst is
-     * at an odd address. Poseidon can hand us iouh_Data buffers at
-     * arbitrary alignments, so play it safe across the board.
-     */
     safe_copy(cmd, (void*)(base + 0xa000), ZZUSB_CMD_SIZE);
 
-    if (data_out && data_out_len > 0 && data_out_len <= ZZUSB_MAX_XFER) {
-        safe_copy(data_out, (void*)(base + 0xa000 + ZZUSB_DATA_OFFSET), data_out_len);
+    memset(&ext, 0, sizeof(ext));
+    if (use_v2) {
+        request_id = next_request_id(state);
+        ext.version = ZZUSB_PROTOCOL_VERSION;
+        ext.header_size = ZZUSB_V2_HEADER_SIZE;
+        ext.request_id = request_id;
+        ext.controller_epoch = is_query ? 0 : state->controller_epoch;
+        ext.capabilities = state->capabilities;
+        safe_copy(&ext, (void*)(base + 0xa000 + ZZUSB_CMD_SIZE),
+                  sizeof(ext));
+    }
+
+    if (data_out && data_out_len > 0) {
+        safe_copy(data_out,
+                  (void*)(base + 0xa000 + ZZUSB_DATA_OFFSET),
+                  data_out_len);
     }
 
     CacheClearU();
+    *((volatile uint16_t*)(base + ZZ_REG_USB_PROXY_CMD)) =
+        cmd->cmd | (use_v2 ? ZZUSB_DOORBELL_V2 : 0);
 
-    *((volatile uint16_t*)(base + ZZ_REG_USB_PROXY_CMD)) = cmd->cmd;
-
-    /*
-     * Tight busy-wait poll for firmware response.
-     *
-     * Prior revisions used an inner delay loop of 1000 empty
-     * iterations between status reads (~200us on 68020 per check).
-     * For a typical 1-5ms bulk transfer that wastes dozens of
-     * 200us windows, adding milliseconds of per-round-trip
-     * overhead that compounds over every bulk chunk. Benchmark
-     * showed this as the dominant throughput bottleneck vs the
-     * Deneb reference.
-     *
-     * Replaced with a short inner delay (~10us) so the poll rate
-     * matches the firmware response timing without hammering the
-     * Zorro bus. Outer loop still bounded by cmd->timeout_ms so
-     * a wedged firmware releases zz_Lock within the specified
-     * deadline.
-     *
-     * Inner delay ~10us + status-read overhead ~5us = ~15us per
-     * iteration. Outer count = timeout_ms * 66 gives us roughly
-     * the right wall-clock bound. timeout_ms=0 falls back to
-     * ~3 sec (200,000 iterations).
-     */
     {
-        uint32_t outer_limit = cmd->timeout_ms
-                               ? (uint32_t)cmd->timeout_ms * 66
-                               : 200000;
-        uint32_t timeout = outer_limit;
-        while (timeout-- > 0) {
-            if (result->status != ZZUSB_STATUS_PENDING) break;
-            delay = 50;        /* ~10us on 68020 */
-            while (delay--);
+        uint32_t firmware_ms = cmd->timeout_ms
+                               ? (uint32_t)cmd->timeout_ms
+                               : ZZUSB_PROXY_MAX_TIMEOUT_MS;
+        outer_limit_us = (firmware_ms + 150U) * 1000U;
+
+        for (elapsed_us = 0; elapsed_us < outer_limit_us;) {
+            uint32_t wait_us = 1000U;
+            int service_rt = ForegroundMailboxBase == base &&
+                             ForegroundMailboxUnit &&
+                             rt_iso_pending_for_unit(
+                                 ForegroundMailboxUnit);
+
+            CacheClearE((APTR)result,
+                        use_v2 ? ZZUSB_V2_HEADER_SIZE : ZZUSB_CMD_SIZE,
+                        CACRF_ClearD);
+            if (result->status != ZZUSB_STATUS_PENDING)
+                break;
+            if (honor_abort && active_work_aborted())
+                break;
+            if (service_rt) {
+                wait_us = rt_iso_service_limit_us(
+                    ForegroundMailboxUnit);
+                if (wait_us > 1000U)
+                    wait_us = 1000U;
+            }
+            if (wait_us > outer_limit_us - elapsed_us)
+                wait_us = outer_limit_us - elapsed_us;
+            if (!worker_wait_us(wait_us))
+                break;
+            elapsed_us += wait_us;
+            if (service_rt)
+                service_rt_iso_during_work(PollBase,
+                                           ForegroundMailboxUnit);
         }
     }
 
-    CacheClearU();
-
+    CacheClearE((APTR)result,
+                use_v2 ? ZZUSB_V2_HEADER_SIZE : ZZUSB_CMD_SIZE,
+                CACRF_ClearD);
     if (result->status == ZZUSB_STATUS_PENDING) {
-        dstr((void*)base, "[zzusbhw] CMD_TIMEOUT cmd=");
-        dhex8((void*)base, cmd->cmd);
-        dstr((void*)base, " dev=");
-        dhex8((void*)base, cmd->dev_addr);
-        dstr((void*)base, " ep=");
-        dhex8((void*)base, cmd->endpoint);
-        dstr((void*)base, " wait=");
-        dhex16((void*)base, cmd->timeout_ms);
-        dstr((void*)base, "\r\n");
+        if (honor_abort && active_work_aborted()) {
+            while (result->status == ZZUSB_STATUS_PENDING &&
+                   elapsed_us < outer_limit_us) {
+                uint32_t wait_us = 1000U;
+                int service_rt = ForegroundMailboxBase == base &&
+                                 ForegroundMailboxUnit &&
+                                 rt_iso_pending_for_unit(
+                                     ForegroundMailboxUnit);
+
+                if (service_rt) {
+                    wait_us = rt_iso_service_limit_us(
+                        ForegroundMailboxUnit);
+                    if (wait_us > 1000U)
+                        wait_us = 1000U;
+                }
+                if (wait_us > outer_limit_us - elapsed_us)
+                    wait_us = outer_limit_us - elapsed_us;
+                if (!worker_wait_us(wait_us))
+                    break;
+                elapsed_us += wait_us;
+                if (service_rt)
+                    service_rt_iso_during_work(PollBase,
+                                               ForegroundMailboxUnit);
+                CacheClearE((APTR)result,
+                            use_v2 ? ZZUSB_V2_HEADER_SIZE : ZZUSB_CMD_SIZE,
+                            CACRF_ClearD);
+            }
+            if (result->status == ZZUSB_STATUS_PENDING && state)
+                state->quarantined = 1;
+            zzusb_engine_diag_record(ZZUSB_DRIVER_EVENT_MAILBOX,
+                                     ZZUSB_ENGINE_STATUS_CANCELLED,
+                                     request_id, state->controller_epoch,
+                                     (uint16_t)cmd->dev_addr,
+                                     (uint8_t)cmd->endpoint,
+                                     (uint8_t)cmd->direction,
+                                     (uint16_t)((cmd->split_hub_addr << 8) |
+                                                (cmd->split_hub_port & 0xffU)),
+                                     cmd->flags, cmd->timeout_ms,
+                                     WorkSequence);
+            return ZZUSB_STATUS_CANCELLED;
+        }
+        if (state)
+            state->quarantined = 1;
+        zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_TIMEOUT);
+        zzusb_engine_diag_record(ZZUSB_DRIVER_EVENT_MAILBOX,
+                                 ZZUSB_ENGINE_STATUS_TIMEOUT,
+                                 request_id, state->controller_epoch,
+                                 (uint16_t)cmd->dev_addr,
+                                 (uint8_t)cmd->endpoint,
+                                 (uint8_t)cmd->direction,
+                                 (uint16_t)((cmd->split_hub_addr << 8) |
+                                            (cmd->split_hub_port & 0xffU)),
+                                 cmd->flags, cmd->timeout_ms,
+                                 WorkSequence);
+        return ZZUSB_STATUS_TIMEOUT;
+    }
+    {
+        uint32_t response_length = result->actual_length;
+
+        if (response_length > max_data) {
+            if (state)
+                state->quarantined = 1;
+            return ZZUSB_STATUS_HOSTERROR;
+        }
+        if (response_length)
+            CacheClearE((APTR)(base + 0xa000 + ZZUSB_DATA_OFFSET),
+                        response_length, CACRF_ClearD);
+    }
+
+    if (use_v2) {
+        uint32_t response_id = result_ext->request_id;
+        uint32_t response_epoch = result_ext->controller_epoch;
+
+        if (response_id != request_id) {
+            state->quarantined = 1;
+            zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_LATE_COMPLETION);
+            zzusb_engine_diag_record(ZZUSB_DRIVER_EVENT_LATE_COMPLETION,
+                                     ZZUSB_ENGINE_STATUS_STALE,
+                                     response_id, response_epoch,
+                                     (uint16_t)cmd->dev_addr,
+                                     (uint8_t)cmd->endpoint,
+                                     (uint8_t)cmd->direction,
+                                     0, cmd->flags, request_id,
+                                     WorkSequence);
+            return ZZUSB_STATUS_STALE;
+        }
+        if (!is_query && response_epoch != state->controller_epoch) {
+            if (cmd->cmd == ZZUSB_CMD_RESET_PORT ||
+                result->status == ZZUSB_STATUS_STALE) {
+                state->controller_epoch = response_epoch;
+            } else {
+                state->quarantined = 1;
+                zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_STALE);
+                zzusb_engine_diag_record(ZZUSB_DRIVER_EVENT_STALE,
+                                         ZZUSB_ENGINE_STATUS_STALE,
+                                         response_id, response_epoch,
+                                         (uint16_t)cmd->dev_addr,
+                                         (uint8_t)cmd->endpoint,
+                                         (uint8_t)cmd->direction,
+                                         0, cmd->flags,
+                                         state->controller_epoch,
+                                         WorkSequence);
+                return ZZUSB_STATUS_STALE;
+            }
+        }
+        if (is_query)
+            state->controller_epoch = response_epoch;
+        state->capabilities = result_ext->capabilities;
+        if (result->status == ZZUSB_STATUS_STALE) {
+            zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_STALE);
+            zzusb_engine_diag_record(ZZUSB_DRIVER_EVENT_STALE,
+                                     ZZUSB_ENGINE_STATUS_STALE,
+                                     response_id, response_epoch,
+                                     (uint16_t)cmd->dev_addr,
+                                     (uint8_t)cmd->endpoint,
+                                     (uint8_t)cmd->direction,
+                                     0, cmd->flags, 0, WorkSequence);
+        }
     }
 
     return result->status;
+}
+
+static int send_usb_cmd_sideband(
+    volatile uint8_t *base, struct ZZUSBCommand *cmd,
+    void *data_out, uint32_t data_out_len,
+    void *data_in, uint32_t data_in_capacity,
+    struct ZZUSBProtocolState *state, uint32_t service_limit_us)
+{
+    volatile struct ZZUSBCommand *result =
+        (volatile struct ZZUSBCommand *)
+            (base + 0xa000 + ZZUSB_MAINT_HEADER_OFFSET);
+    volatile struct ZZUSBProtocolExtension *result_ext =
+        (volatile struct ZZUSBProtocolExtension *)
+            (base + 0xa000 + ZZUSB_MAINT_HEADER_OFFSET + ZZUSB_CMD_SIZE);
+    struct ZZUSBProtocolExtension ext;
+    uint32_t request_id;
+    uint32_t elapsed_us;
+    uint32_t outer_limit_us;
+    uint32_t response_length;
+    uint16_t status;
+
+    if (!state || state->mode != ZZUSB_PROTOCOL_V2 ||
+        !(state->capabilities & ZZUSB_CAP_MAINTENANCE) ||
+        state->quarantined || !WorkerTimerRequest || !WorkerTimerMask)
+        return ZZUSB_STATUS_HOSTERROR;
+    if (data_out_len > ZZUSB_MAINT_DATA_MAX ||
+        cmd->data_length > ZZUSB_MAINT_DATA_MAX)
+        return ZZUSB_STATUS_BADPARAM;
+
+    /*
+     * The maintenance mailbox has no doorbell. Publish its payload and
+     * identity while status is terminal, then publish PENDING last so the
+     * firmware cannot consume a partially written command.
+     */
+    cmd->xfer_type = ZZUSB_XFER_ISO;
+    cmd->status = ZZUSB_STATUS_OK;
+    safe_copy(cmd, (void *)result, ZZUSB_CMD_SIZE);
+    memset(&ext, 0, sizeof(ext));
+    request_id = next_request_id(state);
+    ext.version = ZZUSB_PROTOCOL_VERSION;
+    ext.header_size = ZZUSB_V2_HEADER_SIZE;
+    ext.request_id = request_id;
+    ext.controller_epoch = state->controller_epoch;
+    ext.capabilities = state->capabilities;
+    safe_copy(&ext, (void *)result_ext, sizeof(ext));
+    if (data_out && data_out_len)
+        safe_copy(data_out,
+                  (void *)(base + 0xa000 + ZZUSB_MAINT_DATA_OFFSET),
+                  data_out_len);
+    CacheClearU();
+    result->status = ZZUSB_STATUS_PENDING;
+    cmd->status = ZZUSB_STATUS_PENDING;
+    CacheClearU();
+
+    outer_limit_us = ((cmd->timeout_ms ? cmd->timeout_ms :
+                       ZZUSB_PROXY_MAX_TIMEOUT_MS) + 150U) * 1000U;
+    if (service_limit_us && outer_limit_us > service_limit_us)
+        outer_limit_us = service_limit_us;
+    for (elapsed_us = 0; elapsed_us < outer_limit_us;) {
+        uint32_t wait_us = ZZUSB_MAINT_POLL_US;
+
+        CacheClearE((APTR)result, ZZUSB_V2_HEADER_SIZE, CACRF_ClearD);
+        if (result->status != ZZUSB_STATUS_PENDING)
+            break;
+        if (wait_us > outer_limit_us - elapsed_us)
+            wait_us = outer_limit_us - elapsed_us;
+        if (!worker_wait_us(wait_us))
+            break;
+        elapsed_us += wait_us;
+    }
+    CacheClearE((APTR)result, ZZUSB_V2_HEADER_SIZE, CACRF_ClearD);
+    if (result->status == ZZUSB_STATUS_PENDING) {
+        state->maintenance_quarantined = 1;
+        state->quarantined = 1;
+        zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_TIMEOUT);
+        zzusb_engine_diag_record(
+            ZZUSB_DRIVER_EVENT_MAILBOX, ZZUSB_ENGINE_STATUS_TIMEOUT,
+            request_id, state->controller_epoch, (uint16_t)cmd->dev_addr,
+            (uint8_t)cmd->endpoint, (uint8_t)cmd->direction,
+            (uint16_t)((cmd->split_hub_addr << 8) |
+                       (cmd->split_hub_port & 0xffU)),
+            cmd->flags, cmd->timeout_ms, WorkSequence);
+        return ZZUSB_STATUS_TIMEOUT;
+    }
+    if (result_ext->request_id != request_id ||
+        result_ext->controller_epoch != state->controller_epoch) {
+        state->maintenance_quarantined = 1;
+        state->quarantined = 1;
+        zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_LATE_COMPLETION);
+        return ZZUSB_STATUS_STALE;
+    }
+
+    response_length = result->actual_length;
+    if (response_length > ZZUSB_MAINT_DATA_MAX ||
+        response_length > data_in_capacity ||
+        (response_length && !data_in)) {
+        state->maintenance_quarantined = 1;
+        state->quarantined = 1;
+        return ZZUSB_STATUS_HOSTERROR;
+    }
+    if (response_length) {
+        CacheClearE((APTR)(base + 0xa000 + ZZUSB_MAINT_DATA_OFFSET),
+                    response_length, CACRF_ClearD);
+        safe_copy((void *)(base + 0xa000 + ZZUSB_MAINT_DATA_OFFSET),
+                  data_in, response_length);
+    }
+    state->capabilities = result_ext->capabilities;
+    status = result->status;
+    safe_copy((void *)result, cmd, ZZUSB_CMD_SIZE);
+    return status;
+}
+
+
+static int negotiate_usb_proxy(volatile uint8_t *base,
+                               struct ZZUSBProtocolState *state,
+                               int allow_legacy)
+{
+    struct ZZUSBCommand query;
+    int status;
+    int unsafe;
+
+    memset(state, 0, sizeof(*state));
+    state->registers = base;
+    state->next_request_id = 1;
+    state->mode = ZZUSB_PROTOCOL_LEGACY;
+
+    memset(&query, 0, sizeof(query));
+    query.cmd = ZZUSB_CMD_QUERY_CAPS;
+    query.timeout_ms = 100;
+    status = send_usb_cmd_wire(base, &query, NULL, 0, state, 1, 1, 0);
+    unsafe = state->quarantined;
+    if (status == ZZUSB_STATUS_OK &&
+        state->controller_epoch != 0 &&
+        (state->capabilities & ZZUSB_CAP_BASE) == ZZUSB_CAP_BASE) {
+        state->mode = ZZUSB_PROTOCOL_V2;
+        state->quarantined = 0;
+        return 1;
+    }
+
+    state->next_request_id = 1;
+    state->controller_epoch = 0;
+    state->capabilities = 0;
+    state->mode = ZZUSB_PROTOCOL_LEGACY;
+    state->quarantined = unsafe || !allow_legacy;
+    return 0;
+}
+
+/*
+ * Never overwrite a quarantined primary or maintenance mailbox. Once every
+ * in-flight command is terminal, a v2 QUERY_CAPS establishes a fresh
+ * request-ID/epoch fence. Recovery never falls back to unfenced legacy
+ * traffic.
+ */
+static void recover_quarantined_proxy(volatile uint8_t *base)
+{
+    struct ZZUSBProtocolState *state = protocol_state_for(base);
+    volatile struct ZZUSBCommand *result =
+        (volatile struct ZZUSBCommand *)(base + 0xa000);
+    volatile struct ZZUSBCommand *maintenance =
+        (volatile struct ZZUSBCommand *)
+            (base + 0xa000 + ZZUSB_MAINT_HEADER_OFFSET);
+
+    if (!state || !state->quarantined)
+        return;
+    if (state->maintenance_quarantined) {
+        CacheClearE((APTR)maintenance, ZZUSB_V2_HEADER_SIZE,
+                    CACRF_ClearD);
+        if (maintenance->status == ZZUSB_STATUS_PENDING)
+            return;
+        state->maintenance_quarantined = 0;
+    }
+    CacheClearE((APTR)result, ZZUSB_V2_HEADER_SIZE, CACRF_ClearD);
+    if (result->status == ZZUSB_STATUS_PENDING)
+        return;
+    if (negotiate_usb_proxy(base, state, 0)) {
+        zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_RECOVERY);
+        zzusb_engine_diag_record(
+            ZZUSB_DRIVER_EVENT_RECOVERY, ZZUSB_ENGINE_STATUS_OK,
+            active_diag_request_id(), state->controller_epoch,
+            0, 0, 0, 0, 0, state->capabilities, WorkSequence);
+    }
+}
+
+static int send_usb_cmd_scoped(volatile uint8_t *base,
+                               struct ZZUSBCommand *cmd,
+                               void *data_out, uint32_t data_out_len,
+                               int honor_abort)
+{
+    struct ZZUSBProtocolState *state = protocol_state_for(base);
+
+    if (state && state->quarantined)
+        return ZZUSB_STATUS_HOSTERROR;
+    return send_usb_cmd_wire(
+        base, cmd, data_out, data_out_len, state,
+        state && state->mode == ZZUSB_PROTOCOL_V2, 0, honor_abort);
+}
+
+static int send_usb_cmd(volatile uint8_t *base, struct ZZUSBCommand *cmd,
+                        void *data_out, uint32_t data_out_len)
+{
+    return send_usb_cmd_scoped(base, cmd, data_out, data_out_len, 1);
+}
+
+static int send_usb_cmd_maintenance(
+    volatile uint8_t *base, struct ZZUSBCommand *cmd,
+    void *data_out, uint32_t data_out_len,
+    void *data_in, uint32_t data_in_capacity)
+{
+    struct ZZUSBProtocolState *state = protocol_state_for(base);
+    volatile struct ZZUSBCommand *result;
+    uint32_t response_length;
+    int status;
+
+    if (ForegroundMailboxBase == base && ForegroundMailboxUnit)
+        return send_usb_cmd_sideband(
+            base, cmd, data_out, data_out_len,
+            data_in, data_in_capacity, state,
+            rt_iso_service_limit_us(ForegroundMailboxUnit));
+
+    status = send_usb_cmd_scoped(base, cmd, data_out, data_out_len, 0);
+    if (status != ZZUSB_STATUS_OK)
+        return status;
+    result = (volatile struct ZZUSBCommand *)(base + 0xa000);
+    response_length = result->actual_length;
+    if (response_length > data_in_capacity ||
+        (response_length && !data_in)) {
+        if (state)
+            state->quarantined = 1;
+        return ZZUSB_STATUS_HOSTERROR;
+    }
+    if (response_length)
+        safe_copy((void *)(base + 0xa000 + ZZUSB_DATA_OFFSET),
+                  data_in, response_length);
+    safe_copy((void *)result, cmd, ZZUSB_CMD_SIZE);
+    return status;
+}
+
+static int stop_status_retired(uint16_t status)
+{
+    return status == ZZUSB_STATUS_OK ||
+           status == ZZUSB_STATUS_NAK ||
+           status == ZZUSB_STATUS_OFFLINE ||
+           status == ZZUSB_STATUS_STALE;
+}
+
+static uint16_t stop_periodic_slot(struct ZZIntPendingSlot *slot)
+{
+    struct ZZUSBCommand cmd;
+    struct ZZUSBProtocolState *state;
+    volatile uint8_t *base;
+    struct IOUsbHWReq *ior;
+    uint16_t status;
+
+    if (!slot || !slot->armed)
+        return ZZUSB_STATUS_OK;
+    if (!slot->unit || !slot->ior)
+        return ZZUSB_STATUS_BADPARAM;
+
+    ior = slot->ior;
+    base = (volatile uint8_t *)slot->unit->zz_Registers;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.cmd = ZZUSB_CMD_PERIODIC_STOP;
+    cmd.dev_addr = ior->iouh_DevAddr;
+    cmd.endpoint = ior->iouh_Endpoint;
+    cmd.direction = (ior->iouh_Dir == UHDIR_IN) ? 0x80 : 0x00;
+    cmd.max_pkt_size = ior->iouh_MaxPktSize;
+    cmd.speed = request_speed(slot->unit, ior);
+    cmd.interval = ior->iouh_Interval;
+    cmd.reserved = slot->arm_generation;
+    cmd.timeout_ms = 100;
+    fill_split_fields(&cmd, slot->unit, ior);
+    status = send_usb_cmd_with_rt_service(
+        base, &cmd, NULL, 0, slot->unit);
+    if (stop_status_retired(status)) {
+        slot->armed = 0;
+        slot->arm_generation = 0;
+    } else {
+        state = protocol_state_for(base);
+        if (state)
+            state->quarantined = 1;
+    }
+    return status;
+}
+
+static BYTE map_proxy_status(uint16_t status)
+{
+    if (ActiveWorkSlot)
+        ActiveWorkSlot->completion_status = status;
+    switch (zzusb_engine_classify_status(status)) {
+    case ZZUSB_ERROR_NONE:          return UHIOERR_NO_ERROR;
+    case ZZUSB_ERROR_NAK:           return UHIOERR_NAK;
+    case ZZUSB_ERROR_STALL:         return UHIOERR_STALL;
+    case ZZUSB_ERROR_TIMEOUT:       return UHIOERR_TIMEOUT;
+    case ZZUSB_ERROR_OFFLINE:       return UHIOERR_USBOFFLINE;
+    case ZZUSB_ERROR_CRC:           return UHIOERR_CRCERROR;
+    case ZZUSB_ERROR_BABBLE:        return UHIOERR_BABBLE;
+    case ZZUSB_ERROR_OVERFLOW:      return UHIOERR_OVERFLOW;
+    case ZZUSB_ERROR_UNDERFLOW:     return UHIOERR_RUNTPACKET;
+    case ZZUSB_ERROR_BAD_PARAMETER:
+    case ZZUSB_ERROR_UNSUPPORTED:   return UHIOERR_BADPARAMS;
+    case ZZUSB_ERROR_NO_MEMORY:     return UHIOERR_OUTOFMEMORY;
+    case ZZUSB_ERROR_CANCELLED:     return IOERR_ABORTED;
+    case ZZUSB_ERROR_HOST:
+    default:                        return UHIOERR_HOSTERROR;
+    }
+}
+static uint16_t proxy_status_for_io_error(BYTE error)
+{
+    if (error == 0)
+        return ZZUSB_STATUS_OK;
+    if (error == IOERR_ABORTED)
+        return ZZUSB_STATUS_CANCELLED;
+    if (error == IOERR_NOCMD)
+        return ZZUSB_STATUS_UNSUPPORTED;
+    if (error == UHIOERR_NAK)
+        return ZZUSB_STATUS_NAK;
+    if (error == UHIOERR_STALL)
+        return ZZUSB_STATUS_STALL;
+    if (error == UHIOERR_TIMEOUT)
+        return ZZUSB_STATUS_TIMEOUT;
+    if (error == UHIOERR_USBOFFLINE)
+        return ZZUSB_STATUS_OFFLINE;
+    if (error == UHIOERR_CRCERROR)
+        return ZZUSB_STATUS_CRC;
+    if (error == UHIOERR_BABBLE)
+        return ZZUSB_STATUS_BABBLE;
+    if (error == UHIOERR_OVERFLOW)
+        return ZZUSB_STATUS_OVERRUN;
+    if (error == UHIOERR_RUNTPACKET)
+        return ZZUSB_STATUS_UNDERRUN;
+    if (error == UHIOERR_BADPARAMS ||
+        error == UHIOERR_PKTTOOLARGE)
+        return ZZUSB_STATUS_BADPARAM;
+    if (error == UHIOERR_OUTOFMEMORY)
+        return ZZUSB_STATUS_NOMEM;
+    return ZZUSB_STATUS_HOSTERROR;
+}
+
+static ULONG iso_public_capabilities(struct ZZUSBUnit *unit)
+{
+    struct ZZUSBProtocolState *state;
+    ULONG capabilities = UHCF_USB20;
+
+    if (!unit)
+        return capabilities;
+    state = protocol_state_for((volatile uint8_t *)unit->zz_Registers);
+    if (!state || state->mode != ZZUSB_PROTOCOL_V2 || state->quarantined)
+        return capabilities;
+    if (state->capabilities & ZZUSB_CAP_ISO_SIMPLE)
+        capabilities |= UHCF_ISO;
+    if (UtilityBase &&
+        (state->capabilities & ZZUSB_CAP_ISO_REALTIME))
+        capabilities |= UHCF_RT_ISO;
+    return capabilities;
+}
+
+static uint16_t iso_encoded_max_packet(const struct IOUsbHWReq *ior)
+{
+    uint16_t encoded = ior->iouh_MaxPktSize & 0x07ffU;
+
+    if (!(ior->iouh_Flags & UHFF_HIGHSPEED))
+        return encoded;
+    if ((ior->iouh_Flags & UHFF_MULTI_3) == UHFF_MULTI_3)
+        encoded |= 2U << 11;
+    else if (ior->iouh_Flags & UHFF_MULTI_2)
+        encoded |= 1U << 11;
+    return encoded;
+}
+
+static void fill_iso_command(struct ZZUSBCommand *cmd,
+                             struct ZZUSBUnit *unit,
+                             const struct IOUsbHWReq *ior,
+                             uint16_t command, uint32_t data_length)
+{
+    memset(cmd, 0, sizeof(*cmd));
+    cmd->cmd = command;
+    cmd->dev_addr = ior->iouh_DevAddr;
+    cmd->endpoint = ior->iouh_Endpoint;
+    cmd->direction = ior->iouh_Dir == UHDIR_IN ? 0x80 : 0;
+    cmd->max_pkt_size = iso_encoded_max_packet(ior);
+    cmd->data_length = data_length;
+    cmd->timeout_ms = 100;
+    cmd->speed = request_speed(unit, (struct IOUsbHWReq *)ior);
+    cmd->interval = ior->iouh_Interval;
+    cmd->reserved = generation_for_unit(unit);
+    fill_split_fields(cmd, unit, (struct IOUsbHWReq *)ior);
+}
+
+static BYTE map_iso_packet_status(uint8_t status, UWORD request_flags)
+{
+    switch (status) {
+    case ZZUSB_ISO_PACKET_OK:
+        return 0;
+    case ZZUSB_ISO_PACKET_SHORT:
+        return (request_flags & UHFF_ALLOWRUNTPKTS) ?
+               0 : UHIOERR_RUNTPACKET;
+    case ZZUSB_ISO_PACKET_MISSED:
+        return UHIOERR_TIMEOUT;
+    case ZZUSB_ISO_PACKET_UNDERRUN:
+        return UHIOERR_RUNTPACKET;
+    case ZZUSB_ISO_PACKET_OVERRUN:
+        return UHIOERR_OVERFLOW;
+    case ZZUSB_ISO_PACKET_CANCELLED:
+        return IOERR_ABORTED;
+    case ZZUSB_ISO_PACKET_OFFLINE:
+        return UHIOERR_USBOFFLINE;
+    case ZZUSB_ISO_PACKET_BABBLE:
+        return UHIOERR_BABBLE;
+    default:
+        return UHIOERR_HOSTERROR;
+    }
+}
+
+static uint16_t stop_iso_request(volatile uint8_t *base,
+                                 struct ZZUSBUnit *unit,
+                                 const struct IOUsbHWReq *ior)
+{
+    struct ZZUSBCommand cmd;
+
+    fill_iso_command(&cmd, unit, ior, ZZUSB_CMD_ISO_STOP, 0);
+    return send_usb_cmd_with_rt_service(
+        base, &cmd, NULL, 0, unit);
+}
+
+static struct ZZSimpleIsoCleanup *simple_iso_cleanup_for_unit(
+    struct ZZUSBUnit *unit)
+{
+    for (int index = 0; index < ZZ_NUM_PORTS; index++)
+        if (SimpleIsoCleanup[index].unit == unit)
+            return &SimpleIsoCleanup[index];
+    for (int index = 0; index < ZZ_NUM_PORTS; index++)
+        if (!SimpleIsoCleanup[index].pending)
+            return &SimpleIsoCleanup[index];
+    return NULL;
+}
+
+static int simple_iso_cleanup_pending(struct ZZUSBUnit *unit)
+{
+    struct ZZSimpleIsoCleanup *cleanup =
+        simple_iso_cleanup_for_unit(unit);
+
+    return cleanup && cleanup->pending;
+}
+
+static void schedule_simple_iso_cleanup(struct ZZUSBUnit *unit,
+                                        const struct IOUsbHWReq *ior)
+{
+    struct ZZSimpleIsoCleanup *cleanup =
+        simple_iso_cleanup_for_unit(unit);
+
+    if (!cleanup)
+        return;
+    memset(cleanup, 0, sizeof(*cleanup));
+    cleanup->unit = unit;
+    fill_iso_command(
+        &cleanup->stop_cmd, unit, ior, ZZUSB_CMD_ISO_STOP, 0);
+    cleanup->pending = 1;
+}
+
+static void retire_simple_iso_request(volatile uint8_t *base,
+                                      struct ZZUSBUnit *unit,
+                                      const struct IOUsbHWReq *ior)
+{
+    struct ZZUSBProtocolState *state = protocol_state_for(base);
+
+    if (!state || !state->quarantined) {
+        uint16_t stop_status = stop_iso_request(base, unit, ior);
+
+        if (stop_status_retired(stop_status))
+            return;
+    }
+    schedule_simple_iso_cleanup(unit, ior);
+}
+
+static void poll_simple_iso_cleanup(struct ZZUSBUnit *unit)
+{
+    struct ZZSimpleIsoCleanup *cleanup =
+        simple_iso_cleanup_for_unit(unit);
+    volatile uint8_t *base;
+    struct ZZUSBProtocolState *state;
+    uint16_t status;
+
+    if (!cleanup || !cleanup->pending)
+        return;
+    base = (volatile uint8_t *)unit->zz_Registers;
+    state = protocol_state_for(base);
+    if (state && state->quarantined) {
+        recover_quarantined_proxy(base);
+        if (state->quarantined)
+            return;
+    }
+    status = send_usb_cmd(base, &cleanup->stop_cmd, NULL, 0);
+    if (stop_status_retired(status)) {
+        memset(cleanup, 0, sizeof(*cleanup));
+    } else if (state && status != ZZUSB_STATUS_BUSY) {
+        state->quarantined = 1;
+    }
+}
+
+static void execute_simple_iso(struct ZZUSBUnit *unit,
+                               struct IOUsbHWReq *ior,
+                               volatile uint8_t *base)
+{
+    struct ZZUSBCommand cmd;
+    struct zzusb_iso_batch_result batch;
+    struct zzusb_iso_packet_result packets[ZZUSB_ISO_MAX_PACKETS];
+    uint16_t packet_lengths[ZZUSB_ISO_MAX_PACKETS];
+    uint32_t batch_id;
+    uint16_t status;
+    uint32_t total_actual = 0;
+    uint32_t timeout_ms;
+    uint64_t started_us;
+    uint64_t now_us;
+    unsigned packet_count;
+    unsigned wire_length;
+    int queued = 0;
+
+    if (simple_iso_cleanup_pending(unit)) {
+        ior->iouh_Req.io_Error = UHIOERR_NAK;
+        return;
+    }
+    ior->iouh_Actual = 0;
+    ior->iouh_ExtError = 0;
+    if (!(iso_public_capabilities(unit) & UHCF_ISO) ||
+        (ior->iouh_Flags & UHFF_LOWSPEED) ||
+        !ior->iouh_Endpoint || !ior->iouh_Interval ||
+        (ior->iouh_Length && !ior->iouh_Data)) {
+        ior->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+        return;
+    }
+
+    packet_count = zzusb_iso_plan_simple(
+        ior->iouh_Length, iso_encoded_max_packet(ior),
+        packet_lengths, ZZUSB_ISO_MAX_PACKETS);
+    if (!packet_count) {
+        ior->iouh_Req.io_Error =
+            ior->iouh_Length > ZZUSB_ISO_DATA_MAX ?
+            UHIOERR_PKTTOOLARGE : UHIOERR_BADPARAMS;
+        return;
+    }
+    batch_id = SimpleIsoBatchId++;
+    if (!batch_id) {
+        batch_id = 1;
+        SimpleIsoBatchId = 2;
+    }
+    if (PollBase && rt_iso_pending_for_unit(unit)) {
+        service_rt_iso_during_work(PollBase, unit);
+        if (active_work_aborted()) {
+            ior->iouh_Req.io_Error =
+                map_proxy_status(ZZUSB_STATUS_CANCELLED);
+            return;
+        }
+    }
+    wire_length = zzusb_iso_build_queue(
+        IsoWire, sizeof(IsoWire), batch_id,
+        ior->iouh_Frame ? 0 : ZZUSB_ISO_FLAG_ASAP,
+        ior->iouh_Frame, 0, packet_lengths, packet_count,
+        (const uint8_t *)ior->iouh_Data,
+        ior->iouh_Dir == UHDIR_IN);
+    if (!wire_length) {
+        ior->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+        return;
+    }
+
+    fill_iso_command(&cmd, unit, ior, ZZUSB_CMD_ISO_QUEUE, wire_length);
+    status = send_usb_cmd_with_rt_wait(
+        base, &cmd, IsoWire, wire_length, unit);
+    if (status != ZZUSB_STATUS_OK) {
+        struct ZZUSBProtocolState *state = protocol_state_for(base);
+
+        if (state && state->quarantined) {
+            queued = 1;
+            goto simple_iso_complete;
+        }
+        ior->iouh_Req.io_Error = map_proxy_status(status);
+        return;
+    }
+    zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_ISO_QUEUE);
+    queued = 1;
+    timeout_ms = (ior->iouh_Flags & UHFF_NAKTIMEOUT) ?
+                 (ior->iouh_NakTimeout ? ior->iouh_NakTimeout : 1000U) :
+                 1000U;
+    if (!worker_now_us(&started_us)) {
+        status = ZZUSB_STATUS_HOSTERROR;
+        goto simple_iso_complete;
+    }
+
+    for (;;) {
+        volatile struct ZZUSBCommand *result;
+        uint32_t actual_length;
+
+        uint32_t wait_us = 10000U;
+
+        if (PollBase && rt_iso_pending_for_unit(unit)) {
+            service_rt_iso_during_work(PollBase, unit);
+            wait_us = rt_iso_service_limit_us(unit);
+        }
+        if (active_work_aborted()) {
+            status = ZZUSB_STATUS_CANCELLED;
+            break;
+        }
+        fill_iso_command(&cmd, unit, ior, ZZUSB_CMD_ISO_REAP,
+                         ZZUSB_V2_DATA_MAX);
+        status = send_usb_cmd_with_rt_service(
+            base, &cmd, NULL, 0, unit);
+        if (status == ZZUSB_STATUS_OK) {
+            result = (volatile struct ZZUSBCommand *)(base + 0xa000);
+            actual_length = result->actual_length;
+            if (actual_length > sizeof(IsoWire)) {
+                status = ZZUSB_STATUS_HOSTERROR;
+                break;
+            }
+            safe_copy((void *)(base + 0xa000 + ZZUSB_DATA_OFFSET),
+                      IsoWire, actual_length);
+            if (!zzusb_iso_parse_reap(
+                    IsoWire, actual_length, ior->iouh_Dir == UHDIR_IN,
+                    &batch, packets, ZZUSB_ISO_MAX_PACKETS) ||
+                batch.batch_id != batch_id ||
+                !zzusb_iso_layout_matches(
+                    &batch, packets, packet_lengths, packet_count)) {
+                status = ZZUSB_STATUS_HOSTERROR;
+                break;
+            }
+            zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_ISO_REAP);
+            queued = 0;
+            break;
+        }
+        if (status != ZZUSB_STATUS_NAK)
+            break;
+        if (!worker_now_us(&now_us)) {
+            status = ZZUSB_STATUS_HOSTERROR;
+            break;
+        }
+        if (now_us - started_us >= (uint64_t)timeout_ms * 1000ULL) {
+            status = ZZUSB_STATUS_TIMEOUT;
+            break;
+        }
+        if (worker_wait_iso_event(wait_us) < 0) {
+            status = ZZUSB_STATUS_HOSTERROR;
+            break;
+        }
+    }
+
+simple_iso_complete:
+    if (queued)
+        retire_simple_iso_request(base, unit, ior);
+    if (status != ZZUSB_STATUS_OK) {
+        ior->iouh_Req.io_Error = map_proxy_status(status);
+        return;
+    }
+
+    ior->iouh_Frame = packets[0].frame;
+    ior->iouh_Req.io_Error = 0;
+    for (unsigned index = 0; index < batch.packet_count; index++) {
+        BYTE packet_error = map_iso_packet_status(
+            packets[index].status, ior->iouh_Flags);
+
+        if (!ior->iouh_Req.io_Error && packet_error) {
+            ior->iouh_Req.io_Error = packet_error;
+            ior->iouh_ExtError = packets[index].status;
+        }
+        if (ior->iouh_Dir == UHDIR_IN && ior->iouh_Data &&
+            packets[index].actual) {
+            safe_copy(IsoWire + batch.metadata_size +
+                      packets[index].offset,
+                      (uint8_t *)ior->iouh_Data + total_actual,
+                      packets[index].actual);
+        }
+        total_actual += packets[index].actual;
+    }
+    ior->iouh_Actual = total_actual;
+}
+
+static void fill_rt_iso_command(struct ZZUSBCommand *cmd,
+                                const struct ZZRTIsoSlot *slot,
+                                uint16_t command, uint32_t data_length)
+{
+    memset(cmd, 0, sizeof(*cmd));
+    cmd->cmd = command;
+    cmd->dev_addr = slot->address;
+    cmd->endpoint = slot->endpoint;
+    cmd->direction = slot->direction_in ? 0x80 : 0;
+    cmd->max_pkt_size = slot->max_packet;
+    cmd->data_length = data_length;
+    cmd->timeout_ms = 100;
+    cmd->speed = slot->speed;
+    cmd->interval = slot->interval;
+    cmd->split_hub_addr = slot->split_hub_addr;
+    cmd->split_hub_port = slot->split_hub_port;
+    cmd->flags = slot->flags;
+    cmd->reserved = slot->generation;
+}
+
+static struct ZZRTIsoSlot *find_rt_iso_slot(
+    const struct IOUsbHWRTIso *handler)
+{
+    for (unsigned index = 0; index < ZZ_RT_ISO_SLOTS; index++)
+        if (RTIsoSlots[index].handler == handler &&
+            RTIsoSlots[index].lifecycle.state != ZZUSB_RT_FREE)
+            return &RTIsoSlots[index];
+    return NULL;
+}
+
+static struct ZZRTIsoBatchContext *find_rt_batch_context(
+    struct ZZRTIsoSlot *slot, uint32_t batch_id)
+{
+    for (unsigned index = 0; index < ZZUSB_ISO_PIPELINE_DEPTH; index++)
+        if (slot->batches[index].batch_id == batch_id)
+            return &slot->batches[index];
+    return NULL;
+}
+
+static struct ZZRTIsoBatchContext *free_rt_batch_context(
+    struct ZZRTIsoSlot *slot)
+{
+    for (unsigned index = 0; index < ZZUSB_ISO_PIPELINE_DEPTH; index++)
+        if (!slot->batches[index].batch_id)
+            return &slot->batches[index];
+    return NULL;
+}
+
+static uint32_t rt_prefetched_bytes(const struct ZZRTIsoSlot *slot)
+{
+    uint32_t total = 0;
+
+    for (unsigned index = 0; index < ZZUSB_ISO_PIPELINE_DEPTH; index++)
+        if (slot->batches[index].batch_id)
+            total += slot->batches[index].prefetched_bytes;
+    return total;
+}
+
+static void rt_finish_out_context(struct ZZRTIsoSlot *slot,
+                                  struct ZZRTIsoBatchContext *context,
+                                  const struct zzusb_iso_packet_result *packets,
+                                  uint16_t forced_flags)
+{
+    if (!slot->handler || !slot->handler->urti_OutDoneHook)
+        return;
+    for (unsigned index = 0; index < context->packet_count; index++) {
+        struct IOUsbHWBufferReq *request = &context->requests[index];
+
+        request->ubr_Length = packets ? packets[index].actual : 0;
+        if (packets) {
+            request->ubr_Frame = packets[index].frame;
+            request->ubr_Flags |= zzusb_iso_status_flags(
+                packets[index].status);
+        }
+        request->ubr_Flags |= forced_flags;
+        CallHookPkt(slot->handler->urti_OutDoneHook,
+                    (APTR)slot, request);
+    }
+}
+
+static void rt_cancel_contexts(struct ZZRTIsoSlot *slot,
+                               uint16_t flags)
+{
+    for (unsigned index = 0; index < ZZUSB_ISO_PIPELINE_DEPTH; index++) {
+        struct ZZRTIsoBatchContext *context = &slot->batches[index];
+
+        if (!context->batch_id)
+            continue;
+        if (!slot->direction_in)
+            rt_finish_out_context(slot, context, NULL, flags);
+        memset(context, 0, sizeof(*context));
+    }
+}
+
+static uint16_t queue_rt_iso_batch(struct ZZRTIsoSlot *slot)
+{
+    struct ZZRTIsoBatchContext *context;
+    struct ZZUSBCommand cmd;
+    uint16_t lengths[ZZUSB_ISO_MAX_PACKETS];
+    uint32_t batch_id;
+    uint32_t total_data = 0;
+    unsigned packet_count = slot->packet_count;
+    unsigned wire_length;
+    uint16_t status;
+
+    context = free_rt_batch_context(slot);
+    if (!context)
+        return ZZUSB_STATUS_BUSY;
+    memcpy(lengths, slot->packet_lengths,
+           packet_count * sizeof(lengths[0]));
+
+    if (!slot->direction_in && slot->handler->urti_OutPrefetch) {
+        uint32_t available = slot->handler->urti_OutPrefetch;
+        uint32_t outstanding = rt_prefetched_bytes(slot);
+        uint16_t packet_size = zzusb_iso_payload_size(slot->max_packet);
+        unsigned allowed;
+
+        if (outstanding >= available)
+            return ZZUSB_STATUS_BUSY;
+        available -= outstanding;
+        allowed = packet_size ? (unsigned)(available / packet_size) : 0;
+        if (!allowed)
+            return ZZUSB_STATUS_BUSY;
+        if (packet_count > allowed)
+            packet_count = allowed;
+    }
+
+    batch_id = zzusb_rt_queue(&slot->lifecycle);
+    if (!batch_id)
+        return ZZUSB_STATUS_BUSY;
+    memset(context, 0, sizeof(*context));
+    context->batch_id = batch_id;
+    context->packet_count = (uint8_t)packet_count;
+    context->duration_microframes =
+        (slot->duration_microframes * packet_count) /
+        slot->packet_count;
+    if (!context->duration_microframes)
+        context->duration_microframes = 1;
+
+    if (!slot->direction_in) {
+        memset(IsoPayload, 0, sizeof(IsoPayload));
+        for (unsigned index = 0; index < packet_count; index++) {
+            struct IOUsbHWBufferReq *request =
+                &context->requests[index];
+            uint16_t requested = lengths[index];
+
+            request->ubr_Buffer = NULL;
+            request->ubr_Length = requested;
+            request->ubr_Frame = 0;
+            request->ubr_Flags = 0;
+            if (slot->handler->urti_OutReqHook)
+                CallHookPkt(slot->handler->urti_OutReqHook,
+                            (APTR)slot, request);
+            if (request->ubr_Length > requested) {
+                request->ubr_Length = requested;
+                request->ubr_Flags |=
+                    ZZUSB_RT_FLAG_UNDERRUN |
+                    ZZUSB_RT_FLAG_PACKET_ERROR;
+            }
+            lengths[index] = (uint16_t)request->ubr_Length;
+            if (request->ubr_Buffer && lengths[index])
+                safe_copy(request->ubr_Buffer,
+                          IsoPayload + total_data, lengths[index]);
+            else if (lengths[index])
+                request->ubr_Flags |=
+                    ZZUSB_RT_FLAG_UNDERRUN |
+                    ZZUSB_RT_FLAG_PACKET_ERROR;
+            total_data += lengths[index];
+        }
+    } else {
+        for (unsigned index = 0; index < packet_count; index++)
+            total_data += lengths[index];
+    }
+    context->prefetched_bytes = total_data;
+
+    wire_length = zzusb_iso_build_queue(
+        IsoWire, ZZUSB_MAINT_DATA_MAX, batch_id, ZZUSB_ISO_FLAG_ASAP,
+        0, 0, lengths, packet_count, IsoPayload, slot->direction_in);
+    if (!wire_length) {
+        zzusb_rt_complete(&slot->lifecycle, batch_id);
+        if (!slot->direction_in)
+            rt_finish_out_context(
+                slot, context, NULL, ZZUSB_RT_FLAG_PACKET_ERROR);
+        memset(context, 0, sizeof(*context));
+        return ZZUSB_STATUS_BADPARAM;
+    }
+    fill_rt_iso_command(&cmd, slot, ZZUSB_CMD_ISO_QUEUE, wire_length);
+    status = send_usb_cmd_maintenance(
+        (volatile uint8_t *)slot->unit->zz_Registers,
+        &cmd, IsoWire, wire_length, NULL, 0);
+    if (status != ZZUSB_STATUS_OK) {
+        zzusb_rt_complete(&slot->lifecycle, batch_id);
+        if (!slot->direction_in)
+            rt_finish_out_context(
+                slot, context, NULL, ZZUSB_RT_FLAG_PACKET_ERROR);
+        memset(context, 0, sizeof(*context));
+        return status;
+    }
+    zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_ISO_QUEUE);
+    return ZZUSB_STATUS_OK;
+}
+
+static uint16_t fill_rt_iso_pipeline(struct ZZRTIsoSlot *slot,
+                                     int honor_abort)
+{
+    uint16_t status = ZZUSB_STATUS_OK;
+
+    while (slot->lifecycle.state == ZZUSB_RT_RUNNING &&
+           slot->lifecycle.in_flight < ZZUSB_ISO_PIPELINE_DEPTH) {
+        if (honor_abort && active_work_aborted()) {
+            status = ZZUSB_STATUS_CANCELLED;
+            break;
+        }
+        status = queue_rt_iso_batch(slot);
+        if (status != ZZUSB_STATUS_OK)
+            break;
+        if (honor_abort && active_work_aborted()) {
+            status = ZZUSB_STATUS_CANCELLED;
+            break;
+        }
+    }
+    return status;
+}
+
+static void rt_deliver_in_packet(
+    struct ZZRTIsoSlot *slot,
+    const struct zzusb_iso_batch_result *batch,
+    const struct zzusb_iso_packet_result *packet)
+{
+    struct IOUsbHWBufferReq request;
+    const uint8_t *source = IsoWire + batch->metadata_size + packet->offset;
+    uint32_t remaining = packet->actual;
+    uint32_t copied = 0;
+    uint16_t status_flags = zzusb_iso_status_flags(packet->status);
+    unsigned segments = 0;
+
+    memset(&request, 0, sizeof(request));
+    request.ubr_Frame = packet->frame;
+    request.ubr_Flags = status_flags;
+    if (!slot->handler->urti_InReqHook) {
+        request.ubr_Buffer = (UBYTE *)source;
+        request.ubr_Length = remaining;
+        if (slot->handler->urti_InDoneHook)
+            CallHookPkt(slot->handler->urti_InDoneHook,
+                        (APTR)slot, &request);
+        return;
+    }
+
+    do {
+        uint32_t segment;
+
+        request.ubr_Buffer = NULL;
+        request.ubr_Length = remaining;
+        request.ubr_Frame = packet->frame;
+        request.ubr_Flags = status_flags;
+        CallHookPkt(slot->handler->urti_InReqHook,
+                    (APTR)slot, &request);
+        request.ubr_Flags |= status_flags;
+        segment = request.ubr_Length;
+        if (segment > remaining) {
+            segment = remaining;
+            request.ubr_Flags |=
+                ZZUSB_RT_FLAG_OVERRUN |
+                ZZUSB_RT_FLAG_PACKET_ERROR;
+        }
+        if (segment && request.ubr_Buffer)
+            safe_copy(source + copied, request.ubr_Buffer, segment);
+        else if (segment)
+            request.ubr_Flags |=
+                ZZUSB_RT_FLAG_OVERRUN |
+                ZZUSB_RT_FLAG_PACKET_ERROR;
+        request.ubr_Length = segment;
+        segments++;
+        if (remaining > segment &&
+            (!(request.ubr_Flags & UBFF_CONTBUFFER) ||
+             segments >= ZZUSB_ISO_MAX_PACKETS || !segment))
+            request.ubr_Flags |=
+                ZZUSB_RT_FLAG_OVERRUN |
+                ZZUSB_RT_FLAG_PACKET_ERROR;
+        if (slot->handler->urti_InDoneHook)
+            CallHookPkt(slot->handler->urti_InDoneHook,
+                        (APTR)slot, &request);
+        copied += segment;
+        remaining -= segment;
+    } while (remaining && (request.ubr_Flags & UBFF_CONTBUFFER) &&
+             segments < ZZUSB_ISO_MAX_PACKETS && request.ubr_Length);
+}
+
+static uint16_t reap_rt_iso_batch(struct ZZRTIsoSlot *slot)
+{
+    struct ZZUSBCommand cmd;
+    struct zzusb_iso_batch_result batch;
+    struct zzusb_iso_packet_result packets[ZZUSB_ISO_MAX_PACKETS];
+    uint16_t expected_lengths[ZZUSB_ISO_MAX_PACKETS];
+    struct ZZRTIsoBatchContext *context;
+    uint32_t actual_length;
+    uint16_t status;
+
+    fill_rt_iso_command(&cmd, slot, ZZUSB_CMD_ISO_REAP,
+                        ZZUSB_MAINT_DATA_MAX);
+    status = send_usb_cmd_maintenance(
+        (volatile uint8_t *)slot->unit->zz_Registers,
+        &cmd, NULL, 0, IsoWire, sizeof(IsoWire));
+    if (status != ZZUSB_STATUS_OK)
+        return status;
+    actual_length = cmd.actual_length;
+    if (actual_length > sizeof(IsoWire))
+        return ZZUSB_STATUS_HOSTERROR;
+    if (!zzusb_iso_parse_reap(
+            IsoWire, actual_length, slot->direction_in,
+            &batch, packets, ZZUSB_ISO_MAX_PACKETS))
+        return ZZUSB_STATUS_HOSTERROR;
+    context = find_rt_batch_context(slot, batch.batch_id);
+    if (!context || context->packet_count != batch.packet_count)
+        return ZZUSB_STATUS_HOSTERROR;
+    for (unsigned index = 0; index < batch.packet_count; index++)
+        expected_lengths[index] = slot->direction_in
+            ? slot->packet_lengths[index]
+            : (uint16_t)context->requests[index].ubr_Length;
+    if (!zzusb_iso_layout_matches(
+            &batch, packets, expected_lengths, context->packet_count) ||
+        !zzusb_rt_complete(&slot->lifecycle, batch.batch_id))
+        return ZZUSB_STATUS_HOSTERROR;
+
+    if (slot->direction_in) {
+        for (unsigned index = 0; index < batch.packet_count; index++)
+            rt_deliver_in_packet(slot, &batch, &packets[index]);
+    } else {
+        rt_finish_out_context(slot, context, packets, 0);
+    }
+    memset(context, 0, sizeof(*context));
+    zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_ISO_REAP);
+    zzusb_engine_diag_record(
+        ZZUSB_DRIVER_EVENT_ISO, ZZUSB_ENGINE_STATUS_OK,
+        batch.batch_id, ProtocolStates[0].controller_epoch,
+        slot->address, (uint8_t)slot->endpoint,
+        slot->direction_in ? 0x80 : 0,
+        (uint16_t)((slot->split_hub_addr << 8) |
+                   (slot->split_hub_port & 0xffU)),
+        slot->flags, batch.total_data, WorkSequence);
+    return ZZUSB_STATUS_OK;
+}
+
+static uint16_t stop_rt_iso_slot(struct ZZRTIsoSlot *slot)
+{
+    struct ZZUSBCommand cmd;
+    uint16_t status;
+
+    if (slot->lifecycle.state == ZZUSB_RT_RUNNING) {
+        if (!zzusb_rt_begin_stop(&slot->lifecycle))
+            return ZZUSB_STATUS_BADPARAM;
+    } else if (slot->lifecycle.state != ZZUSB_RT_STOPPING) {
+        return ZZUSB_STATUS_BADPARAM;
+    }
+    fill_rt_iso_command(&cmd, slot, ZZUSB_CMD_ISO_STOP, 0);
+    status = send_usb_cmd_maintenance(
+        (volatile uint8_t *)slot->unit->zz_Registers,
+        &cmd, NULL, 0, NULL, 0);
+    if (!stop_status_retired(status))
+        return status;
+    rt_cancel_contexts(slot, ZZUSB_RT_FLAG_PACKET_ERROR);
+    zzusb_rt_finish_stop(&slot->lifecycle);
+    return ZZUSB_STATUS_OK;
+}
+
+static void stop_rt_iso_for_unit(struct ZZUSBUnit *unit)
+{
+    for (unsigned index = 0; index < ZZ_RT_ISO_SLOTS; index++) {
+        struct ZZRTIsoSlot *slot = &RTIsoSlots[index];
+
+        if (slot->unit == unit &&
+            (slot->lifecycle.state == ZZUSB_RT_RUNNING ||
+             slot->lifecycle.state == ZZUSB_RT_STOPPING))
+            stop_rt_iso_slot(slot);
+    }
+}
+
+static void finish_reset_rt_iso_for_unit(struct ZZUSBUnit *unit)
+{
+    for (unsigned index = 0; index < ZZ_RT_ISO_SLOTS; index++) {
+        struct ZZRTIsoSlot *slot = &RTIsoSlots[index];
+
+        if (slot->unit != unit)
+            continue;
+        if (slot->lifecycle.state == ZZUSB_RT_RUNNING)
+            zzusb_rt_begin_stop(&slot->lifecycle);
+        if (slot->lifecycle.state == ZZUSB_RT_STOPPING) {
+            rt_cancel_contexts(slot, ZZUSB_RT_FLAG_PACKET_ERROR);
+            zzusb_rt_finish_stop(&slot->lifecycle);
+        }
+        slot->generation = generation_for_unit(unit);
+    }
+}
+
+static BYTE add_rt_iso_handler(struct ZZUSBUnit *unit,
+                               struct IOUsbHWReq *ior)
+{
+    struct IOUsbHWRTIso *handler =
+        (struct IOUsbHWRTIso *)ior->iouh_Data;
+    struct ZZRTIsoSlot *slot = NULL;
+    struct ZZUSBCommand command;
+    unsigned packet_count;
+
+    if (!(iso_public_capabilities(unit) & UHCF_RT_ISO) ||
+        !handler || (ior->iouh_Flags & UHFF_LOWSPEED) ||
+        !ior->iouh_Endpoint || !ior->iouh_Interval ||
+        find_rt_iso_slot(handler))
+        return UHIOERR_BADPARAMS;
+    for (unsigned index = 0; index < ZZ_RT_ISO_SLOTS; index++)
+        if (RTIsoSlots[index].lifecycle.state == ZZUSB_RT_FREE) {
+            slot = &RTIsoSlots[index];
+            break;
+        }
+    if (!slot)
+        return UHIOERR_OUTOFMEMORY;
+
+    memset(slot, 0, sizeof(*slot));
+    fill_iso_command(&command, unit, ior, ZZUSB_CMD_ISO_QUEUE, 0);
+    slot->unit = unit;
+    slot->handler = handler;
+    slot->generation = command.reserved;
+    slot->address = command.dev_addr;
+    slot->endpoint = command.endpoint;
+    slot->max_packet = command.max_pkt_size;
+    slot->interval = command.interval;
+    slot->speed = command.speed;
+    slot->split_hub_addr = command.split_hub_addr;
+    slot->split_hub_port = command.split_hub_port;
+    slot->flags = command.flags;
+    slot->direction_in = command.direction == 0x80;
+    packet_count = zzusb_iso_plan_realtime(
+        slot->max_packet, slot->interval,
+        slot->speed == ZZUSB_SPEED_HIGH,
+        slot->packet_lengths, ZZUSB_ISO_MAX_PACKETS,
+        &slot->duration_microframes);
+    if (!packet_count) {
+        memset(slot, 0, sizeof(*slot));
+        return UHIOERR_BADPARAMS;
+    }
+    {
+        unsigned planned_count = packet_count;
+
+        packet_count = zzusb_iso_limit_packet_count(
+            slot->packet_lengths, packet_count, ZZUSB_MAINT_DATA_MAX);
+        if (!packet_count) {
+            memset(slot, 0, sizeof(*slot));
+            return UHIOERR_BADPARAMS;
+        }
+        slot->duration_microframes =
+            (slot->duration_microframes * packet_count) / planned_count;
+    }
+    slot->packet_count = (uint8_t)packet_count;
+    zzusb_rt_init(&slot->lifecycle);
+    if (!zzusb_rt_add(&slot->lifecycle)) {
+        memset(slot, 0, sizeof(*slot));
+        return UHIOERR_HOSTERROR;
+    }
+    handler->urti_DriverPrivate1 = slot;
+    ior->iouh_Actual = 0;
+    return 0;
+}
+
+static BYTE start_rt_iso_handler(struct ZZUSBUnit *unit,
+                                 struct IOUsbHWReq *ior)
+{
+    struct ZZRTIsoSlot *slot = find_rt_iso_slot(
+        (struct IOUsbHWRTIso *)ior->iouh_Data);
+    uint16_t status;
+
+    if (!slot || slot->unit != unit ||
+        !(iso_public_capabilities(unit) & UHCF_RT_ISO) ||
+        !zzusb_rt_start(&slot->lifecycle))
+        return UHIOERR_BADPARAMS;
+    status = fill_rt_iso_pipeline(slot, 1);
+    if (rt_iso_refill_terminal(status)) {
+        stop_rt_iso_slot(slot);
+        return map_proxy_status(status);
+    }
+    if (!slot->lifecycle.in_flight) {
+        zzusb_rt_begin_stop(&slot->lifecycle);
+        zzusb_rt_finish_stop(&slot->lifecycle);
+        return map_proxy_status(status);
+    }
+    if (PollBase && PollBase->zz_PollTask && PollBase->zz_PollSignal)
+        Signal(PollBase->zz_PollTask, PollBase->zz_PollSignal);
+    return 0;
+}
+
+static BYTE stop_rt_iso_handler(struct ZZUSBUnit *unit,
+                                struct IOUsbHWReq *ior)
+{
+    struct ZZRTIsoSlot *slot = find_rt_iso_slot(
+        (struct IOUsbHWRTIso *)ior->iouh_Data);
+
+    if (!slot || slot->unit != unit)
+        return UHIOERR_BADPARAMS;
+    return map_proxy_status(stop_rt_iso_slot(slot));
+}
+
+static BYTE remove_rt_iso_handler(struct ZZUSBUnit *unit,
+                                  struct IOUsbHWReq *ior)
+{
+    struct IOUsbHWRTIso *handler =
+        (struct IOUsbHWRTIso *)ior->iouh_Data;
+    struct ZZRTIsoSlot *slot = find_rt_iso_slot(handler);
+    uint16_t status;
+
+    if (!slot || slot->unit != unit)
+        return UHIOERR_BADPARAMS;
+    if (slot->lifecycle.state == ZZUSB_RT_RUNNING ||
+        slot->lifecycle.state == ZZUSB_RT_STOPPING) {
+        status = stop_rt_iso_slot(slot);
+        if (status != ZZUSB_STATUS_OK)
+            return map_proxy_status(status);
+    }
+    if (!zzusb_rt_remove(&slot->lifecycle))
+        return UHIOERR_BADPARAMS;
+    handler->urti_DriverPrivate1 = NULL;
+    memset(slot, 0, sizeof(*slot));
+    return 0;
+}
+
+static void rollback_aborted_iso_work(struct ZZUSBUnit *unit,
+                                      struct IOUsbHWReq *ior)
+{
+    struct IOUsbHWRTIso *handler =
+        (struct IOUsbHWRTIso *)ior->iouh_Data;
+    struct ZZRTIsoSlot *slot = find_rt_iso_slot(handler);
+
+    if (!slot || slot->unit != unit)
+        return;
+    if (ior->iouh_Req.io_Command == UHCMD_ADDISOHANDLER &&
+        slot->lifecycle.state == ZZUSB_RT_ADDED) {
+        handler->urti_DriverPrivate1 = NULL;
+        if (zzusb_rt_remove(&slot->lifecycle))
+            memset(slot, 0, sizeof(*slot));
+    } else if (ior->iouh_Req.io_Command == UHCMD_STARTRTISO &&
+               slot->lifecycle.state == ZZUSB_RT_RUNNING) {
+        zzusb_rt_begin_stop(&slot->lifecycle);
+    }
+}
+
+static int rt_iso_pending_for_unit(const struct ZZUSBUnit *unit)
+{
+    for (unsigned index = 0; index < ZZ_RT_ISO_SLOTS; index++)
+        if (RTIsoSlots[index].unit == unit &&
+            (RTIsoSlots[index].lifecycle.state == ZZUSB_RT_RUNNING ||
+             RTIsoSlots[index].lifecycle.state == ZZUSB_RT_STOPPING))
+            return 1;
+    return 0;
+}
+
+static uint32_t rt_iso_buffered_safe_microframes(
+    const struct ZZRTIsoSlot *slot)
+{
+    uint32_t total = 0;
+    uint32_t longest = 0;
+    unsigned batches = 0;
+
+    for (unsigned index = 0; index < ZZUSB_ISO_PIPELINE_DEPTH; index++) {
+        const struct ZZRTIsoBatchContext *context = &slot->batches[index];
+
+        if (!context->batch_id)
+            continue;
+        total += context->duration_microframes;
+        if (context->duration_microframes > longest)
+            longest = context->duration_microframes;
+        batches++;
+    }
+    return batches > 1 ? total - longest : total;
+}
+
+static uint32_t rt_iso_service_limit_us(const struct ZZUSBUnit *unit)
+{
+    uint32_t shortest_us = 8000U;
+
+    for (unsigned index = 0; index < ZZ_RT_ISO_SLOTS; index++) {
+        const struct ZZRTIsoSlot *slot = &RTIsoSlots[index];
+        uint32_t safe_microframes;
+        uint32_t candidate_us;
+
+        if (slot->unit != unit ||
+            slot->lifecycle.state != ZZUSB_RT_RUNNING)
+            continue;
+        safe_microframes = rt_iso_buffered_safe_microframes(slot);
+        if (!safe_microframes)
+            safe_microframes = 1U;
+        candidate_us = safe_microframes * 125U;
+        if (candidate_us < shortest_us)
+            shortest_us = candidate_us;
+    }
+    return shortest_us;
+}
+
+static int rt_iso_refill_terminal(uint16_t status)
+{
+    return status != ZZUSB_STATUS_OK &&
+           status != ZZUSB_STATUS_NAK &&
+           status != ZZUSB_STATUS_BUSY;
+}
+
+static void poll_rt_iso(struct ZZUSBUnit *unit)
+{
+    for (unsigned index = 0; index < ZZ_RT_ISO_SLOTS; index++) {
+        struct ZZRTIsoSlot *slot = &RTIsoSlots[index];
+        uint16_t status;
+
+        if (slot->unit != unit)
+            continue;
+        if (slot->lifecycle.state == ZZUSB_RT_STOPPING) {
+            stop_rt_iso_slot(slot);
+            continue;
+        }
+        if (slot->lifecycle.state != ZZUSB_RT_RUNNING)
+            continue;
+        if (!unit->zz_PortPresent) {
+            stop_rt_iso_slot(slot);
+            continue;
+        }
+        if (!slot->lifecycle.in_flight) {
+            status = fill_rt_iso_pipeline(slot, 0);
+            if (rt_iso_refill_terminal(status))
+                stop_rt_iso_slot(slot);
+            continue;
+        }
+        while (slot->lifecycle.in_flight) {
+            status = reap_rt_iso_batch(slot);
+            if (status == ZZUSB_STATUS_OK) {
+                status = fill_rt_iso_pipeline(slot, 0);
+                if (rt_iso_refill_terminal(status)) {
+                    stop_rt_iso_slot(slot);
+                    break;
+                }
+                continue;
+            }
+            if (status != ZZUSB_STATUS_NAK &&
+                status != ZZUSB_STATUS_BUSY)
+                stop_rt_iso_slot(slot);
+            break;
+        }
+    }
+}
+
+static ULONG usb_event_isr(struct ZZUSBBase *base __asm("a1"))
+{
+    volatile UWORD *status_reg;
+    UWORD status;
+
+    if (!base || !base->zz_Units[0].zz_Registers)
+        return 0;
+    status_reg = (volatile UWORD *)
+        ((uint8_t *)base->zz_Units[0].zz_Registers + 0x04);
+    status = *status_reg;
+    if (!zzusb_event_interrupt_pending(status))
+        return 0;
+
+    *status_reg = ZZUSB_EVENT_ACK_VALUE;
+    USBEventPending = 1;
+    if (base->zz_PollTask && base->zz_PollSignal)
+        Signal(base->zz_PollTask, base->zz_PollSignal);
+    return 1;
+}
+
+static void install_usb_event_isr(struct ZZUSBBase *base)
+{
+    if (USBEventIRQInstalled)
+        return;
+    memset(&USBEventInterrupt, 0, sizeof(USBEventInterrupt));
+    USBEventInterrupt.is_Node.ln_Type = NT_INTERRUPT;
+    USBEventInterrupt.is_Node.ln_Pri = 0;
+    USBEventInterrupt.is_Node.ln_Name = (char *)"zzusbhw.usb";
+    USBEventInterrupt.is_Data = base;
+    USBEventInterrupt.is_Code = (VOID (*)())usb_event_isr;
+    Disable();
+    AddIntServer(USBEventIRQInt2 ? INTB_PORTS : INTB_EXTER,
+                 &USBEventInterrupt);
+    Enable();
+    USBEventIRQInstalled = 1;
 }
 
 static void ensure_poll_task(struct ZZUSBBase *ZZBase)
@@ -706,6 +2577,7 @@ static void ensure_poll_task(struct ZZUSBBase *ZZBase)
                 : "r"(_a6)
                 : "d0","d1","a0","cc","memory");
         }
+        install_usb_event_isr(ZZBase);
     }
     Permit();
 }
@@ -741,6 +2613,9 @@ static struct Library* __attribute__((used)) init_device(uint8_t *seg_list asm("
         return 0;
     }
 
+    UtilityBase = (struct Library *)OpenLibrary(
+        (CONST_STRPTR)"utility.library", 0L);
+
     /* Saved for expunge so the loader can release our segments. */
     DeviceSegList = seg_list;
 
@@ -751,6 +2626,16 @@ static struct Library* __attribute__((used)) init_device(uint8_t *seg_list asm("
     dev->lib_IdString = (char *)device_id_string;
 
     InitSemaphore(&ZZBase->zz_Lock);
+    {
+        UWORD present = 0;
+        UWORD value = zzcfg_query((ULONG)registers, ZZ_CFG_KEY_INT2,
+                                  &present);
+        USBEventIRQInt2 = (present && value) ? 1 : 0;
+    }
+    USBEventIRQInstalled = 0;
+    USBEventPending = 0;
+    memset(UnitGeneration, 0, sizeof(UnitGeneration));
+    UnitGeneration[0] = 1;
 
     dstr(registers, "[zzusbhw] " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) "\r\n");
 
@@ -769,6 +2654,20 @@ static struct Library* __attribute__((used)) init_device(uint8_t *seg_list asm("
     RootHubIntPending[0] = NULL;
     RootHubPollDelay[0] = 0;
     reset_int_slots();
+    memset(ProtocolStates, 0, sizeof(ProtocolStates));
+    ProtocolStates[0].registers = registers;
+    ProtocolStates[0].next_request_id = 1;
+    ProtocolStates[0].mode = ZZUSB_PROTOCOL_LEGACY;
+    ProtocolNegotiated = 0;
+    memset(WorkSlots, 0, sizeof(WorkSlots));
+    memset(RTIsoSlots, 0, sizeof(RTIsoSlots));
+    memset(SimpleIsoCleanup, 0, sizeof(SimpleIsoCleanup));
+    memset(IsoWire, 0, sizeof(IsoWire));
+    memset(IsoPayload, 0, sizeof(IsoPayload));
+    SimpleIsoBatchId = 1;
+    zzusb_engine_diag_set_critical(
+        diag_enter_critical, diag_leave_critical);
+    zzusb_engine_diag_reset();
 
     PollBase = ZZBase;
     /*
@@ -811,6 +2710,10 @@ static uint8_t *unload_device(struct Library *dev)
     }
 
     uint8_t *seg = DeviceSegList;
+    if (UtilityBase) {
+        CloseLibrary(UtilityBase);
+        UtilityBase = NULL;
+    }
 
     /*
      * Forbid() prevents another task from FindDevice'ing us between
@@ -935,10 +2838,13 @@ static void update_port_state(struct ZZUSBUnit *unit,
                               int aborted_max)
 {
     struct ZZUSBCommand chk;
+    uint16_t status;
     memset(&chk, 0, sizeof(chk));
     chk.cmd = ZZUSB_CMD_CHECK_PORT;
 
-    if (send_usb_cmd(base, &chk, NULL, 0) == ZZUSB_STATUS_OK) {
+    status = send_usb_cmd_with_rt_service(
+        base, &chk, NULL, 0, unit);
+    if (status == ZZUSB_STATUS_OK) {
         /*
          * Firmware says the port is still physically connected.
          * If we previously marked the device dead after an
@@ -980,6 +2886,7 @@ static void update_port_state(struct ZZUSBUnit *unit,
             port_status |= UPSF_PORT_LOW_SPEED;
         }
         if (!unit->zz_PortPresent || unit->zz_Speed != r->speed) {
+            bump_unit_generation(unit);
             unit->zz_PortPresent = TRUE;
             unit->zz_Speed = r->speed;
             unit->zz_PortStatus = port_status;
@@ -988,7 +2895,7 @@ static void update_port_state(struct ZZUSBUnit *unit,
         } else {
             unit->zz_PortStatus = port_status;
         }
-    } else {
+    } else if (status == ZZUSB_STATUS_OFFLINE) {
         /*
          * Firmware says no device on the port (PHYSICAL disconnect).
          * Clear the PortDead sticky state — if the user replugs, we
@@ -997,6 +2904,7 @@ static void update_port_state(struct ZZUSBUnit *unit,
          */
         unit->zz_PortDead = FALSE;
         if (unit->zz_PortPresent) {
+            bump_unit_generation(unit);
             unit->zz_PortPresent = FALSE;
             unit->zz_Speed = 0;
             unit->zz_PortStatus = UPSF_PORT_POWER;
@@ -1005,184 +2913,405 @@ static void update_port_state(struct ZZUSBUnit *unit,
             abort_int_iors_offline(unit, aborted, aborted_count, aborted_max);
             trace_port_state(unit, "PORT_DISCONNECT");
         }
+    } else {
+        /*
+         * A mailbox failure says nothing about physical connection state.
+         * Preserve Poseidon's current view while a quarantined v2 channel
+         * waits for its terminal response and negotiates a fresh fence.
+         */
+        recover_quarantined_proxy(base);
     }
 }
 
-/*
- * Poll pending interrupt IORs on one unit. For each endpoint slot
- * with a pending IOR, issue an INT_XFER command to the firmware and
- * complete the request when firmware returns report data or a real
- * transfer error. Idle IN polls stay queued, matching Deneb-style
- * hardware-driver behaviour: Poseidon should not see a fresh reply
- * for every NAK/no-change interval.
- *
- * IMPORTANT: send_usb_cmd uses the single firmware mailbox, so the
- * poll task holds zz_Lock while the command is in flight. Keep the
- * firmware timeout bounded here so foreground Poseidon I/O is not held
- * indefinitely behind idle interrupt endpoints.
- */
-static void poll_int_pending(struct ZZUSBBase *base_dev,
-                             struct ZZUSBUnit *unit)
+static void poll_int_pending_legacy(struct ZZUSBBase *base_dev,
+                                    struct ZZUSBUnit *unit)
 {
-    volatile uint8_t *base = (volatile uint8_t*)unit->zz_Registers;
+    volatile uint8_t *base = (volatile uint8_t *)unit->zz_Registers;
+    int unit_index = (int)(unit - &base_dev->zz_Units[0]);
+    unsigned start = unit_index >= 0 && unit_index < ZZ_NUM_PORTS
+                   ? LegacyIntPollCursor[unit_index] : 0U;
 
-    for (int slot_index = 0; slot_index < ZZ_INT_PENDING_SLOTS; slot_index++) {
+    for (unsigned visited = 0; visited < ZZ_INT_PENDING_SLOTS;
+         visited++) {
+        unsigned slot_index =
+            (start + visited) % ZZ_INT_PENDING_SLOTS;
         struct ZZIntPendingSlot *slot = &IntPendingSlots[slot_index];
         struct IOUsbHWReq *reply_now = NULL;
+        struct IOUsbHWReq *ior;
+        struct ZZUSBCommand cmd;
+        uint16_t status;
+        uint32_t actual = 0;
+        int idle_in = 0;
 
-        /*
-         * Hold zz_Lock for the entire send_usb_cmd + result decode.
-         * The shared firmware buffer is the serialized resource;
-         * without this lock, begin_io and the poll task race each
-         * other on the command mailbox. ReplyMsg is done AFTER the
-         * lock is released to avoid re-entrancy deadlocks.
-         */
         ObtainSemaphore(&base_dev->zz_Lock);
-
         if (!slot->ior || slot->unit != unit) {
             ReleaseSemaphore(&base_dev->zz_Lock);
             continue;
         }
-        struct IOUsbHWReq *ior = slot->ior;
+        ior = slot->ior;
+        if (slot->abort_requested) {
+            ior->iouh_Actual = 0;
+            ior->iouh_Req.io_Error = IOERR_ABORTED;
+            clear_int_slot(slot);
+            reply_now = ior;
+            goto legacy_done;
+        }
 
-        struct ZZUSBCommand cmd;
         memset(&cmd, 0, sizeof(cmd));
         cmd.cmd = ZZUSB_CMD_INT_XFER;
         cmd.dev_addr = ior->iouh_DevAddr;
         cmd.endpoint = ior->iouh_Endpoint;
-        cmd.direction = (ior->iouh_Dir == UHDIR_IN) ? 0x80 : 0x00;
+        cmd.direction = ior->iouh_Dir == UHDIR_IN ? 0x80 : 0;
         cmd.max_pkt_size = ior->iouh_MaxPktSize;
         cmd.speed = request_speed(unit, ior);
         cmd.data_length = ior->iouh_Length;
         cmd.interval = ior->iouh_Interval;
-        fill_split_fields(&cmd, unit, ior);
-        /*
-         * Firmware's current interrupt helper polls the EHCI queue for
-         * up to 16 ms before reporting an idle IN endpoint as a clean
-         * zero-byte completion, then tears down the periodic queue with
-         * a defensive 500 ms guard. A high-speed hub with no downstream
-         * changes exercises this idle path continuously, so the mailbox
-         * wait must cover the firmware's whole bounded path. Timing out
-         * locally while firmware is still using the shared command buffer
-         * races the next Poseidon request and can wedge the stack.
-         */
         cmd.timeout_ms = 1000;
+        fill_split_fields(&cmd, unit, ior);
+        status = send_usb_cmd(
+            base, &cmd,
+            ior->iouh_Dir == UHDIR_OUT ? ior->iouh_Data : NULL,
+            ior->iouh_Dir == UHDIR_OUT ? ior->iouh_Length : 0);
 
-        uint16_t status = send_usb_cmd(base, &cmd,
-                                       (ior->iouh_Dir == UHDIR_OUT) ? ior->iouh_Data : NULL,
-                                       (ior->iouh_Dir == UHDIR_OUT) ? ior->iouh_Length : 0);
-
-        if (status == ZZUSB_STATUS_OK ||
-            (ior->iouh_Dir == UHDIR_IN &&
-             (status == ZZUSB_STATUS_NAK ||
-              status == ZZUSB_STATUS_TIMEOUT))) {
+        if (status == ZZUSB_STATUS_OK) {
             volatile struct ZZUSBCommand *result =
-                (volatile struct ZZUSBCommand*)(base + 0xa000);
-            uint32_t actual = (status == ZZUSB_STATUS_OK)
-                              ? result->actual_length : 0;
-
-            /* Clamp against the caller's buffer length in case the
-             * firmware returns a bogus actual_length after a data
-             * buffer error — prevents heap corruption in Poseidon. */
-            if (actual > ior->iouh_Length) actual = ior->iouh_Length;
-
-            trace_hub_int_data(unit, ior, actual,
-                (volatile uint8_t*)(base + 0xa000 + ZZUSB_DATA_OFFSET));
-
-            int idle_in = (ior->iouh_Dir == UHDIR_IN && actual == 0);
+                (volatile struct ZZUSBCommand *)(base + 0xa000);
+            actual = result->actual_length;
+            if (actual > ior->iouh_Length)
+                actual = ior->iouh_Length;
+            trace_hub_int_data(
+                unit, ior, actual,
+                (volatile uint8_t *)(base + 0xa000 + ZZUSB_DATA_OFFSET));
+            idle_in = ior->iouh_Dir == UHDIR_IN && actual == 0;
             if (ior->iouh_Dir == UHDIR_IN && actual > 0 && actual <= 2 &&
-                is_zero_report((volatile uint8_t*)(base + 0xa000 + ZZUSB_DATA_OFFSET),
-                               actual)) {
+                is_zero_report(
+                    (volatile uint8_t *)(base + 0xa000 +
+                                         ZZUSB_DATA_OFFSET),
+                    actual))
                 idle_in = 1;
-            }
-            int complete_idle = 0;
+        } else if (ior->iouh_Dir == UHDIR_IN &&
+                   status == ZZUSB_STATUS_NAK) {
+            idle_in = 1;
+        }
 
-            if (idle_in) {
-                /*
-                 * Idle interrupt IN. Deneb leaves this IOR queued and
-                 * only replies when the endpoint produces data. Some
-                 * high-speed hubs return a one-byte all-zero status
-                 * bitmap instead of NAKing when no downstream port
-                 * changed; treat that as idle too. This driver still
-                 * has to emulate the queue with synchronous firmware
-                 * mailbox polls, so periodically complete an idle IOR
-                 * to let Poseidon's bring-online code make progress.
-                 * Keep the zero-report test limited to <=2 bytes so
-                 * HID release reports are still delivered.
-                 */
-                if (slot->idle_polls < 0xff)
-                    slot->idle_polls++;
-                if (slot->idle_polls >= ZZ_INT_IDLE_REPLY_POLLS)
-                    complete_idle = 1;
-            } else if (actual > 0 || ior->iouh_Dir == UHDIR_OUT) {
-                if (ior->iouh_Dir == UHDIR_IN && ior->iouh_Data) {
-                    safe_copy((void*)(base + 0xa000 + ZZUSB_DATA_OFFSET),
-                              ior->iouh_Data, actual);
-                }
-            }
-
-            if (complete_idle) {
-                if (ior->iouh_Dir == UHDIR_IN && ior->iouh_Data) {
-                    if (actual > 0) {
-                        safe_copy((void*)(base + 0xa000 + ZZUSB_DATA_OFFSET),
-                                  ior->iouh_Data, actual);
-                    } else if (ior->iouh_Length > 0) {
+        if (idle_in) {
+            if (slot->idle_polls < 0xff)
+                slot->idle_polls++;
+            if (slot->idle_polls >= ZZ_INT_IDLE_REPLY_POLLS) {
+                if (ior->iouh_Data && ior->iouh_Length) {
+                    if (actual)
+                        safe_copy(
+                            (void *)(base + 0xa000 + ZZUSB_DATA_OFFSET),
+                            ior->iouh_Data, actual);
+                    else
                         safe_zero(ior->iouh_Data, ior->iouh_Length);
-                    }
                 }
                 ior->iouh_Actual = actual;
                 ior->iouh_Req.io_Error = 0;
                 clear_int_slot(slot);
                 reply_now = ior;
-            } else if (!idle_in) {
-                ior->iouh_Actual = actual;
-                ior->iouh_Req.io_Error = 0;
-                clear_int_slot(slot);
-                reply_now = ior;
             }
+        } else if (status == ZZUSB_STATUS_OK) {
+            if (ior->iouh_Dir == UHDIR_IN && ior->iouh_Data && actual)
+                safe_copy((void *)(base + 0xa000 + ZZUSB_DATA_OFFSET),
+                          ior->iouh_Data, actual);
+            ior->iouh_Actual = actual;
+            ior->iouh_Req.io_Error = 0;
+            clear_int_slot(slot);
+            reply_now = ior;
         } else {
-            /*
-             * Interrupt IN errors on idle HID-style endpoints can be
-             * transient EHCI/poll artifacts. Replying UHIOERR_TIMEOUT
-             * here makes Poseidon clear endpoint halt immediately and
-             * retry, which we observed as an endless CLEAR_FEATURE loop
-             * on EP2 IN that starves the whole OS. Treat non-offline
-             * IN errors like an idle poll and periodically complete a
-             * zero-byte result to keep Poseidon moving.
-             */
             ior->iouh_Actual = 0;
-            if (status != ZZUSB_STATUS_OFFLINE &&
-                ior->iouh_Dir == UHDIR_IN) {
-                int complete_idle = 0;
-                if (slot->idle_polls < 0xff)
-                    slot->idle_polls++;
-                if (slot->idle_polls >= ZZ_INT_IDLE_REPLY_POLLS)
-                    complete_idle = 1;
-                if (complete_idle) {
-                    if (ior->iouh_Data && ior->iouh_Length > 0)
-                        safe_zero(ior->iouh_Data, ior->iouh_Length);
-                    ior->iouh_Req.io_Error = 0;
-                    clear_int_slot(slot);
-                    reply_now = ior;
-                }
-            } else if (status == ZZUSB_STATUS_OFFLINE) {
-                ior->iouh_Req.io_Error = UHIOERR_USBOFFLINE;
+            ior->iouh_Req.io_Error = map_proxy_status(status);
+            clear_int_slot(slot);
+            reply_now = ior;
+        }
+
+legacy_done:
+        ReleaseSemaphore(&base_dev->zz_Lock);
+        if (reply_now && !(reply_now->iouh_Req.io_Flags & IOF_QUICK))
+            ReplyMsg(&reply_now->iouh_Req.io_Message);
+        if (unit_index >= 0 && unit_index < ZZ_NUM_PORTS)
+            LegacyIntPollCursor[unit_index] = (uint8_t)
+                zzusb_interrupt_next_slot(
+                    slot_index, ZZ_INT_PENDING_SLOTS);
+        return;
+    }
+}
+
+/*
+ * Arm each pending interrupt IOR once, then reap only after the firmware
+ * raises the coalesced USB event interrupt. NAK and no-data responses remain
+ * non-terminal; terminal completion stops the firmware endpoint before the
+ * Poseidon IOR and its slot are released.
+ */
+static void poll_int_pending(struct ZZUSBBase *base_dev,
+                             struct ZZUSBUnit *unit,
+                             int reap_events)
+{
+    volatile uint8_t *base = (volatile uint8_t*)unit->zz_Registers;
+    struct ZZUSBProtocolState *state = protocol_state_for(base);
+
+    if (!state || !(state->capabilities & ZZUSB_CAP_PERIODIC)) {
+        poll_int_pending_legacy(base_dev, unit);
+        return;
+    }
+
+    for (int slot_index = 0; slot_index < ZZ_INT_PENDING_SLOTS; slot_index++) {
+        struct ZZIntPendingSlot *slot = &IntPendingSlots[slot_index];
+        struct IOUsbHWReq *reply_now = NULL;
+        struct IOUsbHWReq *ior;
+        struct ZZUSBCommand cmd;
+        uint16_t status;
+        uint16_t stop_status;
+        ObtainSemaphore(&base_dev->zz_Lock);
+        if (!slot->ior || slot->unit != unit) {
+            ReleaseSemaphore(&base_dev->zz_Lock);
+            continue;
+        }
+        ior = slot->ior;
+
+        fill_int_arm_command(&cmd, unit, ior);
+        cmd.reserved = slot->armed ? slot->arm_generation :
+            generation_for_unit(unit);
+        cmd.timeout_ms = 100;
+
+        if (slot->stop_pending) {
+            if (slot->abort_requested) {
+                ior->iouh_Actual = 0;
+                ior->iouh_Req.io_Error = IOERR_ABORTED;
+                slot->abort_requested = 0;
+            }
+            stop_status = stop_periodic_slot(slot);
+            if (slot->ior != ior || slot->unit != unit) {
+                ReleaseSemaphore(&base_dev->zz_Lock);
+                continue;
+            }
+            if (stop_status_retired(stop_status)) {
+                clear_int_slot(slot);
+                reply_now = ior;
+            }
+            ReleaseSemaphore(&base_dev->zz_Lock);
+            if (reply_now &&
+                !(reply_now->iouh_Req.io_Flags & IOF_QUICK))
+                ReplyMsg(&reply_now->iouh_Req.io_Message);
+            continue;
+        }
+
+        if (slot->abort_requested) {
+            ior->iouh_Actual = 0;
+            ior->iouh_Req.io_Error = IOERR_ABORTED;
+            stop_status = stop_periodic_slot(slot);
+            if (slot->ior != ior || slot->unit != unit) {
+                ReleaseSemaphore(&base_dev->zz_Lock);
+                continue;
+            }
+            if (stop_status_retired(stop_status)) {
                 clear_int_slot(slot);
                 reply_now = ior;
             } else {
-                ior->iouh_Req.io_Error = UHIOERR_TIMEOUT;
-                clear_int_slot(slot);
-                reply_now = ior;
+                slot->stop_pending = 1;
+                slot->abort_requested = 0;
             }
         }
 
-        ReleaseSemaphore(&base_dev->zz_Lock);
-
-        if (reply_now && !(reply_now->iouh_Req.io_Flags & IOF_QUICK)) {
-            ReplyMsg(&reply_now->iouh_Req.io_Message);
+        if (!reply_now && !slot->stop_pending && slot->rearm_required) {
+            stop_status = stop_periodic_slot(slot);
+            if (slot->ior != ior || slot->unit != unit) {
+                ReleaseSemaphore(&base_dev->zz_Lock);
+                continue;
+            }
+            slot->rearm_required = 0;
+            if (!stop_status_retired(stop_status)) {
+                ior->iouh_Actual = 0;
+                ior->iouh_Req.io_Error = map_proxy_status(stop_status);
+                slot->stop_pending = 1;
+            }
         }
-        return;
+
+        if (!reply_now && !slot->stop_pending && !slot->armed) {
+            cmd.cmd = ZZUSB_CMD_PERIODIC_ARM;
+            slot->arm_generation = cmd.reserved;
+            slot->arm_in_progress = 1;
+            status = send_usb_cmd_with_rt_service(
+                base, &cmd,
+                (ior->iouh_Dir == UHDIR_OUT) ? ior->iouh_Data : NULL,
+                (ior->iouh_Dir == UHDIR_OUT) ? ior->iouh_Length : 0,
+                unit);
+            if (slot->ior != ior || slot->unit != unit) {
+                if (status == ZZUSB_STATUS_OK) {
+                    cmd.cmd = ZZUSB_CMD_PERIODIC_STOP;
+                    stop_status = send_usb_cmd_with_rt_service(
+                        base, &cmd, NULL, 0, unit);
+                    if (!stop_status_retired(stop_status)) {
+                        /*
+                         * Fence the orphaned endpoint until recovery can
+                         * reset firmware ownership.
+                         */
+                        state->quarantined = 1;
+                        bump_unit_generation(unit);
+                    }
+                }
+                ReleaseSemaphore(&base_dev->zz_Lock);
+                continue;
+            }
+            slot->arm_in_progress = 0;
+            if (status != ZZUSB_STATUS_OK) {
+                ior->iouh_Actual = 0;
+                ior->iouh_Req.io_Error = slot->abort_requested ?
+                    IOERR_ABORTED : map_proxy_status(status);
+                if (state->quarantined) {
+                    /*
+                     * The deadline cannot distinguish a rejected ARM from
+                     * one consumed by firmware. Retain the endpoint identity
+                     * and conservatively stop it after mailbox recovery.
+                     */
+                    slot->armed = 1;
+                    slot->stop_pending = 1;
+                } else {
+                    clear_int_slot(slot);
+                    reply_now = ior;
+                }
+            } else {
+                slot->armed = 1;
+                zzusb_engine_diag_count(
+                    ZZUSB_DRIVER_COUNT_INTERRUPT_ARM);
+            }
+        }
+
+        if (!reply_now && !slot->abort_requested &&
+            !slot->stop_pending && slot->armed && reap_events) {
+            volatile struct ZZUSBCommand *result;
+            uint32_t actual;
+            int zero_report = 0;
+            enum zzusb_interrupt_action action;
+
+            cmd.cmd = ZZUSB_CMD_PERIODIC_REAP;
+            status = send_usb_cmd_with_rt_service(
+                base, &cmd, NULL, 0, unit);
+            if (slot->ior != ior || slot->unit != unit) {
+                ReleaseSemaphore(&base_dev->zz_Lock);
+                continue;
+            }
+            if (slot->abort_requested) {
+                ior->iouh_Actual = 0;
+                ior->iouh_Req.io_Error = IOERR_ABORTED;
+                stop_status = stop_periodic_slot(slot);
+                if (slot->ior != ior || slot->unit != unit) {
+                    ReleaseSemaphore(&base_dev->zz_Lock);
+                    continue;
+                }
+                if (stop_status_retired(stop_status)) {
+                    clear_int_slot(slot);
+                    reply_now = ior;
+                } else {
+                    slot->stop_pending = 1;
+                    slot->abort_requested = 0;
+                }
+                goto periodic_slot_done;
+            }
+            result = (volatile struct ZZUSBCommand*)(base + 0xa000);
+            actual = status == ZZUSB_STATUS_OK ? result->actual_length : 0;
+            if (actual > ior->iouh_Length)
+                actual = ior->iouh_Length;
+
+            if (status == ZZUSB_STATUS_OK) {
+                zzusb_engine_diag_count(
+                    ZZUSB_DRIVER_COUNT_INTERRUPT_REAP);
+                trace_hub_int_data(
+                    unit, ior, actual,
+                    (volatile uint8_t*)(base + 0xa000 +
+                                        ZZUSB_DATA_OFFSET));
+                if (ior->iouh_Dir == UHDIR_IN &&
+                    actual > 0 && actual <= 2)
+                    zero_report = is_zero_report(
+                        (volatile uint8_t*)(base + 0xa000 +
+                                            ZZUSB_DATA_OFFSET),
+                        actual);
+            }
+            action = zzusb_interrupt_classify(
+                status, actual, ior->iouh_Dir == UHDIR_IN, zero_report);
+            if (action == ZZUSB_INTERRUPT_COMPLETE) {
+                if (ior->iouh_Dir == UHDIR_IN && ior->iouh_Data)
+                    safe_copy(
+                        (void*)(base + 0xa000 + ZZUSB_DATA_OFFSET),
+                        ior->iouh_Data, actual);
+                ior->iouh_Actual = actual;
+                ior->iouh_Req.io_Error = 0;
+                stop_status = stop_periodic_slot(slot);
+                if (slot->ior != ior || slot->unit != unit) {
+                    ReleaseSemaphore(&base_dev->zz_Lock);
+                    continue;
+                }
+                if (!stop_status_retired(stop_status)) {
+                    ior->iouh_Actual = 0;
+                    ior->iouh_Req.io_Error = map_proxy_status(stop_status);
+                    slot->stop_pending = 1;
+                } else {
+                    clear_int_slot(slot);
+                    reply_now = ior;
+                }
+            } else if (action == ZZUSB_INTERRUPT_FAIL) {
+                ior->iouh_Actual = 0;
+                ior->iouh_Req.io_Error = map_proxy_status(status);
+                stop_status = stop_periodic_slot(slot);
+                if (slot->ior != ior || slot->unit != unit) {
+                    ReleaseSemaphore(&base_dev->zz_Lock);
+                    continue;
+                }
+                if (!stop_status_retired(stop_status)) {
+                    ior->iouh_Req.io_Error =
+                        map_proxy_status(stop_status);
+                    slot->stop_pending = 1;
+                } else {
+                    clear_int_slot(slot);
+                    reply_now = ior;
+                }
+            }
+        }
+
+periodic_slot_done:
+        ReleaseSemaphore(&base_dev->zz_Lock);
+        if (reply_now && !(reply_now->iouh_Req.io_Flags & IOF_QUICK))
+            ReplyMsg(&reply_now->iouh_Req.io_Message);
     }
+}
+
+static void service_rt_iso_during_work(struct ZZUSBBase *base,
+                                       struct ZZUSBUnit *unit)
+{
+    ReleaseSemaphore(&base->zz_Lock);
+    poll_rt_iso(unit);
+    ObtainSemaphore(&base->zz_Lock);
+}
+
+static uint16_t send_usb_cmd_with_rt_wait(
+    volatile uint8_t *base, struct ZZUSBCommand *cmd,
+    void *data_out, uint32_t data_out_len, struct ZZUSBUnit *unit)
+{
+    uint16_t status;
+
+    if (!PollBase || !rt_iso_pending_for_unit(unit))
+        return send_usb_cmd(base, cmd, data_out, data_out_len);
+    if (active_work_aborted())
+        return ZZUSB_STATUS_CANCELLED;
+
+    ForegroundMailboxBase = base;
+    ForegroundMailboxUnit = unit;
+    status = send_usb_cmd(base, cmd, data_out, data_out_len);
+    ForegroundMailboxUnit = NULL;
+    ForegroundMailboxBase = NULL;
+    return status;
+}
+
+static uint16_t send_usb_cmd_with_rt_service(
+    volatile uint8_t *base, struct ZZUSBCommand *cmd,
+    void *data_out, uint32_t data_out_len, struct ZZUSBUnit *unit)
+{
+    if (!PollBase || !rt_iso_pending_for_unit(unit))
+        return send_usb_cmd(base, cmd, data_out, data_out_len);
+    service_rt_iso_during_work(PollBase, unit);
+    return send_usb_cmd_with_rt_wait(
+        base, cmd, data_out, data_out_len, unit);
 }
 
 static int poll_roothub_pending(struct ZZUSBBase *base_dev,
@@ -1215,6 +3344,8 @@ static int poll_roothub_pending(struct ZZUSBBase *base_dev,
         RootHubPollDelay[unit_index] = ZZ_RH_POLL_DELAY_TICKS;
         update_port_state(unit, base, aborted_replies,
                           &aborted_count, ZZ_ABORTED_REPLY_SLOTS);
+        if (RootHubIntPending[unit_index] != ior)
+            goto roothub_done;
     }
 
     if (unit->zz_PortChange != 0) {
@@ -1230,6 +3361,7 @@ static int poll_roothub_pending(struct ZZUSBBase *base_dev,
         reply_now = ior;
     }
 
+roothub_done:
     still_pending = RootHubIntPending[unit_index] != NULL;
 
     ReleaseSemaphore(&base_dev->zz_Lock);
@@ -1287,8 +3419,37 @@ static void hotplug_poll_task(void)
                                  (struct IORequest*)&timer_req, 0) == 0);
     }
 
+    if (timer_open) {
+        WorkerTimerRequest = &timer_req;
+        WorkerTimerMask = timer_mask;
+        if (!ProtocolNegotiated) {
+            negotiate_usb_proxy((volatile uint8_t *)
+                                PollBase->zz_Units[0].zz_Registers,
+                                &ProtocolStates[0], 1);
+            ProtocolNegotiated = 1;
+        }
+    }
+
     for (;;) {
         int any_pending = 0;
+        int reap_events;
+        uint32_t poll_delay_us = 100000U;
+
+        Disable();
+        reap_events = USBEventPending != 0;
+        USBEventPending = 0;
+        Enable();
+        for (int u = 0; u < ZZ_NUM_PORTS; u++) {
+            struct ZZUSBUnit *unit = &PollBase->zz_Units[u];
+
+            if (!unit->zz_Enabled)
+                continue;
+            recover_quarantined_proxy(
+                (volatile uint8_t *)unit->zz_Registers);
+            poll_simple_iso_cleanup(unit);
+            poll_rt_iso(unit);
+        }
+        process_work_queue();
 
         for (int u = 0; u < ZZ_NUM_PORTS; u++) {
             struct ZZUSBUnit *unit = &PollBase->zz_Units[u];
@@ -1298,11 +3459,22 @@ static void hotplug_poll_task(void)
                 any_pending = 1;
             }
 
-            poll_int_pending(PollBase, unit);
+            poll_int_pending(PollBase, unit, reap_events);
 
             if (int_pending_for_unit(unit))
                 any_pending = 1;
+            if (rt_iso_pending_for_unit(unit)) {
+                uint32_t service_limit_us =
+                    rt_iso_service_limit_us(unit);
+
+                any_pending = 1;
+                if (service_limit_us < poll_delay_us)
+                    poll_delay_us = service_limit_us;
+            }
         }
+
+        if (work_queue_pending())
+            continue;
 
         if (!any_pending) {
             Wait(mask);
@@ -1316,7 +3488,7 @@ static void hotplug_poll_task(void)
             SetSignal(0, timer_mask);
             timer_req.tr_node.io_Command = TR_ADDREQUEST;
             timer_req.tr_time.tv_secs = 0;
-            timer_req.tr_time.tv_micro = 100000;
+            timer_req.tr_time.tv_micro = poll_delay_us;
             SendIO((struct IORequest*)&timer_req);
             Wait(mask | timer_mask);
             if (!CheckIO((struct IORequest*)&timer_req)) {
@@ -1592,6 +3764,8 @@ static void handle_roothub_control(struct ZZUSBUnit *unit,
                         unit->zz_PortStatus |= UPSF_PORT_RESET;
                         unit->zz_PortChange &= ~UPSF_C_PORT_RESET;
                         trace_port_state(unit, "SET_RESET_START");
+                        stop_rt_iso_for_unit(unit);
+                        bump_unit_generation(unit);
 
                         struct ZZUSBCommand rcmd;
                         volatile uint8_t *rbase = (volatile uint8_t*)unit->zz_Registers;
@@ -1599,12 +3773,20 @@ static void handle_roothub_control(struct ZZUSBUnit *unit,
                         rcmd.cmd = ZZUSB_CMD_RESET_PORT;
                         rcmd.timeout_ms = 5000;
                         fill_root_reset_hint(&rcmd, unit);
+                        recover_quarantined_proxy(rbase);
 
                         uint16_t rstatus = send_usb_cmd(rbase, &rcmd, NULL, 0);
                         uint16_t fw_speed = 0;
                         volatile struct ZZUSBCommand *rresult =
                             (volatile struct ZZUSBCommand*)(rbase + 0xa000);
                         fw_speed = rresult->speed;
+                        if (rstatus == ZZUSB_STATUS_OK ||
+                            rstatus == ZZUSB_STATUS_OFFLINE) {
+                            finish_reset_rt_iso_for_unit(unit);
+                            finish_reset_periodic_for_unit(unit);
+                            finish_reset_simple_iso_for_unit(unit);
+                            record_reset_success(unit, rstatus);
+                        }
 
                         unit->zz_PortStatus &= ~UPSF_PORT_RESET;
                         if ((rstatus == ZZUSB_STATUS_OK ||
@@ -1712,23 +3894,16 @@ static void handle_roothub_control(struct ZZUSBUnit *unit,
 static int handle_roothub_int(struct ZZUSBUnit *unit,
                               int unit_index,
                               struct IOUsbHWReq *ior,
-                              volatile uint8_t *base,
                               struct IOUsbHWReq **aborted,
                               int *aborted_count,
                               int aborted_max)
 {
     if (ior->iouh_Endpoint == 1 && ior->iouh_Data) {
         /*
-         * Re-check port state on every hub-INT poll unless
-         * Poseidon hasn't yet acked the previous transition
-         * (zz_PortChange != 0). This is how we pick up both
-         * hot-plug and hot-unplug — without refreshing here,
-         * once the port was known occupied we'd never see the
-         * C_PORT_CONNECTION transition going the other way.
+         * Port checks use the poll task's timer request. Queue a quiet
+         * root-hub IOR and signal that task instead of waiting from the
+         * Poseidon caller; an already-latched change needs no mailbox.
          */
-        if (unit->zz_PortChange == 0) {
-            update_port_state(unit, base, aborted, aborted_count, aborted_max);
-        }
         if (unit->zz_PortChange == 0) {
             struct IOUsbHWReq *old = RootHubIntPending[unit_index];
             if (old && old != ior) {
@@ -1740,7 +3915,7 @@ static int handle_roothub_int(struct ZZUSBUnit *unit,
             }
             ior->iouh_Req.io_Flags &= ~IOF_QUICK;
             RootHubIntPending[unit_index] = ior;
-            RootHubPollDelay[unit_index] = ZZ_RH_POLL_DELAY_TICKS;
+            RootHubPollDelay[unit_index] = 0;
             trace_int_status(unit, "RH_INT_WAIT", ior);
             return 1;
         }
@@ -1816,7 +3991,8 @@ static int fill_querydevice_tags(struct ZZUSBUnit *unit, struct TagItem *tags)
                 "Licensed under GNU GPL v3 or later.");
             break;
         case UHA_Capabilities:
-            count += write_tag_ulong(tags, UHCF_USB20);
+            count += write_tag_ulong(tags,
+                                     iso_public_capabilities(unit));
             break;
         case UHA_RootHubAddr:
             count += write_tag_ulong(tags, unit ? unit->zz_RootHubAddr : 0);
@@ -1830,9 +4006,9 @@ static int fill_querydevice_tags(struct ZZUSBUnit *unit, struct TagItem *tags)
 }
 
 /*
- * NSD (NewStyleDevice) capability table. Listed in the order Poseidon
- * tends to query. UHCMD_ISOXFER is intentionally absent — we return
- * UHIOERR_BADPARAMS for it, so advertising support would be a lie.
+ * NSD (NewStyleDevice) command table. Runtime UHA_Capabilities remains
+ * authoritative: ISO commands reject use unless the matched firmware
+ * advertises the corresponding transport.
  */
 #ifndef NSCMD_DEVICEQUERY
 #define NSCMD_DEVICEQUERY 0x4000
@@ -1870,6 +4046,11 @@ static const UWORD NSDSupportedCommands[] = {
     UHCMD_CONTROLXFER,
     UHCMD_BULKXFER,
     UHCMD_INTXFER,
+    UHCMD_ISOXFER,
+    UHCMD_ADDISOHANDLER,
+    UHCMD_REMISOHANDLER,
+    UHCMD_STARTRTISO,
+    UHCMD_STOPRTISO,
     0
 };
 
@@ -1881,7 +4062,7 @@ struct ZZNSDeviceQueryResult {
     const UWORD *SupportedCommands;
 };
 
-static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct IOUsbHWReq *ior asm("a1"))
+static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
 {
     struct ZZUSBBase* ZZBase = (struct ZZUSBBase*)dev;
     struct ZZUSBUnit* unit;
@@ -1915,6 +4096,24 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
     ObtainSemaphore(&ZZBase->zz_Lock);
 
     switch (ior->iouh_Req.io_Command) {
+    case ZZUSB_UHCMD_GET_DIAGNOSTICS:
+        if (!ior->iouh_Data ||
+            ior->iouh_Length < sizeof(DriverDiagSnapshot)) {
+            ior->iouh_Actual = 0;
+            ior->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+        } else if (!zzusb_engine_diag_snapshot(
+                       &DriverDiagSnapshot,
+                       ProtocolStates[0].capabilities,
+                       ProtocolStates[0].controller_epoch, 4U)) {
+            ior->iouh_Actual = 0;
+            ior->iouh_Req.io_Error = UHIOERR_HOSTERROR;
+        } else {
+            safe_copy(&DriverDiagSnapshot, ior->iouh_Data,
+                      sizeof(DriverDiagSnapshot));
+            ior->iouh_Actual = sizeof(DriverDiagSnapshot);
+            ior->iouh_Req.io_Error = 0;
+        }
+        break;
     case UHCMD_QUERYDEVICE:
         {
             int filled = fill_querydevice_tags(unit,
@@ -1961,17 +4160,28 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
     case UHCMD_USBRESET:
         {
             struct ZZUSBCommand cmd;
+            stop_rt_iso_for_unit(unit);
+            bump_unit_generation(unit);
             memset(&cmd, 0, sizeof(cmd));
             cmd.cmd = ZZUSB_CMD_RESET_PORT;
             cmd.timeout_ms = 5000;
             fill_root_reset_hint(&cmd, unit);
+            recover_quarantined_proxy(base);
 
             uint16_t status = send_usb_cmd(base, &cmd, NULL, 0);
             uint16_t fw_speed = 0;
             volatile struct ZZUSBCommand *result =
                 (volatile struct ZZUSBCommand*)(base + 0xa000);
             fw_speed = result->speed;
+            if (status == ZZUSB_STATUS_OK ||
+                status == ZZUSB_STATUS_OFFLINE) {
+                finish_reset_rt_iso_for_unit(unit);
+                finish_reset_periodic_for_unit(unit);
+                finish_reset_simple_iso_for_unit(unit);
+                record_reset_success(unit, status);
+            }
 
+            int empty_port = 0;
             if (status == ZZUSB_STATUS_OK) {
                 if (result->speed == ZZUSB_SPEED_LOW) {
                     mark_direct_low_speed_unsupported(unit, "LS_ROOT_IGNORE");
@@ -1984,21 +4194,16 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
                 }
                 /*
                  * Only flag POWER + CONNECTION + speed here.
-                 * Poseidon's hub class drives the enable / C_RESET
-                 * transitions via the subsequent hub SET_FEATURE
-                 * and GET_STATUS control transfers handled in
-                 * handle_roothub_control. Setting PE or C_RESET at
-                 * this point triggers a Poseidon recovery path
-                 * that can reboot the Amiga on device-online.
+                 * Poseidon's hub class drives enable/C_RESET through the
+                 * subsequent root-hub class requests.
                  */
                 UWORD port_status = UPSF_PORT_POWER | UPSF_PORT_CONNECTION;
                 if (result->speed == ZZUSB_SPEED_HIGH) {
                     port_status |= UPSF_PORT_HIGH_SPEED;
                 } else {
                     port_status |= UPSF_PORT_ENABLE;
-                    if (result->speed == ZZUSB_SPEED_LOW) {
+                    if (result->speed == ZZUSB_SPEED_LOW)
                         port_status |= UPSF_PORT_LOW_SPEED;
-                    }
                 }
                 unit->zz_Speed = result->speed;
                 unit->zz_PortPresent = TRUE;
@@ -2008,32 +4213,34 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
                 if (status == ZZUSB_STATUS_OFFLINE &&
                     fw_speed == ZZUSB_SPEED_LOW) {
                     mark_direct_low_speed_unsupported(unit, "LS_ROOT_IGNORE");
+                    empty_port = 1;
                 } else {
-                    unit->zz_PortPresent = FALSE;
-                    unit->zz_PortStatus = UPSF_PORT_POWER;
-                    unit->zz_PortChange = 0;
-                    unit->zz_Speed = 0;
+                    struct ZZUSBCommand check;
+                    uint16_t check_status;
+
+                    memset(&check, 0, sizeof(check));
+                    check.cmd = ZZUSB_CMD_CHECK_PORT;
+                    check.timeout_ms = 250;
+                    check_status = send_usb_cmd(base, &check, NULL, 0);
+                    if (check_status == ZZUSB_STATUS_OFFLINE) {
+                        unit->zz_PortPresent = FALSE;
+                        unit->zz_PortStatus = UPSF_PORT_POWER;
+                        unit->zz_PortChange = 0;
+                        unit->zz_Speed = 0;
+                        empty_port = 1;
+                    }
                 }
             }
             trace_port_state_status(unit, "USBRESET_FW", status, fw_speed);
             trace_port_state(unit, "USBRESET_DONE");
 
-            /*
-             * USBRESET always-OK reporting (matches v1.53 behaviour).
-             *
-             * v1.58 tried to report UHIOERR_HOSTERROR on firmware
-             * error for strictness, but that set up a contradiction
-             * (io_Error = HOSTERROR + iouh_State = UHSF_OPERATIONAL)
-             * that sent Poseidon down a recovery code path which
-             * in turn tripped the poll task — net result: crash.
-             *
-             * "Empty port" is a normal operational state for a root
-             * hub, not a hardware error. Report success; downstream
-             * port-status / port-connection bits (set above) tell
-             * Poseidon the port is simply unoccupied.
-             */
-            ior->iouh_Req.io_Error = 0;
-            ior->iouh_State = UHSF_OPERATIONAL;
+            if (status == ZZUSB_STATUS_OK || empty_port) {
+                ior->iouh_Req.io_Error = 0;
+                ior->iouh_State = UHSF_OPERATIONAL;
+            } else {
+                ior->iouh_Req.io_Error = map_proxy_status(status);
+                ior->iouh_State = 0;
+            }
         }
         break;
 
@@ -2048,7 +4255,7 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
                 uint16_t status;
                 int setup_in;
 
-                if (ior->iouh_Length > ZZUSB_MAX_XFER) {
+                if (ior->iouh_Length > usb_proxy_data_limit(base)) {
                     ior->iouh_Req.io_Error = UHIOERR_PKTTOOLARGE;
                     break;
                 }
@@ -2103,9 +4310,9 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
                 cmd.setup_wIndex = ior->iouh_SetupData.wIndex;
                 cmd.setup_wLength = ior->iouh_SetupData.wLength;
 
-                status = send_usb_cmd(base, &cmd,
-                                      (!setup_in) ? ior->iouh_Data : NULL,
-                                      (!setup_in) ? ior->iouh_Length : 0);
+                status = send_usb_cmd_with_rt_service(
+                    base, &cmd, (!setup_in) ? ior->iouh_Data : NULL,
+                    (!setup_in) ? ior->iouh_Length : 0, unit);
 
                 if (status == ZZUSB_STATUS_OK) {
                     volatile struct ZZUSBCommand *result =
@@ -2121,77 +4328,30 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
                      */
                     if (actual > ior->iouh_Length) actual = ior->iouh_Length;
 
-                    if (setup_in && ior->iouh_Data && actual > 0) {
+                    if (setup_in && ior->iouh_Data) {
                         /*
-                         * safe_copy not CopyMem — Poseidon's iouh_Data
-                         * can be odd-aligned on small descriptor reads,
-                         * and CopyMem silently no-ops on this toolchain
-                         * with odd endpoints, leaving caller with stale
-                         * bytes (e.g. MaxPktSize0=178).
+                         * Clear the caller's full destination first. A
+                         * short control read must not expose bytes left by
+                         * an older request beyond iouh_Actual.
                          */
-                        safe_copy((void*)(base + 0xa000 + ZZUSB_DATA_OFFSET),
-                                  ior->iouh_Data, actual);
+                        safe_zero(ior->iouh_Data, ior->iouh_Length);
+                        if (actual > 0) {
+                            safe_copy((void*)(base + 0xa000 + ZZUSB_DATA_OFFSET),
+                                      ior->iouh_Data, actual);
+                        }
                     }
                     ior->iouh_Actual = actual;
                     ior->iouh_Req.io_Error = 0;
-                } else if (status == ZZUSB_STATUS_STALL && is_hid_set_idle(ior)) {
-                    /*
-                     * Several HID receivers accept enumeration but stall
-                     * SET_IDLE. Treat that specific optional idle-rate
-                     * request as non-fatal; otherwise Poseidon's HID
-                     * recovery path can keep re-enumerating the device
-                     * and eventually wedge the stack.
-                     */
-                    trace_control_status(unit, "HID_IDLE_STALL_IGN", ior, status);
-                    ior->iouh_Actual = 0;
-                    ior->iouh_Req.io_Error = 0;
                 } else {
-                    /*
-                     * Control error handling. Let explicit STALL and
-                     * OFFLINE through, but keep generic transaction
-                     * failures retryable. The v1.53 "mark port dead +
-                     * fake connection-change" recovery was implicated
-                     * in HID-bring-up crashes and has been removed.
-                     */
                     trace_control_status(unit, "CTRL_FAIL", ior, status);
                     ior->iouh_Actual = 0;
-                    if (is_direct_root_addr0(unit, ior) &&
-                        unit->zz_Speed == ZZUSB_SPEED_LOW &&
-                        is_addr0_get_device_desc(ior)) {
-                        /*
-                         * Zynq/ChipIdea EHCI is not completing direct
-                         * root-port LS EP0. Hide this device until
-                         * physical unplug so Poseidon stops retrying and
-                         * the Amiga remains responsive. LS devices behind
-                         * a HS hub still use split transactions above.
-                         */
-                        unit->zz_PortDead = TRUE;
-                        unit->zz_PortPresent = FALSE;
-                        unit->zz_PortStatus = UPSF_PORT_POWER;
-                        unit->zz_PortChange = UPSF_C_PORT_CONNECTION;
-                        ior->iouh_Req.io_Error = UHIOERR_USBOFFLINE;
-                        trace_port_state(unit, "LS_ROOT_OFFLINE");
-                        break;
-                    }
-                    switch (status) {
-                    case ZZUSB_STATUS_STALL:
-                        ior->iouh_Req.io_Error = UHIOERR_STALL; break;
-                    case ZZUSB_STATUS_TIMEOUT:
-                    case ZZUSB_STATUS_NAK:
-                        ior->iouh_Req.io_Error = UHIOERR_TIMEOUT; break;
-                    case ZZUSB_STATUS_OFFLINE:
-                        ior->iouh_Req.io_Error = UHIOERR_USBOFFLINE; break;
-                    default:
-                        /*
-                         * Poseidon class drivers have repeatedly shown
-                         * fragile recovery behaviour for specific host
-                         * controller errors during enumeration. Treat
-                         * non-stall/non-offline control failures as a
-                         * retryable timeout; the UART trace still keeps
-                         * the firmware status for diagnosis.
-                         */
-                        ior->iouh_Req.io_Error = UHIOERR_TIMEOUT; break;
-                    }
+                    if (status == ZZUSB_STATUS_STALL &&
+                        ior->iouh_SetupData.bmRequestType == 0x21 &&
+                        ior->iouh_SetupData.bRequest == 0x0a)
+                        ior->iouh_Req.io_Error = 0;
+                    else
+                        ior->iouh_Req.io_Error =
+                            map_proxy_status(status);
                 }
             }
         }
@@ -2205,15 +4365,27 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
         break;
 
     case UHCMD_ISOXFER:
-        /*
-         * The mailbox protocol reserves ZZUSB_CMD_ISO_XFER, but the
-         * current firmware dispatcher has no isochronous handler.
-         * Fail explicitly instead of falling through to IOERR_NOCMD,
-         * which makes this look like a broken hardware-driver command
-         * rather than an unsupported transfer type.
-         */
+        execute_simple_iso(unit, ior, base);
+        break;
+
+    case UHCMD_ADDISOHANDLER:
         ior->iouh_Actual = 0;
-        ior->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+        ior->iouh_Req.io_Error = add_rt_iso_handler(unit, ior);
+        break;
+
+    case UHCMD_STARTRTISO:
+        ior->iouh_Actual = 0;
+        ior->iouh_Req.io_Error = start_rt_iso_handler(unit, ior);
+        break;
+
+    case UHCMD_STOPRTISO:
+        ior->iouh_Actual = 0;
+        ior->iouh_Req.io_Error = stop_rt_iso_handler(unit, ior);
+        break;
+
+    case UHCMD_REMISOHANDLER:
+        ior->iouh_Actual = 0;
+        ior->iouh_Req.io_Error = remove_rt_iso_handler(unit, ior);
         break;
 
     case UHCMD_INTXFER:
@@ -2223,7 +4395,7 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
             if (((rh_addr == 0 && ior->iouh_DevAddr == 0) || ior->iouh_DevAddr == rh_addr)
                 && ior->iouh_Endpoint == 1) {
                 int unit_index = (int)(unit - &ZZBase->zz_Units[0]);
-                if (handle_roothub_int(unit, unit_index, ior, base,
+                if (handle_roothub_int(unit, unit_index, ior,
                                        aborted_replies, &aborted_count,
                                        ABORTED_REPLY_MAX)) {
                     deferred = 1;
@@ -2241,7 +4413,7 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
                  * tight Poseidon-side interrupt-poll loop while the
                  * firmware-side EHCI poll remains bounded.
                  */
-                if (ior->iouh_Length > ZZUSB_MAX_XFER) {
+                if (ior->iouh_Length > usb_proxy_data_limit(base)) {
                     ior->iouh_Req.io_Error = UHIOERR_PKTTOOLARGE;
                     break;
                 }
@@ -2324,10 +4496,23 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
              * tuning (lever #5) or a larger shared buffer (lever #3).
              */
             enum { BULK_CHUNK = 16384 };
+            int realtime_active = rt_iso_pending_for_unit(unit);
 
             while (remaining > 0) {
-                uint32_t chunk = (remaining > BULK_CHUNK)
-                                 ? BULK_CHUNK : remaining;
+                if (active_work_aborted()) {
+                    status = ZZUSB_STATUS_CANCELLED;
+                    break;
+                }
+                /*
+                 * A realtime retry must cover at most one USB packet:
+                 * a timed-out qTD then has either completed atomically or
+                 * transferred nothing, so resubmission cannot duplicate a
+                 * partially completed bulk payload.
+                 */
+                uint32_t rt_packet = ior->iouh_MaxPktSize & 0x07ffU;
+                uint32_t limit = realtime_active ?
+                    (rt_packet ? rt_packet : 64U) : BULK_CHUNK;
+                uint32_t chunk = remaining > limit ? limit : remaining;
 
                 memset(&cmd, 0, sizeof(cmd));
                 cmd.cmd = ZZUSB_CMD_BULK_XFER;
@@ -2337,14 +4522,17 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
                 cmd.max_pkt_size = ior->iouh_MaxPktSize;
                 cmd.speed = request_speed(unit, ior);
                 cmd.data_length = chunk;
-                cmd.timeout_ms = (ior->iouh_Flags & UHFF_NAKTIMEOUT)
-                                 ? (ior->iouh_NakTimeout ? ior->iouh_NakTimeout : 500)
-                                 : 500;
+                cmd.timeout_ms =
+                    (ior->iouh_Flags & UHFF_NAKTIMEOUT)
+                    ? (ior->iouh_NakTimeout ? ior->iouh_NakTimeout : 500)
+                    : 500;
                 fill_split_fields(&cmd, unit, ior);
 
-                status = send_usb_cmd(base, &cmd,
-                                      (ior->iouh_Dir == UHDIR_OUT && user_buf) ? user_buf : NULL,
-                                      (ior->iouh_Dir == UHDIR_OUT) ? chunk : 0);
+                status = send_usb_cmd_with_rt_service(
+                    base, &cmd,
+                    (ior->iouh_Dir == UHDIR_OUT && user_buf) ?
+                        user_buf : NULL,
+                    (ior->iouh_Dir == UHDIR_OUT) ? chunk : 0, unit);
 
                 if (status != ZZUSB_STATUS_OK) {
                     break;      /* error — fall through to error handling */
@@ -2381,6 +4569,8 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
                         break;
                     }
                 }
+                if (realtime_active && !active_work_aborted())
+                    service_rt_iso_during_work(ZZBase, unit);
             }
 
             if (status == ZZUSB_STATUS_OK) {
@@ -2389,50 +4579,13 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
                 ior->iouh_Req.io_Error = 0;
             } else {
                 /*
-                 * Error path. Explicitly zero iouh_Actual so the
-                 * caller doesn't misread a stale value as valid
-                 * transfer length and over-read iouh_Data (which
-                 * we did NOT populate on the error path). Observed:
-                 * USB ethernet devices that glitch mid-transfer
-                 * would return HOSTERROR with stale iouh_Actual,
-                 * Poseidon's class driver would walk past the end
-                 * of iouh_Data, and AmigaDOS would guru.
-                 */
-                /*
-                 * Bulk error handling — bounded-retry policy.
-                 *
-                 * Default mapping: non-offline → UHIOERR_TIMEOUT so
-                 * the class driver retries normally (avoids specific
-                 * error codes that have historically crashed
-                 * Poseidon class drivers).
-                 *
-                 * Escalation: after N consecutive failures on this
-                 * unit, report UHIOERR_USBOFFLINE. That forces
-                 * Poseidon to tear the device down cleanly instead
-                 * of retrying forever. Sustained-retry loops
-                 * (4000+ failures over a large file copy) were
-                 * observed to eventually shred Poseidon's internal
-                 * state and hard-lock the Amiga.
-                 *
-                 * Counter resets on any successful bulk, so a
-                 * transient glitch doesn't cause a spurious
-                 * detach.
+                 * Actual length is valid only for a matching successful
+                 * completion. Preserve the firmware error class exactly;
+                 * controller recovery is driven by status/epoch, not by a
+                 * retry counter that silently changes the result.
                  */
                 ior->iouh_Actual = 0;
-                if (status == ZZUSB_STATUS_OFFLINE) {
-                    ior->iouh_Req.io_Error = UHIOERR_USBOFFLINE;
-                } else {
-                    if (unit->zz_BulkErrCount < 0xFFFF)
-                        unit->zz_BulkErrCount++;
-                    if (unit->zz_BulkErrCount >= 16) {
-                        /* Too many consecutive errors — give up on
-                         * this device cleanly. */
-                        ior->iouh_Req.io_Error = UHIOERR_USBOFFLINE;
-                        unit->zz_PortDead = TRUE;
-                    } else {
-                        ior->iouh_Req.io_Error = UHIOERR_TIMEOUT;
-                    }
-                }
+                ior->iouh_Req.io_Error = map_proxy_status(status);
             }
         }
         break;
@@ -2460,13 +4613,22 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
         for (int i = 0; i < ZZ_INT_PENDING_SLOTS; i++) {
             struct ZZIntPendingSlot *slot = &IntPendingSlots[i];
             struct IOUsbHWReq *pending = slot->ior;
+            uint16_t stop_status;
+
             if (!pending || slot->unit != unit) continue;
-            clear_int_slot(slot);
             pending->iouh_Actual = 0;
             pending->iouh_Req.io_Error = IOERR_ABORTED;
-            if (aborted_count < ABORTED_REPLY_MAX)
-                aborted_replies[aborted_count++] = pending;
+            stop_status = stop_periodic_slot(slot);
+            if (stop_status_retired(stop_status)) {
+                clear_int_slot(slot);
+                if (aborted_count < ABORTED_REPLY_MAX)
+                    aborted_replies[aborted_count++] = pending;
+            } else {
+                slot->stop_pending = 1;
+                slot->abort_requested = 0;
+            }
         }
+        stop_rt_iso_for_unit(unit);
         ior->iouh_Req.io_Error = 0;
         break;
     default:
@@ -2497,6 +4659,248 @@ static void __attribute__((used)) begin_io(struct Library *dev asm("a6"), struct
     }
 }
 
+static int command_uses_worker(UWORD command)
+{
+    switch (command) {
+    case ZZUSB_UHCMD_GET_DIAGNOSTICS:
+    case UHCMD_QUERYDEVICE:
+    case UHCMD_USBRESET:
+    case UHCMD_USBRESUME:
+    case UHCMD_USBSUSPEND:
+    case UHCMD_USBOPER:
+    case UHCMD_CONTROLXFER:
+    case UHCMD_BULKXFER:
+    case UHCMD_ISOXFER:
+    case UHCMD_ADDISOHANDLER:
+    case UHCMD_REMISOHANDLER:
+    case UHCMD_STARTRTISO:
+    case UHCMD_STOPRTISO:
+    case CMD_RESET:
+    case CMD_FLUSH:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int enqueue_work(struct ZZUSBBase *base, struct ZZUSBUnit *unit,
+                        struct IOUsbHWReq *ior)
+{
+    struct ZZWorkSlot *available = NULL;
+    uint32_t depth = 0;
+
+    Forbid();
+    for (int i = 0; i < ZZ_WORK_SLOTS; i++) {
+        if (!WorkSlots[i].ior) {
+            available = &WorkSlots[i];
+            break;
+        }
+    }
+    if (available) {
+        zzusb_engine_init(&available->lifecycle);
+        available->lifecycle.observer =
+            ior->iouh_Req.io_Command ==
+                ZZUSB_UHCMD_GET_DIAGNOSTICS;
+        available->unit = unit;
+        available->ior = ior;
+        available->sequence = 0;
+        available->enqueue_seq = EnqueueSequence++;
+        zzusb_engine_queue(&available->lifecycle);
+        ior->iouh_Actual = 0;
+        ior->iouh_Req.io_Error = 0;
+        ior->iouh_Req.io_Flags &= ~IOF_QUICK;
+        for (int i = 0; i < ZZ_WORK_SLOTS; i++) {
+            if (WorkSlots[i].ior)
+                depth++;
+        }
+    }
+    Permit();
+
+    if (!available)
+        return 0;
+    if (zzusb_engine_diag_high_water(depth))
+        zzusb_engine_diag_record(ZZUSB_DRIVER_EVENT_HIGH_WATER,
+                                 ZZUSB_ENGINE_STATUS_PENDING,
+                                 0, ProtocolStates[0].controller_epoch,
+                                 0, 0, 0, 0, 0, depth, WorkSequence);
+    if (base->zz_PollTask && base->zz_PollSignal)
+        Signal(base->zz_PollTask, base->zz_PollSignal);
+    return 1;
+}
+
+static int work_queue_pending(void)
+{
+    int pending = 0;
+
+    Forbid();
+    for (int i = 0; i < ZZ_WORK_SLOTS; i++) {
+        if (WorkSlots[i].ior &&
+            WorkSlots[i].lifecycle.state == ZZUSB_REQ_QUEUED) {
+            pending = 1;
+            break;
+        }
+    }
+    Permit();
+    return pending;
+}
+
+static int process_work_queue(void)
+{
+    struct ZZWorkSlot *slot = NULL;
+    struct IOUsbHWReq *ior;
+    UBYTE saved_flags;
+    int reply;
+
+    Forbid();
+    for (int i = 0; i < ZZ_WORK_SLOTS; i++) {
+        struct ZZWorkSlot *candidate = &WorkSlots[i];
+
+        if (candidate->ior &&
+            candidate->lifecycle.state == ZZUSB_REQ_QUEUED &&
+            (!slot || candidate->enqueue_seq < slot->enqueue_seq))
+            slot = candidate;
+    }
+    if (!slot) {
+        Permit();
+        return 0;
+    }
+    zzusb_engine_dispatch(&slot->lifecycle);
+    slot->sequence = WorkSequence++;
+    if (slot->sequence == 0)
+        slot->sequence = WorkSequence++;
+    zzusb_engine_begin(&slot->lifecycle, slot->sequence,
+                       ProtocolStates[0].controller_epoch);
+    ActiveWorkSlot = slot;
+    slot->completion_status = ZZUSB_STATUS_OK;
+    ior = slot->ior;
+    Permit();
+
+    saved_flags = ior->iouh_Req.io_Flags;
+    ior->iouh_Req.io_Flags |= IOF_QUICK;
+    execute_io((struct Library *)PollBase, ior);
+    ior->iouh_Req.io_Flags = saved_flags;
+
+    Forbid();
+    if (slot->lifecycle.abort_requested) {
+        rollback_aborted_iso_work(slot->unit, ior);
+        ior->iouh_Actual = 0;
+        ior->iouh_Req.io_Error = IOERR_ABORTED;
+        slot->completion_status = ZZUSB_STATUS_CANCELLED;
+    } else if (ior->iouh_Req.io_Error != 0 &&
+               slot->completion_status == ZZUSB_STATUS_OK) {
+        slot->completion_status =
+            proxy_status_for_io_error(ior->iouh_Req.io_Error);
+    }
+    zzusb_engine_complete(&slot->lifecycle, slot->sequence,
+                          slot->lifecycle.controller_epoch,
+                          slot->completion_status);
+    reply = zzusb_engine_claim_reply(&slot->lifecycle);
+    ActiveWorkSlot = NULL;
+    /*
+     * Keep the terminal slot discoverable through reply delivery. Forbid()
+     * also prevents the receiver from reusing this IOR before the slot is
+     * cleared below.
+     */
+    if (reply)
+        ReplyMsg(&ior->iouh_Req.io_Message);
+    zzusb_engine_release_buffer(&slot->lifecycle);
+    slot->ior = NULL;
+    slot->unit = NULL;
+    zzusb_engine_init(&slot->lifecycle);
+    Permit();
+    return work_queue_pending();
+}
+
+static int abort_work_ior(struct IOUsbHWReq *ior, int *reply)
+{
+    struct ZZWorkSlot *slot = NULL;
+
+    *reply = 0;
+    Forbid();
+    for (int i = 0; i < ZZ_WORK_SLOTS; i++) {
+        if (WorkSlots[i].ior == ior) {
+            slot = &WorkSlots[i];
+            break;
+        }
+    }
+    if (!slot) {
+        Permit();
+        return 0;
+    }
+
+    zzusb_engine_abort(&slot->lifecycle);
+    if (slot->lifecycle.state == ZZUSB_REQ_TERMINAL) {
+        ior->iouh_Actual = 0;
+        ior->iouh_Req.io_Error = IOERR_ABORTED;
+        *reply = zzusb_engine_claim_reply(&slot->lifecycle);
+        zzusb_engine_release_buffer(&slot->lifecycle);
+        slot->ior = NULL;
+        slot->unit = NULL;
+        zzusb_engine_init(&slot->lifecycle);
+    }
+    Permit();
+
+    if (PollBase && PollBase->zz_PollTask && PollBase->zz_PollSignal)
+        Signal(PollBase->zz_PollTask, PollBase->zz_PollSignal);
+    return 1;
+}
+
+static void abort_unit_work(struct ZZUSBUnit *unit)
+{
+    struct IOUsbHWReq *replies[ZZ_WORK_SLOTS];
+    int reply_count = 0;
+
+    Forbid();
+    for (int i = 0; i < ZZ_WORK_SLOTS; i++) {
+        struct ZZWorkSlot *slot = &WorkSlots[i];
+        if (!slot->ior || slot->unit != unit)
+            continue;
+
+        zzusb_engine_abort(&slot->lifecycle);
+        if (slot->lifecycle.state != ZZUSB_REQ_TERMINAL)
+            continue;
+
+        slot->ior->iouh_Actual = 0;
+        slot->ior->iouh_Req.io_Error = IOERR_ABORTED;
+        if (zzusb_engine_claim_reply(&slot->lifecycle))
+            replies[reply_count++] = slot->ior;
+        zzusb_engine_release_buffer(&slot->lifecycle);
+        slot->ior = NULL;
+        slot->unit = NULL;
+        zzusb_engine_init(&slot->lifecycle);
+    }
+    Permit();
+
+    for (int i = 0; i < reply_count; i++)
+        ReplyMsg(&replies[i]->iouh_Req.io_Message);
+}
+static void __attribute__((used)) begin_io(
+    struct Library *dev asm("a6"), struct IOUsbHWReq *ior asm("a1"))
+{
+    struct ZZUSBBase *base = (struct ZZUSBBase *)dev;
+    struct ZZUSBUnit *unit;
+
+    if (!base || !ior) {
+        execute_io(dev, ior);
+        return;
+    }
+    unit = (struct ZZUSBUnit *)ior->iouh_Req.io_Unit;
+    if (unit && (ior->iouh_Req.io_Command == CMD_RESET ||
+                 ior->iouh_Req.io_Command == CMD_FLUSH))
+        abort_unit_work(unit);
+    if (unit && command_uses_worker(ior->iouh_Req.io_Command)) {
+        ensure_poll_task(base);
+        if (!enqueue_work(base, unit, ior)) {
+            ior->iouh_Actual = 0;
+            ior->iouh_Req.io_Error = UHIOERR_OUTOFMEMORY;
+            if (!(ior->iouh_Req.io_Flags & IOF_QUICK))
+                ReplyMsg(&ior->iouh_Req.io_Message);
+        }
+        return;
+    }
+    execute_io(dev, ior);
+}
+
 static uint32_t __attribute__((used)) abort_io(struct Library *dev asm("a6"), struct IOUsbHWReq *ior asm("a1"))
 {
     /*
@@ -2509,6 +4913,15 @@ static uint32_t __attribute__((used)) abort_io(struct Library *dev asm("a6"), st
     if (!unit) {
         ior->iouh_Req.io_Error = IOERR_ABORTED;
         return IOERR_ABORTED;
+    }
+    {
+        int work_reply = 0;
+
+        if (abort_work_ior(ior, &work_reply)) {
+            if (work_reply)
+                ReplyMsg(&ior->iouh_Req.io_Message);
+            return IOERR_ABORTED;
+        }
     }
 
     ObtainSemaphore(&ZZBase->zz_Lock);
@@ -2523,11 +4936,21 @@ static uint32_t __attribute__((used)) abort_io(struct Library *dev asm("a6"), st
     {
         struct ZZIntPendingSlot *slot = find_int_slot_for_ior(ior);
         if (slot && slot->unit == unit) {
-            clear_int_slot(slot);
-            found = 1;
+            if (slot->armed || slot->arm_in_progress) {
+                slot->abort_requested = 1;
+                found = 2;
+            } else {
+                clear_int_slot(slot);
+                found = 1;
+            }
         }
     }
     ReleaseSemaphore(&ZZBase->zz_Lock);
+    if (found == 2) {
+        if (ZZBase->zz_PollTask && ZZBase->zz_PollSignal)
+            Signal(ZZBase->zz_PollTask, ZZBase->zz_PollSignal);
+        return IOERR_ABORTED;
+    }
 
     if (found) {
         ior->iouh_Actual = 0;

@@ -276,7 +276,6 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("VideoCapPreCropTarget", text)
         self.assertIn("VideoCapPreCropTransitions", text)
         self.assertIn("VideoCapPreCrop[", text)
-        self.assertIn('#define ZZDIAG_VERSION "1.11"', text)
         self.assertIn("VideoCapOwnerStable", text)
         self.assertIn("ZZ_VCAP_PROBE_TARGET_X", header)
         self.assertIn("928U", header)

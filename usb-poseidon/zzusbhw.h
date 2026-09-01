@@ -45,9 +45,10 @@
 
 #define DEVICE_NAME      "zzusbhw.device"
 #define DEVICE_VERSION   2
-#define DEVICE_REVISION  1
+#define DEVICE_REVISION  2
 
 #define ZZ_NUM_PORTS     1
+#define ZZUSB_UHCMD_GET_DIAGNOSTICS 0x7a00
 
 /*
  * USB Command Mailbox Protocol
@@ -74,6 +75,16 @@
 #define ZZUSB_CMD_SET_ADDRESS   0x0A
 #define ZZUSB_CMD_CLEAR_STALL   0x0B
 #define ZZUSB_CMD_CHECK_PORT    0x0C
+#define ZZUSB_CMD_QUERY_CAPS     0x0D
+#define ZZUSB_CMD_RETIRE_EP      0x0E
+#define ZZUSB_CMD_CANCEL_EP      0x0F
+#define ZZUSB_CMD_DIAG_SNAPSHOT  0x10
+#define ZZUSB_CMD_PERIODIC_ARM    0x11
+#define ZZUSB_CMD_PERIODIC_REAP   0x12
+#define ZZUSB_CMD_PERIODIC_STOP   0x13
+#define ZZUSB_CMD_ISO_QUEUE       0x14
+#define ZZUSB_CMD_ISO_REAP        0x15
+#define ZZUSB_CMD_ISO_STOP        0x16
 
 /* Command status codes (returned by ARM firmware) */
 #define ZZUSB_STATUS_OK         0x00
@@ -88,14 +99,28 @@
 #define ZZUSB_STATUS_UNDERRUN   0xF8
 #define ZZUSB_STATUS_OFFLINE    0xF7
 #define ZZUSB_STATUS_BADPARAM   0xF6
+#define ZZUSB_STATUS_UNSUPPORTED 0xF5
+#define ZZUSB_STATUS_STALE       0xF4
+#define ZZUSB_STATUS_CANCELLED   0xF3
+#define ZZUSB_STATUS_HOSTERROR   0xF2
+#define ZZUSB_STATUS_BUSY        0xF1
+#define ZZUSB_STATUS_NOMEM       0xF0
 
 /* USB speed types */
 #define ZZUSB_SPEED_LOW        0
 #define ZZUSB_SPEED_FULL       1
 #define ZZUSB_SPEED_HIGH       2
 
-#define ZZUSB_FLAG_SPLIT       0x0001
-#define ZZUSB_FLAG_RESET_FSLS  0x0002
+#define ZZUSB_FLAG_SPLIT          0x0001
+#define ZZUSB_FLAG_RESET_FSLS     0x0002
+#define ZZUSB_FLAG_MULTI_TT       0x0004
+#define ZZUSB_FLAG_TT_THINK_SHIFT 4
+#define ZZUSB_FLAG_TT_THINK_MASK  0x0030
+
+#define ZZUSB_XFER_CONTROL        0
+#define ZZUSB_XFER_BULK           1
+#define ZZUSB_XFER_INTERRUPT      2
+#define ZZUSB_XFER_ISO            3
 
 /*
  * Command structure layout in shared buffer.
@@ -132,11 +157,87 @@ struct ZZUSBCommand {
     /* Data follows at ZZUSB_DATA_OFFSET. */
 } __attribute__((packed));
 
-#define ZZUSB_CMD_SIZE    48   /* command header including setup data */
-#define ZZUSB_DATA_OFFSET 64   /* data starts at this offset (cache-line aligned) */
+struct ZZUSBProtocolExtension {
+    uint16_t version;
+    uint16_t header_size;
+    uint32_t request_id;
+    uint32_t controller_epoch;
+    uint32_t capabilities;
+} __attribute__((packed));
 
-/* Size of shared buffer minus command header = max data per transfer */
-#define ZZUSB_MAX_XFER    (24576 - ZZUSB_DATA_OFFSET)
+#define ZZUSB_PROTOCOL_VERSION 2
+#define ZZUSB_CMD_SIZE         48
+#define ZZUSB_V2_HEADER_SIZE   64
+#define ZZUSB_DATA_OFFSET      64
+#define ZZUSB_APERTURE_SIZE    24576
+#define ZZUSB_MAX_XFER         (ZZUSB_APERTURE_SIZE - ZZUSB_DATA_OFFSET)
+#define ZZUSB_PROXY_MAX_TIMEOUT_MS 1000
+#define ZZUSB_V2_DATA_MAX      16384
+#define ZZUSB_DIAG_SIZE        4096
+#define ZZUSB_DIAG_OFFSET      (ZZUSB_APERTURE_SIZE - ZZUSB_DIAG_SIZE)
+#define ZZUSB_MAINT_HEADER_OFFSET (ZZUSB_DATA_OFFSET + ZZUSB_V2_DATA_MAX)
+#define ZZUSB_MAINT_DATA_OFFSET   (ZZUSB_MAINT_HEADER_OFFSET + \
+                                   ZZUSB_V2_HEADER_SIZE)
+#define ZZUSB_MAINT_DATA_MAX      (ZZUSB_DIAG_OFFSET - \
+                                   ZZUSB_MAINT_DATA_OFFSET)
+#define ZZUSB_DIAG_PAGE_SIZE    4096
+#define ZZUSB_DIAG_MAGIC             0x5a554447UL
+#define ZZUSB_DIAG_VERSION           1
+#define ZZUSB_DIAG_EVENT_COUNT       64
+#define ZZUSB_DIAG_EVENT_SIZE        32
+#define ZZUSB_DIAG_COUNTER_COUNT     16
+#define ZZUSB_DIAG_OFF_MAGIC         0
+#define ZZUSB_DIAG_OFF_GENERATION    4
+#define ZZUSB_DIAG_OFF_VERSION       8
+#define ZZUSB_DIAG_OFF_HEADER_SIZE   10
+#define ZZUSB_DIAG_OFF_TOTAL_SIZE    12
+#define ZZUSB_DIAG_OFF_CAPABILITIES  16
+#define ZZUSB_DIAG_OFF_EPOCH         20
+#define ZZUSB_DIAG_OFF_LAST_ID       24
+#define ZZUSB_DIAG_OFF_EVENT_NEXT    28
+#define ZZUSB_DIAG_OFF_EVENT_COUNT   32
+#define ZZUSB_DIAG_OFF_LOST_EVENTS   36
+#define ZZUSB_DIAG_OFF_QUEUE_STATE   40
+#define ZZUSB_DIAG_OFF_SCHEDULE_BITS 44
+#define ZZUSB_DIAG_OFF_COUNTERS      48
+#define ZZUSB_DIAG_OFF_EVENTS        128
+#define ZZUSB_DIAG_EVT_OFF_SEQUENCE  0
+#define ZZUSB_DIAG_EVT_OFF_REQUEST   4
+#define ZZUSB_DIAG_EVT_OFF_EPOCH     8
+#define ZZUSB_DIAG_EVT_OFF_DETAIL    12
+#define ZZUSB_DIAG_EVT_OFF_TIMESTAMP 16
+#define ZZUSB_DIAG_EVT_OFF_TYPE      20
+#define ZZUSB_DIAG_EVT_OFF_STATUS    22
+#define ZZUSB_DIAG_EVT_OFF_ADDRESS   24
+#define ZZUSB_DIAG_EVT_OFF_TOPOLOGY  26
+#define ZZUSB_DIAG_EVT_OFF_ENDPOINT  28
+#define ZZUSB_DIAG_EVT_OFF_DIRECTION 29
+#define ZZUSB_DIAG_EVT_OFF_SCHEDULE  30
+#define ZZUSB_DOORBELL_V2      0x8000
+
+#define ZZUSB_CAP_PROTOCOL_V2      (1UL << 0)
+#define ZZUSB_CAP_REQUEST_ID       (1UL << 1)
+#define ZZUSB_CAP_CONTROLLER_EPOCH (1UL << 2)
+#define ZZUSB_CAP_VALIDATION       (1UL << 3)
+#define ZZUSB_CAP_DIAGNOSTICS      (1UL << 4)
+#define ZZUSB_CAP_PERIODIC         (1UL << 5)
+#define ZZUSB_CAP_ISO_SIMPLE       (1UL << 6)
+#define ZZUSB_CAP_ISO_REALTIME     (1UL << 7)
+#define ZZUSB_CAP_EVENT_IRQ        (1UL << 8)
+#define ZZUSB_CAP_PRECISE_ERRORS   (1UL << 9)
+#define ZZUSB_CAP_MAINTENANCE      (1UL << 10)
+#define ZZUSB_CAP_BASE (ZZUSB_CAP_PROTOCOL_V2 | ZZUSB_CAP_REQUEST_ID | \
+                        ZZUSB_CAP_CONTROLLER_EPOCH | ZZUSB_CAP_VALIDATION | \
+                        ZZUSB_CAP_DIAGNOSTICS | ZZUSB_CAP_PERIODIC | \
+                        ZZUSB_CAP_ISO_SIMPLE | ZZUSB_CAP_ISO_REALTIME | \
+                        ZZUSB_CAP_EVENT_IRQ | ZZUSB_CAP_PRECISE_ERRORS | \
+                        ZZUSB_CAP_MAINTENANCE)
+
+typedef char ZZUSBCommand_size_must_match_protocol[
+    (sizeof(struct ZZUSBCommand) == ZZUSB_CMD_SIZE) ? 1 : -1];
+typedef char ZZUSBProtocolExtension_size_must_fill_gap[
+    (sizeof(struct ZZUSBProtocolExtension) ==
+     (ZZUSB_DATA_OFFSET - ZZUSB_CMD_SIZE)) ? 1 : -1];
 
 #define ZZ_REG_USB_PROXY_CMD    0xDE
 

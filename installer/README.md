@@ -21,6 +21,7 @@ installer/
     ├── Docs/
     │   ├── ahi-README.md             Audio tunables doc populated by CI
     │   ├── usb-poseidon-README.md    Poseidon setup doc populated by CI
+    │   ├── usb-qualification-matrix.md USB evidence/gaps populated by CI
     │   ├── sdk-README.md             SDK runtime doc populated by CI
     │   └── amissl-README.md          Accelerated AmiSSL doc populated by CI
     ├── Devs/
@@ -137,6 +138,8 @@ install -Dm755 net/ZZNetStats/ZZNetStats       "$INST/Tools/ZZNetStats"
 install -Dm755 ZZDiag/ZZDiag                   "$INST/Tools/ZZDiag"
 install -Dm644 ahi/README.md                   "$INST/Docs/ahi-README.md"
 install -Dm644 usb-poseidon/README.md          "$INST/Docs/usb-poseidon-README.md"
+install -Dm644 docs/usb-qualification-matrix.md \
+                                               "$INST/Docs/usb-qualification-matrix.md"
 ```
 
 The SDK runtime payloads and the per-CPU accelerated

@@ -5,27 +5,28 @@
 
 # ZZ9000 USB — Poseidon hardware driver
 
-`zzusbhw.device` is the USB hardware driver that lets the MNT ZZ9000's
-on-board EHCI (USB 2.0 High-Speed) host controller plug into the
-[Poseidon USB stack](https://www.platon42.de/en/poseidon/) running on
-AmigaOS. Once bound, Poseidon's class drivers for control, bulk, and
-interrupt devices see ZZ9000 USB ports as regular USB hardware.
+`zzusbhw.device` connects the MNT ZZ9000 EHCI host controller to the
+[commercial Poseidon 4.5 USB stack](https://www.platon42.de/en/poseidon/)
+on AmigaOS. Poseidon and its class files are external prerequisites; this
+package does not replace or modify them.
 
-## What it supports
+## Implemented and qualified scope
 
-| Device class                     | Status         |
-|----------------------------------|----------------|
-| HID — mice, keyboards            | Works          |
-| USB mass storage (FAT/FFS/RDB)   | Works          |
-| USB audio class                  | Not yet (firmware ISO proxy missing) |
-| USB Ethernet (ASIX AX88772, …)   | Works          |
-| Hot-plug / re-enumeration        | Works          |
-| Low-speed + full-speed + high-speed | Works (dynamic ULPI XCVR) |
+| Path | Implementation | Current evidence |
+|---|---|---|
+| Control and bulk; mass storage | Supported | Existing issue-23 baseline reports a known-good storage device; matched 2.9/2.2 hardware requalification is pending |
+| Persistent interrupt; HID and Ethernet status | Supported with event-driven endpoint reuse | Host lifecycle/cadence models pass; Sun HID and AX88772C issue-23 hardware gates are pending |
+| Simple ISO IN/OUT | Supported at explicit or ASAP frames | Firmware/driver batch and retirement models pass; commercial-Poseidon hardware gate is pending |
+| Realtime ISO IN/OUT; USB Audio | Poseidon add/remove/start/stop handlers implemented | UAC1 capture/playback hardware formats, cadence, and soak are unqualified |
+| MIDIStreaming | Descriptor-defined bulk IN/OUT; independent of ISO advertisement | Concurrent audio/MIDI hardware gate is pending |
+| Hot-plug, abort, timeout, reset | Generation/epoch fenced with exact-once driver retirement | Host race/error models pass; 100-cycle hardware gate is pending |
+| Speed/topology | High speed; split full speed behind a high-speed hub | Direct low speed is deliberately unadvertised; single-TT/multi-TT hardware rows are pending |
 
-A wired HS mass-storage stick will typically copy at roughly
-**4 MB/s write / 3 MB/s read** on a Zorro III-capable Amiga. That's
-the range to expect — it's bounded by the Zorro/AXI path, not by the
-EHCI itself.
+Earlier hardware measurements for a high-speed mass-storage stick were about
+4 MB/s write and 3 MB/s read on a Zorro III-capable Amiga. Treat those as a
+historical baseline, not a result for this matched release. See
+[`docs/usb-qualification-matrix.md`](../docs/usb-qualification-matrix.md) for
+the exact evidence and gaps behind every claim.
 
 ## Where the driver lives
 
@@ -35,13 +36,16 @@ drawer. The installer copies it to
 `usb-poseidon/zzusbhw.device` to `DEVS:USBHardware/` yourself and then
 register it with Poseidon.
 
-The matching ZZ9000 firmware still provides the ARM-side USB stack and
-mailbox protocol, so keep the board firmware current:
-<https://github.com/BlitterStudio/zz9000-firmware>.
+The ARM-side USB proxy is part of the firmware. Firmware 2.9 and
+`zzusbhw.device` 2.2 are the matched pair for persistent interrupt and ISO.
+The driver negotiates protocol capabilities at startup. With older firmware it
+falls back to the constrained legacy transport and does not advertise simple
+or realtime ISO.
 
-Some firmware images may also expose a ROM copy of the hardware driver,
-but the filesystem copy in `DEVS:USBHardware/` is the release package's
-explicit installation path and can be updated with the driver package.
+Some firmware images may expose a ROM copy of the hardware driver, but the
+filesystem copy in `DEVS:USBHardware/` is the release package's explicit
+installation path. Confirm with AmigaOS `version ... FILE` that 2.2 is the copy
+Poseidon opens.
 
 ## Registering the driver with Poseidon
 
@@ -66,17 +70,18 @@ The ZZ9000 USB ports should now show up as Poseidon USB hardware.
 Older ZZ9000 releases shipped a separate `ZZ9000USBStorage.device`
 that spoke only the mass-storage subset. It is obsolete and **should
 be removed** — `zzusbhw.device` via Poseidon replaces it and covers
-every class. The installer prompts to delete
-`Devs:ZZ9000USBStorage.device` if it finds one.
+every endpoint type implemented by the matched firmware and driver. The
+installer prompts to delete `Devs:ZZ9000USBStorage.device` when it finds one.
 
 ## Troubleshooting
 
-| Symptom                                  | Check |
-|------------------------------------------|-------|
-| Device not detected                      | Confirm ZZ9000 firmware is current (see firmware repo). Re-scan from Trident. |
-| Mass-storage mounts but transfers stall  | Try a different cable / hub. Very long passive cables can drop HS signalling. |
-| HS mouse / keyboard feels laggy          | Wireless HS receivers poll on their own schedule; this is normal behaviour on any host. |
-| Poseidon's Info window is blank          | Cosmetic only — the driver reports vendor/product correctly, but Poseidon caches the display separately. No functional impact. |
+| Symptom | Check |
+|---|---|
+| Driver exposes no ISO capability | Confirm firmware 2.9 and `zzusbhw.device` 2.2, then run the matched `ZZDiag`; legacy fallback intentionally hides ISO |
+| Device not detected | Capture `ZZDiag`, Poseidon's `PsdErrorlog`, Trident binding output, VID:PID, speed, hub address/port, and TT type |
+| Transfer stops or returns an error | Record the last successful action and the driver/firmware epochs, counters, queue state, schedule bits, and recent events printed by `ZZDiag` |
+| Audio product string ends in `?` | Capture raw string-descriptor bytes plus control requested/actual lengths; do not replace Poseidon files or patch displayed text |
+| Direct low-speed device is absent | Expected for this release; test low/full speed only behind a qualified high-speed hub |
 
 For anything unexpected, please attach the output of Poseidon's
 **debug log** (enable via Trident → Main → Debug) when reporting.
