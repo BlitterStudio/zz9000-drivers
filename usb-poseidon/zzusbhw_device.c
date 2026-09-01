@@ -1573,6 +1573,30 @@ static uint16_t stop_iso_request(volatile uint8_t *base,
         base, &cmd, NULL, 0, unit);
 }
 
+static void retire_simple_iso_request(volatile uint8_t *base,
+                                      struct ZZUSBUnit *unit,
+                                      const struct IOUsbHWReq *ior)
+{
+    for (;;) {
+        struct ZZUSBProtocolState *state = protocol_state_for(base);
+        uint16_t stop_status;
+
+        if (state && state->quarantined) {
+            recover_quarantined_proxy(base);
+            if (state->quarantined) {
+                worker_wait_us(1000U);
+                continue;
+            }
+        }
+        stop_status = stop_iso_request(base, unit, ior);
+        if (stop_status_retired(stop_status))
+            return;
+        if (state && stop_status != ZZUSB_STATUS_BUSY)
+            state->quarantined = 1;
+        worker_wait_us(1000U);
+    }
+}
+
 static void execute_simple_iso(struct ZZUSBUnit *unit,
                                struct IOUsbHWReq *ior,
                                volatile uint8_t *base)
@@ -1638,8 +1662,12 @@ static void execute_simple_iso(struct ZZUSBUnit *unit,
     status = send_usb_cmd_with_rt_wait(
         base, &cmd, IsoWire, wire_length, unit);
     if (status != ZZUSB_STATUS_OK) {
-        if (status == ZZUSB_STATUS_HOSTERROR)
-            stop_iso_request(base, unit, ior);
+        struct ZZUSBProtocolState *state = protocol_state_for(base);
+
+        if (state && state->quarantined) {
+            queued = 1;
+            goto simple_iso_complete;
+        }
         ior->iouh_Req.io_Error = map_proxy_status(status);
         return;
     }
@@ -1710,23 +1738,8 @@ static void execute_simple_iso(struct ZZUSBUnit *unit,
     }
 
 simple_iso_complete:
-    if (queued) {
-        uint16_t stop_status = stop_iso_request(base, unit, ior);
-
-        if (!stop_status_retired(stop_status)) {
-            struct ZZUSBProtocolState *state = protocol_state_for(base);
-
-            if (state)
-                state->quarantined = 1;
-            /*
-             * Fence the unretired batch from subsequent endpoint reuse.
-             * Recovery negotiates a fresh mailbox fence; the next request
-             * also carries this new device generation.
-             */
-            bump_unit_generation(unit);
-            status = stop_status;
-        }
-    }
+    if (queued)
+        retire_simple_iso_request(base, unit, ior);
     if (status != ZZUSB_STATUS_OK) {
         ior->iouh_Req.io_Error = map_proxy_status(status);
         return;
