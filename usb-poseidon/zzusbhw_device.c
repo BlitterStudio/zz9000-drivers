@@ -231,6 +231,7 @@ struct ZZIntPendingSlot {
     uint8_t abort_requested;
     uint8_t idle_polls;
     uint8_t rearm_required;
+    uint8_t stop_pending;
 };
 
 static struct ZZIntPendingSlot IntPendingSlots[ZZ_INT_PENDING_SLOTS];
@@ -591,6 +592,7 @@ static void clear_int_slot(struct ZZIntPendingSlot *slot)
     slot->abort_requested = 0;
     slot->idle_polls = 0;
     slot->rearm_required = 0;
+    slot->stop_pending = 0;
 }
 
 static void reset_int_slots(void)
@@ -621,6 +623,8 @@ static int queue_int_ior(struct ZZUSBUnit *unit,
     for (int i = 0; i < ZZ_INT_PENDING_SLOTS; i++) {
         struct ZZIntPendingSlot *slot = &IntPendingSlots[i];
         if (int_slot_matches(slot, unit, ior)) {
+            if (slot->stop_pending)
+                return 0;
             if (slot->ior && slot->ior != ior) {
                 if (replaced)
                     *replaced = slot->ior;
@@ -649,6 +653,7 @@ static int queue_int_ior(struct ZZUSBUnit *unit,
     free_slot->armed = 0;
     free_slot->abort_requested = 0;
     free_slot->idle_polls = 0;
+    free_slot->stop_pending = 0;
     return 1;
 }
 
@@ -1391,8 +1396,9 @@ static uint16_t stop_periodic_slot(struct ZZIntPendingSlot *slot)
     fill_split_fields(&cmd, slot->unit, ior);
     status = send_usb_cmd_with_rt_service(
         base, &cmd, NULL, 0, slot->unit);
-    slot->armed = 0;
-    if (!stop_status_retired(status)) {
+    if (stop_status_retired(status)) {
+        slot->armed = 0;
+    } else {
         state = protocol_state_for(base);
         if (state)
             state->quarantined = 1;
@@ -2899,19 +2905,46 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
         cmd.reserved = generation_for_unit(unit);
         cmd.timeout_ms = 100;
 
-        if (slot->abort_requested) {
-            stop_periodic_slot(slot);
+        if (slot->stop_pending) {
+            if (slot->abort_requested) {
+                ior->iouh_Actual = 0;
+                ior->iouh_Req.io_Error = IOERR_ABORTED;
+                slot->abort_requested = 0;
+            }
+            stop_status = stop_periodic_slot(slot);
             if (slot->ior != ior || slot->unit != unit) {
                 ReleaseSemaphore(&base_dev->zz_Lock);
                 continue;
             }
-            ior->iouh_Actual = 0;
-            ior->iouh_Req.io_Error = IOERR_ABORTED;
-            clear_int_slot(slot);
-            reply_now = ior;
+            if (stop_status_retired(stop_status)) {
+                clear_int_slot(slot);
+                reply_now = ior;
+            }
+            ReleaseSemaphore(&base_dev->zz_Lock);
+            if (reply_now &&
+                !(reply_now->iouh_Req.io_Flags & IOF_QUICK))
+                ReplyMsg(&reply_now->iouh_Req.io_Message);
+            continue;
         }
 
-        if (!reply_now && slot->rearm_required) {
+        if (slot->abort_requested) {
+            ior->iouh_Actual = 0;
+            ior->iouh_Req.io_Error = IOERR_ABORTED;
+            stop_status = stop_periodic_slot(slot);
+            if (slot->ior != ior || slot->unit != unit) {
+                ReleaseSemaphore(&base_dev->zz_Lock);
+                continue;
+            }
+            if (stop_status_retired(stop_status)) {
+                clear_int_slot(slot);
+                reply_now = ior;
+            } else {
+                slot->stop_pending = 1;
+                slot->abort_requested = 0;
+            }
+        }
+
+        if (!reply_now && !slot->stop_pending && slot->rearm_required) {
             stop_status = stop_periodic_slot(slot);
             if (slot->ior != ior || slot->unit != unit) {
                 ReleaseSemaphore(&base_dev->zz_Lock);
@@ -2921,12 +2954,11 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
             if (!stop_status_retired(stop_status)) {
                 ior->iouh_Actual = 0;
                 ior->iouh_Req.io_Error = map_proxy_status(stop_status);
-                clear_int_slot(slot);
-                reply_now = ior;
+                slot->stop_pending = 1;
             }
         }
 
-        if (!reply_now && !slot->armed) {
+        if (!reply_now && !slot->stop_pending && !slot->armed) {
             cmd.cmd = ZZUSB_CMD_PERIODIC_ARM;
             status = send_usb_cmd_with_rt_service(
                 base, &cmd,
@@ -2962,7 +2994,8 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
             }
         }
 
-        if (!reply_now && slot->armed && reap_events) {
+        if (!reply_now && !slot->stop_pending &&
+            slot->armed && reap_events) {
             volatile struct ZZUSBCommand *result;
             uint32_t actual;
             int zero_report = 0;
@@ -3011,19 +3044,27 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
                 if (!stop_status_retired(stop_status)) {
                     ior->iouh_Actual = 0;
                     ior->iouh_Req.io_Error = map_proxy_status(stop_status);
+                    slot->stop_pending = 1;
+                } else {
+                    clear_int_slot(slot);
+                    reply_now = ior;
                 }
-                clear_int_slot(slot);
-                reply_now = ior;
             } else if (action == ZZUSB_INTERRUPT_FAIL) {
                 ior->iouh_Actual = 0;
                 ior->iouh_Req.io_Error = map_proxy_status(status);
-                stop_periodic_slot(slot);
+                stop_status = stop_periodic_slot(slot);
                 if (slot->ior != ior || slot->unit != unit) {
                     ReleaseSemaphore(&base_dev->zz_Lock);
                     continue;
                 }
-                clear_int_slot(slot);
-                reply_now = ior;
+                if (!stop_status_retired(stop_status)) {
+                    ior->iouh_Req.io_Error =
+                        map_proxy_status(stop_status);
+                    slot->stop_pending = 1;
+                } else {
+                    clear_int_slot(slot);
+                    reply_now = ior;
+                }
             }
         }
 
