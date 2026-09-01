@@ -80,7 +80,8 @@ static int read_driver_usb_diag(struct zzusb_driver_diag_snapshot *snapshot)
         request->iouh_Length = sizeof(*snapshot);
         if (DoIO((struct IORequest *)request) == 0 &&
             request->iouh_Actual == sizeof(*snapshot) &&
-            snapshot->magic == ZZUSB_DRIVER_DIAG_MAGIC)
+            snapshot->magic == ZZUSB_DRIVER_DIAG_MAGIC &&
+            snapshot->version == ZZUSB_DRIVER_DIAG_VERSION)
             ok = 1;
         CloseDevice((struct IORequest *)request);
     }
