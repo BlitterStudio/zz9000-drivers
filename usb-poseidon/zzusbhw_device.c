@@ -260,7 +260,7 @@ struct ZZRTIsoBatchContext {
     uint32_t batch_id;
     uint32_t prefetched_bytes;
     uint8_t packet_count;
-    uint16_t duration_microframes;
+    uint32_t duration_microframes;
 };
 
 struct ZZRTIsoSlot {
@@ -278,7 +278,7 @@ struct ZZRTIsoSlot {
     uint16_t speed;
     uint16_t split_hub_addr;
     uint16_t split_hub_port;
-    uint16_t duration_microframes;
+    uint32_t duration_microframes;
     uint8_t direction_in;
     uint8_t packet_count;
 };
@@ -1792,9 +1792,9 @@ static uint16_t queue_rt_iso_batch(struct ZZRTIsoSlot *slot)
     memset(context, 0, sizeof(*context));
     context->batch_id = batch_id;
     context->packet_count = (uint8_t)packet_count;
-    context->duration_microframes = (uint16_t)(
-        ((uint32_t)slot->duration_microframes * packet_count) /
-        slot->packet_count);
+    context->duration_microframes =
+        (slot->duration_microframes * packet_count) /
+        slot->packet_count;
     if (!context->duration_microframes)
         context->duration_microframes = 1;
 
@@ -2192,7 +2192,7 @@ static uint32_t rt_iso_buffered_safe_microframes(
     const struct ZZRTIsoSlot *slot)
 {
     uint32_t total = 0;
-    uint16_t longest = 0;
+    uint32_t longest = 0;
     unsigned batches = 0;
 
     for (unsigned index = 0; index < ZZUSB_ISO_PIPELINE_DEPTH; index++) {

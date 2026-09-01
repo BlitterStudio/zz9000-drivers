@@ -90,7 +90,7 @@ unsigned zzusb_iso_plan_realtime(uint16_t encoded_max_packet,
                                  uint16_t interval, int high_speed,
                                  uint16_t *packet_lengths,
                                  unsigned capacity,
-                                 uint16_t *duration_microframes);
+                                 uint32_t *duration_microframes);
 unsigned zzusb_iso_limit_packet_count(const uint16_t *packet_lengths,
                                       unsigned packet_count,
                                       unsigned wire_capacity);

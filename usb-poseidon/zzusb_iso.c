@@ -71,7 +71,7 @@ unsigned zzusb_iso_plan_realtime(uint16_t encoded_max_packet,
                                  uint16_t interval, int high_speed,
                                  uint16_t *packet_lengths,
                                  unsigned capacity,
-                                 uint16_t *duration_microframes)
+                                 uint32_t *duration_microframes)
 {
     uint16_t payload = zzusb_iso_payload_size(encoded_max_packet);
     uint32_t step;
@@ -106,7 +106,7 @@ unsigned zzusb_iso_plan_realtime(uint16_t encoded_max_packet,
         return 0;
     for (unsigned index = 0; index < count; index++)
         packet_lengths[index] = payload;
-    *duration_microframes = (uint16_t)(count * step);
+    *duration_microframes = count * step;
     return count;
 }
 

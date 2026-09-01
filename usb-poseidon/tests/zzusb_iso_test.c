@@ -28,7 +28,7 @@ static void put_be16_test(uint8_t *bytes, uint16_t value)
 static void test_packet_plans(void)
 {
     uint16_t lengths[ZZUSB_ISO_MAX_PACKETS];
-    uint16_t duration;
+    uint32_t duration;
     unsigned count;
 
     assert(zzusb_iso_payload_size(64) == 64);
@@ -70,6 +70,10 @@ static void test_packet_plans(void)
                                     ZZUSB_ISO_MAX_PACKETS, &duration);
     assert(count == 1);
     assert(duration == 32);
+    count = zzusb_iso_plan_realtime(192, 16, 0, lengths,
+                                    ZZUSB_ISO_MAX_PACKETS, &duration);
+    assert(count == 1);
+    assert(duration == 262144);
     assert(zzusb_iso_plan_realtime(64, 17, 1, lengths,
                                     ZZUSB_ISO_MAX_PACKETS, &duration) == 0);
     assert(zzusb_iso_plan_realtime(64, 17, 0, lengths,
