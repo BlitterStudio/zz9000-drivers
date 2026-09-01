@@ -316,6 +316,12 @@ static void service_rt_iso_during_work(struct ZZUSBBase *base,
                                        struct ZZUSBUnit *unit);
 
 static uint16_t request_speed(struct ZZUSBUnit *unit, struct IOUsbHWReq *ior);
+static void fill_int_arm_command(struct ZZUSBCommand *cmd,
+                                 struct ZZUSBUnit *unit,
+                                 struct IOUsbHWReq *ior);
+static int int_arm_parameters_changed(struct ZZUSBUnit *unit,
+                                      struct IOUsbHWReq *old_ior,
+                                      struct IOUsbHWReq *new_ior);
 static int write_tag_ulong(struct TagItem *tag, ULONG value);
 static int write_tag_str(struct TagItem *tag, const char *value);
 
@@ -590,7 +596,8 @@ static int queue_int_ior(struct ZZUSBUnit *unit,
                 slot->ior->iouh_Actual = 0;
                 slot->ior->iouh_Req.io_Error = IOERR_ABORTED;
                 if (zzusb_interrupt_rearm_on_replace(
-                        slot->armed, ior->iouh_Dir == UHDIR_IN))
+                        slot->armed, ior->iouh_Dir == UHDIR_IN,
+                        int_arm_parameters_changed(unit, slot->ior, ior)))
                     slot->rearm_required = 1;
             }
             slot->unit = unit;
@@ -710,6 +717,34 @@ static void fill_split_fields(struct ZZUSBCommand *cmd,
         cmd->split_hub_port = ior->iouh_SplitHubPort;
         cmd->flags |= ZZUSB_FLAG_SPLIT;
     }
+}
+
+static void fill_int_arm_command(struct ZZUSBCommand *cmd,
+                                 struct ZZUSBUnit *unit,
+                                 struct IOUsbHWReq *ior)
+{
+    memset(cmd, 0, sizeof(*cmd));
+    cmd->cmd = ZZUSB_CMD_PERIODIC_ARM;
+    cmd->dev_addr = ior->iouh_DevAddr;
+    cmd->endpoint = ior->iouh_Endpoint;
+    cmd->direction = ior->iouh_Dir == UHDIR_IN ? 0x80 : 0;
+    cmd->max_pkt_size = ior->iouh_MaxPktSize;
+    cmd->speed = request_speed(unit, ior);
+    cmd->data_length = ior->iouh_Length;
+    cmd->interval = ior->iouh_Interval;
+    fill_split_fields(cmd, unit, ior);
+}
+
+static int int_arm_parameters_changed(struct ZZUSBUnit *unit,
+                                      struct IOUsbHWReq *old_ior,
+                                      struct IOUsbHWReq *new_ior)
+{
+    struct ZZUSBCommand old_cmd;
+    struct ZZUSBCommand new_cmd;
+
+    fill_int_arm_command(&old_cmd, unit, old_ior);
+    fill_int_arm_command(&new_cmd, unit, new_ior);
+    return memcmp(&old_cmd, &new_cmd, sizeof(old_cmd)) != 0;
 }
 
 static void fill_root_reset_hint(struct ZZUSBCommand *cmd,
@@ -2108,6 +2143,13 @@ static uint32_t rt_iso_service_limit_us(const struct ZZUSBUnit *unit)
     return shortest_us;
 }
 
+static int rt_iso_refill_terminal(uint16_t status)
+{
+    return status != ZZUSB_STATUS_OK &&
+           status != ZZUSB_STATUS_NAK &&
+           status != ZZUSB_STATUS_BUSY;
+}
+
 static void poll_rt_iso(struct ZZUSBUnit *unit)
 {
     for (unsigned index = 0; index < ZZ_RT_ISO_SLOTS; index++) {
@@ -2124,13 +2166,19 @@ static void poll_rt_iso(struct ZZUSBUnit *unit)
             continue;
         }
         if (!slot->lifecycle.in_flight) {
-            fill_rt_iso_pipeline(slot);
+            status = fill_rt_iso_pipeline(slot);
+            if (rt_iso_refill_terminal(status))
+                stop_rt_iso_slot(slot);
             continue;
         }
         while (slot->lifecycle.in_flight) {
             status = reap_rt_iso_batch(slot);
             if (status == ZZUSB_STATUS_OK) {
-                fill_rt_iso_pipeline(slot);
+                status = fill_rt_iso_pipeline(slot);
+                if (rt_iso_refill_terminal(status)) {
+                    stop_rt_iso_slot(slot);
+                    break;
+                }
                 continue;
             }
             if (status != ZZUSB_STATUS_NAK &&
@@ -2703,17 +2751,9 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
         }
         ior = slot->ior;
 
-        memset(&cmd, 0, sizeof(cmd));
-        cmd.dev_addr = ior->iouh_DevAddr;
-        cmd.endpoint = ior->iouh_Endpoint;
-        cmd.direction = (ior->iouh_Dir == UHDIR_IN) ? 0x80 : 0x00;
-        cmd.max_pkt_size = ior->iouh_MaxPktSize;
-        cmd.speed = request_speed(unit, ior);
-        cmd.data_length = ior->iouh_Length;
-        cmd.interval = ior->iouh_Interval;
+        fill_int_arm_command(&cmd, unit, ior);
         cmd.reserved = generation_for_unit(unit);
         cmd.timeout_ms = 100;
-        fill_split_fields(&cmd, unit, ior);
 
         if (slot->abort_requested) {
             stop_periodic_slot(slot);
