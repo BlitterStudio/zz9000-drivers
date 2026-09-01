@@ -4795,15 +4795,19 @@ static int process_work_queue(void)
                           slot->lifecycle.controller_epoch,
                           slot->completion_status);
     reply = zzusb_engine_claim_reply(&slot->lifecycle);
-    zzusb_engine_release_buffer(&slot->lifecycle);
     ActiveWorkSlot = NULL;
+    /*
+     * Keep the terminal slot discoverable through reply delivery. Forbid()
+     * also prevents the receiver from reusing this IOR before the slot is
+     * cleared below.
+     */
+    if (reply)
+        ReplyMsg(&ior->iouh_Req.io_Message);
+    zzusb_engine_release_buffer(&slot->lifecycle);
     slot->ior = NULL;
     slot->unit = NULL;
     zzusb_engine_init(&slot->lifecycle);
     Permit();
-
-    if (reply)
-        ReplyMsg(&ior->iouh_Req.io_Message);
     return work_queue_pending();
 }
 
