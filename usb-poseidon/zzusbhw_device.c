@@ -2934,6 +2934,19 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
                 (ior->iouh_Dir == UHDIR_OUT) ? ior->iouh_Length : 0,
                 unit);
             if (slot->ior != ior || slot->unit != unit) {
+                if (status == ZZUSB_STATUS_OK) {
+                    cmd.cmd = ZZUSB_CMD_PERIODIC_STOP;
+                    stop_status = send_usb_cmd_with_rt_service(
+                        base, &cmd, NULL, 0, unit);
+                    if (!stop_status_retired(stop_status)) {
+                        /*
+                         * Fence the orphaned endpoint until recovery can
+                         * reset firmware ownership.
+                         */
+                        state->quarantined = 1;
+                        bump_unit_generation(unit);
+                    }
+                }
                 ReleaseSemaphore(&base_dev->zz_Lock);
                 continue;
             }
