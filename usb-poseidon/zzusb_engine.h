@@ -140,6 +140,7 @@ struct zzusb_engine_request {
     uint8_t abort_requested;
     uint8_t reply_claimed;
     uint8_t buffer_released;
+    uint8_t observer;
 };
 
 void zzusb_engine_init(struct zzusb_engine_request *request);

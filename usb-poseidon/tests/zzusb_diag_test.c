@@ -30,6 +30,7 @@ int main(void)
     struct zzusb_driver_diag_snapshot snapshot;
     struct zzusb_engine_request request;
     uint32_t first_generation;
+    uint32_t before_observer_sequence;
 
     zzusb_engine_diag_set_critical(enter_critical, leave_critical);
     zzusb_engine_diag_reset();
@@ -95,6 +96,19 @@ int main(void)
     CHECK(zzusb_engine_complete(&request, 79u, 12u,
                                 ZZUSB_ENGINE_STATUS_HOSTERROR));
     CHECK(zzusb_engine_diag_snapshot(&snapshot, 0x31fu, 12u, 4u));
+    CHECK(snapshot.counters[ZZUSB_DRIVER_COUNT_COMPLETION] == 3u);
+    CHECK(snapshot.counters[ZZUSB_DRIVER_COUNT_HOST_ERROR] == 1u);
+    before_observer_sequence = snapshot.next_sequence;
+    zzusb_engine_init(&request);
+    request.observer = 1;
+    CHECK(zzusb_engine_queue(&request));
+    CHECK(zzusb_engine_dispatch(&request));
+    CHECK(zzusb_engine_begin(&request, 80u, 12u));
+    CHECK(zzusb_engine_complete(&request, 80u, 12u,
+                                ZZUSB_ENGINE_STATUS_OK));
+    CHECK(zzusb_engine_diag_snapshot(&snapshot, 0x31fu, 12u, 4u));
+    CHECK(snapshot.next_sequence == before_observer_sequence);
+    CHECK(snapshot.counters[ZZUSB_DRIVER_COUNT_REQUEST] == 3u);
     CHECK(snapshot.counters[ZZUSB_DRIVER_COUNT_COMPLETION] == 3u);
     CHECK(snapshot.counters[ZZUSB_DRIVER_COUNT_HOST_ERROR] == 1u);
 

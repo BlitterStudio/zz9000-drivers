@@ -218,11 +218,13 @@ int zzusb_engine_begin(struct zzusb_engine_request *request,
     request->request_id = request_id;
     request->controller_epoch = controller_epoch;
     request->state = ZZUSB_REQ_IN_FLIGHT;
-    zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_REQUEST);
-    zzusb_engine_diag_record(ZZUSB_DRIVER_EVENT_REQUEST,
-                             ZZUSB_ENGINE_STATUS_PENDING,
-                             request_id, controller_epoch,
-                             0, 0, 0, 0, 0, 0, 0);
+    if (!request->observer) {
+        zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_REQUEST);
+        zzusb_engine_diag_record(ZZUSB_DRIVER_EVENT_REQUEST,
+                                 ZZUSB_ENGINE_STATUS_PENDING,
+                                 request_id, controller_epoch,
+                                 0, 0, 0, 0, 0, 0, 0);
+    }
     return 1;
 }
 
@@ -233,12 +235,14 @@ int zzusb_engine_abort(struct zzusb_engine_request *request)
         request->abort_requested)
         return 0;
     request->abort_requested = 1;
-    zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_CANCELLATION);
-    zzusb_engine_diag_record(ZZUSB_DRIVER_EVENT_CANCELLATION,
-                             ZZUSB_ENGINE_STATUS_CANCELLED,
-                             request->request_id,
-                             request->controller_epoch,
-                             0, 0, 0, 0, 0, request->state, 0);
+    if (!request->observer) {
+        zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_CANCELLATION);
+        zzusb_engine_diag_record(ZZUSB_DRIVER_EVENT_CANCELLATION,
+                                 ZZUSB_ENGINE_STATUS_CANCELLED,
+                                 request->request_id,
+                                 request->controller_epoch,
+                                 0, 0, 0, 0, 0, request->state, 0);
+    }
     if (request->state == ZZUSB_REQ_QUEUED)
         return make_terminal(request, ZZUSB_RESULT_ABORTED,
                              ZZUSB_ENGINE_STATUS_CANCELLED);
@@ -250,12 +254,14 @@ int zzusb_engine_timeout(struct zzusb_engine_request *request)
     if (!request || request->state != ZZUSB_REQ_IN_FLIGHT)
         return 0;
     request->state = ZZUSB_REQ_RETIRING;
-    zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_TIMEOUT);
-    zzusb_engine_diag_record(ZZUSB_DRIVER_EVENT_TIMEOUT,
-                             ZZUSB_ENGINE_STATUS_TIMEOUT,
-                             request->request_id,
-                             request->controller_epoch,
-                             0, 0, 0, 0, 0, request->state, 0);
+    if (!request->observer) {
+        zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_TIMEOUT);
+        zzusb_engine_diag_record(ZZUSB_DRIVER_EVENT_TIMEOUT,
+                                 ZZUSB_ENGINE_STATUS_TIMEOUT,
+                                 request->request_id,
+                                 request->controller_epoch,
+                                 0, 0, 0, 0, 0, request->state, 0);
+    }
     return 1;
 }
 
@@ -271,23 +277,27 @@ int zzusb_engine_complete(struct zzusb_engine_request *request,
          request->state != ZZUSB_REQ_RETIRING) ||
         request_id != request->request_id ||
         controller_epoch != request->controller_epoch) {
-        zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_LATE_COMPLETION);
-        zzusb_engine_diag_record(ZZUSB_DRIVER_EVENT_LATE_COMPLETION,
-                                 transport_status,
-                                 request_id, controller_epoch,
-                                 0, 0, 0, 0, 0, request->state, 0);
+        if (!request->observer) {
+            zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_LATE_COMPLETION);
+            zzusb_engine_diag_record(ZZUSB_DRIVER_EVENT_LATE_COMPLETION,
+                                     transport_status,
+                                     request_id, controller_epoch,
+                                     0, 0, 0, 0, 0, request->state, 0);
+        }
         return 0;
     }
     result = transport_status == ZZUSB_ENGINE_STATUS_OK
         ? ZZUSB_RESULT_OK : ZZUSB_RESULT_IO_ERROR;
-    zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_COMPLETION);
-    if (transport_status == ZZUSB_ENGINE_STATUS_ERROR ||
-        transport_status == ZZUSB_ENGINE_STATUS_HOSTERROR)
-        zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_HOST_ERROR);
-    zzusb_engine_diag_record(ZZUSB_DRIVER_EVENT_COMPLETION,
-                             transport_status, request_id,
-                             controller_epoch, 0, 0, 0, 0, 0,
-                             request->abort_requested, 0);
+    if (!request->observer) {
+        zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_COMPLETION);
+        if (transport_status == ZZUSB_ENGINE_STATUS_ERROR ||
+            transport_status == ZZUSB_ENGINE_STATUS_HOSTERROR)
+            zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_HOST_ERROR);
+        zzusb_engine_diag_record(ZZUSB_DRIVER_EVENT_COMPLETION,
+                                 transport_status, request_id,
+                                 controller_epoch, 0, 0, 0, 0, 0,
+                                 request->abort_requested, 0);
+    }
     return make_terminal(request, result, transport_status);
 }
 
@@ -300,12 +310,14 @@ int zzusb_engine_retire(struct zzusb_engine_request *request,
          request->state != ZZUSB_REQ_IN_FLIGHT &&
          request->state != ZZUSB_REQ_RETIRING))
         return 0;
-    zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_COMPLETION);
-    zzusb_engine_diag_record(ZZUSB_DRIVER_EVENT_COMPLETION,
-                             transport_status,
-                             request->request_id,
-                             request->controller_epoch,
-                             0, 0, 0, 0, 0, result, 0);
+    if (!request->observer) {
+        zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_COMPLETION);
+        zzusb_engine_diag_record(ZZUSB_DRIVER_EVENT_COMPLETION,
+                                 transport_status,
+                                 request->request_id,
+                                 request->controller_epoch,
+                                 0, 0, 0, 0, 0, result, 0);
+    }
     return make_terminal(request, result, transport_status);
 }
 

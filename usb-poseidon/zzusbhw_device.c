@@ -4381,13 +4381,20 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
         for (int i = 0; i < ZZ_INT_PENDING_SLOTS; i++) {
             struct ZZIntPendingSlot *slot = &IntPendingSlots[i];
             struct IOUsbHWReq *pending = slot->ior;
+            uint16_t stop_status;
+
             if (!pending || slot->unit != unit) continue;
-            stop_periodic_slot(slot);
-            clear_int_slot(slot);
             pending->iouh_Actual = 0;
             pending->iouh_Req.io_Error = IOERR_ABORTED;
-            if (aborted_count < ABORTED_REPLY_MAX)
-                aborted_replies[aborted_count++] = pending;
+            stop_status = stop_periodic_slot(slot);
+            if (stop_status_retired(stop_status)) {
+                clear_int_slot(slot);
+                if (aborted_count < ABORTED_REPLY_MAX)
+                    aborted_replies[aborted_count++] = pending;
+            } else {
+                slot->stop_pending = 1;
+                slot->abort_requested = 0;
+            }
         }
         stop_rt_iso_for_unit(unit);
         ior->iouh_Req.io_Error = 0;
@@ -4459,6 +4466,9 @@ static int enqueue_work(struct ZZUSBBase *base, struct ZZUSBUnit *unit,
     }
     if (available) {
         zzusb_engine_init(&available->lifecycle);
+        available->lifecycle.observer =
+            ior->iouh_Req.io_Command ==
+                ZZUSB_UHCMD_GET_DIAGNOSTICS;
         available->unit = unit;
         available->ior = ior;
         available->sequence = 0;
