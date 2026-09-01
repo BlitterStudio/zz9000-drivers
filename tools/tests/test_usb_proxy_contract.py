@@ -26,7 +26,11 @@ class USBProxyContractTests(unittest.TestCase):
         cls.firmware_iso_header = (
             cls.firmware_root / CONTRACT.FIRMWARE_ISO_HEADER_REL
         )
+        cls.firmware_diag_header = (
+            cls.firmware_root / CONTRACT.FIRMWARE_DIAG_HEADER_REL
+        )
         if (not cls.firmware_header.is_file() or
+                not cls.firmware_diag_header.is_file() or
                 not cls.firmware_iso_header.is_file()):
             raise unittest.SkipTest(
                 "set ZZ9K_FIRMWARE_DIR to a zz9000-firmware checkout"
@@ -81,6 +85,47 @@ class USBProxyContractTests(unittest.TestCase):
             )
             errors = CONTRACT.compare_headers(copied)
         self.assertTrue(any("ZZUSB_CMD_QUERY_CAPS" in item for item in errors))
+
+    def test_missing_diagnostics_header_is_detected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            copied = pathlib.Path(directory) / "usb_proxy.h"
+            shutil.copyfile(self.firmware_header, copied)
+            errors = CONTRACT.compare_headers(copied)
+        self.assertTrue(
+            any("missing firmware diagnostics header" in item
+                for item in errors)
+        )
+
+    def test_array_member_drift_is_detected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            copied = pathlib.Path(directory) / "usb_proxy.h"
+            shutil.copyfile(self.firmware_header, copied)
+            shutil.copyfile(
+                self.firmware_diag_header,
+                pathlib.Path(directory) / "usb_proxy_diag.h",
+            )
+            text = copied.read_text(encoding="utf-8")
+            copied.write_text(
+                text.replace(
+                    "struct ZZUSBCommand {\n    uint16_t cmd;",
+                    "struct ZZUSBCommand {\n"
+                    "    uint8_t reserved_test[4];\n"
+                    "    uint16_t cmd;",
+                ),
+                encoding="utf-8",
+            )
+            errors = CONTRACT.compare_headers(copied)
+        self.assertTrue(
+            any("ZZUSBCommand" in item for item in errors)
+        )
+
+    def test_unrecognized_struct_member_is_rejected(self):
+        text = (
+            "struct Wire { unsigned long unsupported; } "
+            "__attribute__((packed));"
+        )
+        with self.assertRaisesRegex(ValueError, "unsupported declaration"):
+            CONTRACT.extract_struct(text, "Wire")
 
     def test_iso_drift_is_detected(self):
         with tempfile.TemporaryDirectory() as directory:

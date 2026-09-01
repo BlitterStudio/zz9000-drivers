@@ -130,10 +130,27 @@ def extract_struct(text: str, name: str) -> list[tuple[str, str]]:
     )
     if not match:
         raise ValueError(f"missing packed struct {name}")
-    fields = re.findall(
-        r"\b(uint(?:8|16|32)_t)\s+([A-Za-z_][A-Za-z0-9_]*)\s*;",
-        match.group("body"),
-    )
+    body = re.sub(r"/\*.*?\*/", "", match.group("body"), flags=re.DOTALL)
+    body = re.sub(r"//[^\n]*", "", body)
+    fields: list[tuple[str, str]] = []
+    for raw_declaration in body.split(";"):
+        declaration = raw_declaration.strip()
+        if not declaration:
+            continue
+        field = re.fullmatch(
+            r"(uint(?:8|16|32)_t)\s+"
+            r"([A-Za-z_][A-Za-z0-9_]*)"
+            r"(\s*\[\s*[A-Za-z0-9_()+*/ -]+\s*\])?",
+            declaration,
+        )
+        if not field:
+            raise ValueError(
+                f"{name}: unsupported declaration {declaration!r}"
+            )
+        field_type = field.group(1)
+        if field.group(3):
+            field_type += re.sub(r"\s+", "", field.group(3))
+        fields.append((field_type, field.group(2)))
     return fields
 
 
@@ -167,7 +184,11 @@ def compare_headers(firmware_header: pathlib.Path,
             )
 
     firmware_diag_header = firmware_header.with_name("usb_proxy_diag.h")
-    if firmware_diag_header.is_file():
+    if not firmware_diag_header.is_file():
+        errors.append(
+            f"missing firmware diagnostics header {firmware_diag_header}"
+        )
+    else:
         firmware_diag_defines = extract_defines(
             firmware_diag_header.read_text(encoding="utf-8"),
             DIAG_DEFINE_NAMES,
@@ -187,7 +208,6 @@ def compare_headers(firmware_header: pathlib.Path,
                 errors.append(
                     f"{name}: firmware diagnostics={left} driver={right}"
                 )
-
     return errors
 
 
