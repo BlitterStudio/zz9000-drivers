@@ -1388,7 +1388,8 @@ static uint16_t stop_periodic_slot(struct ZZIntPendingSlot *slot)
     cmd.reserved = generation_for_unit(slot->unit);
     cmd.timeout_ms = 100;
     fill_split_fields(&cmd, slot->unit, ior);
-    status = send_usb_cmd(base, &cmd, NULL, 0);
+    status = send_usb_cmd_with_rt_service(
+        base, &cmd, NULL, 0, slot->unit);
     slot->armed = 0;
     if (!stop_status_retired(status)) {
         state = protocol_state_for(base);
@@ -2903,10 +2904,11 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
 
         if (!reply_now && !slot->armed) {
             cmd.cmd = ZZUSB_CMD_PERIODIC_ARM;
-            status = send_usb_cmd(
+            status = send_usb_cmd_with_rt_service(
                 base, &cmd,
                 (ior->iouh_Dir == UHDIR_OUT) ? ior->iouh_Data : NULL,
-                (ior->iouh_Dir == UHDIR_OUT) ? ior->iouh_Length : 0);
+                (ior->iouh_Dir == UHDIR_OUT) ? ior->iouh_Length : 0,
+                unit);
             if (status != ZZUSB_STATUS_OK) {
                 ior->iouh_Actual = 0;
                 ior->iouh_Req.io_Error = map_proxy_status(status);
@@ -2926,7 +2928,8 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
             enum zzusb_interrupt_action action;
 
             cmd.cmd = ZZUSB_CMD_PERIODIC_REAP;
-            status = send_usb_cmd(base, &cmd, NULL, 0);
+            status = send_usb_cmd_with_rt_service(
+                base, &cmd, NULL, 0, unit);
             result = (volatile struct ZZUSBCommand*)(base + 0xa000);
             actual = status == ZZUSB_STATUS_OK ? result->actual_length : 0;
             if (actual > ior->iouh_Length)
