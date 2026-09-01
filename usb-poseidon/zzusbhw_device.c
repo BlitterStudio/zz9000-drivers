@@ -289,6 +289,14 @@ static struct ZZRTIsoSlot RTIsoSlots[ZZ_RT_ISO_SLOTS];
 static uint8_t IsoWire[ZZUSB_V2_DATA_MAX];
 static uint8_t IsoPayload[ZZUSB_ISO_DATA_MAX];
 static uint32_t SimpleIsoBatchId = 1;
+struct ZZSimpleIsoCleanup {
+    struct ZZUSBUnit *unit;
+    struct ZZUSBCommand stop_cmd;
+    uint8_t pending;
+};
+
+static struct ZZSimpleIsoCleanup
+    SimpleIsoCleanup[ZZ_NUM_PORTS];
 
 #define ZZ_WORK_SLOTS 32
 #define ZZUSB_MAINT_POLL_US 25U
@@ -705,6 +713,14 @@ static void finish_reset_periodic_for_unit(struct ZZUSBUnit *unit)
         IntPendingSlots[slot].armed = 0;
         IntPendingSlots[slot].arm_in_progress = 0;
     }
+}
+
+static void finish_reset_simple_iso_for_unit(struct ZZUSBUnit *unit)
+{
+    for (int slot = 0; slot < ZZ_NUM_PORTS; slot++)
+        if (SimpleIsoCleanup[slot].unit == unit)
+            memset(&SimpleIsoCleanup[slot], 0,
+                   sizeof(SimpleIsoCleanup[slot]));
 }
 
 static int is_addr0_ep0(struct IOUsbHWReq *ior)
@@ -1573,27 +1589,78 @@ static uint16_t stop_iso_request(volatile uint8_t *base,
         base, &cmd, NULL, 0, unit);
 }
 
+static struct ZZSimpleIsoCleanup *simple_iso_cleanup_for_unit(
+    struct ZZUSBUnit *unit)
+{
+    for (int index = 0; index < ZZ_NUM_PORTS; index++)
+        if (SimpleIsoCleanup[index].unit == unit)
+            return &SimpleIsoCleanup[index];
+    for (int index = 0; index < ZZ_NUM_PORTS; index++)
+        if (!SimpleIsoCleanup[index].pending)
+            return &SimpleIsoCleanup[index];
+    return NULL;
+}
+
+static int simple_iso_cleanup_pending(struct ZZUSBUnit *unit)
+{
+    struct ZZSimpleIsoCleanup *cleanup =
+        simple_iso_cleanup_for_unit(unit);
+
+    return cleanup && cleanup->pending;
+}
+
+static void schedule_simple_iso_cleanup(struct ZZUSBUnit *unit,
+                                        const struct IOUsbHWReq *ior)
+{
+    struct ZZSimpleIsoCleanup *cleanup =
+        simple_iso_cleanup_for_unit(unit);
+
+    if (!cleanup)
+        return;
+    memset(cleanup, 0, sizeof(*cleanup));
+    cleanup->unit = unit;
+    fill_iso_command(
+        &cleanup->stop_cmd, unit, ior, ZZUSB_CMD_ISO_STOP, 0);
+    cleanup->pending = 1;
+}
+
 static void retire_simple_iso_request(volatile uint8_t *base,
                                       struct ZZUSBUnit *unit,
                                       const struct IOUsbHWReq *ior)
 {
-    for (;;) {
-        struct ZZUSBProtocolState *state = protocol_state_for(base);
-        uint16_t stop_status;
+    struct ZZUSBProtocolState *state = protocol_state_for(base);
 
-        if (state && state->quarantined) {
-            recover_quarantined_proxy(base);
-            if (state->quarantined) {
-                worker_wait_us(1000U);
-                continue;
-            }
-        }
-        stop_status = stop_iso_request(base, unit, ior);
+    if (!state || !state->quarantined) {
+        uint16_t stop_status = stop_iso_request(base, unit, ior);
+
         if (stop_status_retired(stop_status))
             return;
-        if (state && stop_status != ZZUSB_STATUS_BUSY)
-            state->quarantined = 1;
-        worker_wait_us(1000U);
+    }
+    schedule_simple_iso_cleanup(unit, ior);
+}
+
+static void poll_simple_iso_cleanup(struct ZZUSBUnit *unit)
+{
+    struct ZZSimpleIsoCleanup *cleanup =
+        simple_iso_cleanup_for_unit(unit);
+    volatile uint8_t *base;
+    struct ZZUSBProtocolState *state;
+    uint16_t status;
+
+    if (!cleanup || !cleanup->pending)
+        return;
+    base = (volatile uint8_t *)unit->zz_Registers;
+    state = protocol_state_for(base);
+    if (state && state->quarantined) {
+        recover_quarantined_proxy(base);
+        if (state->quarantined)
+            return;
+    }
+    status = send_usb_cmd(base, &cleanup->stop_cmd, NULL, 0);
+    if (stop_status_retired(status)) {
+        memset(cleanup, 0, sizeof(*cleanup));
+    } else if (state && status != ZZUSB_STATUS_BUSY) {
+        state->quarantined = 1;
     }
 }
 
@@ -1615,6 +1682,10 @@ static void execute_simple_iso(struct ZZUSBUnit *unit,
     unsigned wire_length;
     int queued = 0;
 
+    if (simple_iso_cleanup_pending(unit)) {
+        ior->iouh_Req.io_Error = UHIOERR_NAK;
+        return;
+    }
     ior->iouh_Actual = 0;
     ior->iouh_ExtError = 0;
     if (!(iso_public_capabilities(unit) & UHCF_ISO) ||
@@ -2585,6 +2656,7 @@ static struct Library* __attribute__((used)) init_device(uint8_t *seg_list asm("
     ProtocolNegotiated = 0;
     memset(WorkSlots, 0, sizeof(WorkSlots));
     memset(RTIsoSlots, 0, sizeof(RTIsoSlots));
+    memset(SimpleIsoCleanup, 0, sizeof(SimpleIsoCleanup));
     memset(IsoWire, 0, sizeof(IsoWire));
     memset(IsoPayload, 0, sizeof(IsoPayload));
     SimpleIsoBatchId = 1;
@@ -3367,6 +3439,7 @@ static void hotplug_poll_task(void)
                 continue;
             recover_quarantined_proxy(
                 (volatile uint8_t *)unit->zz_Registers);
+            poll_simple_iso_cleanup(unit);
             poll_rt_iso(unit);
         }
         process_work_queue();
@@ -3704,6 +3777,7 @@ static void handle_roothub_control(struct ZZUSBUnit *unit,
                             rstatus == ZZUSB_STATUS_OFFLINE) {
                             finish_reset_rt_iso_for_unit(unit);
                             finish_reset_periodic_for_unit(unit);
+                            finish_reset_simple_iso_for_unit(unit);
                             record_reset_success(unit, rstatus);
                         }
 
@@ -4096,6 +4170,7 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
                 status == ZZUSB_STATUS_OFFLINE) {
                 finish_reset_rt_iso_for_unit(unit);
                 finish_reset_periodic_for_unit(unit);
+                finish_reset_simple_iso_for_unit(unit);
                 record_reset_success(unit, status);
             }
 
