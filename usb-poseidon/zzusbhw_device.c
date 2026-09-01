@@ -2901,6 +2901,10 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
 
         if (slot->abort_requested) {
             stop_periodic_slot(slot);
+            if (slot->ior != ior || slot->unit != unit) {
+                ReleaseSemaphore(&base_dev->zz_Lock);
+                continue;
+            }
             ior->iouh_Actual = 0;
             ior->iouh_Req.io_Error = IOERR_ABORTED;
             clear_int_slot(slot);
@@ -2909,6 +2913,10 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
 
         if (!reply_now && slot->rearm_required) {
             stop_status = stop_periodic_slot(slot);
+            if (slot->ior != ior || slot->unit != unit) {
+                ReleaseSemaphore(&base_dev->zz_Lock);
+                continue;
+            }
             slot->rearm_required = 0;
             if (!stop_status_retired(stop_status)) {
                 ior->iouh_Actual = 0;
@@ -2925,6 +2933,10 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
                 (ior->iouh_Dir == UHDIR_OUT) ? ior->iouh_Data : NULL,
                 (ior->iouh_Dir == UHDIR_OUT) ? ior->iouh_Length : 0,
                 unit);
+            if (slot->ior != ior || slot->unit != unit) {
+                ReleaseSemaphore(&base_dev->zz_Lock);
+                continue;
+            }
             if (status != ZZUSB_STATUS_OK) {
                 ior->iouh_Actual = 0;
                 ior->iouh_Req.io_Error = map_proxy_status(status);
@@ -2946,6 +2958,10 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
             cmd.cmd = ZZUSB_CMD_PERIODIC_REAP;
             status = send_usb_cmd_with_rt_service(
                 base, &cmd, NULL, 0, unit);
+            if (slot->ior != ior || slot->unit != unit) {
+                ReleaseSemaphore(&base_dev->zz_Lock);
+                continue;
+            }
             result = (volatile struct ZZUSBCommand*)(base + 0xa000);
             actual = status == ZZUSB_STATUS_OK ? result->actual_length : 0;
             if (actual > ior->iouh_Length)
@@ -2975,6 +2991,10 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
                 ior->iouh_Actual = actual;
                 ior->iouh_Req.io_Error = 0;
                 stop_status = stop_periodic_slot(slot);
+                if (slot->ior != ior || slot->unit != unit) {
+                    ReleaseSemaphore(&base_dev->zz_Lock);
+                    continue;
+                }
                 if (!stop_status_retired(stop_status)) {
                     ior->iouh_Actual = 0;
                     ior->iouh_Req.io_Error = map_proxy_status(stop_status);
@@ -2985,6 +3005,10 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
                 ior->iouh_Actual = 0;
                 ior->iouh_Req.io_Error = map_proxy_status(status);
                 stop_periodic_slot(slot);
+                if (slot->ior != ior || slot->unit != unit) {
+                    ReleaseSemaphore(&base_dev->zz_Lock);
+                    continue;
+                }
                 clear_int_slot(slot);
                 reply_now = ior;
             }
@@ -3054,6 +3078,8 @@ static int poll_roothub_pending(struct ZZUSBBase *base_dev,
         RootHubPollDelay[unit_index] = ZZ_RH_POLL_DELAY_TICKS;
         update_port_state(unit, base, aborted_replies,
                           &aborted_count, ZZ_ABORTED_REPLY_SLOTS);
+        if (RootHubIntPending[unit_index] != ior)
+            goto roothub_done;
     }
 
     if (unit->zz_PortChange != 0) {
@@ -3069,6 +3095,7 @@ static int poll_roothub_pending(struct ZZUSBBase *base_dev,
         reply_now = ior;
     }
 
+roothub_done:
     still_pending = RootHubIntPending[unit_index] != NULL;
 
     ReleaseSemaphore(&base_dev->zz_Lock);
@@ -3903,17 +3930,19 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
                     empty_port = 1;
                 } else {
                     struct ZZUSBCommand check;
-                    unit->zz_PortPresent = FALSE;
-                    unit->zz_PortStatus = UPSF_PORT_POWER;
-                    unit->zz_PortChange = 0;
-                    unit->zz_Speed = 0;
+                    uint16_t check_status;
 
                     memset(&check, 0, sizeof(check));
                     check.cmd = ZZUSB_CMD_CHECK_PORT;
                     check.timeout_ms = 250;
-                    empty_port =
-                        send_usb_cmd(base, &check, NULL, 0) ==
-                        ZZUSB_STATUS_OFFLINE;
+                    check_status = send_usb_cmd(base, &check, NULL, 0);
+                    if (check_status == ZZUSB_STATUS_OFFLINE) {
+                        unit->zz_PortPresent = FALSE;
+                        unit->zz_PortStatus = UPSF_PORT_POWER;
+                        unit->zz_PortChange = 0;
+                        unit->zz_Speed = 0;
+                        empty_port = 1;
+                    }
                 }
             }
             trace_port_state_status(unit, "USBRESET_FW", status, fw_speed);
