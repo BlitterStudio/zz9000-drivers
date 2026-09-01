@@ -242,6 +242,20 @@ int zzusb_iso_parse_reap(const uint8_t *wire, unsigned wire_length,
     return batch->batch_id != 0;
 }
 
+int zzusb_iso_layout_matches(
+    const struct zzusb_iso_batch_result *batch,
+    const struct zzusb_iso_packet_result *packets,
+    const uint16_t *packet_lengths, unsigned packet_count)
+{
+    if (!batch || !packets || !packet_lengths ||
+        batch->packet_count != packet_count)
+        return 0;
+    for (unsigned index = 0; index < packet_count; index++)
+        if (packets[index].requested != packet_lengths[index])
+            return 0;
+    return 1;
+}
+
 uint16_t zzusb_iso_status_flags(uint8_t packet_status)
 {
     switch (packet_status) {

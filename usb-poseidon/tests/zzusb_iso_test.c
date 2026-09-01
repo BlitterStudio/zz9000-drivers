@@ -126,6 +126,16 @@ static void test_wire_round_trip(void)
     assert(packets[2].frame == 1);
     assert(packets[2].offset == 4);
     assert(packets[1].status == ZZUSB_ISO_PACKET_SHORT);
+    assert(zzusb_iso_layout_matches(
+        &batch, packets, lengths, 3));
+    {
+        const uint16_t wrong_lengths[3] = {2, 1, 3};
+
+        assert(!zzusb_iso_layout_matches(
+            &batch, packets, wrong_lengths, 3));
+        assert(!zzusb_iso_layout_matches(
+            &batch, packets, lengths, 2));
+    }
 
     put_be16_test(wire + ZZUSB_ISO_HEADER_SIZE +
                   ZZUSB_ISO_PKT_OFF_ACTUAL, 5);

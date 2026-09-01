@@ -260,6 +260,7 @@ struct ZZRTIsoBatchContext {
     uint32_t batch_id;
     uint32_t prefetched_bytes;
     uint8_t packet_count;
+    uint16_t duration_microframes;
 };
 
 struct ZZRTIsoSlot {
@@ -1573,7 +1574,9 @@ static void execute_simple_iso(struct ZZUSBUnit *unit,
             if (!zzusb_iso_parse_reap(
                     IsoWire, actual_length, ior->iouh_Dir == UHDIR_IN,
                     &batch, packets, ZZUSB_ISO_MAX_PACKETS) ||
-                batch.batch_id != batch_id) {
+                batch.batch_id != batch_id ||
+                !zzusb_iso_layout_matches(
+                    &batch, packets, packet_lengths, packet_count)) {
                 status = ZZUSB_STATUS_HOSTERROR;
                 break;
             }
@@ -1759,6 +1762,11 @@ static uint16_t queue_rt_iso_batch(struct ZZRTIsoSlot *slot)
     memset(context, 0, sizeof(*context));
     context->batch_id = batch_id;
     context->packet_count = (uint8_t)packet_count;
+    context->duration_microframes = (uint16_t)(
+        ((uint32_t)slot->duration_microframes * packet_count) /
+        slot->packet_count);
+    if (!context->duration_microframes)
+        context->duration_microframes = 1;
 
     if (!slot->direction_in) {
         memset(IsoPayload, 0, sizeof(IsoPayload));
@@ -2142,6 +2150,26 @@ static int rt_iso_pending_for_unit(const struct ZZUSBUnit *unit)
     return 0;
 }
 
+static uint32_t rt_iso_buffered_safe_microframes(
+    const struct ZZRTIsoSlot *slot)
+{
+    uint32_t total = 0;
+    uint16_t longest = 0;
+    unsigned batches = 0;
+
+    for (unsigned index = 0; index < ZZUSB_ISO_PIPELINE_DEPTH; index++) {
+        const struct ZZRTIsoBatchContext *context = &slot->batches[index];
+
+        if (!context->batch_id)
+            continue;
+        total += context->duration_microframes;
+        if (context->duration_microframes > longest)
+            longest = context->duration_microframes;
+        batches++;
+    }
+    return batches > 1 ? total - longest : total;
+}
+
 static uint32_t rt_iso_service_limit_us(const struct ZZUSBUnit *unit)
 {
     uint32_t shortest_us = 8000U;
@@ -2154,9 +2182,7 @@ static uint32_t rt_iso_service_limit_us(const struct ZZUSBUnit *unit)
         if (slot->unit != unit ||
             slot->lifecycle.state != ZZUSB_RT_RUNNING)
             continue;
-        safe_microframes = slot->duration_microframes *
-            (slot->lifecycle.in_flight > 1 ?
-             slot->lifecycle.in_flight - 1U : 1U);
+        safe_microframes = rt_iso_buffered_safe_microframes(slot);
         candidate_us = safe_microframes * 125U;
         if (candidate_us < shortest_us)
             shortest_us = candidate_us;

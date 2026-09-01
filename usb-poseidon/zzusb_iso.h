@@ -106,6 +106,10 @@ int zzusb_iso_parse_reap(const uint8_t *wire, unsigned wire_length,
                          struct zzusb_iso_batch_result *batch,
                          struct zzusb_iso_packet_result *packets,
                          unsigned packet_capacity);
+int zzusb_iso_layout_matches(
+    const struct zzusb_iso_batch_result *batch,
+    const struct zzusb_iso_packet_result *packets,
+    const uint16_t *packet_lengths, unsigned packet_count);
 uint16_t zzusb_iso_status_flags(uint8_t packet_status);
 
 void zzusb_rt_init(struct zzusb_rt_lifecycle *lifecycle);
