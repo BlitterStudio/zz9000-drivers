@@ -3205,6 +3205,7 @@ static void hotplug_poll_task(void)
     for (;;) {
         int any_pending = 0;
         int reap_events;
+        uint32_t poll_delay_us = 100000U;
 
         Disable();
         reap_events = USBEventPending != 0;
@@ -3227,8 +3228,14 @@ static void hotplug_poll_task(void)
 
             if (int_pending_for_unit(unit))
                 any_pending = 1;
-            if (rt_iso_pending_for_unit(unit))
+            if (rt_iso_pending_for_unit(unit)) {
+                uint32_t service_limit_us =
+                    rt_iso_service_limit_us(unit);
+
                 any_pending = 1;
+                if (service_limit_us < poll_delay_us)
+                    poll_delay_us = service_limit_us;
+            }
         }
 
         if (work_queue_pending())
@@ -3246,7 +3253,7 @@ static void hotplug_poll_task(void)
             SetSignal(0, timer_mask);
             timer_req.tr_node.io_Command = TR_ADDREQUEST;
             timer_req.tr_time.tv_secs = 0;
-            timer_req.tr_time.tv_micro = 100000;
+            timer_req.tr_time.tv_micro = poll_delay_us;
             SendIO((struct IORequest*)&timer_req);
             Wait(mask | timer_mask);
             if (!CheckIO((struct IORequest*)&timer_req)) {
