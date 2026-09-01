@@ -315,8 +315,12 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior);
 static int process_work_queue(void);
 static int rt_iso_pending_for_unit(const struct ZZUSBUnit *unit);
 static uint32_t rt_iso_service_limit_us(const struct ZZUSBUnit *unit);
+static int rt_iso_refill_terminal(uint16_t status);
 static void service_rt_iso_during_work(struct ZZUSBBase *base,
                                        struct ZZUSBUnit *unit);
+static uint16_t send_usb_cmd_with_rt_service(
+    volatile uint8_t *base, struct ZZUSBCommand *cmd,
+    void *data_out, uint32_t data_out_len, struct ZZUSBUnit *unit);
 
 static uint16_t request_speed(struct ZZUSBUnit *unit, struct IOUsbHWReq *ior);
 static void fill_int_arm_command(struct ZZUSBCommand *cmd,
@@ -1500,7 +1504,8 @@ static uint16_t stop_iso_request(volatile uint8_t *base,
     struct ZZUSBCommand cmd;
 
     fill_iso_command(&cmd, unit, ior, ZZUSB_CMD_ISO_STOP, 0);
-    return send_usb_cmd(base, &cmd, NULL, 0);
+    return send_usb_cmd_with_rt_service(
+        base, &cmd, NULL, 0, unit);
 }
 
 static void execute_simple_iso(struct ZZUSBUnit *unit,
@@ -1557,7 +1562,8 @@ static void execute_simple_iso(struct ZZUSBUnit *unit,
     }
 
     fill_iso_command(&cmd, unit, ior, ZZUSB_CMD_ISO_QUEUE, wire_length);
-    status = send_usb_cmd(base, &cmd, IsoWire, wire_length);
+    status = send_usb_cmd_with_rt_service(
+        base, &cmd, IsoWire, wire_length, unit);
     if (status != ZZUSB_STATUS_OK) {
         if (status == ZZUSB_STATUS_HOSTERROR)
             stop_iso_request(base, unit, ior);
@@ -1590,7 +1596,8 @@ static void execute_simple_iso(struct ZZUSBUnit *unit,
         }
         fill_iso_command(&cmd, unit, ior, ZZUSB_CMD_ISO_REAP,
                          ZZUSB_V2_DATA_MAX);
-        status = send_usb_cmd(base, &cmd, NULL, 0);
+        status = send_usb_cmd_with_rt_service(
+            base, &cmd, NULL, 0, unit);
         if (status == ZZUSB_STATUS_OK) {
             result = (volatile struct ZZUSBCommand *)(base + 0xa000);
             actual_length = result->actual_length;
@@ -2109,8 +2116,7 @@ static BYTE add_rt_iso_handler(struct ZZUSBUnit *unit,
             return UHIOERR_BADPARAMS;
         }
         slot->duration_microframes =
-            (uint16_t)(((uint32_t)slot->duration_microframes *
-                        packet_count) / planned_count);
+            (slot->duration_microframes * packet_count) / planned_count;
     }
     slot->packet_count = (uint8_t)packet_count;
     zzusb_rt_init(&slot->lifecycle);
@@ -2135,6 +2141,20 @@ static BYTE start_rt_iso_handler(struct ZZUSBUnit *unit,
         !zzusb_rt_start(&slot->lifecycle))
         return UHIOERR_BADPARAMS;
     status = fill_rt_iso_pipeline(slot);
+    if (rt_iso_refill_terminal(status)) {
+        uint16_t stop_status = stop_rt_iso_slot(slot);
+
+        if (stop_status != ZZUSB_STATUS_OK) {
+            struct ZZUSBProtocolState *state = protocol_state_for(
+                (volatile uint8_t *)slot->unit->zz_Registers);
+
+            if (state)
+                state->quarantined = 1;
+            rt_cancel_contexts(slot, ZZUSB_RT_FLAG_PACKET_ERROR);
+            zzusb_rt_finish_stop(&slot->lifecycle);
+        }
+        return map_proxy_status(status);
+    }
     if (!slot->lifecycle.in_flight) {
         zzusb_rt_begin_stop(&slot->lifecycle);
         zzusb_rt_finish_stop(&slot->lifecycle);
