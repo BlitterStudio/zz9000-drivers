@@ -694,10 +694,16 @@ static void bump_unit_generation(struct ZZUSBUnit *unit)
         UnitGeneration[i]++;
         if (!UnitGeneration[i])
             UnitGeneration[i] = 1;
-        for (int slot = 0; slot < ZZ_INT_PENDING_SLOTS; slot++)
-            if (IntPendingSlots[slot].unit == unit)
-                IntPendingSlots[slot].armed = 0;
         return;
+    }
+}
+static void finish_reset_periodic_for_unit(struct ZZUSBUnit *unit)
+{
+    for (int slot = 0; slot < ZZ_INT_PENDING_SLOTS; slot++) {
+        if (IntPendingSlots[slot].unit != unit)
+            continue;
+        IntPendingSlots[slot].armed = 0;
+        IntPendingSlots[slot].arm_in_progress = 0;
     }
 }
 
@@ -1906,15 +1912,24 @@ static uint16_t queue_rt_iso_batch(struct ZZRTIsoSlot *slot)
     return ZZUSB_STATUS_OK;
 }
 
-static uint16_t fill_rt_iso_pipeline(struct ZZRTIsoSlot *slot)
+static uint16_t fill_rt_iso_pipeline(struct ZZRTIsoSlot *slot,
+                                     int honor_abort)
 {
     uint16_t status = ZZUSB_STATUS_OK;
 
     while (slot->lifecycle.state == ZZUSB_RT_RUNNING &&
            slot->lifecycle.in_flight < ZZUSB_ISO_PIPELINE_DEPTH) {
+        if (honor_abort && active_work_aborted()) {
+            status = ZZUSB_STATUS_CANCELLED;
+            break;
+        }
         status = queue_rt_iso_batch(slot);
         if (status != ZZUSB_STATUS_OK)
             break;
+        if (honor_abort && active_work_aborted()) {
+            status = ZZUSB_STATUS_CANCELLED;
+            break;
+        }
     }
     return status;
 }
@@ -2168,7 +2183,7 @@ static BYTE start_rt_iso_handler(struct ZZUSBUnit *unit,
         !(iso_public_capabilities(unit) & UHCF_RT_ISO) ||
         !zzusb_rt_start(&slot->lifecycle))
         return UHIOERR_BADPARAMS;
-    status = fill_rt_iso_pipeline(slot);
+    status = fill_rt_iso_pipeline(slot, 1);
     if (rt_iso_refill_terminal(status)) {
         stop_rt_iso_slot(slot);
         return map_proxy_status(status);
@@ -2295,7 +2310,7 @@ static void poll_rt_iso(struct ZZUSBUnit *unit)
             continue;
         }
         if (!slot->lifecycle.in_flight) {
-            status = fill_rt_iso_pipeline(slot);
+            status = fill_rt_iso_pipeline(slot, 0);
             if (rt_iso_refill_terminal(status))
                 stop_rt_iso_slot(slot);
             continue;
@@ -2303,7 +2318,7 @@ static void poll_rt_iso(struct ZZUSBUnit *unit)
         while (slot->lifecycle.in_flight) {
             status = reap_rt_iso_batch(slot);
             if (status == ZZUSB_STATUS_OK) {
-                status = fill_rt_iso_pipeline(slot);
+                status = fill_rt_iso_pipeline(slot, 0);
                 if (rt_iso_refill_terminal(status)) {
                     stop_rt_iso_slot(slot);
                     break;
@@ -3586,8 +3601,10 @@ static void handle_roothub_control(struct ZZUSBUnit *unit,
                         fw_speed = rresult->speed;
                         finish_reset_rt_iso_for_unit(unit);
                         if (rstatus == ZZUSB_STATUS_OK ||
-                            rstatus == ZZUSB_STATUS_OFFLINE)
+                            rstatus == ZZUSB_STATUS_OFFLINE) {
+                            finish_reset_periodic_for_unit(unit);
                             record_reset_success(unit, rstatus);
+                        }
 
                         unit->zz_PortStatus &= ~UPSF_PORT_RESET;
                         if ((rstatus == ZZUSB_STATUS_OK ||
@@ -3976,8 +3993,10 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
             fw_speed = result->speed;
             finish_reset_rt_iso_for_unit(unit);
             if (status == ZZUSB_STATUS_OK ||
-                status == ZZUSB_STATUS_OFFLINE)
+                status == ZZUSB_STATUS_OFFLINE) {
+                finish_reset_periodic_for_unit(unit);
                 record_reset_success(unit, status);
+            }
 
             int empty_port = 0;
             if (status == ZZUSB_STATUS_OK) {
