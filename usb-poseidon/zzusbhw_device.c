@@ -234,6 +234,7 @@ struct ZZIntPendingSlot {
 };
 
 static struct ZZIntPendingSlot IntPendingSlots[ZZ_INT_PENDING_SLOTS];
+static uint8_t LegacyIntPollCursor[ZZ_NUM_PORTS];
 
 enum ZZUSBProtocolMode {
     ZZUSB_PROTOCOL_LEGACY = 0,
@@ -567,6 +568,7 @@ static void reset_int_slots(void)
 {
     for (int i = 0; i < ZZ_INT_PENDING_SLOTS; i++)
         clear_int_slot(&IntPendingSlots[i]);
+    memset(LegacyIntPollCursor, 0, sizeof(LegacyIntPollCursor));
 }
 
 static struct ZZIntPendingSlot *find_int_slot_for_ior(struct IOUsbHWReq *ior)
@@ -2617,9 +2619,14 @@ static void poll_int_pending_legacy(struct ZZUSBBase *base_dev,
                                     struct ZZUSBUnit *unit)
 {
     volatile uint8_t *base = (volatile uint8_t *)unit->zz_Registers;
+    int unit_index = (int)(unit - &base_dev->zz_Units[0]);
+    unsigned start = unit_index >= 0 && unit_index < ZZ_NUM_PORTS
+                   ? LegacyIntPollCursor[unit_index] : 0U;
 
-    for (int slot_index = 0; slot_index < ZZ_INT_PENDING_SLOTS;
-         slot_index++) {
+    for (unsigned visited = 0; visited < ZZ_INT_PENDING_SLOTS;
+         visited++) {
+        unsigned slot_index =
+            (start + visited) % ZZ_INT_PENDING_SLOTS;
         struct ZZIntPendingSlot *slot = &IntPendingSlots[slot_index];
         struct IOUsbHWReq *reply_now = NULL;
         struct IOUsbHWReq *ior;
@@ -2675,7 +2682,7 @@ static void poll_int_pending_legacy(struct ZZUSBBase *base_dev,
                     actual))
                 idle_in = 1;
         } else if (ior->iouh_Dir == UHDIR_IN &&
-                   status != ZZUSB_STATUS_OFFLINE) {
+                   status == ZZUSB_STATUS_NAK) {
             idle_in = 1;
         }
 
@@ -2715,6 +2722,10 @@ legacy_done:
         ReleaseSemaphore(&base_dev->zz_Lock);
         if (reply_now && !(reply_now->iouh_Req.io_Flags & IOF_QUICK))
             ReplyMsg(&reply_now->iouh_Req.io_Message);
+        if (unit_index >= 0 && unit_index < ZZ_NUM_PORTS)
+            LegacyIntPollCursor[unit_index] = (uint8_t)
+                zzusb_interrupt_next_slot(
+                    slot_index, ZZ_INT_PENDING_SLOTS);
         return;
     }
 }
@@ -2787,6 +2798,8 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
                 reply_now = ior;
             } else {
                 slot->armed = 1;
+                zzusb_engine_diag_count(
+                    ZZUSB_DRIVER_COUNT_INTERRUPT_ARM);
             }
         }
 

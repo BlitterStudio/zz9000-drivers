@@ -36,4 +36,10 @@ static inline int zzusb_interrupt_rearm_on_replace(
     return armed && (!is_in || parameters_changed);
 }
 
+static inline unsigned zzusb_interrupt_next_slot(unsigned current,
+                                                  unsigned slot_count)
+{
+    return slot_count ? (current + 1U) % slot_count : 0U;
+}
+
 #endif
