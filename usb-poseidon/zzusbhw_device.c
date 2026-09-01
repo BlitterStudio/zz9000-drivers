@@ -2650,7 +2650,8 @@ static void update_port_state(struct ZZUSBUnit *unit,
     memset(&chk, 0, sizeof(chk));
     chk.cmd = ZZUSB_CMD_CHECK_PORT;
 
-    status = send_usb_cmd(base, &chk, NULL, 0);
+    status = send_usb_cmd_with_rt_service(
+        base, &chk, NULL, 0, unit);
     if (status == ZZUSB_STATUS_OK) {
         /*
          * Firmware says the port is still physically connected.
