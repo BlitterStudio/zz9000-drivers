@@ -396,6 +396,18 @@ static void diag_leave_critical(void)
     Permit();
 }
 
+static void record_reset_success(struct ZZUSBUnit *unit, uint16_t status)
+{
+    zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_RESET);
+    zzusb_engine_diag_record(
+        ZZUSB_DRIVER_EVENT_RESET, status, active_diag_request_id(),
+        ProtocolStates[0].controller_epoch, 0, 0, 0, 0,
+        unit ? unit->zz_Speed : 0,
+        unit ? ((uint32_t)unit->zz_PortStatus << 16) |
+               unit->zz_PortChange : 0,
+        WorkSequence);
+}
+
 static uint16_t diag_topology(struct IOUsbHWReq *ior)
 {
     return (uint16_t)(((uint16_t)ior->iouh_SplitHubAddr << 8) |
@@ -1277,7 +1289,13 @@ static void recover_quarantined_proxy(volatile uint8_t *base)
     CacheClearE((APTR)result, ZZUSB_V2_HEADER_SIZE, CACRF_ClearD);
     if (result->status == ZZUSB_STATUS_PENDING)
         return;
-    negotiate_usb_proxy(base, state, 0);
+    if (negotiate_usb_proxy(base, state, 0)) {
+        zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_RECOVERY);
+        zzusb_engine_diag_record(
+            ZZUSB_DRIVER_EVENT_RECOVERY, ZZUSB_ENGINE_STATUS_OK,
+            active_diag_request_id(), state->controller_epoch,
+            0, 0, 0, 0, 0, state->capabilities, WorkSequence);
+    }
 }
 
 static int send_usb_cmd_scoped(volatile uint8_t *base,
@@ -1546,6 +1564,7 @@ static void execute_simple_iso(struct ZZUSBUnit *unit,
         ior->iouh_Req.io_Error = map_proxy_status(status);
         return;
     }
+    zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_ISO_QUEUE);
     queued = 1;
     timeout_ms = (ior->iouh_Flags & UHFF_NAKTIMEOUT) ?
                  (ior->iouh_NakTimeout ? ior->iouh_NakTimeout : 1000U) :
@@ -1590,6 +1609,7 @@ static void execute_simple_iso(struct ZZUSBUnit *unit,
                 status = ZZUSB_STATUS_HOSTERROR;
                 break;
             }
+            zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_ISO_REAP);
             queued = 0;
             break;
         }
@@ -3399,6 +3419,9 @@ static void handle_roothub_control(struct ZZUSBUnit *unit,
                         if (rstatus == ZZUSB_STATUS_OK ||
                             rstatus == ZZUSB_STATUS_OFFLINE)
                             finish_reset_rt_iso_for_unit(unit);
+                        if (rstatus == ZZUSB_STATUS_OK ||
+                            rstatus == ZZUSB_STATUS_OFFLINE)
+                            record_reset_success(unit, rstatus);
 
                         unit->zz_PortStatus &= ~UPSF_PORT_RESET;
                         if ((rstatus == ZZUSB_STATUS_OK ||
@@ -3788,6 +3811,9 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
             if (status == ZZUSB_STATUS_OK ||
                 status == ZZUSB_STATUS_OFFLINE)
                 finish_reset_rt_iso_for_unit(unit);
+            if (status == ZZUSB_STATUS_OK ||
+                status == ZZUSB_STATUS_OFFLINE)
+                record_reset_success(unit, status);
 
             int empty_port = 0;
             if (status == ZZUSB_STATUS_OK) {
