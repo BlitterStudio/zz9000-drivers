@@ -281,7 +281,8 @@ int zzusb_engine_complete(struct zzusb_engine_request *request,
     result = transport_status == ZZUSB_ENGINE_STATUS_OK
         ? ZZUSB_RESULT_OK : ZZUSB_RESULT_IO_ERROR;
     zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_COMPLETION);
-    if (transport_status != ZZUSB_ENGINE_STATUS_OK)
+    if (transport_status == ZZUSB_ENGINE_STATUS_ERROR ||
+        transport_status == ZZUSB_ENGINE_STATUS_HOSTERROR)
         zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_HOST_ERROR);
     zzusb_engine_diag_record(ZZUSB_DRIVER_EVENT_COMPLETION,
                              transport_status, request_id,

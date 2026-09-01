@@ -80,6 +80,23 @@ int main(void)
     CHECK(snapshot.counters[ZZUSB_DRIVER_COUNT_TIMEOUT] == 1u);
     CHECK(snapshot.counters[ZZUSB_DRIVER_COUNT_LATE_COMPLETION] == 1u);
     CHECK(snapshot.counters[ZZUSB_DRIVER_COUNT_COMPLETION] == 1u);
+    CHECK(snapshot.counters[ZZUSB_DRIVER_COUNT_HOST_ERROR] == 0u);
+
+    zzusb_engine_init(&request);
+    CHECK(zzusb_engine_queue(&request));
+    CHECK(zzusb_engine_dispatch(&request));
+    CHECK(zzusb_engine_begin(&request, 78u, 12u));
+    CHECK(zzusb_engine_complete(&request, 78u, 12u,
+                                ZZUSB_ENGINE_STATUS_STALL));
+    zzusb_engine_init(&request);
+    CHECK(zzusb_engine_queue(&request));
+    CHECK(zzusb_engine_dispatch(&request));
+    CHECK(zzusb_engine_begin(&request, 79u, 12u));
+    CHECK(zzusb_engine_complete(&request, 79u, 12u,
+                                ZZUSB_ENGINE_STATUS_HOSTERROR));
+    CHECK(zzusb_engine_diag_snapshot(&snapshot, 0x31fu, 12u, 4u));
+    CHECK(snapshot.counters[ZZUSB_DRIVER_COUNT_COMPLETION] == 3u);
+    CHECK(snapshot.counters[ZZUSB_DRIVER_COUNT_HOST_ERROR] == 1u);
 
     CHECK(critical_enters == critical_leaves);
     CHECK(critical_enters != 0);
