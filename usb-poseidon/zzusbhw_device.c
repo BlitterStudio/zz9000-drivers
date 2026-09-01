@@ -840,6 +840,13 @@ static struct ZZUSBProtocolState *protocol_state_for(
     }
     return NULL;
 }
+static uint32_t usb_proxy_data_limit(volatile uint8_t *base)
+{
+    struct ZZUSBProtocolState *state = protocol_state_for(base);
+
+    return state && state->mode == ZZUSB_PROTOCOL_V2 ?
+        ZZUSB_V2_DATA_MAX : ZZUSB_MAX_XFER;
+}
 
 static uint32_t next_request_id(struct ZZUSBProtocolState *state)
 {
@@ -3605,9 +3612,9 @@ static void handle_roothub_control(struct ZZUSBUnit *unit,
                         volatile struct ZZUSBCommand *rresult =
                             (volatile struct ZZUSBCommand*)(rbase + 0xa000);
                         fw_speed = rresult->speed;
-                        finish_reset_rt_iso_for_unit(unit);
                         if (rstatus == ZZUSB_STATUS_OK ||
                             rstatus == ZZUSB_STATUS_OFFLINE) {
+                            finish_reset_rt_iso_for_unit(unit);
                             finish_reset_periodic_for_unit(unit);
                             record_reset_success(unit, rstatus);
                         }
@@ -3997,9 +4004,9 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
             volatile struct ZZUSBCommand *result =
                 (volatile struct ZZUSBCommand*)(base + 0xa000);
             fw_speed = result->speed;
-            finish_reset_rt_iso_for_unit(unit);
             if (status == ZZUSB_STATUS_OK ||
                 status == ZZUSB_STATUS_OFFLINE) {
+                finish_reset_rt_iso_for_unit(unit);
                 finish_reset_periodic_for_unit(unit);
                 record_reset_success(unit, status);
             }
@@ -4078,7 +4085,7 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
                 uint16_t status;
                 int setup_in;
 
-                if (ior->iouh_Length > ZZUSB_MAX_XFER) {
+                if (ior->iouh_Length > usb_proxy_data_limit(base)) {
                     ior->iouh_Req.io_Error = UHIOERR_PKTTOOLARGE;
                     break;
                 }
@@ -4236,7 +4243,7 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
                  * tight Poseidon-side interrupt-poll loop while the
                  * firmware-side EHCI poll remains bounded.
                  */
-                if (ior->iouh_Length > ZZUSB_MAX_XFER) {
+                if (ior->iouh_Length > usb_proxy_data_limit(base)) {
                     ior->iouh_Req.io_Error = UHIOERR_PKTTOOLARGE;
                     break;
                 }
