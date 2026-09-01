@@ -233,6 +233,7 @@ struct ZZIntPendingSlot {
     uint8_t rearm_required;
     uint8_t stop_pending;
     uint8_t arm_in_progress;
+    uint16_t arm_generation;
 };
 
 static struct ZZIntPendingSlot IntPendingSlots[ZZ_INT_PENDING_SLOTS];
@@ -606,6 +607,7 @@ static void clear_int_slot(struct ZZIntPendingSlot *slot)
     slot->arm_in_progress = 0;
     slot->rearm_required = 0;
     slot->stop_pending = 0;
+    slot->arm_generation = 0;
 }
 
 static void reset_int_slots(void)
@@ -670,6 +672,7 @@ static int queue_int_ior(struct ZZUSBUnit *unit,
     free_slot->idle_polls = 0;
     free_slot->rearm_required = 0;
     free_slot->stop_pending = 0;
+    free_slot->arm_generation = 0;
     return 1;
 }
 
@@ -712,6 +715,7 @@ static void finish_reset_periodic_for_unit(struct ZZUSBUnit *unit)
             continue;
         IntPendingSlots[slot].armed = 0;
         IntPendingSlots[slot].arm_in_progress = 0;
+        IntPendingSlots[slot].arm_generation = 0;
     }
 }
 
@@ -1434,13 +1438,14 @@ static uint16_t stop_periodic_slot(struct ZZIntPendingSlot *slot)
     cmd.max_pkt_size = ior->iouh_MaxPktSize;
     cmd.speed = request_speed(slot->unit, ior);
     cmd.interval = ior->iouh_Interval;
-    cmd.reserved = generation_for_unit(slot->unit);
+    cmd.reserved = slot->arm_generation;
     cmd.timeout_ms = 100;
     fill_split_fields(&cmd, slot->unit, ior);
     status = send_usb_cmd_with_rt_service(
         base, &cmd, NULL, 0, slot->unit);
     if (stop_status_retired(status)) {
         slot->armed = 0;
+        slot->arm_generation = 0;
     } else {
         state = protocol_state_for(base);
         if (state)
@@ -3066,7 +3071,8 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
         ior = slot->ior;
 
         fill_int_arm_command(&cmd, unit, ior);
-        cmd.reserved = generation_for_unit(unit);
+        cmd.reserved = slot->armed ? slot->arm_generation :
+            generation_for_unit(unit);
         cmd.timeout_ms = 100;
 
         if (slot->stop_pending) {
@@ -3124,6 +3130,7 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
 
         if (!reply_now && !slot->stop_pending && !slot->armed) {
             cmd.cmd = ZZUSB_CMD_PERIODIC_ARM;
+            slot->arm_generation = cmd.reserved;
             slot->arm_in_progress = 1;
             status = send_usb_cmd_with_rt_service(
                 base, &cmd,
