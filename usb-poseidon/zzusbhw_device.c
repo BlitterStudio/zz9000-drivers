@@ -323,6 +323,9 @@ static void service_rt_iso_during_work(struct ZZUSBBase *base,
 static uint16_t send_usb_cmd_with_rt_service(
     volatile uint8_t *base, struct ZZUSBCommand *cmd,
     void *data_out, uint32_t data_out_len, struct ZZUSBUnit *unit);
+static uint16_t send_usb_cmd_with_rt_wait(
+    volatile uint8_t *base, struct ZZUSBCommand *cmd,
+    void *data_out, uint32_t data_out_len, struct ZZUSBUnit *unit);
 
 static uint16_t request_speed(struct ZZUSBUnit *unit, struct IOUsbHWReq *ior);
 static void fill_int_arm_command(struct ZZUSBCommand *cmd,
@@ -1557,6 +1560,14 @@ static void execute_simple_iso(struct ZZUSBUnit *unit,
         batch_id = 1;
         SimpleIsoBatchId = 2;
     }
+    if (PollBase && rt_iso_pending_for_unit(unit)) {
+        service_rt_iso_during_work(PollBase, unit);
+        if (active_work_aborted()) {
+            ior->iouh_Req.io_Error =
+                map_proxy_status(ZZUSB_STATUS_CANCELLED);
+            return;
+        }
+    }
     wire_length = zzusb_iso_build_queue(
         IsoWire, sizeof(IsoWire), batch_id,
         ior->iouh_Frame ? 0 : ZZUSB_ISO_FLAG_ASAP,
@@ -1569,7 +1580,7 @@ static void execute_simple_iso(struct ZZUSBUnit *unit,
     }
 
     fill_iso_command(&cmd, unit, ior, ZZUSB_CMD_ISO_QUEUE, wire_length);
-    status = send_usb_cmd_with_rt_service(
+    status = send_usb_cmd_with_rt_wait(
         base, &cmd, IsoWire, wire_length, unit);
     if (status != ZZUSB_STATUS_OK) {
         if (status == ZZUSB_STATUS_HOSTERROR)
@@ -3066,7 +3077,7 @@ static void service_rt_iso_during_work(struct ZZUSBBase *base,
     ObtainSemaphore(&base->zz_Lock);
 }
 
-static uint16_t send_usb_cmd_with_rt_service(
+static uint16_t send_usb_cmd_with_rt_wait(
     volatile uint8_t *base, struct ZZUSBCommand *cmd,
     void *data_out, uint32_t data_out_len, struct ZZUSBUnit *unit)
 {
@@ -3074,7 +3085,6 @@ static uint16_t send_usb_cmd_with_rt_service(
 
     if (!PollBase || !rt_iso_pending_for_unit(unit))
         return send_usb_cmd(base, cmd, data_out, data_out_len);
-    service_rt_iso_during_work(PollBase, unit);
     if (active_work_aborted())
         return ZZUSB_STATUS_CANCELLED;
 
@@ -3084,6 +3094,17 @@ static uint16_t send_usb_cmd_with_rt_service(
     ForegroundMailboxUnit = NULL;
     ForegroundMailboxBase = NULL;
     return status;
+}
+
+static uint16_t send_usb_cmd_with_rt_service(
+    volatile uint8_t *base, struct ZZUSBCommand *cmd,
+    void *data_out, uint32_t data_out_len, struct ZZUSBUnit *unit)
+{
+    if (!PollBase || !rt_iso_pending_for_unit(unit))
+        return send_usb_cmd(base, cmd, data_out, data_out_len);
+    service_rt_iso_during_work(PollBase, unit);
+    return send_usb_cmd_with_rt_wait(
+        base, cmd, data_out, data_out_len, unit);
 }
 
 static int poll_roothub_pending(struct ZZUSBBase *base_dev,
