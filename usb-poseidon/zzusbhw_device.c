@@ -2647,10 +2647,12 @@ static void update_port_state(struct ZZUSBUnit *unit,
                               int aborted_max)
 {
     struct ZZUSBCommand chk;
+    uint16_t status;
     memset(&chk, 0, sizeof(chk));
     chk.cmd = ZZUSB_CMD_CHECK_PORT;
 
-    if (send_usb_cmd(base, &chk, NULL, 0) == ZZUSB_STATUS_OK) {
+    status = send_usb_cmd(base, &chk, NULL, 0);
+    if (status == ZZUSB_STATUS_OK) {
         /*
          * Firmware says the port is still physically connected.
          * If we previously marked the device dead after an
@@ -2701,7 +2703,7 @@ static void update_port_state(struct ZZUSBUnit *unit,
         } else {
             unit->zz_PortStatus = port_status;
         }
-    } else {
+    } else if (status == ZZUSB_STATUS_OFFLINE) {
         /*
          * Firmware says no device on the port (PHYSICAL disconnect).
          * Clear the PortDead sticky state — if the user replugs, we
@@ -2719,6 +2721,13 @@ static void update_port_state(struct ZZUSBUnit *unit,
             abort_int_iors_offline(unit, aborted, aborted_count, aborted_max);
             trace_port_state(unit, "PORT_DISCONNECT");
         }
+    } else {
+        /*
+         * A mailbox failure says nothing about physical connection state.
+         * Preserve Poseidon's current view while a quarantined v2 channel
+         * waits for its terminal response and negotiates a fresh fence.
+         */
+        recover_quarantined_proxy(base);
     }
 }
 
