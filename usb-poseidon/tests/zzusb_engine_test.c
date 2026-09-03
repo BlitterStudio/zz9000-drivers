@@ -45,6 +45,20 @@ int main(void)
     CHECK(zzusb_engine_claim_reply(&request));
     CHECK(!zzusb_engine_claim_reply(&request));
 
+    prepare(&request, 9u, 4u);
+    CHECK(zzusb_engine_retry(&request, ZZUSB_ENGINE_STATUS_NAK));
+    CHECK(request.state == ZZUSB_REQ_QUEUED);
+    CHECK(request.request_id == 0);
+    CHECK(!request.reply_claimed);
+    CHECK(zzusb_engine_dispatch(&request));
+    CHECK(zzusb_engine_begin(&request, 10u, 4u));
+    CHECK(!zzusb_engine_abort(&request));
+    CHECK(!zzusb_engine_retry(&request, ZZUSB_ENGINE_STATUS_NAK));
+    CHECK(zzusb_engine_complete(&request, 10u, 4u,
+                                ZZUSB_ENGINE_STATUS_CANCELLED));
+    CHECK(request.terminal_result == ZZUSB_RESULT_ABORTED);
+    CHECK(zzusb_engine_claim_reply(&request));
+
     prepare(&request, 8u, 4u);
     CHECK(zzusb_engine_timeout(&request));
     CHECK(request.state == ZZUSB_REQ_RETIRING);

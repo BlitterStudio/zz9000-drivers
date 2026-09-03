@@ -81,15 +81,12 @@ unsigned zzusb_iso_plan_realtime(uint16_t encoded_max_packet,
     if (!packet_lengths || !duration_microframes || !capacity || !payload ||
         !interval || payload > ZZUSB_ISO_DATA_MAX)
         return 0;
-    if (high_speed) {
-        if (interval > 16U)
-            return 0;
-        step = 1UL << (interval - 1U);
-    } else {
-        if (interval > 16U)
-            return 0;
-        step = (uint32_t)(1UL << (interval - 1U)) * 8U;
-    }
+    if (interval > 32768U || (interval & (interval - 1U)) != 0)
+        return 0;
+    if (high_speed)
+        step = interval;
+    else
+        step = (uint32_t)interval * 8U;
     time_limit = step > 32768U ? 1U : (unsigned)(32768U / step);
     if (!time_limit)
         time_limit = 1U;

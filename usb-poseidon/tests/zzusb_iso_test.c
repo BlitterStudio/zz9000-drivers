@@ -30,6 +30,10 @@ static void test_packet_plans(void)
     uint16_t lengths[ZZUSB_ISO_MAX_PACKETS];
     uint32_t duration;
     unsigned count;
+    assert(zzusb_iso_topology_supported(1, 0));
+    assert(zzusb_iso_topology_supported(0, 1));
+    assert(!zzusb_iso_topology_supported(0, 0));
+
 
     assert(zzusb_iso_payload_size(64) == 64);
     assert(zzusb_iso_payload_size(0x13ff) == 3069);
@@ -51,7 +55,7 @@ static void test_packet_plans(void)
                                  ZZUSB_ISO_MAX_PACKETS) == 1);
     assert(lengths[0] == 0);
 
-    count = zzusb_iso_plan_realtime(192, 4, 1, lengths,
+    count = zzusb_iso_plan_realtime(192, 8, 1, lengths,
                                     ZZUSB_ISO_MAX_PACKETS, &duration);
     assert(count == 4);
     assert(duration == 32);
@@ -66,17 +70,17 @@ static void test_packet_plans(void)
                                     ZZUSB_ISO_MAX_PACKETS, &duration);
     assert(count == 4);
     assert(duration == 32);
-    count = zzusb_iso_plan_realtime(192, 3, 0, lengths,
+    count = zzusb_iso_plan_realtime(192, 4, 0, lengths,
                                     ZZUSB_ISO_MAX_PACKETS, &duration);
     assert(count == 1);
     assert(duration == 32);
-    count = zzusb_iso_plan_realtime(192, 16, 0, lengths,
+    count = zzusb_iso_plan_realtime(192, 32768, 0, lengths,
                                     ZZUSB_ISO_MAX_PACKETS, &duration);
     assert(count == 1);
     assert(duration == 262144);
-    assert(zzusb_iso_plan_realtime(64, 17, 1, lengths,
+    assert(zzusb_iso_plan_realtime(64, 3, 1, lengths,
                                     ZZUSB_ISO_MAX_PACKETS, &duration) == 0);
-    assert(zzusb_iso_plan_realtime(64, 17, 0, lengths,
+    assert(zzusb_iso_plan_realtime(64, 3, 0, lengths,
                                     ZZUSB_ISO_MAX_PACKETS, &duration) == 0);
 }
 

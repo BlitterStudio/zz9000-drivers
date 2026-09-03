@@ -35,6 +35,10 @@ static inline int zzusb_interrupt_rearm_on_replace(
 {
     return armed && (!is_in || parameters_changed);
 }
+static inline int zzusb_interrupt_retain_endpoint(int is_in)
+{
+    return is_in;
+}
 
 static inline unsigned zzusb_interrupt_next_slot(unsigned current,
                                                   unsigned slot_count)

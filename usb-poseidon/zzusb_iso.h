@@ -80,6 +80,15 @@ struct zzusb_rt_lifecycle {
     uint8_t state;
     uint8_t in_flight;
 };
+static inline int zzusb_iso_topology_supported(int high_speed, int split)
+{
+    /*
+     * EHCI iTDs carry high-speed ISO directly. Full/low-speed ISO requires
+     * siTD split transactions through a USB 2.0 transaction translator.
+     */
+    return high_speed || split;
+}
+
 
 uint16_t zzusb_iso_payload_size(uint16_t encoded_max_packet);
 unsigned zzusb_iso_plan_simple(uint32_t total_length,
