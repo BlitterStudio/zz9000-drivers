@@ -148,6 +148,8 @@ int zzusb_engine_queue(struct zzusb_engine_request *request);
 int zzusb_engine_dispatch(struct zzusb_engine_request *request);
 int zzusb_engine_begin(struct zzusb_engine_request *request,
                        uint32_t request_id, uint32_t controller_epoch);
+int zzusb_engine_retry(struct zzusb_engine_request *request,
+                       uint16_t transport_status);
 int zzusb_engine_abort(struct zzusb_engine_request *request);
 int zzusb_engine_timeout(struct zzusb_engine_request *request);
 int zzusb_engine_complete(struct zzusb_engine_request *request,

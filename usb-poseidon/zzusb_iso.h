@@ -79,7 +79,18 @@ struct zzusb_rt_lifecycle {
     uint32_t next_batch_id;
     uint8_t state;
     uint8_t in_flight;
+    uint8_t remove_pending;
+    uint8_t stop_ack_pending;
 };
+static inline int zzusb_iso_topology_supported(int high_speed, int split)
+{
+    /*
+     * EHCI iTDs carry high-speed ISO directly. Full/low-speed ISO requires
+     * siTD split transactions through a USB 2.0 transaction translator.
+     */
+    return high_speed || split;
+}
+
 
 uint16_t zzusb_iso_payload_size(uint16_t encoded_max_packet);
 unsigned zzusb_iso_plan_simple(uint32_t total_length,
@@ -119,7 +130,9 @@ uint32_t zzusb_rt_queue(struct zzusb_rt_lifecycle *lifecycle);
 int zzusb_rt_complete(struct zzusb_rt_lifecycle *lifecycle,
                       uint32_t batch_id);
 int zzusb_rt_begin_stop(struct zzusb_rt_lifecycle *lifecycle);
+int zzusb_rt_ack_stop(struct zzusb_rt_lifecycle *lifecycle);
 int zzusb_rt_finish_stop(struct zzusb_rt_lifecycle *lifecycle);
 int zzusb_rt_remove(struct zzusb_rt_lifecycle *lifecycle);
+int zzusb_rt_request_remove(struct zzusb_rt_lifecycle *lifecycle);
 
 #endif

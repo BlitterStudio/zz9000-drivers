@@ -227,6 +227,28 @@ int zzusb_engine_begin(struct zzusb_engine_request *request,
     }
     return 1;
 }
+int zzusb_engine_retry(struct zzusb_engine_request *request,
+                       uint16_t transport_status)
+{
+    if (!request || request->state != ZZUSB_REQ_IN_FLIGHT ||
+        request->abort_requested)
+        return 0;
+    if (!request->observer) {
+        zzusb_engine_diag_count(ZZUSB_DRIVER_COUNT_COMPLETION);
+        zzusb_engine_diag_record(ZZUSB_DRIVER_EVENT_COMPLETION,
+                                 transport_status,
+                                 request->request_id,
+                                 request->controller_epoch,
+                                 0, 0, 0, 0, 0, 0, 0);
+    }
+    request->request_id = 0;
+    request->controller_epoch = 0;
+    request->transport_status = transport_status;
+    request->terminal_result = ZZUSB_RESULT_NONE;
+    request->state = ZZUSB_REQ_QUEUED;
+    return 1;
+}
+
 
 int zzusb_engine_abort(struct zzusb_engine_request *request)
 {

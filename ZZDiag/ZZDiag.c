@@ -186,6 +186,33 @@ static void print_firmware_usb_events(const UBYTE *snapshot)
     }
 }
 
+static void print_driver_only_usb_diagnostics(void)
+{
+    unsigned i;
+
+    if (!read_driver_usb_diag(&DriverDiagSnapshot)) {
+        printf("USBDriverDiagnostics    = unsupported/unavailable\n");
+        return;
+    }
+    printf("USBDriverDiagVersion    = %u\n",
+           (unsigned)DriverDiagSnapshot.version);
+    printf("USBDriverCapabilities   = 0x%08lx\n",
+           (unsigned long)DriverDiagSnapshot.capabilities);
+    printf("USBDriverEpoch          = %lu\n",
+           (unsigned long)DriverDiagSnapshot.controller_epoch);
+    printf("USBDriverGeneration     = %lu\n",
+           (unsigned long)DriverDiagSnapshot.generation);
+    printf("USBDriverEvents         = %u retained, %lu lost\n",
+           (unsigned)DriverDiagSnapshot.event_count,
+           (unsigned long)DriverDiagSnapshot.lost_events);
+    for (i = 0; i < sizeof(usb_diag_counter_names) /
+                        sizeof(usb_diag_counter_names[0]); i++)
+        printf("USBDriverCounter %-15s = %lu\n",
+               usb_diag_counter_names[i],
+               (unsigned long)DriverDiagSnapshot.counters[i]);
+    print_driver_usb_events(&DriverDiagSnapshot);
+}
+
 static void print_usb_diagnostics(ULONG board_addr)
 {
     ULONG firmware_epoch;
@@ -820,6 +847,8 @@ static void usage(const char *name)
     printf("  samples     : number of dumps, default 1\n");
     printf("  delay_ticks : ticks between samples and before capture, default 50\n");
     printf("  capture.ppm : optional 1280x320 native-capture framebuffer dump\n");
+    printf("  usb-driver  : read only zzusbhw.device diagnostics\n");
+
 }
 
 int main(int argc, char **argv)
@@ -840,6 +869,11 @@ int main(int argc, char **argv)
     if (argc > 3) capture_path = argv[3];
     if (samples < 1) samples = 1;
     if (delay_ticks < 0) delay_ticks = 0;
+
+    if (argc == 2 && strcmp(argv[1], "usb-driver") == 0) {
+        print_driver_only_usb_diagnostics();
+        return 0;
+    }
 
     if (!zz9000_find_board(&board)) {
         printf("ERROR: ZZ9000 not found\n");

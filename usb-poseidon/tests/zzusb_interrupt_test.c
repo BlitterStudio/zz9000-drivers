@@ -17,9 +17,18 @@ int main(void)
     assert(!zzusb_interrupt_rearm_on_replace(1, 1, 0));
     assert(zzusb_interrupt_rearm_on_replace(1, 1, 1));
     assert(zzusb_interrupt_rearm_on_replace(1, 0, 0));
+    assert(zzusb_interrupt_retain_endpoint(1));
+    assert(!zzusb_interrupt_retain_endpoint(0));
     assert(zzusb_interrupt_next_slot(0, 4) == 1);
     assert(zzusb_interrupt_next_slot(3, 4) == 0);
     assert(zzusb_interrupt_next_slot(0, 0) == 0);
+
+    assert(zzusb_interrupt_abort_after_retire(1, 0));
+    assert(!zzusb_interrupt_abort_after_retire(1, 1));
+    assert(!zzusb_interrupt_abort_after_retire(0, 0));
+    assert(!zzusb_interrupt_abort_reply_ready(1, 1));
+    assert(zzusb_interrupt_abort_reply_ready(1, 0));
+    assert(!zzusb_interrupt_abort_reply_ready(0, 0));
 
     action = zzusb_interrupt_classify(0xfcU, 0, 1, 0);
     assert(action == ZZUSB_INTERRUPT_KEEP_PENDING);
