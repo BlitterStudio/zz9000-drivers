@@ -2749,13 +2749,12 @@ static BYTE stop_rt_iso_handler(struct ZZUSBUnit *unit,
     Disable();
     /*
      * Poseidon increments pd_IOBusyCount only for a successful StartRTIso
-     * and decrements it for every successful StopRTIso. Reject duplicate
-     * stops: usbaudio.class may call Stop once from subLibStop and again
-     * while freeing the handler, and reporting both as successful
-     * underflows the device busy count and wedges later device removal.
+     * and decrements it for every successful StopRTIso. A transport failure
+     * may retire the stream before Poseidon issues Stop, so acknowledge the
+     * first Stop belonging to that Start even when retirement is complete.
+     * Reject later duplicates to prevent busy-count underflow.
      */
-    if (slot->lifecycle.state != ZZUSB_RT_RUNNING ||
-        !zzusb_rt_begin_stop(&slot->lifecycle)) {
+    if (!zzusb_rt_ack_stop(&slot->lifecycle)) {
         Enable();
         return UHIOERR_BADPARAMS;
     }
@@ -2765,7 +2764,8 @@ static BYTE stop_rt_iso_handler(struct ZZUSBUnit *unit,
      * any in-flight hook/copy before Poseidon frees the handler and buffers.
      */
     slot->start_requested = 0;
-    slot->stop_requested = 1;
+    slot->stop_requested =
+        slot->lifecycle.state == ZZUSB_RT_STOPPING;
     memset(&slot->out_request, 0, sizeof(slot->out_request));
     Enable();
     dstr(unit->zz_Registers, "[zzusbhw] RTS\r\n");
@@ -2776,7 +2776,8 @@ static BYTE stop_rt_iso_handler(struct ZZUSBUnit *unit,
 
 
 static BYTE remove_rt_iso_handler(struct ZZUSBUnit *unit,
-                                  struct IOUsbHWReq *ior)
+                                  struct IOUsbHWReq *ior,
+                                  int retire_now)
 {
     struct IOUsbHWRTIso *handler =
         (struct IOUsbHWRTIso *)ior->iouh_Data;
@@ -2803,7 +2804,8 @@ static BYTE remove_rt_iso_handler(struct ZZUSBUnit *unit,
     if (!zzusb_rt_request_remove(&slot->lifecycle))
         return UHIOERR_BADPARAMS;
     if (slot->lifecycle.state != ZZUSB_RT_FREE) {
-        status = stop_rt_iso_slot(slot);
+        status = retire_now ? stop_rt_iso_slot(slot) :
+                              ZZUSB_STATUS_BUSY;
         if (status != ZZUSB_STATUS_OK &&
             PollBase && PollBase->zz_PollTask && PollBase->zz_PollSignal)
             Signal(PollBase->zz_PollTask, PollBase->zz_PollSignal);
@@ -5198,7 +5200,7 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
 
     case UHCMD_REMISOHANDLER:
         ior->iouh_Actual = 0;
-        ior->iouh_Req.io_Error = remove_rt_iso_handler(unit, ior);
+        ior->iouh_Req.io_Error = remove_rt_iso_handler(unit, ior, 1);
         break;
 
     case UHCMD_INTXFER:
@@ -5849,7 +5851,11 @@ static void __attribute__((used)) begin_io(
         if (!zzusb_sync_command_timer_available(
                 timer_open, ForegroundTimerOwner == FindTask(NULL))) {
             ior->iouh_Actual = 0;
-            ior->iouh_Req.io_Error = UHIOERR_HOSTERROR;
+            if (ior->iouh_Req.io_Command == UHCMD_REMISOHANDLER)
+                ior->iouh_Req.io_Error =
+                    remove_rt_iso_handler(unit, ior, 0);
+            else
+                ior->iouh_Req.io_Error = UHIOERR_HOSTERROR;
             if (!(ior->iouh_Req.io_Flags & IOF_QUICK))
                 ReplyMsg(&ior->iouh_Req.io_Message);
             return;

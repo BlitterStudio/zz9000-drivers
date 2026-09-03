@@ -80,6 +80,7 @@ struct zzusb_rt_lifecycle {
     uint8_t state;
     uint8_t in_flight;
     uint8_t remove_pending;
+    uint8_t stop_ack_pending;
 };
 static inline int zzusb_iso_topology_supported(int high_speed, int split)
 {
@@ -129,6 +130,7 @@ uint32_t zzusb_rt_queue(struct zzusb_rt_lifecycle *lifecycle);
 int zzusb_rt_complete(struct zzusb_rt_lifecycle *lifecycle,
                       uint32_t batch_id);
 int zzusb_rt_begin_stop(struct zzusb_rt_lifecycle *lifecycle);
+int zzusb_rt_ack_stop(struct zzusb_rt_lifecycle *lifecycle);
 int zzusb_rt_finish_stop(struct zzusb_rt_lifecycle *lifecycle);
 int zzusb_rt_remove(struct zzusb_rt_lifecycle *lifecycle);
 int zzusb_rt_request_remove(struct zzusb_rt_lifecycle *lifecycle);

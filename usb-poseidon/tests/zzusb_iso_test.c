@@ -179,8 +179,8 @@ static void test_realtime_lifecycle(void)
     assert(zzusb_rt_complete(&lifecycle, ids[1]));
     assert(!zzusb_rt_complete(&lifecycle, ids[1]));
     assert(lifecycle.in_flight == ZZUSB_ISO_PIPELINE_DEPTH - 1U);
-    assert(zzusb_rt_begin_stop(&lifecycle));
-    assert(!zzusb_rt_begin_stop(&lifecycle));
+    assert(zzusb_rt_ack_stop(&lifecycle));
+    assert(!zzusb_rt_ack_stop(&lifecycle));
     assert(zzusb_rt_queue(&lifecycle) == 0);
     assert(!zzusb_rt_complete(&lifecycle, ids[0]));
     assert(zzusb_rt_finish_stop(&lifecycle));
@@ -189,6 +189,9 @@ static void test_realtime_lifecycle(void)
     assert(zzusb_rt_start(&lifecycle));
     assert(zzusb_rt_begin_stop(&lifecycle));
     assert(zzusb_rt_finish_stop(&lifecycle));
+    assert(!zzusb_rt_start(&lifecycle));
+    assert(zzusb_rt_ack_stop(&lifecycle));
+    assert(!zzusb_rt_ack_stop(&lifecycle));
     assert(zzusb_rt_remove(&lifecycle));
     assert(lifecycle.state == ZZUSB_RT_FREE);
     assert(!zzusb_rt_remove(&lifecycle));

@@ -291,13 +291,14 @@ int zzusb_rt_add(struct zzusb_rt_lifecycle *lifecycle)
 
 int zzusb_rt_start(struct zzusb_rt_lifecycle *lifecycle)
 {
-    if (!lifecycle ||
+    if (!lifecycle || lifecycle->stop_ack_pending ||
         (lifecycle->state != ZZUSB_RT_ADDED &&
          lifecycle->state != ZZUSB_RT_STOPPED))
         return 0;
     memset(lifecycle->queued_ids, 0, sizeof(lifecycle->queued_ids));
     lifecycle->in_flight = 0;
     lifecycle->state = ZZUSB_RT_RUNNING;
+    lifecycle->stop_ack_pending = 1;
     return 1;
 }
 
@@ -341,6 +342,21 @@ int zzusb_rt_begin_stop(struct zzusb_rt_lifecycle *lifecycle)
     if (!lifecycle || lifecycle->state != ZZUSB_RT_RUNNING)
         return 0;
     lifecycle->state = ZZUSB_RT_STOPPING;
+    return 1;
+}
+
+int zzusb_rt_ack_stop(struct zzusb_rt_lifecycle *lifecycle)
+{
+    if (!lifecycle || !lifecycle->stop_ack_pending)
+        return 0;
+    if (lifecycle->state == ZZUSB_RT_RUNNING) {
+        if (!zzusb_rt_begin_stop(lifecycle))
+            return 0;
+    } else if (lifecycle->state != ZZUSB_RT_STOPPING &&
+               lifecycle->state != ZZUSB_RT_STOPPED) {
+        return 0;
+    }
+    lifecycle->stop_ack_pending = 0;
     return 1;
 }
 
