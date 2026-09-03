@@ -342,6 +342,7 @@ static ULONG ForegroundTimerMask;
 static struct Task *ForegroundTimerOwner;
 static volatile uint8_t *ForegroundMailboxBase;
 static struct ZZUSBUnit *ForegroundMailboxUnit;
+static struct SignalSemaphore PrimaryMailboxLock;
 static uint8_t LastRTStartStage;
 static uint16_t LastRTAddress;
 static uint16_t LastRTEndpoint;
@@ -1697,7 +1698,12 @@ static int send_usb_cmd_scoped(volatile uint8_t *base,
 static int send_usb_cmd(volatile uint8_t *base, struct ZZUSBCommand *cmd,
                         void *data_out, uint32_t data_out_len)
 {
-    return send_usb_cmd_scoped(base, cmd, data_out, data_out_len, 1);
+    int status;
+
+    ObtainSemaphore(&PrimaryMailboxLock);
+    status = send_usb_cmd_scoped(base, cmd, data_out, data_out_len, 1);
+    ReleaseSemaphore(&PrimaryMailboxLock);
+    return status;
 }
 
 static int send_usb_cmd_maintenance(
@@ -3126,6 +3132,7 @@ static struct Library* __attribute__((used)) init_device(uint8_t *seg_list asm("
     dev->lib_IdString = (char *)device_id_string;
 
     InitSemaphore(&ZZBase->zz_Lock);
+    InitSemaphore(&PrimaryMailboxLock);
     {
         UWORD present = 0;
         UWORD value = zzcfg_query((ULONG)registers, ZZ_CFG_KEY_INT2,
@@ -4868,6 +4875,13 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
 
     volatile uint8_t* base = (volatile uint8_t*)unit->zz_Registers;
 
+    /*
+     * PrimaryMailboxLock must precede zz_Lock. A primary command may
+     * temporarily release zz_Lock to service realtime ISO while retaining
+     * mailbox ownership; foreground reset/flush must wait here rather than
+     * acquire zz_Lock and deadlock or overwrite that command.
+     */
+    ObtainSemaphore(&PrimaryMailboxLock);
     ObtainSemaphore(&ZZBase->zz_Lock);
 
     switch (ior->iouh_Req.io_Command) {
@@ -5558,6 +5572,7 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
     }
 
     ReleaseSemaphore(&ZZBase->zz_Lock);
+    ReleaseSemaphore(&PrimaryMailboxLock);
 
     /* Reply any IORs that were aborted during CMD_RESET/CMD_FLUSH
      * or pre-empted by a re-queue in UHCMD_INTXFER. Done after
