@@ -86,6 +86,12 @@ int zzusb_sideband_publish_available(int quarantined,
 }
 
 
+int zzusb_quickio_available(int poll_task, int worker_request,
+                            int worker_mask)
+{
+    return poll_task && worker_request && worker_mask;
+}
+
 int zzusb_is_audio_rate_set_cur(uint8_t request_type, uint8_t request,
                                 uint16_t value, uint16_t length,
                                 uint32_t data_length)

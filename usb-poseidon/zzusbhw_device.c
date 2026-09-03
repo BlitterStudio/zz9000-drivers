@@ -1831,7 +1831,9 @@ static ULONG iso_public_capabilities(struct ZZUSBUnit *unit)
 
     if (!unit)
         return capabilities;
-    if (PollBase && PollBase->zz_PollTask)
+    if (zzusb_quickio_available(
+            PollBase && PollBase->zz_PollTask,
+            WorkerTimerRequest != NULL, WorkerTimerMask != 0))
         capabilities |= UHCF_QUICKIO;
 
     state = protocol_state_for((volatile uint8_t *)unit->zz_Registers);
@@ -4023,9 +4025,11 @@ static void hotplug_poll_task(void)
 
             if (!unit->zz_Enabled)
                 continue;
+            ObtainSemaphore(&PollBase->zz_Lock);
             recover_quarantined_proxy(
                 (volatile uint8_t *)unit->zz_Registers);
             poll_simple_iso_cleanup(unit);
+            ReleaseSemaphore(&PollBase->zz_Lock);
             poll_rt_iso(unit);
         }
         process_work_queue();

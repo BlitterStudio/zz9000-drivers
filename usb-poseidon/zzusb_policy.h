@@ -24,6 +24,8 @@ int zzusb_mailbox_timer_available(int worker_request, int worker_mask,
                                   int foreground_owned);
 int zzusb_sync_command_timer_available(int foreground_opened,
                                        int foreground_owned);
+int zzusb_quickio_available(int poll_task, int worker_request,
+                            int worker_mask);
 int zzusb_negotiation_complete(int complete, int attempt_result);
 int zzusb_sideband_publish_available(int quarantined,
                                      int maintenance_quarantined);

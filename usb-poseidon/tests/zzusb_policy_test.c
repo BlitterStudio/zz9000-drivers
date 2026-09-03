@@ -50,6 +50,10 @@ int main(void)
     CHECK(zzusb_sync_command_timer_available(1, 1));
     CHECK(!zzusb_sync_command_timer_available(0, 1));
     CHECK(!zzusb_sync_command_timer_available(1, 0));
+    CHECK(zzusb_quickio_available(1, 1, 1));
+    CHECK(!zzusb_quickio_available(0, 1, 1));
+    CHECK(!zzusb_quickio_available(1, 0, 1));
+    CHECK(!zzusb_quickio_available(1, 1, 0));
     CHECK(!zzusb_negotiation_complete(0, -1));
     CHECK(zzusb_negotiation_complete(0, 0));
     CHECK(zzusb_negotiation_complete(0, 1));
