@@ -19,6 +19,8 @@ uint32_t zzusb_worker_timer_elapsed(uint64_t started_us, uint64_t now_us,
                                     uint32_t delay_us);
 uint32_t zzusb_worker_timer_remaining(uint32_t delay_us,
                                       uint32_t elapsed_us);
+uint32_t zzusb_worker_timer_account_elapsed(
+    struct zzusb_worker_timer *timer, uint32_t elapsed_us);
 int zzusb_periodic_endpoint_matches(uint8_t old_dev_addr,
                                     uint8_t old_endpoint,
                                     uint8_t old_direction,

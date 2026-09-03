@@ -4142,13 +4142,30 @@ static void hotplug_poll_task(void)
             }
             wake = Wait(mask | timer_mask);
             elapsed_us = zzusb_worker_timer_expire(
-                &worker_timer, (wake & timer_mask) != 0);
+                &worker_timer,
+                (wake & timer_mask) != 0 ||
+                CheckIO((struct IORequest*)&timer_req) != NULL);
             if (elapsed_us) {
                 timer_started_us = 0;
                 WaitIO((struct IORequest*)&timer_req);
                 timer_poll_due = 1;
                 root_poll_elapsed_us += elapsed_us;
                 work_queue_advance_delay(elapsed_us);
+            } else if (worker_timer.pending) {
+                uint64_t now_us;
+
+                if (worker_now_us(&now_us)) {
+                    elapsed_us = zzusb_worker_timer_elapsed(
+                        timer_started_us, now_us,
+                        worker_timer.delay_us);
+                    elapsed_us = zzusb_worker_timer_account_elapsed(
+                        &worker_timer, elapsed_us);
+                    if (elapsed_us) {
+                        timer_started_us = now_us;
+                        root_poll_elapsed_us += elapsed_us;
+                        work_queue_advance_delay(elapsed_us);
+                    }
+                }
             }
         } else {
             Wait(mask);

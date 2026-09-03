@@ -59,6 +59,16 @@ uint32_t zzusb_worker_timer_remaining(uint32_t delay_us,
     return elapsed_us < delay_us ? delay_us - elapsed_us : 0;
 }
 
+uint32_t zzusb_worker_timer_account_elapsed(
+    struct zzusb_worker_timer *timer, uint32_t elapsed_us)
+{
+    if (!timer || !timer->pending || !elapsed_us ||
+        elapsed_us >= timer->delay_us)
+        return 0;
+    timer->delay_us -= elapsed_us;
+    return elapsed_us;
+}
+
 int zzusb_periodic_endpoint_matches(uint8_t old_dev_addr,
                                     uint8_t old_endpoint,
                                     uint8_t old_direction,
