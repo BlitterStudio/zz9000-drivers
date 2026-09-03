@@ -2744,15 +2744,13 @@ static BYTE stop_rt_iso_handler(struct ZZUSBUnit *unit,
     if (!slot || slot->unit != unit)
         return UHIOERR_BADPARAMS;
     Disable();
-    if (slot->lifecycle.state == ZZUSB_RT_ADDED ||
-        slot->lifecycle.state == ZZUSB_RT_STOPPED) {
-        Enable();
-        return 0;
-    }
-    if (slot->lifecycle.state == ZZUSB_RT_STOPPING) {
-        Enable();
-        return 0;
-    }
+    /*
+     * Poseidon increments pd_IOBusyCount only for a successful StartRTIso
+     * and decrements it for every successful StopRTIso. Reject duplicate
+     * stops: usbaudio.class may call Stop once from subLibStop and again
+     * while freeing the handler, and reporting both as successful
+     * underflows the device busy count and wedges later device removal.
+     */
     if (slot->lifecycle.state != ZZUSB_RT_RUNNING ||
         !zzusb_rt_begin_stop(&slot->lifecycle)) {
         Enable();
