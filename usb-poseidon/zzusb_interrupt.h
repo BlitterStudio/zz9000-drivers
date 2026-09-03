@@ -40,6 +40,12 @@ static inline int zzusb_interrupt_retain_endpoint(int is_in)
     return is_in;
 }
 
+static inline int zzusb_interrupt_abort_detaches(
+    int armed, int arm_in_progress)
+{
+    return armed && !arm_in_progress;
+}
+
 static inline unsigned zzusb_interrupt_next_slot(unsigned current,
                                                   unsigned slot_count)
 {

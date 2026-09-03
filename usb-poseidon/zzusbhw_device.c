@@ -5896,7 +5896,22 @@ static uint32_t __attribute__((used)) abort_io(struct Library *dev asm("a6"), st
     {
         struct ZZIntPendingSlot *slot = find_int_slot_for_ior(ior);
         if (slot && slot->unit == unit) {
-            if (slot->armed || slot->arm_in_progress) {
+            if (zzusb_interrupt_abort_detaches(
+                    slot->armed, slot->arm_in_progress)) {
+                /*
+                 * The firmware queue owns its transfer buffer. Detach the
+                 * Amiga IORequest before retiring that queue so Poseidon may
+                 * complete pipe teardown without the poll task retaining a
+                 * pointer into the freed pipe.
+                 */
+                slot->ior = NULL;
+                slot->abort_requested = 0;
+                slot->idle_polls = 0;
+                slot->stop_pending = 1;
+                slot->reuse_pending = 0;
+                slot->reuse_ticks = 0;
+                found = 3;
+            } else if (slot->armed || slot->arm_in_progress) {
                 slot->abort_requested = 1;
                 found = 2;
             } else {
@@ -5911,6 +5926,8 @@ static uint32_t __attribute__((used)) abort_io(struct Library *dev asm("a6"), st
             Signal(ZZBase->zz_PollTask, ZZBase->zz_PollSignal);
         return IOERR_ABORTED;
     }
+    if (found == 3 && ZZBase->zz_PollTask && ZZBase->zz_PollSignal)
+        Signal(ZZBase->zz_PollTask, ZZBase->zz_PollSignal);
 
     if (found) {
         ior->iouh_Actual = 0;
