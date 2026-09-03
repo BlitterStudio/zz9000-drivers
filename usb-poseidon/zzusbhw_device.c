@@ -4662,9 +4662,10 @@ struct ZZNSDeviceQueryResult {
     const UWORD *SupportedCommands;
 };
 
-static int stalled_audio_rate_is_current(
+static int audio_rate_is_current_at_index(
     volatile uint8_t *base, struct ZZUSBUnit *unit,
-    const struct IOUsbHWReq *ior, const struct ZZUSBCommand *set_command)
+    const struct IOUsbHWReq *ior, const struct ZZUSBCommand *set_command,
+    uint16_t index)
 {
     struct ZZUSBCommand query;
     volatile struct ZZUSBCommand *result;
@@ -4672,20 +4673,12 @@ static int stalled_audio_rate_is_current(
     uint8_t current_rate[3];
     uint16_t status;
 
-    if (!ior->iouh_Data ||
-        !zzusb_is_audio_rate_set_cur(
-            ior->iouh_SetupData.bmRequestType,
-            ior->iouh_SetupData.bRequest,
-            SWAP16(ior->iouh_SetupData.wValue),
-            SWAP16(ior->iouh_SetupData.wLength),
-            ior->iouh_Length))
-        return 0;
-
     query = *set_command;
     query.direction = 0x80;
     query.data_length = 3;
     query.setup_bRequestType = 0xa2;
     query.setup_bRequest = 0x81;
+    query.setup_wIndex = SWAP16(index);
     status = send_usb_cmd_with_rt_service(base, &query, NULL, 0, unit);
     if (status != ZZUSB_STATUS_OK)
         return 0;
@@ -4698,6 +4691,63 @@ static int stalled_audio_rate_is_current(
     current_rate[1] = reply_data[1];
     current_rate[2] = reply_data[2];
     return zzusb_audio_rate_matches(ior->iouh_Data, current_rate, 3);
+}
+
+static int is_audio_rate_request(const struct IOUsbHWReq *ior)
+{
+    return ior->iouh_Data &&
+           zzusb_is_audio_rate_set_cur(
+               ior->iouh_SetupData.bmRequestType,
+               ior->iouh_SetupData.bRequest,
+               SWAP16(ior->iouh_SetupData.wValue),
+               SWAP16(ior->iouh_SetupData.wLength),
+               ior->iouh_Length);
+}
+
+static int stalled_audio_rate_is_current(
+    volatile uint8_t *base, struct ZZUSBUnit *unit,
+    const struct IOUsbHWReq *ior, const struct ZZUSBCommand *set_command)
+{
+    if (!is_audio_rate_request(ior))
+        return 0;
+    return audio_rate_is_current_at_index(
+        base, unit, ior, set_command,
+        SWAP16(ior->iouh_SetupData.wIndex));
+}
+
+static int retry_stalled_audio_rate_for_input(
+    volatile uint8_t *base, struct ZZUSBUnit *unit,
+    const struct IOUsbHWReq *ior, const struct ZZUSBCommand *set_command)
+{
+    struct ZZUSBCommand retry;
+    uint16_t input_index;
+    uint16_t status;
+
+    if (!is_audio_rate_request(ior) ||
+        !zzusb_audio_rate_input_index(
+            SWAP16(ior->iouh_SetupData.wIndex), &input_index))
+        return 0;
+
+    /*
+     * Poseidon 4.5 passes EA_EndpointNum in wIndex for USB Audio endpoint
+     * controls. That attribute excludes bEndpointAddress's direction bit,
+     * so controls for an IN endpoint are sent to EP n rather than EP 0x8n.
+     * First avoid a write when the correctly addressed endpoint already
+     * reports the requested rate. Otherwise retry SET_CUR at that address
+     * and accept it only after GET_CUR confirms the requested three bytes.
+     */
+    if (audio_rate_is_current_at_index(
+            base, unit, ior, set_command, input_index))
+        return 1;
+
+    retry = *set_command;
+    retry.setup_wIndex = SWAP16(input_index);
+    status = send_usb_cmd_with_rt_service(
+        base, &retry, ior->iouh_Data, ior->iouh_Length, unit);
+    if (status != ZZUSB_STATUS_OK)
+        return 0;
+    return audio_rate_is_current_at_index(
+        base, unit, ior, set_command, input_index);
 }
 
 static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
@@ -5091,6 +5141,12 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
                          * endpoint controls retain their original stall.
                          */
                         LastAudioControlSeen = 2;
+                        ior->iouh_Actual = ior->iouh_Length;
+                        ior->iouh_Req.io_Error = 0;
+                    } else if (status == ZZUSB_STATUS_STALL &&
+                               retry_stalled_audio_rate_for_input(
+                                   base, unit, ior, &cmd)) {
+                        LastAudioControlSeen = 3;
                         ior->iouh_Actual = ior->iouh_Length;
                         ior->iouh_Req.io_Error = 0;
                     } else {

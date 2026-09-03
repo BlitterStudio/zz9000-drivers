@@ -100,3 +100,12 @@ int zzusb_audio_rate_matches(const void *requested, const void *current,
     return requested && current && length == 3 &&
            memcmp(requested, current, 3) == 0;
 }
+
+int zzusb_audio_rate_input_index(uint16_t index,
+                                 uint16_t *input_index)
+{
+    if (!input_index || index == 0 || (index & 0xfff0U) != 0)
+        return 0;
+    *input_index = (uint16_t)(index | 0x0080U);
+    return 1;
+}
