@@ -367,7 +367,7 @@ static uint16_t LastLifecycleCommand;
 
 
 static void execute_io(struct Library *dev, struct IOUsbHWReq *ior);
-static int process_work_queue(void);
+static int process_work_queue(struct ZZWorkSlot **retry_slot);
 static uint32_t work_queue_min_delay_us(void);
 static void work_queue_advance_delay(uint32_t elapsed_us);
 static int work_queue_pending(void);
@@ -1698,12 +1698,7 @@ static int send_usb_cmd_scoped(volatile uint8_t *base,
 static int send_usb_cmd(volatile uint8_t *base, struct ZZUSBCommand *cmd,
                         void *data_out, uint32_t data_out_len)
 {
-    int status;
-
-    ObtainSemaphore(&PrimaryMailboxLock);
-    status = send_usb_cmd_scoped(base, cmd, data_out, data_out_len, 1);
-    ReleaseSemaphore(&PrimaryMailboxLock);
-    return status;
+    return send_usb_cmd_scoped(base, cmd, data_out, data_out_len, 1);
 }
 
 static int send_usb_cmd_maintenance(
@@ -3876,11 +3871,25 @@ static uint16_t send_usb_cmd_with_rt_service(
     volatile uint8_t *base, struct ZZUSBCommand *cmd,
     void *data_out, uint32_t data_out_len, struct ZZUSBUnit *unit)
 {
+    uint16_t status;
+
     if (!PollBase || !rt_iso_pending_for_unit(unit))
         return send_usb_cmd(base, cmd, data_out, data_out_len);
-    service_rt_iso_during_work(PollBase, unit);
-    return send_usb_cmd_with_rt_wait(
+
+    /*
+     * Drop zz_Lock before taking the mailbox lock so every path uses the
+     * PrimaryMailboxLock -> zz_Lock order. Pre-service realtime ISO while
+     * neither lock is held, then retain mailbox ownership across any later
+     * zz_Lock release performed during the primary wait.
+     */
+    ReleaseSemaphore(&PollBase->zz_Lock);
+    poll_rt_iso(unit);
+    ObtainSemaphore(&PrimaryMailboxLock);
+    ObtainSemaphore(&PollBase->zz_Lock);
+    status = send_usb_cmd_with_rt_wait(
         base, cmd, data_out, data_out_len, unit);
+    ReleaseSemaphore(&PrimaryMailboxLock);
+    return status;
 }
 
 static int poll_roothub_pending(struct ZZUSBBase *base_dev,
@@ -4027,6 +4036,7 @@ static void hotplug_poll_task(void)
 
     for (;;) {
         int any_pending = 0;
+        struct ZZWorkSlot *new_retry = NULL;
         int reap_events;
         int root_poll_due = root_poll_elapsed_us >= 100000U;
         uint32_t poll_delay_us = root_poll_due ? 100000U :
@@ -4053,7 +4063,44 @@ static void hotplug_poll_task(void)
             ReleaseSemaphore(&PollBase->zz_Lock);
             poll_rt_iso(unit);
         }
-        process_work_queue();
+        process_work_queue(&new_retry);
+        if (new_retry) {
+            uint32_t elapsed_us = 0;
+
+            /*
+             * Close the accounting interval before publishing the new
+             * backoff. Time spent on the request that returned NAK predates
+             * this retry and must advance only delays that already existed.
+             */
+            if (worker_timer.pending) {
+                if (CheckIO((struct IORequest*)&timer_req)) {
+                    WaitIO((struct IORequest*)&timer_req);
+                    elapsed_us = zzusb_worker_timer_expire(
+                        &worker_timer, 1);
+                    timer_started_us = 0;
+                    timer_poll_due = 1;
+                } else {
+                    uint64_t now_us;
+
+                    if (worker_now_us(&now_us)) {
+                        elapsed_us = zzusb_worker_timer_elapsed(
+                            timer_started_us, now_us,
+                            worker_timer.delay_us);
+                        elapsed_us = zzusb_worker_timer_account_elapsed(
+                            &worker_timer, elapsed_us);
+                        if (elapsed_us)
+                            timer_started_us = now_us;
+                    }
+                }
+            }
+            if (elapsed_us) {
+                root_poll_elapsed_us += elapsed_us;
+                work_queue_advance_delay(elapsed_us);
+            }
+            Forbid();
+            new_retry->retry_delay_us = ZZUSB_IDLE_BULK_RETRY_US;
+            Permit();
+        }
 
         for (int u = 0; u < ZZ_NUM_PORTS; u++) {
             struct ZZUSBUnit *unit = &PollBase->zz_Units[u];
@@ -5747,12 +5794,14 @@ static int bulk_in_waits_for_data(const struct IOUsbHWReq *ior)
 }
 
 
-static int process_work_queue(void)
+static int process_work_queue(struct ZZWorkSlot **retry_slot)
 {
     struct ZZWorkSlot *slot = NULL;
     struct IOUsbHWReq *ior;
     UBYTE saved_flags;
     int reply;
+    if (retry_slot)
+        *retry_slot = NULL;
 
     Forbid();
     for (int i = 0; i < ZZ_WORK_SLOTS; i++) {
@@ -5811,7 +5860,8 @@ static int process_work_queue(void)
         slot->enqueue_seq = EnqueueSequence++;
         if (slot->idle_bulk_retries != 0xffffU)
             slot->idle_bulk_retries++;
-        slot->retry_delay_us = ZZUSB_IDLE_BULK_RETRY_US;
+        if (retry_slot)
+            *retry_slot = slot;
         ActiveWorkSlot = NULL;
         Permit();
         return 1;
