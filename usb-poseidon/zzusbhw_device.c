@@ -1124,6 +1124,33 @@ static int worker_wait_us(uint32_t microseconds)
     return 1;
 }
 
+/*
+ * QUICKIO is a session capability, not a transient status. The worker task
+ * is scheduled from open(), but may not have opened timer.device before
+ * Poseidon immediately issues UHCMD_QUERYDEVICE. Wait on the caller-owned
+ * foreground timer so the first capability snapshot cannot race startup.
+ */
+static int wait_for_worker_ready(uint32_t timeout_us)
+{
+    uint32_t elapsed_us = 0;
+
+    while (!zzusb_quickio_available(
+               PollBase && PollBase->zz_PollTask,
+               WorkerTimerRequest != NULL, WorkerTimerMask != 0)) {
+        uint32_t wait_us;
+
+        if (elapsed_us >= timeout_us)
+            return 0;
+        wait_us = timeout_us - elapsed_us;
+        if (wait_us > 1000U)
+            wait_us = 1000U;
+        if (!worker_wait_us(wait_us))
+            return 0;
+        elapsed_us += wait_us;
+    }
+    return 1;
+}
+
 static int worker_now_us(uint64_t *now_us)
 {
     struct timerequest *request = WorkerTimerRequest;
@@ -1625,22 +1652,27 @@ static int negotiate_usb_proxy_retries(volatile uint8_t *base,
 
 /*
  * Poseidon queries capabilities synchronously, before the long-lived worker
- * necessarily owns timer.device. Supply a temporary timer for that one
- * negotiation instead of busy-spinning the high-priority Poseidon task.
- * Return -1 when the timer cannot be acquired so the caller keeps
- * negotiation pending and retries after the transient failure instead of
- * pinning the session to legacy capabilities.
+ * necessarily owns timer.device. Reuse the BeginIO task's temporary timer
+ * when present; direct callers acquire one here. Return -1 when no timer is
+ * available so negotiation remains pending instead of pinning the session
+ * to legacy capabilities.
  */
 static int negotiate_usb_proxy_foreground(
     volatile uint8_t *base, struct ZZUSBProtocolState *state)
 {
     struct ZZForegroundTimer timer;
+    int opened_here = 0;
     int negotiated;
 
-    if (!open_foreground_timer(&timer))
-        return -1;
+    if (!ForegroundTimerRequest ||
+        ForegroundTimerOwner != FindTask(NULL)) {
+        if (!open_foreground_timer(&timer))
+            return -1;
+        opened_here = 1;
+    }
     negotiated = negotiate_usb_proxy_retries(base, state);
-    close_foreground_timer(&timer);
+    if (opened_here)
+        close_foreground_timer(&timer);
     return negotiated;
 }
 
@@ -5663,6 +5695,7 @@ static int command_requires_sync_timer(UWORD command)
     case CMD_RESET:
     case CMD_FLUSH:
     case UHCMD_REMISOHANDLER:
+    case UHCMD_QUERYDEVICE:
         return 1;
     default:
         return 0;
@@ -6019,6 +6052,17 @@ static void __attribute__((used)) begin_io(
             if (!(ior->iouh_Req.io_Flags & IOF_QUICK))
                 ReplyMsg(&ior->iouh_Req.io_Message);
             return;
+        }
+        if (ior->iouh_Req.io_Command == UHCMD_QUERYDEVICE) {
+            ensure_poll_task(base);
+            if (!wait_for_worker_ready(500000U)) {
+                ior->iouh_Actual = 0;
+                ior->iouh_Req.io_Error = UHIOERR_HOSTERROR;
+                if (!(ior->iouh_Req.io_Flags & IOF_QUICK))
+                    ReplyMsg(&ior->iouh_Req.io_Message);
+                close_foreground_timer(&timer);
+                return;
+            }
         }
         if (ior->iouh_Req.io_Command == CMD_RESET ||
             ior->iouh_Req.io_Command == CMD_FLUSH)
