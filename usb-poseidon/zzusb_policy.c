@@ -57,6 +57,15 @@ int zzusb_bulk_resume_window(uint32_t requested, uint32_t completed,
     return 1;
 }
 
+int zzusb_mailbox_timer_available(int worker_request, int worker_mask,
+                                  int foreground_request,
+                                  int foreground_mask,
+                                  int foreground_owned)
+{
+    return (worker_request && worker_mask) ||
+           (foreground_request && foreground_mask && foreground_owned);
+}
+
 int zzusb_is_audio_rate_set_cur(uint8_t request_type, uint8_t request,
                                 uint16_t value, uint16_t length,
                                 uint32_t data_length)

@@ -1153,7 +1153,10 @@ static int send_usb_cmd_wire(volatile uint8_t *base,
 
     if (data_out_len > max_data)
         return ZZUSB_STATUS_BADPARAM;
-    if (!WorkerTimerRequest || !WorkerTimerMask)
+    if (!zzusb_mailbox_timer_available(
+            WorkerTimerRequest != NULL, WorkerTimerMask != 0,
+            ForegroundTimerRequest != NULL, ForegroundTimerMask != 0,
+            ForegroundTimerOwner == FindTask(NULL)))
         return ZZUSB_STATUS_HOSTERROR;
 
     switch (cmd->cmd) {
@@ -1389,10 +1392,10 @@ static int send_usb_cmd_sideband(
     uint32_t response_length;
     uint16_t status;
     int bootstrap = cmd && cmd->cmd == ZZUSB_CMD_QUERY_CAPS;
-    int timer_available =
-        (WorkerTimerRequest && WorkerTimerMask) ||
-        (ForegroundTimerRequest && ForegroundTimerMask &&
-         ForegroundTimerOwner == FindTask(NULL));
+    int timer_available = zzusb_mailbox_timer_available(
+        WorkerTimerRequest != NULL, WorkerTimerMask != 0,
+        ForegroundTimerRequest != NULL, ForegroundTimerMask != 0,
+        ForegroundTimerOwner == FindTask(NULL));
 
 
     if (!state || !timer_available || state->quarantined ||
@@ -2282,6 +2285,15 @@ static uint16_t queue_rt_iso_batch(struct ZZRTIsoSlot *slot)
             if (request->ubr_Buffer && lengths[index])
                 safe_copy(request->ubr_Buffer, IsoPayload + total_data,
                           lengths[index]);
+            /*
+             * Persist and advance the packet cursor across hook calls.
+             * Poseidon's audio hook sets ubr_Buffer only when it switches
+             * mixer buffers; its documented "automatically increases"
+             * contract requires the host driver to retain the cursor.
+             * UBFF_CONTBUFFER instead requests another segment within this
+             * same USB packet and does not delimit cross-packet ownership.
+             * Deneb follows the same persistent-cursor behavior.
+             */
             slot->out_request = *request;
             if (slot->out_request.ubr_Buffer)
                 slot->out_request.ubr_Buffer += lengths[index];
