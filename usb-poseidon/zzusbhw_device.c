@@ -1003,11 +1003,9 @@ struct ZZForegroundTimer {
     uint8_t opened;
 };
 
-static int open_foreground_timer(struct ZZForegroundTimer *timer)
+static int open_task_timer(struct ZZForegroundTimer *timer)
 {
     memset(timer, 0, sizeof(*timer));
-    if (ForegroundTimerRequest)
-        return 0;
     timer->signal = AllocSignal(-1);
     if (timer->signal < 0)
         return 0;
@@ -1030,8 +1028,14 @@ static int open_foreground_timer(struct ZZForegroundTimer *timer)
         timer->signal = -1;
         return 0;
     }
-
     timer->opened = 1;
+    return 1;
+}
+
+static int open_foreground_timer(struct ZZForegroundTimer *timer)
+{
+    if (ForegroundTimerRequest || !open_task_timer(timer))
+        return 0;
     ForegroundTimerRequest = &timer->request;
     ForegroundTimerMask = 1UL << timer->signal;
     ForegroundTimerOwner = FindTask(NULL);
@@ -3847,6 +3851,8 @@ static void hotplug_poll_task(void)
     ULONG timer_mask = (timer_sig >= 0) ? (1UL << timer_sig) : 0;
     struct MsgPort timer_port;
     struct timerequest timer_req;
+    struct ZZForegroundTimer io_timer;
+    BOOL io_timer_open = FALSE;
     BOOL timer_open = FALSE;
 
     PollBase->zz_PollSignal = mask;
@@ -3870,13 +3876,17 @@ static void hotplug_poll_task(void)
                                  (struct IORequest*)&timer_req, 0) == 0);
     }
 
-    if (timer_open) {
-        WorkerTimerRequest = &timer_req;
-        WorkerTimerMask = timer_mask;
+    if (timer_open)
+        io_timer_open = open_task_timer(&io_timer);
+    if (io_timer_open) {
+        WorkerTimerRequest = &io_timer.request;
+        WorkerTimerMask = 1UL << io_timer.signal;
+        ObtainSemaphore(&PollBase->zz_Lock);
         if (!ProtocolNegotiated)
             ProtocolNegotiated = negotiate_usb_proxy(
                 (volatile uint8_t *)PollBase->zz_Units[0].zz_Registers,
                 &ProtocolStates[0], 1);
+        ReleaseSemaphore(&PollBase->zz_Lock);
     }
     int timer_poll_due = 0;
     uint32_t root_poll_elapsed_us = 100000U;
@@ -5178,6 +5188,9 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
                      */
                     : (ior->iouh_Dir == UHDIR_IN ?
                        ZZUSB_IDLE_BULK_SLICE_MS : 500);
+                if (ior->iouh_Dir == UHDIR_IN &&
+                    !(ior->iouh_Flags & UHFF_NAKTIMEOUT))
+                    cmd.flags |= ZZUSB_FLAG_BULK_IN_POLL;
                 fill_split_fields(&cmd, unit, ior);
 
                 status = send_usb_cmd_with_rt_service(
