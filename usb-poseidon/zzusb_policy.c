@@ -79,6 +79,11 @@ int zzusb_negotiation_complete(int complete, int attempt_result)
 {
     return complete || attempt_result >= 0;
 }
+int zzusb_sideband_publish_available(int quarantined,
+                                     int maintenance_quarantined)
+{
+    return !quarantined && !maintenance_quarantined;
+}
 
 
 int zzusb_is_audio_rate_set_cur(uint8_t request_type, uint8_t request,

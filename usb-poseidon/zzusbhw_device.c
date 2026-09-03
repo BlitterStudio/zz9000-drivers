@@ -1034,11 +1034,40 @@ static int open_task_timer(struct ZZForegroundTimer *timer)
 
 static int open_foreground_timer(struct ZZForegroundTimer *timer)
 {
-    if (ForegroundTimerRequest || !open_task_timer(timer))
+    struct Task *owner = FindTask(NULL);
+
+    /*
+     * Reserve ownership before the blocking timer.device open. Publishing
+     * the owner under Disable() prevents two BeginIO tasks from both
+     * observing an unowned slot and later displacing each other's stack
+     * request.
+     */
+    Disable();
+    if (ForegroundTimerOwner) {
+        Enable();
         return 0;
-    ForegroundTimerRequest = &timer->request;
+    }
+    ForegroundTimerOwner = owner;
+    Enable();
+
+    if (!open_task_timer(timer)) {
+        Disable();
+        if (ForegroundTimerOwner == owner && !ForegroundTimerRequest)
+            ForegroundTimerOwner = NULL;
+        Enable();
+        return 0;
+    }
+
+    if (ForegroundTimerOwner != owner || ForegroundTimerRequest) {
+        Enable();
+        CloseDevice((struct IORequest *)&timer->request);
+        FreeSignal(timer->signal);
+        timer->opened = 0;
+        return 0;
+    }
     ForegroundTimerMask = 1UL << timer->signal;
-    ForegroundTimerOwner = FindTask(NULL);
+    ForegroundTimerRequest = &timer->request;
+    Enable();
     return 1;
 }
 
@@ -1046,11 +1075,13 @@ static void close_foreground_timer(struct ZZForegroundTimer *timer)
 {
     if (!timer || !timer->opened)
         return;
+    Disable();
     if (ForegroundTimerRequest == &timer->request) {
         ForegroundTimerRequest = NULL;
         ForegroundTimerMask = 0;
         ForegroundTimerOwner = NULL;
     }
+    Enable();
     CloseDevice((struct IORequest *)&timer->request);
     FreeSignal(timer->signal);
     timer->opened = 0;
@@ -1398,7 +1429,9 @@ static int send_usb_cmd_sideband(
         ForegroundTimerOwner == FindTask(NULL));
 
 
-    if (!state || !timer_available || state->quarantined ||
+    if (!state || !timer_available ||
+        !zzusb_sideband_publish_available(
+            state->quarantined, state->maintenance_quarantined) ||
         (!bootstrap &&
          (state->mode != ZZUSB_PROTOCOL_V2 ||
           !(state->capabilities & ZZUSB_CAP_MAINTENANCE))))
@@ -1504,11 +1537,14 @@ static int negotiate_usb_proxy(volatile uint8_t *base,
     struct ZZUSBCommand query;
     int status;
     int unsafe;
+    uint8_t maintenance_quarantined =
+        state->maintenance_quarantined;
 
     memset(state, 0, sizeof(*state));
     state->registers = base;
     state->next_request_id = 1;
     state->mode = ZZUSB_PROTOCOL_LEGACY;
+    state->maintenance_quarantined = maintenance_quarantined;
 
     memset(&query, 0, sizeof(query));
     query.cmd = ZZUSB_CMD_QUERY_CAPS;
@@ -1521,8 +1557,13 @@ static int negotiate_usb_proxy(volatile uint8_t *base,
     status = send_usb_cmd_sideband(
         base, &query, NULL, 0, NULL, 0, state, 0);
     if (status != ZZUSB_STATUS_OK) {
+        /*
+         * A timed-out sideband request may still be running. Permit the
+         * primary-mailbox bootstrap fallback, but retain the maintenance
+         * quarantine so neither a negotiation retry nor normal maintenance
+         * traffic overwrites that request before its status becomes terminal.
+         */
         state->quarantined = 0;
-        state->maintenance_quarantined = 0;
         status = send_usb_cmd_wire(
             base, &query, NULL, 0, state, 1, 1, 0);
     }
@@ -1548,9 +1589,8 @@ static int negotiate_usb_proxy(volatile uint8_t *base,
  * still be bringing the USB proxy online when the device is opened, so a
  * single missed QUERY_CAPS permanently hides ISO support for this session.
  * Retry while the caller's timer is valid before publishing capabilities.
- * The caller must own either the worker timer or a foreground timer for
- * the inter-attempt waits; every retry is self-contained because
- * negotiate_usb_proxy() re-initializes the protocol state.
+ * Stop when either mailbox becomes ambiguous; recovery must observe a
+ * terminal status before another attempt can reuse that slot.
  */
 static int negotiate_usb_proxy_retries(volatile uint8_t *base,
                                        struct ZZUSBProtocolState *state)
@@ -1560,6 +1600,8 @@ static int negotiate_usb_proxy_retries(volatile uint8_t *base,
 
     for (attempt = 0; attempt < 5 && !negotiated; attempt++) {
         negotiated = negotiate_usb_proxy(base, state, 1);
+        if (state->quarantined || state->maintenance_quarantined)
+            break;
         if (!negotiated && attempt != 4)
             worker_wait_us(100000U);
     }
@@ -1602,7 +1644,8 @@ static void recover_quarantined_proxy(volatile uint8_t *base)
         (volatile struct ZZUSBCommand *)
             (base + 0xa000 + ZZUSB_MAINT_HEADER_OFFSET);
 
-    if (!state || !state->quarantined)
+    if (!state ||
+        (!state->quarantined && !state->maintenance_quarantined))
         return;
     if (state->maintenance_quarantined) {
         CacheClearE((APTR)maintenance, ZZUSB_V2_HEADER_SIZE,
@@ -1611,6 +1654,8 @@ static void recover_quarantined_proxy(volatile uint8_t *base)
             return;
         state->maintenance_quarantined = 0;
     }
+    if (!state->quarantined)
+        return;
     CacheClearE((APTR)result, ZZUSB_V2_HEADER_SIZE, CACRF_ClearD);
     if (result->status == ZZUSB_STATUS_PENDING)
         return;
