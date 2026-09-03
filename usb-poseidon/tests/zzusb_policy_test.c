@@ -58,6 +58,9 @@ int main(void)
     CHECK(zzusb_worker_timer_elapsed(1000, 201000, 100000) == 100000);
     CHECK(zzusb_worker_timer_elapsed(0, 91000, 100000) == 0);
     CHECK(zzusb_worker_timer_elapsed(91000, 1000, 100000) == 0);
+    CHECK(zzusb_worker_timer_remaining(8000, 7000) == 1000);
+    CHECK(zzusb_worker_timer_remaining(8000, 8000) == 0);
+    CHECK(zzusb_worker_timer_remaining(8000, 9000) == 0);
     CHECK(!zzusb_negotiation_complete(0, -1));
     CHECK(zzusb_negotiation_complete(0, 0));
     CHECK(zzusb_negotiation_complete(0, 1));

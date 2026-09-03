@@ -4088,8 +4088,7 @@ static void hotplug_poll_task(void)
              * A newly discovered earlier deadline may replace the old timer;
              * subsequent equal-deadline wakeups leave it running.
              */
-            if (worker_timer.pending && any_pending &&
-                poll_delay_us < worker_timer.delay_us) {
+            if (worker_timer.pending && any_pending) {
                 if (CheckIO((struct IORequest*)&timer_req)) {
                     WaitIO((struct IORequest*)&timer_req);
                     elapsed_us = zzusb_worker_timer_expire(
@@ -4104,15 +4103,21 @@ static void hotplug_poll_task(void)
                     uint64_t now_us;
 
                     if (worker_now_us(&now_us)) {
+                        uint32_t remaining_us;
+
                         elapsed_us = zzusb_worker_timer_elapsed(
                             timer_started_us, now_us,
                             worker_timer.delay_us);
-                        AbortIO((struct IORequest*)&timer_req);
-                        WaitIO((struct IORequest*)&timer_req);
-                        zzusb_worker_timer_cancel(&worker_timer);
-                        timer_started_us = 0;
-                        root_poll_elapsed_us += elapsed_us;
-                        work_queue_advance_delay(elapsed_us);
+                        remaining_us = zzusb_worker_timer_remaining(
+                            worker_timer.delay_us, elapsed_us);
+                        if (poll_delay_us < remaining_us) {
+                            AbortIO((struct IORequest*)&timer_req);
+                            WaitIO((struct IORequest*)&timer_req);
+                            zzusb_worker_timer_cancel(&worker_timer);
+                            timer_started_us = 0;
+                            root_poll_elapsed_us += elapsed_us;
+                            work_queue_advance_delay(elapsed_us);
+                        }
                     }
                 }
             }
