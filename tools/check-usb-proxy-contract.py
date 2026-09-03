@@ -42,8 +42,7 @@ DEFINE_NAMES = (
     "ZZUSB_STATUS_HOSTERROR", "ZZUSB_STATUS_BUSY", "ZZUSB_STATUS_NOMEM",
     "ZZUSB_SPEED_LOW", "ZZUSB_SPEED_FULL", "ZZUSB_SPEED_HIGH",
     "ZZUSB_FLAG_SPLIT", "ZZUSB_FLAG_RESET_FSLS", "ZZUSB_FLAG_MULTI_TT",
-    "ZZUSB_FLAG_BULK_IN_POLL", "ZZUSB_FLAG_TT_THINK_SHIFT",
-    "ZZUSB_FLAG_TT_THINK_MASK",
+    "ZZUSB_FLAG_TT_THINK_SHIFT", "ZZUSB_FLAG_TT_THINK_MASK",
     "ZZUSB_XFER_CONTROL", "ZZUSB_XFER_BULK", "ZZUSB_XFER_INTERRUPT",
     "ZZUSB_XFER_ISO", "ZZUSB_PROTOCOL_VERSION", "ZZUSB_CMD_SIZE",
     "ZZUSB_V2_HEADER_SIZE", "ZZUSB_DATA_OFFSET", "ZZUSB_APERTURE_SIZE",
@@ -57,6 +56,10 @@ DEFINE_NAMES = (
     "ZZUSB_CAP_ISO_SIMPLE", "ZZUSB_CAP_ISO_REALTIME",
     "ZZUSB_CAP_EVENT_IRQ", "ZZUSB_CAP_PRECISE_ERRORS",
     "ZZUSB_CAP_MAINTENANCE",
+)
+
+OPTIONAL_DEFINE_NAMES = (
+    "ZZUSB_FLAG_BULK_IN_POLL",
 )
 
 DIAG_DEFINE_NAMES = (
@@ -159,8 +162,10 @@ def compare_headers(firmware_header: pathlib.Path,
                     driver_header: pathlib.Path = DRIVER_HEADER) -> list[str]:
     firmware_text = firmware_header.read_text(encoding="utf-8")
     driver_text = driver_header.read_text(encoding="utf-8")
-    firmware_defines = extract_defines(firmware_text)
-    driver_defines = extract_defines(driver_text)
+    firmware_defines = extract_defines(
+        firmware_text, DEFINE_NAMES + OPTIONAL_DEFINE_NAMES)
+    driver_defines = extract_defines(
+        driver_text, DEFINE_NAMES + OPTIONAL_DEFINE_NAMES)
     errors: list[str] = []
 
     for name in DEFINE_NAMES:
@@ -170,6 +175,14 @@ def compare_headers(firmware_header: pathlib.Path,
             errors.append(f"{name}: missing in " +
                           ("firmware" if left is None else "driver"))
         elif left != right:
+            errors.append(f"{name}: firmware={left} driver={right}")
+
+    for name in OPTIONAL_DEFINE_NAMES:
+        left = firmware_defines.get(name)
+        right = driver_defines.get(name)
+        if left is not None and right is None:
+            errors.append(f"{name}: missing in driver")
+        elif left is not None and left != right:
             errors.append(f"{name}: firmware={left} driver={right}")
 
     for struct_name in ("ZZUSBCommand", "ZZUSBProtocolExtension"):
