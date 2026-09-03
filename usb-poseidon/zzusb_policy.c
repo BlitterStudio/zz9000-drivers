@@ -65,6 +65,12 @@ int zzusb_mailbox_timer_available(int worker_request, int worker_mask,
     return (worker_request && worker_mask) ||
            (foreground_request && foreground_mask && foreground_owned);
 }
+int zzusb_sync_command_timer_available(int foreground_opened,
+                                       int foreground_owned)
+{
+    return foreground_opened && foreground_owned;
+}
+
 
 int zzusb_is_audio_rate_set_cur(uint8_t request_type, uint8_t request,
                                 uint16_t value, uint16_t length,

@@ -46,6 +46,9 @@ int main(void)
     CHECK(zzusb_mailbox_timer_available(0, 0, 1, 1, 1));
     CHECK(!zzusb_mailbox_timer_available(0, 0, 1, 1, 0));
     CHECK(!zzusb_mailbox_timer_available(0, 0, 1, 0, 1));
+    CHECK(zzusb_sync_command_timer_available(1, 1));
+    CHECK(!zzusb_sync_command_timer_available(0, 1));
+    CHECK(!zzusb_sync_command_timer_available(1, 0));
     CHECK(zzusb_is_audio_rate_set_cur(0x22, 0x01, 0x0100, 3, 3));
     CHECK(!zzusb_is_audio_rate_set_cur(0x22, 0x01, 0x0200, 3, 3));
     CHECK(!zzusb_is_audio_rate_set_cur(0x22, 0x01, 0x0100, 4, 4));

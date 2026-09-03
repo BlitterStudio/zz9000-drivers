@@ -5679,17 +5679,29 @@ static void __attribute__((used)) begin_io(
             ReplyMsg(&ior->iouh_Req.io_Message);
         return;
     }
-    if (unit && (ior->iouh_Req.io_Command == CMD_RESET ||
-                 ior->iouh_Req.io_Command == CMD_FLUSH))
-        abort_unit_work(unit);
     if (unit && command_requires_sync_timer(
             ior->iouh_Req.io_Command)) {
         struct ZZForegroundTimer timer;
         int timer_open = open_foreground_timer(&timer);
 
+        /*
+         * These commands execute on the BeginIO task and may wait on the
+         * proxy. The worker timer belongs to the poll task and is never a
+         * valid fallback here.
+         */
+        if (!zzusb_sync_command_timer_available(
+                timer_open, ForegroundTimerOwner == FindTask(NULL))) {
+            ior->iouh_Actual = 0;
+            ior->iouh_Req.io_Error = UHIOERR_HOSTERROR;
+            if (!(ior->iouh_Req.io_Flags & IOF_QUICK))
+                ReplyMsg(&ior->iouh_Req.io_Message);
+            return;
+        }
+        if (ior->iouh_Req.io_Command == CMD_RESET ||
+            ior->iouh_Req.io_Command == CMD_FLUSH)
+            abort_unit_work(unit);
         execute_io(dev, ior);
-        if (timer_open)
-            close_foreground_timer(&timer);
+        close_foreground_timer(&timer);
         return;
     }
     if (unit && command_uses_worker(ior->iouh_Req.io_Command)) {
