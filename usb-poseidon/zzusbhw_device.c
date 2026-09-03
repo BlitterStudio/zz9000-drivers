@@ -1058,6 +1058,7 @@ static int open_foreground_timer(struct ZZForegroundTimer *timer)
         return 0;
     }
 
+    Disable();
     if (ForegroundTimerOwner != owner || ForegroundTimerRequest) {
         Enable();
         CloseDevice((struct IORequest *)&timer->request);
