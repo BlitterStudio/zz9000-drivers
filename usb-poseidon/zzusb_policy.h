@@ -19,6 +19,12 @@ uint32_t zzusb_worker_timer_elapsed(uint64_t started_us, uint64_t now_us,
                                     uint32_t delay_us);
 uint32_t zzusb_worker_timer_remaining(uint32_t delay_us,
                                       uint32_t elapsed_us);
+int zzusb_periodic_endpoint_matches(uint8_t old_dev_addr,
+                                    uint8_t old_endpoint,
+                                    uint8_t old_direction,
+                                    uint8_t new_dev_addr,
+                                    uint8_t new_endpoint,
+                                    uint8_t new_direction);
 int zzusb_completion_needs_reply(int quick);
 int zzusb_bulk_resume_window(uint32_t requested, uint32_t completed,
                              uint32_t *offset, uint32_t *remaining);

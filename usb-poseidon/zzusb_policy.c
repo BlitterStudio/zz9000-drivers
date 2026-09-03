@@ -59,6 +59,18 @@ uint32_t zzusb_worker_timer_remaining(uint32_t delay_us,
     return elapsed_us < delay_us ? delay_us - elapsed_us : 0;
 }
 
+int zzusb_periodic_endpoint_matches(uint8_t old_dev_addr,
+                                    uint8_t old_endpoint,
+                                    uint8_t old_direction,
+                                    uint8_t new_dev_addr,
+                                    uint8_t new_endpoint,
+                                    uint8_t new_direction)
+{
+    return old_dev_addr == new_dev_addr &&
+           (old_endpoint & 0x0fU) == (new_endpoint & 0x0fU) &&
+           old_direction == new_direction;
+}
+
 int zzusb_completion_needs_reply(int quick)
 {
     return !quick;

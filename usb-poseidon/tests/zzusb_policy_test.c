@@ -61,6 +61,12 @@ int main(void)
     CHECK(zzusb_worker_timer_remaining(8000, 7000) == 1000);
     CHECK(zzusb_worker_timer_remaining(8000, 8000) == 0);
     CHECK(zzusb_worker_timer_remaining(8000, 9000) == 0);
+    CHECK(zzusb_periodic_endpoint_matches(
+        5, 0x82, 0x80, 5, 2, 0x80));
+    CHECK(!zzusb_periodic_endpoint_matches(
+        5, 0x82, 0x80, 5, 2, 0));
+    CHECK(!zzusb_periodic_endpoint_matches(
+        5, 0x82, 0x80, 6, 2, 0x80));
     CHECK(!zzusb_negotiation_complete(0, -1));
     CHECK(zzusb_negotiation_complete(0, 0));
     CHECK(zzusb_negotiation_complete(0, 1));

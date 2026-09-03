@@ -672,8 +672,10 @@ static int detached_int_slot_matches(struct ZZIntPendingSlot *slot,
         slot->unit != unit)
         return 0;
     fill_int_arm_command(&candidate, unit, ior);
-    return memcmp(&slot->armed_command, &candidate,
-                  sizeof(candidate)) == 0;
+    return zzusb_periodic_endpoint_matches(
+        slot->armed_command.dev_addr, slot->armed_command.endpoint,
+        slot->armed_command.direction, candidate.dev_addr,
+        candidate.endpoint, candidate.direction);
 }
 
 static void clear_int_slot(struct ZZIntPendingSlot *slot)
@@ -721,6 +723,12 @@ static int queue_int_ior(struct ZZUSBUnit *unit,
     for (int i = 0; i < ZZ_INT_PENDING_SLOTS; i++) {
         struct ZZIntPendingSlot *slot = &IntPendingSlots[i];
         if (detached_int_slot_matches(slot, unit, ior)) {
+            struct ZZUSBCommand candidate;
+
+            fill_int_arm_command(&candidate, unit, ior);
+            slot->rearm_required =
+                memcmp(&slot->armed_command, &candidate,
+                       sizeof(candidate)) != 0;
             slot->ior = ior;
             slot->reuse_pending = 1;
             slot->abort_requested = 0;
@@ -4013,7 +4021,9 @@ static void hotplug_poll_task(void)
         int any_pending = 0;
         int reap_events;
         int root_poll_due = root_poll_elapsed_us >= 100000U;
-        uint32_t poll_delay_us = 100000U;
+        uint32_t poll_delay_us = root_poll_due ? 100000U :
+            zzusb_worker_timer_remaining(100000U,
+                                         root_poll_elapsed_us);
 
         Disable();
         reap_events = USBEventPending != 0;
