@@ -1544,31 +1544,45 @@ static int negotiate_usb_proxy(volatile uint8_t *base,
 }
 
 /*
- * Poseidon queries capabilities synchronously, before the long-lived worker
- * necessarily owns timer.device. Supply a temporary timer for that one
- * negotiation instead of busy-spinning the high-priority Poseidon task.
+ * UHCMD_QUERYDEVICE is Poseidon's only capability snapshot. The ARM can
+ * still be bringing the USB proxy online when the device is opened, so a
+ * single missed QUERY_CAPS permanently hides ISO support for this session.
+ * Retry while the caller's timer is valid before publishing capabilities.
+ * The caller must own either the worker timer or a foreground timer for
+ * the inter-attempt waits; every retry is self-contained because
+ * negotiate_usb_proxy() re-initializes the protocol state.
  */
-static int negotiate_usb_proxy_foreground(
-    volatile uint8_t *base, struct ZZUSBProtocolState *state)
+static int negotiate_usb_proxy_retries(volatile uint8_t *base,
+                                       struct ZZUSBProtocolState *state)
 {
-    struct ZZForegroundTimer timer;
     int negotiated = 0;
     int attempt;
 
-    if (!open_foreground_timer(&timer))
-        return 0;
-    /*
-     * UHCMD_QUERYDEVICE is Poseidon's only capability snapshot. The ARM can
-     * still be bringing the USB proxy online when the device is opened, so a
-     * single missed QUERY_CAPS permanently hides ISO support for this session.
-     * Retry here, while the caller-owned timer is valid, before publishing
-     * capabilities.
-     */
     for (attempt = 0; attempt < 5 && !negotiated; attempt++) {
         negotiated = negotiate_usb_proxy(base, state, 1);
         if (!negotiated && attempt != 4)
             worker_wait_us(100000U);
     }
+    return negotiated;
+}
+
+/*
+ * Poseidon queries capabilities synchronously, before the long-lived worker
+ * necessarily owns timer.device. Supply a temporary timer for that one
+ * negotiation instead of busy-spinning the high-priority Poseidon task.
+ * Return -1 when the timer cannot be acquired so the caller keeps
+ * negotiation pending and retries after the transient failure instead of
+ * pinning the session to legacy capabilities.
+ */
+static int negotiate_usb_proxy_foreground(
+    volatile uint8_t *base, struct ZZUSBProtocolState *state)
+{
+    struct ZZForegroundTimer timer;
+    int negotiated;
+
+    if (!open_foreground_timer(&timer))
+        return -1;
+    negotiated = negotiate_usb_proxy_retries(base, state);
     close_foreground_timer(&timer);
     return negotiated;
 }
@@ -3895,10 +3909,19 @@ static void hotplug_poll_task(void)
         WorkerTimerMask = 1UL << io_timer.signal;
         ObtainSemaphore(&PollBase->zz_Lock);
         if (!ProtocolNegotiationComplete) {
-            negotiate_usb_proxy(
-                (volatile uint8_t *)PollBase->zz_Units[0].zz_Registers,
-                &ProtocolStates[0], 1);
-            ProtocolNegotiationComplete = 1;
+            /*
+             * The ARM can still be bringing the USB proxy online while
+             * this task starts. A single missed QUERY_CAPS would mark the
+             * session legacy and hide ISO and diagnostic capabilities from
+             * every later query, so run the bounded retry with the worker
+             * timer before publishing the negotiated mode.
+             */
+            ProtocolNegotiationComplete = zzusb_negotiation_complete(
+                ProtocolNegotiationComplete,
+                negotiate_usb_proxy_retries(
+                    (volatile uint8_t *)
+                        PollBase->zz_Units[0].zz_Registers,
+                    &ProtocolStates[0]));
         }
         ReleaseSemaphore(&PollBase->zz_Lock);
     }
@@ -4673,9 +4696,15 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
     case UHCMD_QUERYDEVICE:
         {
             if (!ProtocolNegotiationComplete) {
-                negotiate_usb_proxy_foreground(base, &ProtocolStates[0]);
-                if (ProtocolStates[0].registers == base)
-                    ProtocolNegotiationComplete = 1;
+                /*
+                 * -1 means the temporary timer could not be acquired, so
+                 * no attempt ran: leave negotiation pending and retry on
+                 * the next query after the transient failure.
+                 */
+                ProtocolNegotiationComplete = zzusb_negotiation_complete(
+                    ProtocolNegotiationComplete,
+                    negotiate_usb_proxy_foreground(
+                        base, &ProtocolStates[0]));
             }
             dstr(unit->zz_Registers, "[zzusbhw] proxy mode=");
             dhex8(unit->zz_Registers, ProtocolStates[0].mode);

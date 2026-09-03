@@ -70,6 +70,15 @@ int zzusb_sync_command_timer_available(int foreground_opened,
 {
     return foreground_opened && foreground_owned;
 }
+/*
+ * attempt_result: -1 = no attempt ran (e.g. the caller's timer was
+ * unavailable), 0 = legacy fallback selected, 1 = v2 selected.
+ * Completion is sticky and independent of whether v2 won.
+ */
+int zzusb_negotiation_complete(int complete, int attempt_result)
+{
+    return complete || attempt_result >= 0;
+}
 
 
 int zzusb_is_audio_rate_set_cur(uint8_t request_type, uint8_t request,
