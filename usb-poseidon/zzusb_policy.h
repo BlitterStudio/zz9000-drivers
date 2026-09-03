@@ -1,0 +1,26 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+#ifndef ZZUSB_POLICY_H
+#define ZZUSB_POLICY_H
+
+#include <stdint.h>
+
+struct zzusb_worker_timer {
+    uint32_t delay_us;
+    uint8_t pending;
+};
+
+void zzusb_worker_timer_init(struct zzusb_worker_timer *timer);
+int zzusb_worker_timer_arm(struct zzusb_worker_timer *timer,
+                           uint32_t delay_us);
+uint32_t zzusb_worker_timer_expire(struct zzusb_worker_timer *timer,
+                                   int timer_signaled);
+void zzusb_worker_timer_cancel(struct zzusb_worker_timer *timer);
+int zzusb_completion_needs_reply(int quick);
+
+int zzusb_is_audio_rate_set_cur(uint8_t request_type, uint8_t request,
+                                uint16_t value, uint16_t length,
+                                uint32_t data_length);
+int zzusb_audio_rate_matches(const void *requested, const void *current,
+                             uint32_t length);
+
+#endif

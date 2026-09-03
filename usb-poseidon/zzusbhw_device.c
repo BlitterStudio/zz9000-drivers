@@ -45,6 +45,7 @@
 #include "zzusb_engine.h"
 #include "zzusb_interrupt.h"
 #include "zzusb_iso.h"
+#include "zzusb_policy.h"
 #include "zzcfg_query.h"
 
 /*
@@ -3874,6 +3875,9 @@ static void hotplug_poll_task(void)
     }
     int timer_poll_due = 0;
     uint32_t root_poll_elapsed_us = 100000U;
+    struct zzusb_worker_timer worker_timer;
+
+    zzusb_worker_timer_init(&worker_timer);
 
     for (;;) {
         int any_pending = 0;
@@ -3941,32 +3945,48 @@ static void hotplug_poll_task(void)
         if (work_queue_pending())
             continue;
 
-        if (!any_pending) {
-            Wait(mask);
-        } else if (timer_open) {
+        if (timer_open && (any_pending || worker_timer.pending)) {
+            uint32_t elapsed_us;
+            ULONG wake;
+
             /*
-             * Pending interrupt IORs are normal. Do not spin in a CPU
-             * delay loop here: that made the whole OS feel stuck while
-             * Poseidon held a hub-status request open. Sleep on
-             * timer.device and wake early if begin_io signals new work.
+             * Keep an outstanding timer armed across worker-signal wakeups.
+             * Replacing it on every signal discards elapsed time and lets a
+             * busy event source starve root polling and deferred retries.
+             * A newly discovered earlier deadline may replace the old timer;
+             * subsequent equal-deadline wakeups leave it running.
              */
-            SetSignal(0, timer_mask);
-            timer_req.tr_node.io_Command = TR_ADDREQUEST;
-            timer_req.tr_time.tv_secs = 0;
-            timer_req.tr_time.tv_micro = poll_delay_us;
-            SendIO((struct IORequest*)&timer_req);
-            {
-                ULONG wake = Wait(mask | timer_mask);
-                if (wake & timer_mask) {
+            if (worker_timer.pending && any_pending &&
+                poll_delay_us < worker_timer.delay_us) {
+                if (CheckIO((struct IORequest*)&timer_req)) {
+                    WaitIO((struct IORequest*)&timer_req);
+                    elapsed_us = zzusb_worker_timer_expire(
+                        &worker_timer, 1);
                     timer_poll_due = 1;
-                    root_poll_elapsed_us += poll_delay_us;
-                    work_queue_advance_delay(poll_delay_us);
+                    root_poll_elapsed_us += elapsed_us;
+                    work_queue_advance_delay(elapsed_us);
+                    continue;
                 }
-            }
-            if (!CheckIO((struct IORequest*)&timer_req)) {
                 AbortIO((struct IORequest*)&timer_req);
+                WaitIO((struct IORequest*)&timer_req);
+                zzusb_worker_timer_cancel(&worker_timer);
             }
-            WaitIO((struct IORequest*)&timer_req);
+            if (zzusb_worker_timer_arm(&worker_timer, poll_delay_us)) {
+                SetSignal(0, timer_mask);
+                timer_req.tr_node.io_Command = TR_ADDREQUEST;
+                timer_req.tr_time.tv_secs = 0;
+                timer_req.tr_time.tv_micro = worker_timer.delay_us;
+                SendIO((struct IORequest*)&timer_req);
+            }
+            wake = Wait(mask | timer_mask);
+            elapsed_us = zzusb_worker_timer_expire(
+                &worker_timer, (wake & timer_mask) != 0);
+            if (elapsed_us) {
+                WaitIO((struct IORequest*)&timer_req);
+                timer_poll_due = 1;
+                root_poll_elapsed_us += elapsed_us;
+                work_queue_advance_delay(elapsed_us);
+            }
         } else {
             Wait(mask);
         }
@@ -4531,6 +4551,44 @@ struct ZZNSDeviceQueryResult {
     const UWORD *SupportedCommands;
 };
 
+static int stalled_audio_rate_is_current(
+    volatile uint8_t *base, struct ZZUSBUnit *unit,
+    const struct IOUsbHWReq *ior, const struct ZZUSBCommand *set_command)
+{
+    struct ZZUSBCommand query;
+    volatile struct ZZUSBCommand *result;
+    volatile uint8_t *reply_data;
+    uint8_t current_rate[3];
+    uint16_t status;
+
+    if (!ior->iouh_Data ||
+        !zzusb_is_audio_rate_set_cur(
+            ior->iouh_SetupData.bmRequestType,
+            ior->iouh_SetupData.bRequest,
+            SWAP16(ior->iouh_SetupData.wValue),
+            SWAP16(ior->iouh_SetupData.wLength),
+            ior->iouh_Length))
+        return 0;
+
+    query = *set_command;
+    query.direction = 0x80;
+    query.data_length = 3;
+    query.setup_bRequestType = 0xa2;
+    query.setup_bRequest = 0x81;
+    status = send_usb_cmd_with_rt_service(base, &query, NULL, 0, unit);
+    if (status != ZZUSB_STATUS_OK)
+        return 0;
+
+    result = (volatile struct ZZUSBCommand *)(base + 0xa000);
+    if (result->actual_length != 3)
+        return 0;
+    reply_data = base + 0xa000 + ZZUSB_DATA_OFFSET;
+    current_rate[0] = reply_data[0];
+    current_rate[1] = reply_data[1];
+    current_rate[2] = reply_data[2];
+    return zzusb_audio_rate_matches(ior->iouh_Data, current_rate, 3);
+}
+
 static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
 {
     struct ZZUSBBase* ZZBase = (struct ZZUSBBase*)dev;
@@ -4903,14 +4961,15 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
                         ior->iouh_SetupData.bRequest == 0x0a) {
                         ior->iouh_Req.io_Error = 0;
                     } else if (status == ZZUSB_STATUS_STALL &&
-                               ior->iouh_SetupData.bmRequestType == 0x22 &&
-                               ior->iouh_SetupData.bRequest == 0x01) {
+                               stalled_audio_rate_is_current(
+                                   base, unit, ior, &cmd)) {
                         /*
-                         * Some fixed-rate USB Audio 1.0 devices advertise
-                         * endpoint sampling-frequency control but stall
-                         * SET_CUR. Poseidon's audio class aborts before
-                         * StartRTIso on that response, although the selected
-                         * alternate setting already fixes the stream rate.
+                         * A fixed-rate USB Audio 1.0 endpoint may stall
+                         * sampling-frequency SET_CUR even when it is already
+                         * running at the requested rate. Suppress only that
+                         * harmless case: a successful GET_CUR must report the
+                         * same three-byte rate. Unsupported rates and other
+                         * endpoint controls retain their original stall.
                          */
                         LastAudioControlSeen = 2;
                         ior->iouh_Actual = ior->iouh_Length;
@@ -5560,8 +5619,8 @@ static void __attribute__((used)) begin_io(
             ior->iouh_Req.io_Error = start_rt_iso_handler(unit, ior);
         else
             ior->iouh_Req.io_Error = stop_rt_iso_handler(unit, ior);
-        if (!(ior->iouh_Req.io_Flags & IOF_QUICK) &&
-            ior->iouh_Req.io_Message.mn_ReplyPort)
+        if (zzusb_completion_needs_reply(
+                (ior->iouh_Req.io_Flags & IOF_QUICK) != 0))
             ReplyMsg(&ior->iouh_Req.io_Message);
         return;
     }

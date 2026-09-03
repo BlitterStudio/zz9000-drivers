@@ -8,4 +8,4 @@ fi
 
 export PATH=/opt/amiga/bin:"$PATH"
 
-m68k-amigaos-gcc -m68020 -mtune=68020-60 -msoft-float -s -Wall -Wextra -Wno-unused-parameter -fomit-frame-pointer -nostdlib -nostartfiles -O2 -I. -I../include -o zzusbhw.device zzusbhw_device.c zzusb_engine.c zzusb_iso.c -lgcc -lc
+m68k-amigaos-gcc -m68020 -mtune=68020-60 -msoft-float -s -Wall -Wextra -Wno-unused-parameter -fomit-frame-pointer -nostdlib -nostartfiles -O2 -I. -I../include -o zzusbhw.device zzusbhw_device.c zzusb_engine.c zzusb_iso.c zzusb_policy.c -lgcc -lc

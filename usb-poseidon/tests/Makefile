@@ -7,7 +7,8 @@ TARGETS := $(BUILD_DIR)/zzusb_legacy_model_test \
 	$(BUILD_DIR)/zzusb_error_test \
 	$(BUILD_DIR)/zzusb_diag_test \
 	$(BUILD_DIR)/zzusb_interrupt_test \
-	$(BUILD_DIR)/zzusb_iso_test
+	$(BUILD_DIR)/zzusb_iso_test \
+	$(BUILD_DIR)/zzusb_policy_test
 
 .PHONY: test clean
 
@@ -18,6 +19,7 @@ test: $(TARGETS)
 	$(BUILD_DIR)/zzusb_diag_test
 	$(BUILD_DIR)/zzusb_interrupt_test
 	$(BUILD_DIR)/zzusb_iso_test
+	$(BUILD_DIR)/zzusb_policy_test
 
 $(BUILD_DIR)/zzusb_legacy_model_test: zzusb_legacy_model_test.c fixtures/legacy_mailbox.h
 	@mkdir -p $(BUILD_DIR)
@@ -42,6 +44,10 @@ $(BUILD_DIR)/zzusb_interrupt_test: zzusb_interrupt_test.c ../zzusb_interrupt.h
 $(BUILD_DIR)/zzusb_iso_test: zzusb_iso_test.c ../zzusb_iso.c ../zzusb_iso.h
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) -I.. -o $@ zzusb_iso_test.c ../zzusb_iso.c
+
+$(BUILD_DIR)/zzusb_policy_test: zzusb_policy_test.c ../zzusb_policy.c ../zzusb_policy.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I.. -o $@ zzusb_policy_test.c ../zzusb_policy.c
 
 clean:
 	rm -rf $(BUILD_DIR)
