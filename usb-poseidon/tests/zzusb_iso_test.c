@@ -192,6 +192,37 @@ static void test_realtime_lifecycle(void)
     assert(!zzusb_rt_remove(&lifecycle));
 }
 
+static void test_deferred_realtime_remove(void)
+{
+    struct zzusb_rt_lifecycle lifecycle;
+    uint32_t batch;
+
+    zzusb_rt_init(&lifecycle);
+    assert(zzusb_rt_add(&lifecycle));
+    assert(zzusb_rt_request_remove(&lifecycle));
+    assert(lifecycle.state == ZZUSB_RT_FREE);
+
+    assert(zzusb_rt_add(&lifecycle));
+    assert(zzusb_rt_start(&lifecycle));
+    batch = zzusb_rt_queue(&lifecycle);
+    assert(batch != 0);
+    assert(zzusb_rt_request_remove(&lifecycle));
+    assert(lifecycle.state == ZZUSB_RT_STOPPING);
+    assert(lifecycle.remove_pending);
+    assert(lifecycle.in_flight == 1);
+    assert(zzusb_rt_finish_stop(&lifecycle));
+    assert(lifecycle.state == ZZUSB_RT_FREE);
+    assert(lifecycle.in_flight == 0);
+
+    assert(zzusb_rt_add(&lifecycle));
+    assert(zzusb_rt_start(&lifecycle));
+    assert(zzusb_rt_begin_stop(&lifecycle));
+    assert(zzusb_rt_request_remove(&lifecycle));
+    assert(lifecycle.remove_pending);
+    assert(zzusb_rt_finish_stop(&lifecycle));
+    assert(lifecycle.state == ZZUSB_RT_FREE);
+}
+
 static void test_status_flags(void)
 {
     assert(zzusb_iso_status_flags(ZZUSB_ISO_PACKET_OK) == 0);
@@ -209,6 +240,7 @@ int main(void)
     test_packet_plans();
     test_wire_round_trip();
     test_realtime_lifecycle();
+    test_deferred_realtime_remove();
     test_status_flags();
     puts("zzusb_iso_test: ok");
     return 0;

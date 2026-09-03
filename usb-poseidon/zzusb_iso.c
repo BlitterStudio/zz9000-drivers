@@ -346,11 +346,16 @@ int zzusb_rt_begin_stop(struct zzusb_rt_lifecycle *lifecycle)
 
 int zzusb_rt_finish_stop(struct zzusb_rt_lifecycle *lifecycle)
 {
+    int remove_pending;
+
     if (!lifecycle || lifecycle->state != ZZUSB_RT_STOPPING)
         return 0;
+    remove_pending = lifecycle->remove_pending;
     memset(lifecycle->queued_ids, 0, sizeof(lifecycle->queued_ids));
     lifecycle->in_flight = 0;
     lifecycle->state = ZZUSB_RT_STOPPED;
+    if (remove_pending)
+        zzusb_rt_init(lifecycle);
     return 1;
 }
 
@@ -361,5 +366,21 @@ int zzusb_rt_remove(struct zzusb_rt_lifecycle *lifecycle)
          lifecycle->state != ZZUSB_RT_STOPPED))
         return 0;
     zzusb_rt_init(lifecycle);
+    return 1;
+}
+
+int zzusb_rt_request_remove(struct zzusb_rt_lifecycle *lifecycle)
+{
+    if (!lifecycle)
+        return 0;
+    if (lifecycle->state == ZZUSB_RT_ADDED ||
+        lifecycle->state == ZZUSB_RT_STOPPED)
+        return zzusb_rt_remove(lifecycle);
+    if (lifecycle->state == ZZUSB_RT_RUNNING &&
+        !zzusb_rt_begin_stop(lifecycle))
+        return 0;
+    if (lifecycle->state != ZZUSB_RT_STOPPING)
+        return 0;
+    lifecycle->remove_pending = 1;
     return 1;
 }

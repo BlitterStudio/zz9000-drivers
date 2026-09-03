@@ -2567,6 +2567,8 @@ static uint16_t stop_rt_iso_slot(struct ZZRTIsoSlot *slot)
 
     zzusb_rt_finish_stop(&slot->lifecycle);
     dstr(slot->unit->zz_Registers, "[zzusbhw] RTE\r\n");
+    if (slot->lifecycle.state == ZZUSB_RT_FREE)
+        memset(slot, 0, sizeof(*slot));
     return ZZUSB_STATUS_OK;
 }
 
@@ -2775,7 +2777,6 @@ static BYTE stop_rt_iso_handler(struct ZZUSBUnit *unit,
 static BYTE remove_rt_iso_handler(struct ZZUSBUnit *unit,
                                   struct IOUsbHWReq *ior)
 {
-
     struct IOUsbHWRTIso *handler =
         (struct IOUsbHWRTIso *)ior->iouh_Data;
     struct ZZRTIsoSlot *slot = find_rt_iso_slot(handler);
@@ -2784,17 +2785,31 @@ static BYTE remove_rt_iso_handler(struct ZZUSBUnit *unit,
     if (!slot || slot->unit != unit)
         return UHIOERR_BADPARAMS;
     dstr(unit->zz_Registers, "[zzusbhw] RMR\r\n");
-    if (slot->lifecycle.state == ZZUSB_RT_RUNNING ||
-        slot->lifecycle.state == ZZUSB_RT_STOPPING) {
-        status = stop_rt_iso_slot(slot);
-        if (status != ZZUSB_STATUS_OK)
-            return map_proxy_status(status);
-    }
-    if (!zzusb_rt_remove(&slot->lifecycle))
-        return UHIOERR_BADPARAMS;
+
+    /*
+     * Poseidon frees the pipe, handler, and audio buffers immediately after
+     * this command returns and ignores an error result. Revoke every Amiga
+     * callback and detach the external handler before attempting firmware
+     * retirement. If STOP is temporarily unavailable, the worker retains
+     * only driver-owned state and finishes retirement asynchronously.
+     */
+    rt_cancel_contexts(slot, ZZUSB_RT_FLAG_PACKET_ERROR);
+    memset(&slot->out_request, 0, sizeof(slot->out_request));
     handler->urti_DriverPrivate1 = NULL;
+    slot->handler = NULL;
+    slot->start_requested = 0;
+    slot->stop_requested = 0;
+    if (!zzusb_rt_request_remove(&slot->lifecycle))
+        return UHIOERR_BADPARAMS;
+    if (slot->lifecycle.state != ZZUSB_RT_FREE) {
+        status = stop_rt_iso_slot(slot);
+        if (status != ZZUSB_STATUS_OK &&
+            PollBase && PollBase->zz_PollTask && PollBase->zz_PollSignal)
+            Signal(PollBase->zz_PollTask, PollBase->zz_PollSignal);
+    } else {
+        memset(slot, 0, sizeof(*slot));
+    }
     dstr(unit->zz_Registers, "[zzusbhw] RME\r\n");
-    memset(slot, 0, sizeof(*slot));
     return 0;
 }
 
