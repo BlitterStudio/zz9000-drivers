@@ -5539,7 +5539,6 @@ static int command_requires_sync_timer(UWORD command)
     switch (command) {
     case CMD_RESET:
     case CMD_FLUSH:
-    case UHCMD_ADDISOHANDLER:
     case UHCMD_REMISOHANDLER:
         return 1;
     default:
