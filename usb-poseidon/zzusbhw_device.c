@@ -335,7 +335,7 @@ static uint32_t WorkSequence = 1;
 static uint32_t EnqueueSequence = 1;
 static struct timerequest *WorkerTimerRequest;
 static ULONG WorkerTimerMask;
-static uint8_t ProtocolNegotiated;
+static uint8_t ProtocolNegotiationComplete;
 static struct timerequest *ForegroundTimerRequest;
 static ULONG ForegroundTimerMask;
 static struct Task *ForegroundTimerOwner;
@@ -3056,7 +3056,7 @@ static struct Library* __attribute__((used)) init_device(uint8_t *seg_list asm("
     ProtocolStates[0].registers = registers;
     ProtocolStates[0].next_request_id = 1;
     ProtocolStates[0].mode = ZZUSB_PROTOCOL_LEGACY;
-    ProtocolNegotiated = 0;
+    ProtocolNegotiationComplete = 0;
     memset(WorkSlots, 0, sizeof(WorkSlots));
     memset(RTIsoSlots, 0, sizeof(RTIsoSlots));
     memset(SimpleIsoCleanup, 0, sizeof(SimpleIsoCleanup));
@@ -3882,10 +3882,12 @@ static void hotplug_poll_task(void)
         WorkerTimerRequest = &io_timer.request;
         WorkerTimerMask = 1UL << io_timer.signal;
         ObtainSemaphore(&PollBase->zz_Lock);
-        if (!ProtocolNegotiated)
-            ProtocolNegotiated = negotiate_usb_proxy(
+        if (!ProtocolNegotiationComplete) {
+            negotiate_usb_proxy(
                 (volatile uint8_t *)PollBase->zz_Units[0].zz_Registers,
                 &ProtocolStates[0], 1);
+            ProtocolNegotiationComplete = 1;
+        }
         ReleaseSemaphore(&PollBase->zz_Lock);
     }
     int timer_poll_due = 0;
@@ -4658,9 +4660,11 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
         break;
     case UHCMD_QUERYDEVICE:
         {
-            if (!ProtocolNegotiated)
-                ProtocolNegotiated = negotiate_usb_proxy_foreground(
-                    base, &ProtocolStates[0]);
+            if (!ProtocolNegotiationComplete) {
+                negotiate_usb_proxy_foreground(base, &ProtocolStates[0]);
+                if (ProtocolStates[0].registers == base)
+                    ProtocolNegotiationComplete = 1;
+            }
             dstr(unit->zz_Registers, "[zzusbhw] proxy mode=");
             dhex8(unit->zz_Registers, ProtocolStates[0].mode);
             dstr(unit->zz_Registers, " caps=");
@@ -5340,6 +5344,8 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
 static int command_requires_sync_timer(UWORD command)
 {
     switch (command) {
+    case CMD_RESET:
+    case CMD_FLUSH:
     case UHCMD_ADDISOHANDLER:
     case UHCMD_REMISOHANDLER:
         return 1;
