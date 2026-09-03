@@ -1845,6 +1845,8 @@ static ULONG iso_public_capabilities(struct ZZUSBUnit *unit)
     if (state->capabilities & ZZUSB_CAP_ISO_SIMPLE)
         capabilities |= UHCF_ISO;
     if (UtilityBase && (capabilities & UHCF_QUICKIO) &&
+        zzusb_sideband_publish_available(
+            state->quarantined, state->maintenance_quarantined) &&
         (state->capabilities & ZZUSB_CAP_ISO_REALTIME))
         capabilities |= UHCF_RT_ISO;
 
@@ -4003,6 +4005,7 @@ static void hotplug_poll_task(void)
     int timer_poll_due = 0;
     uint32_t root_poll_elapsed_us = 100000U;
     struct zzusb_worker_timer worker_timer;
+    uint64_t timer_started_us = 0;
 
     zzusb_worker_timer_init(&worker_timer);
 
@@ -4091,14 +4094,27 @@ static void hotplug_poll_task(void)
                     WaitIO((struct IORequest*)&timer_req);
                     elapsed_us = zzusb_worker_timer_expire(
                         &worker_timer, 1);
+                    timer_started_us = 0;
                     timer_poll_due = 1;
                     root_poll_elapsed_us += elapsed_us;
                     work_queue_advance_delay(elapsed_us);
                     continue;
                 }
-                AbortIO((struct IORequest*)&timer_req);
-                WaitIO((struct IORequest*)&timer_req);
-                zzusb_worker_timer_cancel(&worker_timer);
+                {
+                    uint64_t now_us;
+
+                    if (worker_now_us(&now_us)) {
+                        elapsed_us = zzusb_worker_timer_elapsed(
+                            timer_started_us, now_us,
+                            worker_timer.delay_us);
+                        AbortIO((struct IORequest*)&timer_req);
+                        WaitIO((struct IORequest*)&timer_req);
+                        zzusb_worker_timer_cancel(&worker_timer);
+                        timer_started_us = 0;
+                        root_poll_elapsed_us += elapsed_us;
+                        work_queue_advance_delay(elapsed_us);
+                    }
+                }
             }
             if (zzusb_worker_timer_arm(&worker_timer, poll_delay_us)) {
                 SetSignal(0, timer_mask);
@@ -4106,11 +4122,14 @@ static void hotplug_poll_task(void)
                 timer_req.tr_time.tv_secs = 0;
                 timer_req.tr_time.tv_micro = worker_timer.delay_us;
                 SendIO((struct IORequest*)&timer_req);
+                if (!worker_now_us(&timer_started_us))
+                    timer_started_us = 0;
             }
             wake = Wait(mask | timer_mask);
             elapsed_us = zzusb_worker_timer_expire(
                 &worker_timer, (wake & timer_mask) != 0);
             if (elapsed_us) {
+                timer_started_us = 0;
                 WaitIO((struct IORequest*)&timer_req);
                 timer_poll_due = 1;
                 root_poll_elapsed_us += elapsed_us;

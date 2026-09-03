@@ -42,6 +42,17 @@ void zzusb_worker_timer_cancel(struct zzusb_worker_timer *timer)
     }
 }
 
+uint32_t zzusb_worker_timer_elapsed(uint64_t started_us, uint64_t now_us,
+                                    uint32_t delay_us)
+{
+    uint64_t elapsed;
+
+    if (!started_us || now_us < started_us)
+        return 0;
+    elapsed = now_us - started_us;
+    return elapsed > delay_us ? delay_us : (uint32_t)elapsed;
+}
+
 int zzusb_completion_needs_reply(int quick)
 {
     return !quick;

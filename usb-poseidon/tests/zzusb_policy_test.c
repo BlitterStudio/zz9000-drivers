@@ -54,6 +54,10 @@ int main(void)
     CHECK(!zzusb_quickio_available(0, 1, 1));
     CHECK(!zzusb_quickio_available(1, 0, 1));
     CHECK(!zzusb_quickio_available(1, 1, 0));
+    CHECK(zzusb_worker_timer_elapsed(1000, 91000, 100000) == 90000);
+    CHECK(zzusb_worker_timer_elapsed(1000, 201000, 100000) == 100000);
+    CHECK(zzusb_worker_timer_elapsed(0, 91000, 100000) == 0);
+    CHECK(zzusb_worker_timer_elapsed(91000, 1000, 100000) == 0);
     CHECK(!zzusb_negotiation_complete(0, -1));
     CHECK(zzusb_negotiation_complete(0, 0));
     CHECK(zzusb_negotiation_complete(0, 1));
