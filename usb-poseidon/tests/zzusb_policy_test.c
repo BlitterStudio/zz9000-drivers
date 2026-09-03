@@ -66,11 +66,12 @@ int main(void)
     CHECK(zzusb_audio_rate_matches(requested_rate, current_rate, 3));
     CHECK(!zzusb_audio_rate_matches(requested_rate, other_rate, 3));
     CHECK(!zzusb_audio_rate_matches(requested_rate, current_rate, 2));
-    CHECK(zzusb_audio_rate_input_index(0x0002, &input_index));
+    CHECK(zzusb_audio_rate_input_index(0x0002, 1, &input_index));
     CHECK(input_index == 0x0082);
-    CHECK(!zzusb_audio_rate_input_index(0x0082, &input_index));
-    CHECK(!zzusb_audio_rate_input_index(0x0010, &input_index));
-    CHECK(!zzusb_audio_rate_input_index(0, &input_index));
+    CHECK(!zzusb_audio_rate_input_index(0x0002, 0, &input_index));
+    CHECK(!zzusb_audio_rate_input_index(0x0082, 1, &input_index));
+    CHECK(!zzusb_audio_rate_input_index(0x0010, 1, &input_index));
+    CHECK(!zzusb_audio_rate_input_index(0, 1, &input_index));
 
     puts("USB worker timer and audio-control policies satisfied");
     return EXIT_SUCCESS;

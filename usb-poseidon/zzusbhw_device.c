@@ -4729,6 +4729,20 @@ static int stalled_audio_rate_is_current(
         SWAP16(ior->iouh_SetupData.wIndex));
 }
 
+static int rt_iso_input_endpoint_known(
+    const struct ZZUSBUnit *unit, uint16_t address, uint16_t endpoint)
+{
+    for (unsigned index = 0; index < ZZ_RT_ISO_SLOTS; index++) {
+        const struct ZZRTIsoSlot *slot = &RTIsoSlots[index];
+
+        if (slot->lifecycle.state != ZZUSB_RT_FREE &&
+            slot->unit == unit && slot->address == address &&
+            slot->endpoint == endpoint && slot->direction_in)
+            return 1;
+    }
+    return 0;
+}
+
 static int retry_stalled_audio_rate_for_input(
     volatile uint8_t *base, struct ZZUSBUnit *unit,
     const struct IOUsbHWReq *ior, const struct ZZUSBCommand *set_command)
@@ -4739,7 +4753,11 @@ static int retry_stalled_audio_rate_for_input(
 
     if (!is_audio_rate_request(ior) ||
         !zzusb_audio_rate_input_index(
-            SWAP16(ior->iouh_SetupData.wIndex), &input_index))
+            SWAP16(ior->iouh_SetupData.wIndex),
+            rt_iso_input_endpoint_known(
+                unit, ior->iouh_DevAddr,
+                SWAP16(ior->iouh_SetupData.wIndex)),
+            &input_index))
         return 0;
 
     /*
@@ -5851,11 +5869,14 @@ static void __attribute__((used)) begin_io(
         if (!zzusb_sync_command_timer_available(
                 timer_open, ForegroundTimerOwner == FindTask(NULL))) {
             ior->iouh_Actual = 0;
-            if (ior->iouh_Req.io_Command == UHCMD_REMISOHANDLER)
+            if (ior->iouh_Req.io_Command == UHCMD_REMISOHANDLER) {
+                ObtainSemaphore(&base->zz_Lock);
                 ior->iouh_Req.io_Error =
                     remove_rt_iso_handler(unit, ior, 0);
-            else
+                ReleaseSemaphore(&base->zz_Lock);
+            } else {
                 ior->iouh_Req.io_Error = UHIOERR_HOSTERROR;
+            }
             if (!(ior->iouh_Req.io_Flags & IOF_QUICK))
                 ReplyMsg(&ior->iouh_Req.io_Message);
             return;

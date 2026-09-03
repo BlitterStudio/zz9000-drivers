@@ -33,7 +33,7 @@ int zzusb_is_audio_rate_set_cur(uint8_t request_type, uint8_t request,
                                 uint32_t data_length);
 int zzusb_audio_rate_matches(const void *requested, const void *current,
                              uint32_t length);
-int zzusb_audio_rate_input_index(uint16_t index,
+int zzusb_audio_rate_input_index(uint16_t index, int known_input,
                                  uint16_t *input_index);
 
 #endif

@@ -101,10 +101,11 @@ int zzusb_audio_rate_matches(const void *requested, const void *current,
            memcmp(requested, current, 3) == 0;
 }
 
-int zzusb_audio_rate_input_index(uint16_t index,
+int zzusb_audio_rate_input_index(uint16_t index, int known_input,
                                  uint16_t *input_index)
 {
-    if (!input_index || index == 0 || (index & 0xfff0U) != 0)
+    if (!known_input || !input_index || index == 0 ||
+        (index & 0xfff0U) != 0)
         return 0;
     *input_index = (uint16_t)(index | 0x0080U);
     return 1;
