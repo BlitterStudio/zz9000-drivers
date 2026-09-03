@@ -367,7 +367,9 @@ static uint16_t LastLifecycleCommand;
 
 
 static void execute_io(struct Library *dev, struct IOUsbHWReq *ior);
-static int process_work_queue(struct ZZWorkSlot **retry_slot);
+static int process_work_queue(struct ZZWorkSlot **retry_slot,
+                              struct IOUsbHWReq **retry_ior,
+                              uint32_t *retry_sequence);
 static uint32_t work_queue_min_delay_us(void);
 static void work_queue_advance_delay(uint32_t elapsed_us);
 static int work_queue_pending(void);
@@ -4037,6 +4039,8 @@ static void hotplug_poll_task(void)
     for (;;) {
         int any_pending = 0;
         struct ZZWorkSlot *new_retry = NULL;
+        struct IOUsbHWReq *new_retry_ior = NULL;
+        uint32_t new_retry_sequence = 0;
         int reap_events;
         int root_poll_due = root_poll_elapsed_us >= 100000U;
         uint32_t poll_delay_us = root_poll_due ? 100000U :
@@ -4063,7 +4067,8 @@ static void hotplug_poll_task(void)
             ReleaseSemaphore(&PollBase->zz_Lock);
             poll_rt_iso(unit);
         }
-        process_work_queue(&new_retry);
+        process_work_queue(&new_retry, &new_retry_ior,
+                           &new_retry_sequence);
         if (new_retry) {
             uint32_t elapsed_us = 0;
 
@@ -4098,7 +4103,11 @@ static void hotplug_poll_task(void)
                 work_queue_advance_delay(elapsed_us);
             }
             Forbid();
-            new_retry->retry_delay_us = ZZUSB_IDLE_BULK_RETRY_US;
+            if (new_retry->ior == new_retry_ior &&
+                new_retry->sequence == new_retry_sequence &&
+                new_retry->lifecycle.state == ZZUSB_REQ_QUEUED &&
+                new_retry->retry_delay_us == 0)
+                new_retry->retry_delay_us = ZZUSB_IDLE_BULK_RETRY_US;
             Permit();
         }
 
@@ -5794,7 +5803,9 @@ static int bulk_in_waits_for_data(const struct IOUsbHWReq *ior)
 }
 
 
-static int process_work_queue(struct ZZWorkSlot **retry_slot)
+static int process_work_queue(struct ZZWorkSlot **retry_slot,
+                              struct IOUsbHWReq **retry_ior,
+                              uint32_t *retry_sequence)
 {
     struct ZZWorkSlot *slot = NULL;
     struct IOUsbHWReq *ior;
@@ -5802,6 +5813,10 @@ static int process_work_queue(struct ZZWorkSlot **retry_slot)
     int reply;
     if (retry_slot)
         *retry_slot = NULL;
+    if (retry_ior)
+        *retry_ior = NULL;
+    if (retry_sequence)
+        *retry_sequence = 0;
 
     Forbid();
     for (int i = 0; i < ZZ_WORK_SLOTS; i++) {
@@ -5862,6 +5877,10 @@ static int process_work_queue(struct ZZWorkSlot **retry_slot)
             slot->idle_bulk_retries++;
         if (retry_slot)
             *retry_slot = slot;
+        if (retry_ior)
+            *retry_ior = ior;
+        if (retry_sequence)
+            *retry_sequence = slot->sequence;
         ActiveWorkSlot = NULL;
         Permit();
         return 1;
