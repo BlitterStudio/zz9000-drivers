@@ -325,6 +325,7 @@ struct ZZWorkSlot {
     uint16_t completion_status;
     uint16_t idle_bulk_retries;
     uint32_t retry_delay_us;
+    uint32_t bulk_actual;
 };
 
 static struct ZZWorkSlot WorkSlots[ZZ_WORK_SLOTS];
@@ -2485,6 +2486,7 @@ static uint16_t stop_rt_iso_slot(struct ZZRTIsoSlot *slot)
     dstr(slot->unit->zz_Registers, "\r\n");
     if (!stop_status_retired(status))
         return status;
+    rt_cancel_contexts(slot, ZZUSB_RT_FLAG_PACKET_ERROR);
     memset(&slot->out_request, 0, sizeof(slot->out_request));
 
     zzusb_rt_finish_stop(&slot->lifecycle);
@@ -3571,6 +3573,9 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
             }
             slot->arm_in_progress = 0;
             if (slot->reuse_pending && status != ZZUSB_STATUS_OK) {
+                ior->iouh_Actual = 0;
+                ior->iouh_Req.io_Error = slot->abort_requested ?
+                    IOERR_ABORTED : map_proxy_status(status);
                 slot->armed = 1;
                 slot->reuse_pending = 0;
                 stop_status = stop_periodic_slot(slot);
@@ -5103,9 +5108,23 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
              */
             struct ZZUSBCommand cmd;
             uint16_t status = ZZUSB_STATUS_OK;
-            uint32_t remaining = ior->iouh_Length;
-            uint32_t total_actual = 0;
+            uint32_t remaining;
+            uint32_t total_actual;
+            uint32_t completed =
+                ActiveWorkSlot &&
+                ior->iouh_Dir == UHDIR_IN &&
+                !(ior->iouh_Flags & UHFF_NAKTIMEOUT) ?
+                ActiveWorkSlot->bulk_actual : 0;
             uint8_t *user_buf = (uint8_t *)ior->iouh_Data;
+
+            if (!zzusb_bulk_resume_window(ior->iouh_Length, completed,
+                                          &total_actual, &remaining)) {
+                ior->iouh_Actual = 0;
+                ior->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+                break;
+            }
+            if (user_buf)
+                user_buf += total_actual;
 
             /*
              * Bulk chunk size: 16 KB per EHCI transaction.
@@ -5184,6 +5203,10 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
                     }
 
                     total_actual += actual;
+                    if (ActiveWorkSlot &&
+                        ior->iouh_Dir == UHDIR_IN &&
+                        !(ior->iouh_Flags & UHFF_NAKTIMEOUT))
+                        ActiveWorkSlot->bulk_actual = total_actual;
                     user_buf += actual;
                     remaining -= actual;
 
@@ -5363,6 +5386,7 @@ static int enqueue_work(struct ZZUSBBase *base, struct ZZUSBUnit *unit,
         available->sequence = 0;
         available->idle_bulk_retries = 0;
         available->retry_delay_us = 0;
+        available->bulk_actual = 0;
         available->enqueue_seq = EnqueueSequence++;
         zzusb_engine_queue(&available->lifecycle);
         ior->iouh_Actual = 0;

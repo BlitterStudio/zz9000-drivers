@@ -18,6 +18,8 @@ int main(void)
     const uint8_t requested_rate[3] = { 0x44, 0xac, 0x00 };
     const uint8_t current_rate[3] = { 0x44, 0xac, 0x00 };
     const uint8_t other_rate[3] = { 0x80, 0xbb, 0x00 };
+    uint32_t bulk_offset;
+    uint32_t bulk_remaining;
 
     zzusb_worker_timer_init(&timer);
     CHECK(zzusb_worker_timer_arm(&timer, 20000));
@@ -33,6 +35,12 @@ int main(void)
     CHECK(zzusb_completion_needs_reply(0));
     CHECK(!zzusb_completion_needs_reply(1));
 
+    CHECK(zzusb_bulk_resume_window(65536, 16384, &bulk_offset,
+                                   &bulk_remaining));
+    CHECK(bulk_offset == 16384);
+    CHECK(bulk_remaining == 49152);
+    CHECK(!zzusb_bulk_resume_window(16384, 16385, &bulk_offset,
+                                    &bulk_remaining));
     CHECK(zzusb_is_audio_rate_set_cur(0x22, 0x01, 0x0100, 3, 3));
     CHECK(!zzusb_is_audio_rate_set_cur(0x22, 0x01, 0x0200, 3, 3));
     CHECK(!zzusb_is_audio_rate_set_cur(0x22, 0x01, 0x0100, 4, 4));

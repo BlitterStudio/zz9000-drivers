@@ -16,6 +16,8 @@ uint32_t zzusb_worker_timer_expire(struct zzusb_worker_timer *timer,
                                    int timer_signaled);
 void zzusb_worker_timer_cancel(struct zzusb_worker_timer *timer);
 int zzusb_completion_needs_reply(int quick);
+int zzusb_bulk_resume_window(uint32_t requested, uint32_t completed,
+                             uint32_t *offset, uint32_t *remaining);
 
 int zzusb_is_audio_rate_set_cur(uint8_t request_type, uint8_t request,
                                 uint16_t value, uint16_t length,
