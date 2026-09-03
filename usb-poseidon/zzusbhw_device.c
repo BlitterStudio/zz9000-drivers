@@ -229,6 +229,7 @@ static uint8_t RootHubPollDelay[ZZ_NUM_PORTS];
 struct ZZIntPendingSlot {
     struct ZZUSBUnit *unit;
     struct IOUsbHWReq *ior;
+    struct IOUsbHWReq *abort_reply;
     uint8_t armed;
     uint8_t abort_requested;
     uint8_t idle_polls;
@@ -667,7 +668,8 @@ static int detached_int_slot_matches(struct ZZIntPendingSlot *slot,
 {
     struct ZZUSBCommand candidate;
 
-    if (!slot->armed || slot->ior || slot->unit != unit)
+    if (!slot->armed || slot->ior || slot->abort_reply ||
+        slot->unit != unit)
         return 0;
     fill_int_arm_command(&candidate, unit, ior);
     return memcmp(&slot->armed_command, &candidate,
@@ -678,6 +680,7 @@ static void clear_int_slot(struct ZZIntPendingSlot *slot)
 {
     slot->unit = NULL;
     slot->ior = NULL;
+    slot->abort_reply = NULL;
     slot->armed = 0;
     slot->abort_requested = 0;
     slot->idle_polls = 0;
@@ -745,7 +748,7 @@ static int queue_int_ior(struct ZZUSBUnit *unit,
             slot->idle_polls = 0;
             return 1;
         }
-        if (!slot->ior && !slot->armed && !free_slot)
+        if (!slot->ior && !slot->abort_reply && !slot->armed && !free_slot)
             free_slot = slot;
     }
     if (!free_slot)
@@ -3561,14 +3564,23 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
         if (!slot->ior) {
             if (slot->armed && slot->reuse_ticks) {
                 slot->reuse_ticks--;
-            } else if (slot->armed) {
-                stop_status = stop_periodic_slot(slot);
-                if (stop_status_retired(stop_status))
-                    clear_int_slot(slot);
             } else {
-                clear_int_slot(slot);
+                if (slot->armed)
+                    (void)stop_periodic_slot(slot);
+                if (!slot->armed) {
+                    if (zzusb_interrupt_abort_reply_ready(
+                            slot->abort_reply != NULL, slot->armed))
+                        reply_now = slot->abort_reply;
+                    clear_int_slot(slot);
+                }
             }
             ReleaseSemaphore(&base_dev->zz_Lock);
+            if (reply_now) {
+                reply_now->iouh_Actual = 0;
+                reply_now->iouh_Req.io_Error = IOERR_ABORTED;
+                if (!(reply_now->iouh_Req.io_Flags & IOF_QUICK))
+                    ReplyMsg(&reply_now->iouh_Req.io_Message);
+            }
             continue;
         }
         ior = slot->ior;
@@ -5441,7 +5453,8 @@ static void execute_io(struct Library *dev, struct IOUsbHWReq *ior)
         }
         for (int i = 0; i < ZZ_INT_PENDING_SLOTS; i++) {
             struct ZZIntPendingSlot *slot = &IntPendingSlots[i];
-            struct IOUsbHWReq *pending = slot->ior;
+            struct IOUsbHWReq *pending =
+                slot->ior ? slot->ior : slot->abort_reply;
             uint16_t stop_status;
 
             if (slot->unit != unit || (!pending && !slot->armed))
@@ -5896,21 +5909,23 @@ static uint32_t __attribute__((used)) abort_io(struct Library *dev asm("a6"), st
     {
         struct ZZIntPendingSlot *slot = find_int_slot_for_ior(ior);
         if (slot && slot->unit == unit) {
-            if (zzusb_interrupt_abort_detaches(
+            if (zzusb_interrupt_abort_after_retire(
                     slot->armed, slot->arm_in_progress)) {
                 /*
-                 * The firmware queue owns its transfer buffer. Detach the
-                 * Amiga IORequest before retiring that queue so Poseidon may
-                 * complete pipe teardown without the poll task retaining a
-                 * pointer into the freed pipe.
+                 * Stop identity comes from the driver-owned ARM snapshot.
+                 * Keep the request only as the eventual reply token: Poseidon
+                 * waits for that reply before freeing its pipe. Replying
+                 * before PERIODIC_STOP lets device teardown race the live
+                 * firmware queue.
                  */
+                slot->abort_reply = ior;
                 slot->ior = NULL;
                 slot->abort_requested = 0;
                 slot->idle_polls = 0;
                 slot->stop_pending = 1;
                 slot->reuse_pending = 0;
                 slot->reuse_ticks = 0;
-                found = 3;
+                found = 2;
             } else if (slot->armed || slot->arm_in_progress) {
                 slot->abort_requested = 1;
                 found = 2;
@@ -5926,8 +5941,6 @@ static uint32_t __attribute__((used)) abort_io(struct Library *dev asm("a6"), st
             Signal(ZZBase->zz_PollTask, ZZBase->zz_PollSignal);
         return IOERR_ABORTED;
     }
-    if (found == 3 && ZZBase->zz_PollTask && ZZBase->zz_PollSignal)
-        Signal(ZZBase->zz_PollTask, ZZBase->zz_PollSignal);
 
     if (found) {
         ior->iouh_Actual = 0;
