@@ -3728,6 +3728,7 @@ static void poll_int_pending(struct ZZUSBBase *base_dev,
             } else {
                 slot->reuse_pending = 0;
                 slot->armed = 1;
+                fill_int_arm_command(&slot->armed_command, unit, ior);
                 zzusb_engine_diag_count(
                     ZZUSB_DRIVER_COUNT_INTERRUPT_ARM);
             }
