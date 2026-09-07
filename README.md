@@ -155,6 +155,11 @@ yes writes a `Path ... ADD` line into a `;BEGIN ZZ9000` block in
 Upgrading from an earlier release, the installer offers to delete the old
 `SYS:Tools/ZZTop` so you are not left running a stale copy.
 
+ZZTop's fixed-size windows use Intuition Smart Refresh to preserve their
+contents when uncovered while a secondary window or requester is open.
+This uses additional display memory for obscured areas; it does not make
+the modal dialogs non-modal or change the background readout update rate.
+
 ## SD-Card Configuration (ZZ9000.CFG)
 
 Firmware 2.3+ reads an optional `ZZ9000.CFG` file from the root of the
@@ -162,6 +167,10 @@ ZZ9000's FAT32 microSD card at cold boot (documented in the
 [zz9000-firmware README](https://github.com/BlitterStudio/zz9000-firmware#configuration-file-zz9000cfg)).
 ZZTop's **Project → Settings…** window reads and writes it directly
 from AmigaOS, so the card never needs to leave the slot.
+Settings saves preserve all eight audio scenes, including their names and
+calibration values. Generated files use compact formatting to stay within
+the firmware's 4 KiB configuration limit; explanatory per-setting comments
+are not retained. A generation failure leaves the existing SD file untouched.
 
 The drivers in this repo consult it too:
 

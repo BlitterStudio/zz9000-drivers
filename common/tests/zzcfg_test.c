@@ -13,7 +13,10 @@
 #include <stdio.h>
 #include <string.h>
 #include "zzcfg_amiga.h"
-#include "fwup_client.h"   /* FWUP_ERR_UNKNOWN: zzcfg_save refusal */
+#include "fwup_client.h"
+
+extern char fwup_test_saved_text[];
+extern uint16_t fwup_test_saved_len;
 
 static int failures;
 
@@ -553,14 +556,16 @@ int main(void)
     check(b.audio_active == 8 && b.audio_scene_mask[5] == 0,
           "invalid values parse permissively without presence");
 
-    /* Maximal legal audio model: every presence flag, every scene's
-     * 16-key mask and every value at its accepted ceiling -- exactly
-     * what parsing a fully populated firmware-U5 file yields. It
-     * renders past ZZCFG_MAX_SIZE, so generation must fail explicitly
-     * (0, the value zzcfg_save refuses) instead of returning a
-     * writable truncated length that would save a partial file over
-     * the operator's scenes. */
+    /* A complete audio file from firmware must survive a Settings save.
+     * Exercise all scene/name keys, long user strings and the larger
+     * legacy-video representation within the firmware's 4 KiB limit. */
     defaults(&b);
+    b.use_videocap_profile_key = 0;
+    b.videocap_crop_h = b.videocap_crop_v = 4095;
+    b.videocap_crop_h_present = b.videocap_crop_v_present = 1;
+    strcpy(b.mac, "AA:BB:CC:DD:EE:FF");
+    memset(b.hdf, 'h', ZZCFG_HDF_CHARS);
+    b.hdf[ZZCFG_HDF_CHARS] = '\0';
     b.audio_active_present = 1;
     b.audio_baseline_present = 1;
     b.audio_ceiling_paula_present = 1;
@@ -573,20 +578,47 @@ int main(void)
         int f;
 
         b.audio_scene_mask[i] = 0xffffu;
-        b.audio_scene_lpf[i] = 20000u;
-        b.audio_scene_out[i] = 100u;
-        b.audio_scene_pan[i] = 100u;
-        for (f = 0; f < 5; f++) b.audio_scene_eq[i][f] = 100u;
+        b.audio_scene_lpf[i] = 23900u - i;
+        b.audio_scene_out[i] = 12900u - i;
+        b.audio_scene_pan[i] = 100u - i;
+        for (f = 0; f < 5; f++) b.audio_scene_eq[i][f] = 12900u - i - f;
         for (f = 0; f < ZZCFG_AUDIO_SCENE_NM_CHUNKS; f++)
-            b.audio_scene_nm[i][f] = 0x7e7eu;
+            b.audio_scene_nm[i][f] = 0x7e7eu - i - f;
     }
     n = zzcfg_generate(&b, text, sizeof(text));
-    check(n == 0, "maximal audio model fails generation, not outsz-1");
-    check(zzcfg_save(0, &b) == FWUP_ERR_UNKNOWN,
-          "maximal audio model is never saved as a truncated file");
+    check(n != 0 && n < ZZCFG_MAX_SIZE - 1,
+          "all settings and eight complete scenes fit the firmware parser");
+    check(zzcfg_save(0, &b) == FWUP_OK,
+          "Settings save accepts all eight populated audio scenes");
+    defaults(&a);
+    zzcfg_parse_text(fwup_test_saved_text, fwup_test_saved_len, &a);
+    check(a.audio_active == b.audio_active &&
+          a.audio_baseline == b.audio_baseline &&
+          a.audio_ceiling_paula == b.audio_ceiling_paula &&
+          a.audio_ceiling_ax == b.audio_ceiling_ax,
+          "saved file preserves audio selection, baseline and ceilings");
+    check(memcmp(a.audio_scene_mask, b.audio_scene_mask,
+                 sizeof(a.audio_scene_mask)) == 0 &&
+          memcmp(a.audio_scene_lpf, b.audio_scene_lpf,
+                 sizeof(a.audio_scene_lpf)) == 0 &&
+          memcmp(a.audio_scene_eq, b.audio_scene_eq,
+                 sizeof(a.audio_scene_eq)) == 0 &&
+          memcmp(a.audio_scene_out, b.audio_scene_out,
+                 sizeof(a.audio_scene_out)) == 0 &&
+          memcmp(a.audio_scene_pan, b.audio_scene_pan,
+                 sizeof(a.audio_scene_pan)) == 0 &&
+          memcmp(a.audio_scene_nm, b.audio_scene_nm,
+                 sizeof(a.audio_scene_nm)) == 0,
+          "saved file preserves every scene field and complete name");
+    check(strcmp(a.mac, b.mac) == 0 && strcmp(a.hdf, b.hdf) == 0 &&
+          a.videocap_profile == b.videocap_profile &&
+          a.videocap_crop_h == b.videocap_crop_h &&
+          a.videocap_crop_v == b.videocap_crop_v,
+          "saved audio file preserves network, storage and video settings");
+    check(n != 0 && zzcfg_generate(&b, text, n) == 0,
+          "undersized audio output is refused rather than truncated");
 
-    /* A fully populated single scene still renders: the failure above
-     * is the size cliff, not populated audio keys themselves. */
+    /* A partial file containing one complete scene stays partial. */
     defaults(&b);
     b.audio_active_present = 1;
     b.audio_active = 3;

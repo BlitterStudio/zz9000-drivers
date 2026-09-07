@@ -38,6 +38,7 @@
 #define FWUP_ERR_RESTORE   0x000Bu
 #define FWUP_ERR_FILE      0x00FEu /* client: cannot read the source file */
 #define FWUP_ERR_NOMEM     0x00FDu /* client: out of memory */
+#define FWUP_ERR_CONFIG_SIZE 0x00FCu /* client: generated config does not fit */
 
 /* Largest chunk staged per WRITE. Stays under the firmware's 24576-byte
  * shared-buffer window and matches the SD-boot residency story. */

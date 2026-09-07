@@ -2,10 +2,8 @@
  * Board register offsets for host tests. The real zz9000_hw.h pulls in
  * AmigaOS headers that do not exist off-target.
  *
- * These constants only matter to zzcfg_read_raw()/zzcfg_save(), which the
- * host tests do not exercise - they cover the pure parse/generate model.
- * They are present so the translation unit compiles, not so it can talk to
- * hardware.
+ * The config tests exercise register reads through ZZCFG_TEST_IO and
+ * saves through the in-memory FWUP transport, never physical hardware.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
