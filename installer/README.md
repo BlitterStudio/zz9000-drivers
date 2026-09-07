@@ -81,14 +81,16 @@ The installer backs up the previous settings file as
 `Devs:Picasso96Settings.pre-ZZ9000-2.4` before installing the migrated
 settings file.
 
-The default Amiga chipset-video output remains the `full_60` 1280x1024
-profile. A matched v2.8-RC2-or-newer full-rate bitstream, firmware, RTG driver,
-and ZZTop can also select `centered_1080p_60`: it places the same 1280x1024
-content at `(320,28)` in a 1920x1080 raster with black borders. The existing
-150 MHz timing is approximately 60.60606 Hz. This native-video profile is
-separate from the Zorro III-only Picasso96 1920x1080x32 RTG setting. Old or
-mixed components safely fall back to `full_60` and do not preserve the
-centered selection.
+Native Amiga chipset video normally defaults to `filtered_60` (800x600 at
+60 Hz). The nonstandard-sync firmware variant defaults to PAL timing.
+Use ZZTop to select another profile and save it to `ZZ9000.CFG` for the
+next cold boot. These settings are separate from Picasso96 RTG screenmodes.
+Remove legacy `ENVARC:ZZ9000-VCAP-800x600` and `ENVARC:ZZ9000-NS-VSYNC`
+overrides when using ZZTop to manage the profile.
+
+Release packaging converts the README, manuals, and installer script to
+Amiga-compatible ISO-8859-1 (Latin-1), replacing Unicode punctuation and
+diagrams with plain-text equivalents. Repository sources remain UTF-8.
 
 The SDK runtime payloads (`zz9k.library`, the ARM-accelerated
 `mpega.library` drop-in, the `zz9k-picture.datatype` plus its inactive
