@@ -437,6 +437,7 @@ jobs:
           cp installer/README.md "$STAGING/README.md"
           cp installer/ZZ9000Installer.info "$STAGING/ZZ9000Installer.info"
           cp -r installer/ZZ9000Installer "$STAGING/ZZ9000Installer"
+          python3 tools/encode-amiga-docs.py "$STAGING"
           zip -r "$STAGING.zip" "$STAGING"
           ls -lh "$STAGING.zip"
       - name: Create GitHub Release
