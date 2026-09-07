@@ -176,8 +176,11 @@ The drivers in this repo consult it too:
 
 - `ZZ9000.card` takes its native-video defaults from the firmware's parsed
   configuration. ZZTop 2.8 presents one explicit **Native Output** profile
-  instead of independent width, resolution, and refresh controls. Normal
-  choices state the resulting resolution and refresh directly; capture
+  instead of independent width, resolution, and refresh controls. Native
+  Amiga chipset video normally defaults to `filtered_60` (800x600 at 60 Hz);
+  the nonstandard-sync firmware variant defaults to PAL timing. Use ZZTop
+  to choose another profile and save it to `ZZ9000.CFG` for the next cold
+  boot. Normal choices state the resulting resolution and refresh directly; capture
   sampling and framing live in **Advanced Video**. Framing defaults to
   **Automatic**: full-rate/full-width capture uses `280/40`, while filtered
   and Denise-adapter paths retain `188/26`. **Custom** values remain literal
@@ -192,10 +195,10 @@ The drivers in this repo consult it too:
   screen mode. The reused 150 MHz/2200x1125 timing produces approximately
   60.60606 Hz despite the nominal `60` profile name.
 - The centered choice appears and is serialized only with matching support in
-  the bitstream, firmware, `ZZ9000.card`, and ZZTop. Old, filtered-only, or
-  mixed installations safely use `full_60`/native mode 1 and do not preserve a
-  stored centered identity; `full_60` remains the default. Unrelated MAC and
-  INT2 ENV overrides preserve a supported centered choice, while legacy
+  the bitstream, firmware, `ZZ9000.card`, and ZZTop. Unsupported installations
+  fall back to a legacy native-video mode and do not preserve a stored
+  centered identity; this fallback is separate from the normal `filtered_60`
+  default. Unrelated MAC and INT2 ENV overrides preserve a supported centered choice, while legacy
   native-video ENV overrides intentionally select their legacy fallback.
 - `ZZ9000Net.device`, `zz9000ax.audio` and `mhizz9000.library` honor
   `int2 = on`; `ZZ9000Net.device` adopts the firmware's `mac`.

@@ -85,8 +85,9 @@ Native Amiga chipset video normally defaults to `filtered_60` (800x600 at
 60 Hz). The nonstandard-sync firmware variant defaults to PAL timing.
 Use ZZTop to select another profile and save it to `ZZ9000.CFG` for the
 next cold boot. These settings are separate from Picasso96 RTG screenmodes.
-Remove legacy `ENVARC:ZZ9000-VCAP-800x600` and `ENVARC:ZZ9000-NS-VSYNC`
-overrides when using ZZTop to manage the profile.
+Remove legacy `ENVARC:ZZ9000-VCAP-800x600`, `ENVARC:ZZ9000-NS-VSYNC`,
+and `ENVARC:ZZ9000-NS-VSYNC-NTSC` overrides when using ZZTop to manage the
+profile.
 
 Release packaging converts the README, manuals, and installer script to
 Amiga-compatible ISO-8859-1 (Latin-1), replacing Unicode punctuation and
