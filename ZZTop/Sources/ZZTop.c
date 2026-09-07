@@ -2409,7 +2409,7 @@ static BOOL settings_video_advanced_window(struct Screen *mysc, void *vi,
 		WA_InnerHeight, h, WA_MinHeight, h,
 		WA_DragBar, TRUE, WA_DepthGadget, TRUE,
 		WA_Activate, TRUE, WA_CloseGadget, TRUE,
-		WA_SizeGadget, FALSE, WA_SimpleRefresh, TRUE,
+		WA_SizeGadget, FALSE, WA_SmartRefresh, TRUE,
 		WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
 			BUTTONIDCMP | CYCLEIDCMP | STRINGIDCMP,
 		WA_PubScreen, mysc,
@@ -2589,7 +2589,7 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 		WA_InnerHeight,  h,       WA_MinHeight,     h,
 		WA_DragBar,      TRUE,    WA_DepthGadget,   TRUE,
 		WA_Activate,     TRUE,    WA_CloseGadget,   TRUE,
-		WA_SizeGadget,   FALSE,   WA_SimpleRefresh, TRUE,
+		WA_SizeGadget,   FALSE,   WA_SmartRefresh, TRUE,
 		WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
 			BUTTONIDCMP | CYCLEIDCMP | STRINGIDCMP,
 		WA_PubScreen, mysc,
@@ -3848,7 +3848,7 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 		WA_InnerHeight,  h,       WA_MinHeight,     h,
 		WA_DragBar,      TRUE,    WA_DepthGadget,   TRUE,
 		WA_Activate,     TRUE,    WA_CloseGadget,   TRUE,
-		WA_SizeGadget,   FALSE,   WA_SimpleRefresh, TRUE,
+		WA_SizeGadget,   FALSE,   WA_SmartRefresh, TRUE,
 		WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
 			BUTTONIDCMP | CYCLEIDCMP | SLIDERIDCMP,
 		WA_PubScreen, mysc,
@@ -4360,7 +4360,7 @@ static BOOL audio_scene_editor_window(struct Screen *mysc, void *vi,
 		WA_InnerHeight, h, WA_MinHeight, h,
 		WA_DragBar, TRUE, WA_DepthGadget, TRUE,
 		WA_Activate, TRUE, WA_CloseGadget, TRUE,
-		WA_SizeGadget, FALSE, WA_SimpleRefresh, TRUE,
+		WA_SizeGadget, FALSE, WA_SmartRefresh, TRUE,
 		WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
 			BUTTONIDCMP | SLIDERIDCMP,
 		WA_PubScreen, mysc,
@@ -4576,7 +4576,7 @@ static int audio_scene_rename_window(struct Screen *mysc, void *vi,
 		WA_InnerHeight, h, WA_MinHeight, h,
 		WA_DragBar, TRUE, WA_DepthGadget, TRUE,
 		WA_Activate, TRUE, WA_CloseGadget, TRUE,
-		WA_SizeGadget, FALSE, WA_SimpleRefresh, TRUE,
+		WA_SizeGadget, FALSE, WA_SmartRefresh, TRUE,
 		WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
 			IDCMP_RAWKEY | BUTTONIDCMP | STRINGIDCMP,
 		WA_PubScreen, mysc,
@@ -4985,6 +4985,9 @@ VOID gadtoolsWindow(VOID) {
 			if (NULL == createAllGadgets(&glist, vi, &zztop_layout))
 				errorMessage("createAllGadgets() failed");
 			else {
+				/* Fixed-size GadTools windows use Smart Refresh so Layers
+				 * restores obscured pixels even while a modal child or
+				 * requester has suspended the parent's event loop. */
 				if (NULL == (mywin = OpenWindowTags(NULL,
 						WA_Title,			"ZZTop " ZZTOP_RELEASE,
 						WA_Gadgets,		glist,			WA_AutoAdjust,		TRUE,
@@ -4992,7 +4995,7 @@ VOID gadtoolsWindow(VOID) {
 						WA_InnerHeight, zztop_layout.window_height,			WA_MinHeight,			 zztop_layout.window_height,
 						WA_DragBar,		 TRUE,			WA_DepthGadget,		TRUE,
 						WA_Activate,	 TRUE,			WA_CloseGadget,		TRUE,
-						WA_SizeGadget, FALSE,			WA_SimpleRefresh, TRUE,
+						WA_SizeGadget, FALSE,			WA_SmartRefresh, TRUE,
 						/* Renders the menu strip with the new-look pens
 						 * (black on white). GTMN_NewLookMenus at
 						 * LayoutMenus() only handles the layout half;

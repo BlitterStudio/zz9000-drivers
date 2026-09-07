@@ -12,10 +12,12 @@ CPPFLAGS += -I$(COMMON_DIR)
 SOURCES := fwup_client_test.c $(COMMON_DIR)/fwup_client.c
 DEPS := $(COMMON_DIR)/fwup_client.h
 
-# zzcfg_amiga.c is Amiga source; stubs/ supplies the few AmigaOS headers it
-# includes so the pure parse/generate model can be tested on the host.
-CFG_SOURCES := zzcfg_test.c $(COMMON_DIR)/zzcfg_amiga.c stubs/fwup_stub.c
-CFG_DEPS := $(COMMON_DIR)/zzcfg_amiga.h $(COMMON_DIR)/../include/zzcfg_query.h
+# zzcfg_amiga.c uses stubs/ for AmigaOS types and a simulated board;
+# parse/generate/save run on the host with the real FWUP protocol client.
+CFG_SOURCES := zzcfg_test.c $(COMMON_DIR)/zzcfg_amiga.c \
+	$(COMMON_DIR)/fwup_client.c stubs/fwup_stub.c
+CFG_DEPS := $(COMMON_DIR)/zzcfg_amiga.h $(COMMON_DIR)/../include/zzcfg_query.h \
+	$(COMMON_DIR)/fwup_client.h $(COMMON_DIR)/fwup_amiga.h
 CFG_CPPFLAGS := -Istubs -I$(COMMON_DIR) -I$(COMMON_DIR)/../include \
 	-DZZCFG_TEST_IO -DZZCFG_POLL_LIMIT=32UL
 VCAP_SOURCES := zz_vcap_live_test.c $(COMMON_DIR)/zz_vcap_live.c

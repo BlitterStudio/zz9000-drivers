@@ -45,6 +45,7 @@ const char *fwup_strerror(uint16_t status) {
     case FWUP_ERR_RESTORE:   return "firmware restore (rename) failed";
     case FWUP_ERR_FILE:      return "cannot read the source file";
     case FWUP_ERR_NOMEM:     return "out of memory";
+    case FWUP_ERR_CONFIG_SIZE: return "configuration exceeds file size limit";
     case FWUP_STATUS_BUSY:   return "timed out waiting for firmware";
     default:                 return "unknown error";
     }

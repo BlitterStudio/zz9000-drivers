@@ -703,7 +703,6 @@ static int zzcfg_append_audio(const struct zzcfg_values *v, char *out,
     if (off < 0 || (UWORD)off >= outsz) return -1;
     n = snprintf(out + off, outsz - (UWORD)off,
         "\n"
-        "# Audio control plane: scene, baseline and measured ceilings\n"
         "%saudio_active = %u\n"
         "%saudio_baseline = %u\n"
         "%saudio_ceiling_paula = %u\n"
@@ -762,17 +761,15 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
     UWORD profile = zzcfg_profile_sanitize(v->videocap_profile,
         v->firmware_capabilities);
     UWORD legacy_pal, legacy_full, legacy_vsync;
-    char video_config[512];
+    char video_config[128];
     int n;
 
     zzcfg_profile_to_legacy(profile, &legacy_pal, &legacy_full, &legacy_vsync);
     if (v->use_videocap_profile_key) {
         snprintf(video_config, sizeof(video_config),
-            "# Native video output profile (resolution, detail and refresh)\n"
             "videocap_profile = %s\n", zzcfg_profiles[profile].name);
     } else {
         snprintf(video_config, sizeof(video_config),
-            "# Native video output (legacy firmware without profile capability)\n"
             "videocap_mode = %s\n"
             "videocap_shres = %s\n"
             "nonstandard_vsync = %s\n",
@@ -781,36 +778,21 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
             vsync_names[legacy_vsync]);
     }
 
+    /* Share the firmware's 4 KiB budget with all eight audio scenes.
+     * Keep help in the manual rather than expanding a valid audio-save
+     * file past the boot parser's limit with per-setting comments. */
     n = snprintf(out, outsz,
-        "# ZZ9000.CFG - ZZ9000 firmware configuration file\n"
-        "# Written by ZZTop. Read once at cold boot (power-on);\n"
-        "# soft resets do not re-read it. See the firmware manual\n"
-        "# for all options: https://github.com/BlitterStudio/zz9000-firmware\n"
-        "\n"
-        "%s\n"
-        "# Native capture sampling: average (default), even or odd\n"
+        "# ZZ9000.CFG written by ZZTop; power-cycle to apply\n"
+        "%s"
         "videocap_sample = %s\n"
-        "# Capture framing: commented axes use the automatic board/profile baseline\n"
         "%svideocap_crop_h = %u\n"
         "%svideocap_crop_v = %u\n"
-        "\n"
-        "# Scanlines: 0=off 1=classic 2=soft 3=gradient; parity 0/1\n"
         "scanline_mode = %u\n"
         "scanline_parity = %u\n"
-        "\n"
-        "# on = drivers use INT2 instead of INT6 (replaces ENV:ZZ9K_INT2)\n"
         "int2 = %s\n"
-        "\n"
-        "# Accelerated P96 off-screen bitmaps (replaces ENV:ZZ9000-NO-OFFSCREEN)\n"
         "offscreen_bitmaps = %s\n"
-        "\n"
-        "# P96 video window / picture-in-picture (replaces ENV:ZZ9000-NO-PIP)\n"
         "video_overlay = %s\n"
-        "\n"
-        "# Ethernet MAC override (replaces ENV:ZZ9K_MAC)\n"
         "%smac = %s\n"
-        "\n"
-        "# SD-card boot HDF image in the root of the card (default zz9000.hdf)\n"
         "%shdf = %s\n",
         video_config,
         sample_names[sample],
@@ -850,7 +832,7 @@ UWORD zzcfg_save(ULONG board, const struct zzcfg_values *v)
     UWORD len, st;
 
     len = zzcfg_generate(v, text, sizeof(text));
-    if (len == 0) return FWUP_ERR_UNKNOWN;
+    if (len == 0) return FWUP_ERR_CONFIG_SIZE;
 
     fwup_io_init_board(&io, board);
 
