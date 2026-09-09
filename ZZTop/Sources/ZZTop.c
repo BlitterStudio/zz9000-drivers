@@ -2753,13 +2753,6 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 #define ZZTOP_AUDIO_CEILING_MIN 1
 #define ZZTOP_AUDIO_CEILING_MAX 4095
 
-static UWORD audio_balanced_level(UWORD ceiling)
-{
-	ULONG balanced = (3UL * ceiling) / 8UL;
-
-	return (UWORD)(balanced > ZZTOP_AUDIO_LEVEL_MAX
-		? ZZTOP_AUDIO_LEVEL_MAX : balanced);
-}
 
 static BOOL audio_control_capped = FALSE;
 static BOOL audio_metering_capped = FALSE;
@@ -3116,6 +3109,26 @@ static UWORD audio_baseline_paula;
 static UWORD audio_baseline_ax;
 static UWORD audio_ceiling_paula;
 static UWORD audio_ceiling_ax;
+/* Operator balance preset: measured Paula/AHI parity -- Paula at 3/4
+ * of its clean ceiling, AX exactly 2x Paula capped by the AX clean
+ * ceiling and the leg max (36/72 at the 48/80 calibration). Matches
+ * the limiter firmware's boot default for cards with no saved
+ * baseline. */
+static void audio_balanced_levels(UWORD *paula, UWORD *ax)
+{
+	ULONG balanced_paula =
+		((ULONG)audio_ceiling_paula * 3UL) / 4UL;
+	ULONG balanced_ax = balanced_paula * 2UL;
+
+	if (balanced_ax > (ULONG)audio_ceiling_ax)
+		balanced_ax = audio_ceiling_ax;
+	if (balanced_paula > ZZTOP_AUDIO_LEVEL_MAX)
+		balanced_paula = ZZTOP_AUDIO_LEVEL_MAX;
+	if (balanced_ax > ZZTOP_AUDIO_LEVEL_MAX)
+		balanced_ax = ZZTOP_AUDIO_LEVEL_MAX;
+	*paula = (UWORD)balanced_paula;
+	*ax = (UWORD)balanced_ax;
+}
 static BOOL audio_ui_seeded = FALSE;
 /* Unsaved-changes contract (R15): edits persist in firmware RAM, so
  * "dirty" is card-wide state that outlives the window; only a
@@ -4085,11 +4098,13 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 							break;
 						}
 						case AUDGAD_BTN_BALANCE: {
-							UWORD bal_paula =
-								audio_balanced_level(audio_ceiling_paula);
-							UWORD bal_ax =
-								audio_balanced_level(audio_ceiling_ax);
-							int bst = audio_scene_write_commit(
+							UWORD bal_paula;
+							UWORD bal_ax;
+							int bst;
+
+							audio_balanced_levels(&bal_paula,
+								&bal_ax);
+							bst = audio_scene_write_commit(
 								scene,
 								ZZ9K_AUDIO_SCENE_PARAM_BASELINE,
 								ZZ9K_AUDIO_BALANCE_PACK(bal_paula,
