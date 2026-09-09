@@ -32,6 +32,37 @@ paths.
 
 Build and install locations are covered in the [main README](../README.md).
 
+## AHI timer pairing
+
+Version 4.28 calls `PostTimer` after every executed `PreTimer`, including
+when AHI's CPU limiter skips mixing. Both fabric and legacy playback use
+this pairing. Earlier versions left the previous exit timestamp stale on
+a skip, which could incorrectly suppress subsequent periods. The CPU
+limit, 50-Hz pacing, startup runway and buffer bounds are unchanged.
+
+The target regression in `driver/timer_pair_test.c` includes the real
+driver. It checks recovery of complete, ordered PCM after an overload
+skip in both paths, and balanced timing without delivery for oversized
+legacy periods. Scheduling, hook dispatch and coherent RAM are controlled
+by the fixture; this does not qualify real interrupt, DMA or cache timing.
+
+After the normal AHI build has staged the SDK headers, run from the repo
+root (the executable can also run on AmigaOS):
+
+```sh
+tools/amiga-docker.sh ahi/driver m68k-amigaos-gcc \
+  timer_pair_test.c asmfuncs.s -m68020 -O3 \
+  -I../../include -Izz9k-headers -ffunction-sections -fdata-sections \
+  -Wl,--gc-sections -Wall -Wextra -Werror -Wno-unused-parameter \
+  -o timer_pair_test -ldebug -lamiga -noixemul
+vamos --cpu=68020 --ram-size=8192 --stack-size=64 ahi/driver/timer_pair_test
+```
+
+The emulator verification used `amitools==0.8.1` and `machine68k==0.3.0`.
+All three cases must pass. Hardware still needs a separate playback and
+recording check; a corrected timing pair does not diagnose a weak analog
+return.
+
 ## AHI recording
 
 `zz9000ax.audio` supports stereo recording from the ZZ9000AX RCA inputs when
