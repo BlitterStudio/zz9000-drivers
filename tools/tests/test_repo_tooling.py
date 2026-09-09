@@ -227,15 +227,18 @@ class RepoToolingTests(unittest.TestCase):
         ):
             self.assertIn(token, source)
         helper = source[
-            source.index("static UWORD audio_balanced_level"):
-            source.index("static BOOL audio_control_capped")
+            source.index("static void audio_balanced_levels"):
+            source.index("static BOOL audio_ui_seeded")
         ]
         balance = source[
             source.index("case AUDGAD_BTN_BALANCE"):
             source.index("case AUDGAD_BTN_SAVE")
         ]
-        self.assertIn("balanced > ZZTOP_AUDIO_LEVEL_MAX", helper)
-        self.assertEqual(2, balance.count("audio_balanced_level("))
+        self.assertIn("balanced_paula > ZZTOP_AUDIO_LEVEL_MAX", helper)
+        self.assertIn("balanced_ax > ZZTOP_AUDIO_LEVEL_MAX", helper)
+        self.assertIn("balanced_ax > (ULONG)audio_ceiling_ax", helper)
+        self.assertIn("balanced_paula * 2UL", helper)
+        self.assertEqual(1, balance.count("audio_balanced_levels("))
         self.assertNotIn("(3UL * audio_ceiling", balance)
         self.assertIn("audio_ceiling_paula_present", cfg_header)
         self.assertIn("audio_ceiling_ax_present", cfg_header)
