@@ -60,9 +60,9 @@
 #define XSTR(s) STR(s)
 
 #define DEVICE_NAME "zz9000ax.audio"
-#define DEVICE_DATE "(30.08.2026)"
+#define DEVICE_DATE "(09.09.2026)"
 #define DEVICE_VERSION 4
-#define DEVICE_REVISION 27
+#define DEVICE_REVISION 28
 #define DEVICE_ID_STRING "ZZ9000AX " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
 #define DEVICE_PRIORITY 0
 
@@ -551,14 +551,13 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
   if (AudioCtrl->ahiac_BuffSamples > BOUNCE_MAX_FRAMES)
     return;  /* the legacy defence-in-depth bound still applies */
 
-  /* Master's exact worker cadence at the period rate: PlayerFunc
-   * every round, PreTimer-gated mix, PostTimer inside the mixed
-   * branch (PostTimer is ahi.device's clock tick -- it must advance
-   * exactly once per period, which the 20-ms round rate
-   * guarantees). The lease adaptations are only at the output side:
-   * the mix accumulates and stages whole grant periods under ring
-   * backpressure, and the lease stays PAUSED until the configured
-   * runway is staged (inaudible prefill). */
+  /* PlayerFunc runs at the period rate; PreTimer gates only the mix.
+   * Every PreTimer must be paired with PostTimer, even when it skips
+   * mixing, so AHI's CPU accounting never uses a stale exit timestamp.
+   * The lease adaptations are only at the output side: the mix
+   * accumulates and stages whole grant periods under ring backpressure,
+   * and the lease stays PAUSED until the configured runway is staged
+   * (inaudible prefill). */
   {
     uint32_t lease_period =
         (session->grant.source_rate / 50U) * 4U;
@@ -580,8 +579,8 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
                       (void *)(uintptr_t)ahi_data->audio_buf_addr);
           /* Never concatenate a truncated prefix with a later mixer
            * period. If backpressure leaves insufficient accumulator
-           * room, the complete newly mixed period is discarded after
-           * advancing AHI's Player/PostTimer timeline. */
+           * room, the complete newly mixed period is discarded; AHI's
+           * timing pair is still completed. */
           if (mix_bytes == lease_period && mix_bytes <= room) {
             fabric_swap_period_le(
                 (void *)(uintptr_t)ahi_data->audio_buf_addr,
@@ -594,8 +593,8 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
             ahi_data->lease_accum_fill += mix_bytes;
           }
         }
-        (*AudioCtrl->ahiac_PostTimer)();
       }
+      (*AudioCtrl->ahiac_PostTimer)();
       fabric_lease_flush_accum(ahi_data, session, lease_period);
       if ((session->flags & ZZ9K_AUDIO_RING_PRODUCER_FLAG_PAUSED) &&
           session->write_cursor - session->consumed_cursor >=
@@ -811,9 +810,9 @@ void WorkerProcess() {
         if (ahi_data->buf_offset >= ZZ_AX_AUDIO_BUFSZ) {
           ahi_data->buf_offset = 0;
         }
-
-        (*AudioCtrl->ahiac_PostTimer)();
       }
+      /* AHI v4 requires PostTimer even when PreTimer skips the mix. */
+      (*AudioCtrl->ahiac_PostTimer)();
     }
 
     if (!ahi_data->record_stop) process_recording(ahi_data, AudioCtrl);
