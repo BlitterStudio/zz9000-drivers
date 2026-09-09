@@ -120,7 +120,8 @@ static const char version[] __attribute__((used)) =
 #define AUDGAD_BTN_SAVE     (12)
 #define AUDGAD_BTN_RENAME   (13)
 #define AUDGAD_BTN_BALANCE  (14)
-#define AUDGAD_COUNT        (15)
+#define AUDGAD_LEVEL        (15)
+#define AUDGAD_COUNT        (16)
 
 /* Scene-editor window gadgets (sub-window of the Audio window). */
 #define SEGAD_LPF           (0)
@@ -3130,6 +3131,83 @@ static void audio_balanced_levels(UWORD *paula, UWORD *ax)
 	*ax = (UWORD)balanced_ax;
 }
 static BOOL audio_ui_seeded = FALSE;
+
+/* Enforced boundary (AX-equivalent units) as the firmware last
+ * reported it in control state; zero until the first read. */
+static uint32_t audio_boundary;
+
+/* Paula's per-leg weight in AX-equivalent units, the same
+ * ceiling_ax/ceiling_paula ratio the firmware's boundary math uses. */
+static ULONG audio_weighted_level(UWORD paula, UWORD ax)
+{
+	ULONG den = audio_ceiling_paula ? (ULONG)audio_ceiling_paula : 1UL;
+
+	return ((ULONG)paula * (ULONG)audio_ceiling_ax) / den +
+		(ULONG)ax;
+}
+
+/* Boundary before the firmware has reported one: the stricter
+ * production formula, so slider caps start conservative and widen
+ * with the state read on the limiter build. */
+static ULONG audio_boundary_now(void)
+{
+	if (audio_boundary != 0UL)
+		return audio_boundary;
+	return ((ULONG)audio_ceiling_ax * 3UL) / 4UL;
+}
+
+/* Savable slider maximum per leg: the clean ceiling, the 255 ABI leg
+ * max, and the boundary share the other leg's current level leaves
+ * free. A live level above the computed maximum keeps the maximum at
+ * the level so the display never clamps below firmware truth (the
+ * firmware's stage-time validation stays the authority). */
+static UWORD audio_baseline_max_paula(void)
+{
+	ULONG max = audio_ceiling_paula;
+	ULONG free_weighted;
+
+	if (audio_ceiling_ax == 0UL)
+		return 0;
+	free_weighted = audio_boundary_now();
+	if (free_weighted > (ULONG)audio_baseline_ax)
+		free_weighted -= audio_baseline_ax;
+	else
+		free_weighted = 0;
+	free_weighted = free_weighted *
+		(ULONG)audio_ceiling_paula / (ULONG)audio_ceiling_ax;
+	if (free_weighted < max)
+		max = free_weighted;
+	if (max > ZZTOP_AUDIO_LEVEL_MAX)
+		max = ZZTOP_AUDIO_LEVEL_MAX;
+	if (max < (ULONG)audio_baseline_paula &&
+			audio_baseline_paula <= ZZTOP_AUDIO_LEVEL_MAX)
+		max = audio_baseline_paula;
+	return (UWORD)max;
+}
+
+static UWORD audio_baseline_max_ax(void)
+{
+	ULONG max = audio_ceiling_ax;
+	ULONG free_weighted;
+	ULONG paula_weighted;
+
+	if (audio_ceiling_ax == 0UL || audio_ceiling_paula == 0UL)
+		return 0;
+	paula_weighted = audio_weighted_level(audio_baseline_paula, 0);
+	free_weighted = audio_boundary_now();
+	if (free_weighted > paula_weighted)
+		free_weighted -= paula_weighted;
+	else
+		free_weighted = 0;
+	if (free_weighted < max)
+		max = free_weighted;
+	if (max > ZZTOP_AUDIO_LEVEL_MAX)
+		max = ZZTOP_AUDIO_LEVEL_MAX;
+	if (max < (ULONG)audio_baseline_ax &&
+			audio_baseline_ax <= ZZTOP_AUDIO_LEVEL_MAX)
+		max = audio_baseline_ax;
+	return (UWORD)max;
+}
 /* Unsaved-changes contract (R15): edits persist in firmware RAM, so
  * "dirty" is card-wide state that outlives the window; only a
  * successful SCENE_SAVE (or a reboot) clears it. */
@@ -3333,6 +3411,34 @@ static void audio_set_status(struct Window *win, const char *text)
 	}
 }
 
+static char audio_level_buf[40];
+
+/* Compose the level/boundary readout: the baseline pair's weighted
+ * AX-equivalent level against the firmware's enforced boundary. */
+static const char *audio_level_text(void)
+{
+	snprintf(audio_level_buf, sizeof(audio_level_buf), "Level %lu/%lu",
+		(unsigned long)audio_weighted_level(audio_baseline_paula,
+			audio_baseline_ax),
+		(unsigned long)audio_boundary_now());
+	return audio_level_buf;
+}
+
+/* Keep the baseline sliders' maxima at what can actually be saved
+ * (each leg: its clean ceiling, the ABI leg max, and the boundary
+ * share the other leg leaves free) and refresh the level readout. */
+static void audio_update_baseline_bounds(struct Window *win)
+{
+	if (win == NULL)
+		return;
+	GT_SetGadgetAttrs(audgads[AUDGAD_BASE_PAULA], win, NULL,
+		GTSL_Max, (ULONG)audio_baseline_max_paula(), TAG_END);
+	GT_SetGadgetAttrs(audgads[AUDGAD_BASE_AX], win, NULL,
+		GTSL_Max, (ULONG)audio_baseline_max_ax(), TAG_END);
+	GT_SetGadgetAttrs(audgads[AUDGAD_LEVEL], win, NULL,
+		GTTX_Text, (STRPTR)audio_level_text(), TAG_END);
+}
+
 static void audio_reload_saved_state(struct Window *win, UWORD scene)
 {
 	if (audio_seed_editor_state()) {
@@ -3345,6 +3451,7 @@ static void audio_reload_saved_state(struct Window *win, UWORD scene)
 			GTIN_Number, audio_ceiling_paula, TAG_END);
 		GT_SetGadgetAttrs(audgads[AUDGAD_CEIL_AX], win, NULL,
 			GTIN_Number, audio_ceiling_ax, TAG_END);
+		audio_update_baseline_bounds(win);
 		audio_set_status(win,
 			"Saved - survives power-cycle; controls show saved values");
 	} else {
@@ -3373,6 +3480,8 @@ static void audio_save_settle(struct Window *win)
 		return;
 	if (!audio_control_state_get(&st))
 		return;
+	if (st.ceiling != 0UL)
+		audio_boundary = st.ceiling;
 	save_status = st.save_status;
 	if (save_status == ZZ9K_AUDIO_SCENE_SAVE_QUEUED)
 		return; /* the machine is still running */
@@ -3703,7 +3812,7 @@ static struct Gadget *audio_create_gadgets(struct Gadget **glistptr,
 	ng.ng_GadgetID = AUDGAD_BASE_PAULA;
 	ng.ng_GadgetText = (STRPTR)LABEL_AUD_PAULA;
 	audgads[AUDGAD_BASE_PAULA] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
-		GTSL_Min, 0, GTSL_Max, ZZTOP_AUDIO_LEVEL_MAX,
+		GTSL_Min, 0, GTSL_Max, (ULONG)audio_baseline_max_paula(),
 		GTSL_Level, audio_baseline_paula,
 		GTSL_LevelFormat, (STRPTR)"%ld", GTSL_MaxLevelLen, 4,
 		GTSL_LevelPlace, PLACETEXT_RIGHT,
@@ -3714,7 +3823,7 @@ static struct Gadget *audio_create_gadgets(struct Gadget **glistptr,
 	ng.ng_GadgetID = AUDGAD_BASE_AX;
 	ng.ng_GadgetText = (STRPTR)LABEL_AUD_AX;
 	audgads[AUDGAD_BASE_AX] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
-		GTSL_Min, 0, GTSL_Max, ZZTOP_AUDIO_LEVEL_MAX,
+		GTSL_Min, 0, GTSL_Max, (ULONG)audio_baseline_max_ax(),
 		GTSL_Level, audio_baseline_ax,
 		GTSL_LevelFormat, (STRPTR)"%ld", GTSL_MaxLevelLen, 4,
 		GTSL_LevelPlace, PLACETEXT_RIGHT,
@@ -3762,15 +3871,11 @@ static struct Gadget *audio_create_gadgets(struct Gadget **glistptr,
 	audgads[AUDGAD_BTN_SAVE] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
 		GA_Disabled, TRUE, TAG_END);
 
-	/* One-click equal-loudness balance: both legs at the same
-	 * fraction (3/8) of their measured ceilings, so Paula and AX
-	 * contribute identically in AX-equivalent units on calibrated
-	 * cards and keep an equal ratio uncalibrated. 3/8 each, because
-	 * the save validator bounds the SUM of both legs to the enforced
-	 * boundary (3/4 of the AX ceiling): two equal legs share it, and
-	 * the pair composes exactly at the boundary like scene 1. The
-	 * ceilings are hardware measurements, not preferences --
-	 * deliberately not touched here. */
+	/* One-click equal-loudness balance: measured Paula/AHI parity --
+	 * Paula at 3/4 of its clean ceiling, AX exactly 2x Paula capped
+	 * by the AX clean ceiling and the leg max (36/72 at the 48/80
+	 * calibration). The ceilings are hardware measurements, not
+	 * preferences -- deliberately not touched here. */
 	ng.ng_LeftEdge = l.margin_x + button_width + l.label_gap;
 	ng.ng_TopEdge = y;
 	ng.ng_Width = button_width;
@@ -3779,6 +3884,17 @@ static struct Gadget *audio_create_gadgets(struct Gadget **glistptr,
 	ng.ng_Flags = PLACETEXT_IN;
 	audgads[AUDGAD_BTN_BALANCE] = gad = CreateGadget(BUTTON_KIND, gad,
 		&ng, TAG_END);
+
+	/* Live level vs enforced boundary readout, beside the action
+	 * buttons: shows why the sliders stop where they do. */
+	ng.ng_LeftEdge = l.margin_x + 2 * button_width + l.label_gap;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = content_right - ng.ng_LeftEdge;
+	ng.ng_GadgetID = AUDGAD_LEVEL;
+	ng.ng_GadgetText = NULL;
+	audgads[AUDGAD_LEVEL] = gad = CreateGadget(TEXT_KIND, gad, &ng,
+		GTTX_Text, (STRPTR)audio_level_text(), GTTX_Border, TRUE,
+		TAG_END);
 	y += l.row_step;
 
 	*out_w = content_right + l.margin_x;
@@ -3844,6 +3960,7 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 			(UWORD)ZZ9K_AUDIO_BALANCE_CH2(state.baseline);
 		audio_ceiling_paula = state.ceiling_paula;
 		audio_ceiling_ax = state.ceiling_ax;
+		audio_boundary = state.ceiling;
 	}
 	audio_scene_labels_bind();
 
@@ -3876,6 +3993,7 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 	audio_set_status(win, audio_dirty
 		? "Unsaved changes - Save to persist"
 		: "Edits apply live; reboot reverts to the last Save");
+	audio_update_baseline_bounds(win);
 
 	/* Own timer request, not the shared timerio: the main window may
 	 * have a refresh pending on it, and a timerequest cannot be shared
@@ -4028,6 +4146,7 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 										(bst == ZZ9K_STATUS_OK)
 										?	"Baseline committed - Save to persist"
 										:	"Baseline committing - Save to persist");
+								audio_update_baseline_bounds(win);
 								} else {
 									/* Hard error: restore. */
 									GT_SetGadgetAttrs(gad, win, NULL,
@@ -4082,6 +4201,8 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 									(cst == ZZ9K_STATUS_OK)
 									? "Calibration committed - Save to persist"
 									: "Calibration committing - Save to persist");
+								audio_boundary = 0;
+								audio_update_baseline_bounds(win);
 							} else {
 								GT_SetGadgetAttrs(gad, win, NULL,
 									GTIN_Number, (gad->GadgetID ==
@@ -4126,6 +4247,7 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 									(bst == ZZ9K_STATUS_OK)
 									?	"Balance committed - Save to persist"
 									:	"Balance committing...");
+								audio_update_baseline_bounds(win);
 							} else {
 								audio_set_status(win,
 									"Balance failed - retry");
