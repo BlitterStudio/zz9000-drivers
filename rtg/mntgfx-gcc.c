@@ -368,6 +368,8 @@ static LONG tooltype_vcap_mode(char **tool_types, LONG current) {
 		string_equal_ci(value, "1080P") ||
 		string_equal_ci(value, "CENTERED_1080P_60"))
 		return ZZ_VMODE_CENTERED_1080P_60;
+	if (string_equal_ci(value, "CENTERED_1080P_50"))
+		return ZZ_VMODE_CENTERED_1080P_50;
 
 	if (string_equal_ci(value, "720x576") ||
 		string_equal_ci(value, "50") ||
@@ -417,7 +419,10 @@ static struct ConfigDev *find_unconfigured_configdev(struct ExpansionBase *Expan
 }
 
 static void apply_vcap_settings(MNTZZ9KRegs *regs, LONG mode) {
-	if (mode == ZZ_VMODE_CENTERED_1080P_60) {
+	if (mode == ZZ_VMODE_CENTERED_1080P_50) {
+		KPrintF("ZZ9000.card: centered 1280x1024 in 1080p50 mode.\n");
+		regs->videocap_vmode = ZZ_VMODE_CENTERED_1080P_50;
+	} else if (mode == ZZ_VMODE_CENTERED_1080P_60) {
 		KPrintF("ZZ9000.card: centered 1280x1024 in 1080p60 mode.\n");
 		regs->videocap_vmode = ZZ_VMODE_CENTERED_1080P_60;
 	} else if (mode == ZZ_VMODE_800x600) {
@@ -447,7 +452,8 @@ static void apply_card_settings(struct BoardInfo *b, char **tool_types) {
 	/* Any explicit legacy sync tooltype selects the legacy full/native
 	 * identity; the firmware's runtime sync setter intentionally clears
 	 * centered mode. */
-	if (b->CardData[ZZ_CARD_DATA_VCAP_MODE] == ZZ_VMODE_CENTERED_1080P_60 &&
+	if (zz_vcap_mode_is_centered(
+			(UWORD)b->CardData[ZZ_CARD_DATA_VCAP_MODE]) &&
 		(tooltype_value(tool_types, "ZZ9000-NS-VSYNC") ||
 		 tooltype_value(tool_types, "ZZ9000-NS-VSYNC-NTSC") ||
 		 tooltype_value(tool_types, "NSVSYNC")))
@@ -456,7 +462,8 @@ static void apply_card_settings(struct BoardInfo *b, char **tool_types) {
 		tool_types, (LONG)b->CardData[ZZ_CARD_DATA_NSVSYNC]);
 
 	apply_vcap_settings(regs, (LONG)b->CardData[ZZ_CARD_DATA_VCAP_MODE]);
-	if (b->CardData[ZZ_CARD_DATA_VCAP_MODE] != ZZ_VMODE_CENTERED_1080P_60)
+	if (!zz_vcap_mode_is_centered(
+			(UWORD)b->CardData[ZZ_CARD_DATA_VCAP_MODE]))
 		apply_nonstandard_vsync_settings(regs,
 			(LONG)b->CardData[ZZ_CARD_DATA_NSVSYNC]);
 }
@@ -933,8 +940,8 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 		}
 
 		apply_vcap_settings(registers, (LONG)b->CardData[ZZ_CARD_DATA_VCAP_MODE]);
-		if (b->CardData[ZZ_CARD_DATA_VCAP_MODE] !=
-			ZZ_VMODE_CENTERED_1080P_60)
+		if (!zz_vcap_mode_is_centered(
+				(UWORD)b->CardData[ZZ_CARD_DATA_VCAP_MODE]))
 			apply_nonstandard_vsync_settings(registers,
 				(LONG)b->CardData[ZZ_CARD_DATA_NSVSYNC]);
 

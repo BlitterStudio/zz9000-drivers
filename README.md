@@ -35,7 +35,7 @@ complete end-user package around it. The most important differences are:
 |---|---|
 | **One guided installer** | A standard Commodore Installer puts the graphics, network, audio, USB and SD drivers in the right places, installs icons and tools, updates Picasso96 settings, and offers the correct extras for the detected CPU. Upgrades are handled without asking users to copy a collection of files by hand. |
 | **ZZTop as the card's control centre** | ZZTop shows firmware and board status, edits `ZZ9000.CFG` directly on the card, changes scanlines and native-video settings, performs live picture calibration, and can install or restore firmware without removing the microSD card. |
-| **Better native and RTG video** | The current stack offers clear native-output choices, full-detail 1280x1024 capture, the optional 1280x1024 image centered in a 1920x1080 signal, 1920x1080x32 RTG modes on Zorro III, improved acceleration, monitor sleep/DPMS, modern scanlines, and numerous correctness fixes. |
+| **Better native and RTG video** | The current stack offers clear native-output choices, full-detail 1280x1024 capture, the optional 1280x1024 image centered in a 1920x1080 signal at 50 or 60 Hz, 1920x1080x32 RTG modes on Zorro III, improved acceleration, monitor sleep/DPMS, modern scanlines, and numerous correctness fixes. |
 | **ZZPlay media playback** | The installed **ZZPlay** Workbench application uses the ZZ9000's ARM processors to decode MPEG-1 video and MP3/MP2 audio. Video can appear in a hardware-scaled Workbench window or on a dedicated screen. |
 | **Hardware-assisted AmiSSL** | The installer can add a CPU-matched AmiSSL library with ZZ9000 acceleration built in. Supported TLS handshakes and encrypted data are offloaded automatically for existing AmiSSL applications; unsupported operations remain in software. |
 | **A broader matched driver set** | The package includes maintained SANA-II networking, ZZ9000AX AHI/MHI audio, capability-gated Poseidon USB, SD-card boot support, firmware update/recovery, and focused board and network diagnostics. |
@@ -123,7 +123,7 @@ exists for future work, but no 8 MiB bitstream variant is shipped.
 | MHI audio | `mhizz9000.library` | `Libs:MHI/` | Exposes the AX hardware MP3 decoder to MHI-aware players. |
 | USB | `zzusbhw.device` | `Devs:USBHardware/` | Capability-gated Poseidon USB hardware driver. See [usb-poseidon/README.md](usb-poseidon/README.md) and the [qualification matrix](docs/usb-qualification-matrix.md). |
 | SD boot | `zzsd.device` | Firmware `BOOT.bin` | Size-constrained boot driver for FAT32-hosted HDF boot. See [sd-boot/README.md](sd-boot/README.md). |
-| Configuration | `ZZTop` | `SYS:Utilities/ZZ9000/` | GUI for hardware readback, firmware update/restore, and `ZZ9000.CFG` settings. The capability-gated **Audio** window owns scenes, meters, Paula/AX baseline and measured per-card ceilings; edits apply live, and **Save** persists them. |
+| Configuration | `ZZTop` | `SYS:Utilities/ZZ9000/` | GUI for hardware readback, firmware update/restore, and `ZZ9000.CFG` settings. The **Project** menu opens **Settings…**, **Scandoubler…** and **Audio…**; the main window also has a **Scandoubler** button directly above **Audio**. The capability-gated **Scandoubler** window owns native-video **Output**/**Refresh** selection, advanced capture framing, scanlines, and live calibration; the **Audio** window owns scenes, meters, Paula/AX baseline and measured per-card ceilings. Edits apply live, and each window's **Save** persists its keys. |
 | Scanlines | `ZZScanlines` | `C:` | CLI for scanline V1/V2 modes. |
 | Firmware update | `ZZFwUpdate` | `C:` | Pushes `BOOT.bin` or another root-level file to the ZZ9000 FAT32 microSD card over Zorro. |
 | SDK services | `zz9k.library` | `Libs:` | AmigaOS gateway to the SDK v2 firmware services (image/video decode, audio, compression, crypto). Built from the pinned [zz9000-sdk](https://github.com/BlitterStudio/zz9000-sdk) ref by `sdk/build.sh`. |
@@ -165,46 +165,105 @@ the modal dialogs non-modal or change the background readout update rate.
 Firmware 2.3+ reads an optional `ZZ9000.CFG` file from the root of the
 ZZ9000's FAT32 microSD card at cold boot (documented in the
 [zz9000-firmware README](https://github.com/BlitterStudio/zz9000-firmware#configuration-file-zz9000cfg)).
-ZZTop's **Project → Settings…** window reads and writes it directly
-from AmigaOS, so the card never needs to leave the slot.
-Settings saves preserve all eight audio scenes, including their names and
-calibration values. Generated files use compact formatting to stay within
-the firmware's 4 KiB configuration limit; explanatory per-setting comments
-are not retained. A generation failure leaves the existing SD file untouched.
+ZZTop's **Project → Settings…**, **Project → Scandoubler…** and
+**Project → Audio…** windows (plus the main window's **Scandoubler** and
+**Audio** buttons) read and write it directly from AmigaOS, so the card
+never needs to leave the slot. Each window applies only its own edits and
+ENV overrides, preserving supported values from the other sections.
+Absent native-video keys stay inactive during a general Settings save;
+only Scandoubler Save activates its displayed native settings.
+The unsupported-centered-profile fallback described below applies to every
+save. Saves preserve all eight audio scenes, including their names and
+calibration values. Generated files use compact formatting to
+stay within the firmware's 4 KiB configuration limit; explanatory
+per-setting comments are not retained. A generation failure leaves the
+existing SD file untouched.
+
+General **Settings** contains INT2, MAC, HDF, offscreen bitmaps and video
+overlay; native-video controls are only in **Scandoubler**. The main
+**Scandoubler…** button sits directly above **Audio…**, without an extra
+button row. Use the **Project** menu on screens where those buttons are
+off-screen.
 
 The drivers in this repo consult it too:
 
 - `ZZ9000.card` takes its native-video defaults from the firmware's parsed
-  configuration. ZZTop 2.8 presents one explicit **Native Output** profile
-  instead of independent width, resolution, and refresh controls. Native
-  Amiga chipset video normally defaults to `filtered_60` (800x600 at 60 Hz);
-  the nonstandard-sync firmware variant defaults to PAL timing. Use ZZTop
-  to choose another profile and save it to `ZZ9000.CFG` for the next cold
-  boot. Normal choices state the resulting resolution and refresh directly; capture
-  sampling and framing live in **Advanced Video**. Framing defaults to
-  **Automatic**: full-rate/full-width capture uses `280/40`, while filtered
-  and Denise-adapter paths retain `188/26`. **Custom** values remain literal
-  per-machine overrides. Firmware 2.8 with the profile capability stores this
-  as `videocap_profile`; ZZTop transparently writes the equivalent legacy key
-  combination for older firmware, including 2.8 RC1.
+  configuration. ZZTop presents the stored `videocap_profile` as two
+  dependent selectors in the **Scandoubler** window — **Output**
+  (`1280x1024 - full detail`, `1920x1080 - centered`, `800x600 / 720x480 - filtered`,
+  `720x576 / 720x480 - filtered`) and **Refresh** (`50Hz`, `60Hz`,
+  `Match Amiga`, `50Hz PAL, 60Hz NTSC`, `PAL Amiga clock`,
+  `NTSC Amiga clock`) — offering only the combinations the installed
+  stack supports; changing the output keeps the refresh when the pair
+  still exists, otherwise visibly selects a valid one. Native Amiga
+  chipset video normally defaults to `filtered_60` (PAL 800x600 or NTSC
+  720x480 at nominal 60 Hz);
+  the nonstandard-sync firmware variant defaults to PAL timing. Use
+  ZZTop to choose another combination and save it to `ZZ9000.CFG` for
+  the next cold boot. **Capture…** opens sampling, framing and calibration
+  controls from the Scandoubler window. Framing defaults to **Automatic**:
+  full-rate/full-width capture uses `280/40`, while filtered and Denise-adapter paths retain
+  `188/26`. **Custom** values remain literal per-machine overrides.
+  Firmware 2.8 with the profile capability stores this as
+  `videocap_profile`; ZZTop transparently writes the equivalent legacy
+  key combination for older firmware, including 2.8 RC1.
 - With a matching v2.8-RC2-or-newer full-rate bitstream and firmware
   capability bit 3, `centered_1080p_60` places the unchanged 1280x1024 native
   content at `(320,28)` inside a 1920x1080 active raster. The content rectangle
   is `[320,1600) x [28,1052)` and every surrounding pixel stays black. This is
   native Amiga chipset video, not the separate Picasso96 1920x1080x32 RTG
-  screen mode. The reused 150 MHz/2200x1125 timing produces approximately
-  60.60606 Hz despite the nominal `60` profile name.
-- The centered choice appears and is serialized only with matching support in
-  the bitstream, firmware, `ZZ9000.card`, and ZZTop. Unsupported installations
-  fall back to a legacy native-video mode and do not preserve a stored
-  centered identity; this fallback is separate from the normal `filtered_60`
-  default. Unrelated MAC and INT2 ENV overrides preserve a supported centered choice, while legacy
+  screen mode. Its fixed 148.5714286 MHz clock and 2200x1125 totals
+  produce approximately 60.02886 Hz.
+- On stacks that also advertise capability bit 4, `centered_1080p_50`
+  centers the same unchanged 1280x1024 content the same way at nominal
+  50 Hz. Its 2640x1125 totals and the same clock produce approximately
+  50.02405 Hz. Both use the closest legal 100 MHz integer-PLL setting
+  to 148.5 MHz (52/5/7), retaining standard blanking. They remain
+  free-running, not Amiga-genlocked.
+- Install matching firmware, bitstream, `ZZ9000.card`, and ZZTop.
+  ZZTop gates centered choices on the firmware capability register:
+  bit 3 for centered 60 Hz, and both bits 3 and 4 for centered 50 Hz.
+  Current ZZTop substitutes `full_60` for an unsupported stored centered
+  profile, including when another configuration window saves. This is
+  separate from the normal `filtered_60` default. Older firmware can
+  ignore an unknown profile token, so hand-editing that token is not a
+  substitute for a matched update. Unrelated MAC
+  and INT2 ENV overrides preserve a supported centered choice, while legacy
   native-video ENV overrides intentionally select their legacy fallback.
+  Centered 60 Hz and 1920x1080 RTG share hardware preset 5, so the RTG
+  clock callbacks and both stock `Picasso96Settings` templates now use
+  148571429 Hz too. Back up custom settings rather than blindly replacing
+  them with a stock template.
 - `ZZ9000Net.device`, `zz9000ax.audio` and `mhizz9000.library` honor
   `int2 = on`; `ZZ9000Net.device` adopts the firmware's `mac`.
 - `ZZ9000.card` also reads `offscreen_bitmaps` and `video_overlay`,
   the kill switches for card-side off-screen bitmaps and the P96 video
   window. Both default to on; ZZTop's Settings window edits them.
+
+The existing `1280x1024` / `Match Amiga` pair (`full_exact`) selects fixed
+PAL/NTSC approximations of about 49.93/59.95 Hz; the label does not imply
+input genlock. Centered output currently offers fixed 50 Hz and 60 Hz only.
+
+### Scandoubler output and refresh
+
+The selectors map to the following saved profiles. Only supported pairs
+are offered; the centered rows require the capabilities described above.
+
+| Output | Refresh | `videocap_profile` |
+|---|---|---|
+| 1280x1024 - full detail | 60Hz | `full_60` |
+| 1280x1024 - full detail | Match Amiga | `full_exact` |
+| 1920x1080 - centered | 60Hz | `centered_1080p_60` |
+| 1920x1080 - centered | 50Hz | `centered_1080p_50` |
+| 800x600 / 720x480 - filtered | 60Hz | `filtered_60` |
+| 720x576 / 720x480 - filtered | 50Hz PAL,60Hz NTSC | `filtered_pal` |
+| 720x576 / 720x480 - filtered | PAL Amiga clock | `filtered_pal_exact` |
+| 720x576 / 720x480 - filtered | NTSC Amiga clock | `filtered_ntsc_exact` |
+
+Output and Refresh are staged for the next cold boot: choose the pair,
+press **Save**, then power-cycle. Scanline mode and parity changes apply
+live, but also need **Save** to survive a power cycle. Capture/calibration
+previews have the separate accept/restore rules below.
 
 ### Live native-video calibration
 
@@ -215,8 +274,8 @@ live-control bit as well as the exact RTL capability, so either half of an
 older/mixed install—including 2.8 RC1 firmware—leaves the existing Automatic
 and numeric Custom controls available but keeps **Calibrate** disabled.
 
-In **Project → Settings… → Advanced Video…**, leave the staged Native Output
-path matching the currently applied path and choose **Calibrate…**. ZZTop opens
+In **Project → Scandoubler…**, leave the staged Output/Refresh path
+matching the currently applied path, then choose **Capture… → Calibrate…**. ZZTop opens
 an explicit native PAL or NTSC Hires screen—never an RTG fallback—so its edge,
 safe-area, and centre guides pass through the physical capture path being
 adjusted.
@@ -226,17 +285,20 @@ adjusted.
 - Values change on screen only after the FPGA applies the complete H/V control
   word at a capture-frame boundary and acknowledges it.
 - **Enter** accepts the displayed pair as explicit Custom values and returns to
-  Advanced Video. It does not write the SD card.
+  the Capture window. It does not write the SD card.
 - **Escape** restores and acknowledges the exact state from calibration entry,
   including independent per-axis Automatic flags, before the native screen
   closes.
-- **Done** stages an accepted preview in Settings; **Save** is the only action
-  that writes `ZZ9000.CFG`. A cold boot later reproduces the saved pair.
+- **Done** in Capture stages an accepted preview in Scandoubler; **Save** is
+  the only action that writes `ZZ9000.CFG`. A cold boot later reproduces the
+  saved pair.
 
-Advanced Cancel, Settings Reload, and closing Settings restore their owning
-live snapshots before discarding an unsaved preview. If an acknowledgement
-times out, ZZTop keeps the relevant window open and reports that the state is
-unknown; retry the restore when native frames return, or cold-boot to recover
+Capture Cancel, Scandoubler Reload, and closing the Scandoubler window
+restore their owning live snapshots before discarding an unsaved preview; the
+general Settings window is never blocked by video-calibration state. If an
+acknowledgement times out, ZZTop keeps the relevant window open and
+reports that the state is unknown; retry the restore when native frames
+return, or cold-boot to recover
 the persisted CFG state. If another live writer wins the same request
 sequence, ZZTop detects the different applied raw word and asks for a retry or
 exact restore rather than claiming success. A Custom pair is tied to the
@@ -343,9 +405,9 @@ ZZScanlines 3 0
 Modes are `0=off`, `1=classic`, `2=soft`, `3=gradient`; parity is
 `0=odd dark`, `1=even dark`.
 
-Like ZZTop's Settings window, `ZZScanlines` changes the live FPGA
+Like ZZTop's Scandoubler window, `ZZScanlines` changes the live FPGA
 state; to make scanlines survive a power cycle, save them to
-`ZZ9000.CFG` (firmware 2.3+, ZZTop Settings window's Save button).
+`ZZ9000.CFG` (firmware 2.3+, ZZTop Scandoubler window's Save button).
 
 ## Building
 

@@ -107,6 +107,10 @@ static void defaults(struct zzcfg_values *v)
 {
     memset(v, 0, sizeof(*v));
     v->videocap_profile = ZZCFG_VCAP_FULL_60;
+    v->videocap_profile_present = 1;
+    v->videocap_sample_present = 1;
+    v->scanline_mode_present = 1;
+    v->scanline_parity_present = 1;
     v->use_videocap_profile_key = 1;
     v->videocap_crop_h = ZZCFG_VIDEOCAP_CROP_H_COMPAT;
     v->videocap_crop_v = ZZCFG_VIDEOCAP_CROP_V_COMPAT;
@@ -137,6 +141,62 @@ static void check_crop_render(const char *text, const char *axis,
     check(has_exact_line(text, present ? active : inactive), what);
 }
 
+static void test_native_key_presence(void)
+{
+    struct zzcfg_values staged, boot;
+    const char *sparse =
+        "int2 = on\n"
+        "#scanline_mode = 0\n"
+        "#scanline_parity = 0\n"
+        "videocap_profile = unknown\n"
+        "videocap_sample = sideways\n";
+
+    memset(&staged, 0, sizeof(staged));
+    staged.use_videocap_profile_key = 1;
+    staged.videocap_profile = ZZCFG_VCAP_FULL_60;
+    staged.videocap_sample = 2;
+    staged.scanline_mode = 2;
+    staged.scanline_parity = 1;
+    zzcfg_parse_text(sparse, (UWORD)strlen(sparse), &staged);
+    check(zzcfg_save(0, &staged) == FWUP_OK,
+          "general save accepts a file without native keys");
+    memset(&boot, 0, sizeof(boot));
+    boot.videocap_profile = ZZCFG_VCAP_FILTERED_60;
+    zzcfg_parse_text(fwup_test_saved_text, fwup_test_saved_len, &boot);
+    check(boot.videocap_profile == ZZCFG_VCAP_FILTERED_60 &&
+          boot.videocap_sample == 0 && boot.scanline_mode == 0 &&
+          boot.scanline_parity == 0 && boot.int2 == 1,
+          "general save cannot activate absent native defaults or live scanlines");
+
+    sparse = "scanline_mode = 3\n";
+    zzcfg_parse_text(sparse, (UWORD)strlen(sparse), &staged);
+    check(zzcfg_save(0, &staged) == FWUP_OK,
+          "partial native configuration saves");
+    memset(&boot, 0, sizeof(boot));
+    boot.videocap_profile = ZZCFG_VCAP_FILTERED_60;
+    zzcfg_parse_text(fwup_test_saved_text, fwup_test_saved_len, &boot);
+    check(boot.scanline_mode == 3 && boot.scanline_parity == 0 &&
+          boot.videocap_profile == ZZCFG_VCAP_FILTERED_60 &&
+          boot.videocap_sample == 0,
+          "one explicit native key does not activate its absent siblings");
+
+    sparse = "videocap_shres = full\nvideocap_sample = average\n"
+             "scanline_mode = 0\nscanline_parity = 0\n";
+    zzcfg_parse_text(sparse, (UWORD)strlen(sparse), &staged);
+    check(zzcfg_save(0, &staged) == FWUP_OK,
+          "legacy profile and explicit zero settings save");
+    memset(&boot, 0, sizeof(boot));
+    boot.videocap_profile = ZZCFG_VCAP_FILTERED_60;
+    boot.videocap_sample = 2;
+    boot.scanline_mode = 3;
+    boot.scanline_parity = 1;
+    zzcfg_parse_text(fwup_test_saved_text, fwup_test_saved_len, &boot);
+    check(boot.videocap_profile == ZZCFG_VCAP_FULL_60 &&
+          boot.videocap_sample == 0 && boot.scanline_mode == 0 &&
+          boot.scanline_parity == 0,
+          "explicit legacy profile and zero values remain active");
+}
+
 int main(void)
 {
     struct zzcfg_values a, b;
@@ -144,6 +204,8 @@ int main(void)
     const char *mixed;
     UWORD n;
     int i;
+
+    test_native_key_presence();
 
     /* 1. every firmware key appears in generated output */
     defaults(&a);
@@ -420,6 +482,156 @@ int main(void)
     zzcfg_parse_text(mixed, (UWORD)strlen(mixed), &b);
     check(b.videocap_profile == ZZCFG_VCAP_FULL_60,
           "later legacy full-width key still wins");
+
+    /* Centered 50 Hz output: appended profile 7, serialized only when
+     * the firmware advertises BOTH centered capability bits. A 60-only
+     * stack keeps centered 60 working and visibly falls back to
+     * full_60 for 50 -- never a silent save of an unsupported value. */
+    check(ZZCFG_VCAP_CENTERED_1080P_60 == 6 &&
+          ZZCFG_VCAP_CENTERED_1080P_50 == 7 &&
+          ZZCFG_VCAP_PROFILE_COUNT == 8,
+          "centered profiles keep their appended identities");
+    check(zzcfg_profile_sanitize(ZZCFG_VCAP_CENTERED_1080P_50,
+          ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P) == ZZCFG_VCAP_FULL_60,
+          "60-only stack sanitizes centered 50 to full_60");
+    check(zzcfg_profile_sanitize(ZZCFG_VCAP_CENTERED_1080P_50,
+          ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P |
+          ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P_50) ==
+          ZZCFG_VCAP_CENTERED_1080P_50,
+          "dual-bit stack preserves centered 50");
+
+    defaults(&a);
+    a.firmware_capabilities = ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P;
+    a.videocap_profile = ZZCFG_VCAP_CENTERED_1080P_50;
+    n = zzcfg_generate(&a, text, sizeof(text));
+    check(strstr(text, "videocap_profile = full_60") != NULL,
+          "60-only stack saves centered 50 as the full_60 fallback");
+    check(strstr(text, "centered_1080p_50") == NULL,
+          "unsupported centered 50 is never serialized");
+
+    defaults(&a);
+    a.firmware_capabilities = ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P |
+        ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P_50;
+    a.videocap_profile = ZZCFG_VCAP_CENTERED_1080P_50;
+    n = zzcfg_generate(&a, text, sizeof(text));
+    check(n > 0 && n < ZZCFG_MAX_SIZE - 1,
+          "centered 50 save stays inside the 4 KiB parse budget");
+    check(strstr(text, "videocap_profile = centered_1080p_50") != NULL,
+          "supported centered 50 is generated");
+    defaults(&b);
+    b.firmware_capabilities = a.firmware_capabilities;
+    zzcfg_parse_text(text, n, &b);
+    check(b.videocap_profile == ZZCFG_VCAP_CENTERED_1080P_50,
+          "centered 50 round-trips");
+
+    /* A stack without the atomic profile key still gets a coherent
+     * legacy trio; centered 50 degrades to the same full-detail 60 Hz
+     * identity centered 60 always used. */
+    defaults(&a);
+    a.use_videocap_profile_key = 0;
+    a.firmware_capabilities = ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P |
+        ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P_50;
+    a.videocap_profile = ZZCFG_VCAP_CENTERED_1080P_50;
+    n = zzcfg_generate(&a, text, sizeof(text));
+    check(strstr(text, "videocap_mode = 800x600") != NULL &&
+          strstr(text, "videocap_shres = full") != NULL &&
+          strstr(text, "nonstandard_vsync = off") != NULL,
+          "legacy firmware receives the centered 50 fallback trio");
+
+    /* Output/refresh decomposition and its inverse drive the dependent
+     * selectors: every supported pair is reversible, unsupported pairs
+     * report PROFILE_COUNT instead of a hidden fallback. */
+    {
+        static const struct { UWORD output, refresh, profile; } pairs[] = {
+            { ZZCFG_VCAP_OUTPUT_FULL, ZZCFG_VCAP_REFRESH_60,
+              ZZCFG_VCAP_FULL_60 },
+            { ZZCFG_VCAP_OUTPUT_FULL, ZZCFG_VCAP_REFRESH_MATCH_INPUT,
+              ZZCFG_VCAP_FULL_EXACT },
+            { ZZCFG_VCAP_OUTPUT_FILTERED_VGA, ZZCFG_VCAP_REFRESH_60,
+              ZZCFG_VCAP_FILTERED_60 },
+            { ZZCFG_VCAP_OUTPUT_FILTERED_SD, ZZCFG_VCAP_REFRESH_AUTO_50_60,
+              ZZCFG_VCAP_FILTERED_PAL },
+            { ZZCFG_VCAP_OUTPUT_FILTERED_SD, ZZCFG_VCAP_REFRESH_PAL_CLOCK,
+              ZZCFG_VCAP_FILTERED_PAL_EXACT },
+            { ZZCFG_VCAP_OUTPUT_FILTERED_SD, ZZCFG_VCAP_REFRESH_NTSC_CLOCK,
+              ZZCFG_VCAP_FILTERED_NTSC_EXACT },
+            { ZZCFG_VCAP_OUTPUT_CENTERED, ZZCFG_VCAP_REFRESH_60,
+              ZZCFG_VCAP_CENTERED_1080P_60 },
+            { ZZCFG_VCAP_OUTPUT_CENTERED, ZZCFG_VCAP_REFRESH_50,
+              ZZCFG_VCAP_CENTERED_1080P_50 }
+        };
+        UWORD all_caps = ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P |
+            ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P_50;
+        int pairs_ok = 1;
+        UWORD p;
+
+        for (p = 0; p < sizeof(pairs) / sizeof(pairs[0]); p++) {
+            if (zzcfg_profile_output(pairs[p].profile) != pairs[p].output ||
+                zzcfg_profile_refresh(pairs[p].profile) != pairs[p].refresh ||
+                zzcfg_profile_for_output_refresh(pairs[p].output,
+                    pairs[p].refresh, all_caps) != pairs[p].profile)
+                pairs_ok = 0;
+        }
+        check(pairs_ok,
+              "every profile is a reversible output/refresh pair");
+
+        check(zzcfg_profile_for_output_refresh(ZZCFG_VCAP_OUTPUT_CENTERED,
+              ZZCFG_VCAP_REFRESH_MATCH_INPUT, all_caps) ==
+              ZZCFG_VCAP_PROFILE_COUNT,
+              "pair with no profile reports COUNT, not a fallback");
+        check(zzcfg_profile_for_output_refresh(ZZCFG_VCAP_OUTPUT_FULL,
+              ZZCFG_VCAP_REFRESH_PAL_CLOCK, all_caps) ==
+              ZZCFG_VCAP_PROFILE_COUNT,
+              "clock refresh exists only on filtered SD output");
+        check(zzcfg_profile_for_output_refresh(ZZCFG_VCAP_OUTPUT_FILTERED_VGA,
+              ZZCFG_VCAP_REFRESH_AUTO_50_60, all_caps) ==
+              ZZCFG_VCAP_PROFILE_COUNT,
+              "auto refresh exists only on filtered SD output");
+        check(zzcfg_profile_for_output_refresh(ZZCFG_VCAP_OUTPUT_CENTERED,
+              ZZCFG_VCAP_REFRESH_50,
+              ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P) ==
+              ZZCFG_VCAP_PROFILE_COUNT,
+              "centered 50 pair is hidden without both capability bits");
+        check(zzcfg_profile_for_output_refresh(ZZCFG_VCAP_OUTPUT_CENTERED,
+              ZZCFG_VCAP_REFRESH_60,
+              ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P) ==
+              ZZCFG_VCAP_CENTERED_1080P_60,
+              "centered 60 pair stays valid with only bit 3");
+        check(zzcfg_profile_for_output_refresh(ZZCFG_VCAP_OUTPUT_COUNT,
+              ZZCFG_VCAP_REFRESH_60, all_caps) ==
+              ZZCFG_VCAP_PROFILE_COUNT &&
+              zzcfg_profile_for_output_refresh(ZZCFG_VCAP_OUTPUT_FULL,
+              ZZCFG_VCAP_REFRESH_COUNT, all_caps) ==
+              ZZCFG_VCAP_PROFILE_COUNT,
+              "out-of-range selector values report COUNT");
+        check(zzcfg_profile_output(ZZCFG_VCAP_PROFILE_COUNT) ==
+              ZZCFG_VCAP_OUTPUT_COUNT &&
+              zzcfg_profile_refresh(ZZCFG_VCAP_PROFILE_COUNT) ==
+              ZZCFG_VCAP_REFRESH_COUNT,
+              "out-of-range profile decomposes to COUNT axes");
+    }
+
+    /* Saved identities never renumber: tokens parse back to the exact
+     * positions shared with the firmware parser and check-cfg-keys.sh. */
+    {
+        static const char *tokens[] = {
+            "full_60", "full_exact", "filtered_60", "filtered_pal",
+            "filtered_pal_exact", "filtered_ntsc_exact",
+            "centered_1080p_60", "centered_1080p_50"
+        };
+        int ids_ok = 1;
+        UWORD p;
+
+        for (p = 0; p < sizeof(tokens) / sizeof(tokens[0]); p++) {
+            char line[48];
+            snprintf(line, sizeof(line), "videocap_profile = %s\n",
+                     tokens[p]);
+            defaults(&b);
+            zzcfg_parse_text(line, (UWORD)strlen(line), &b);
+            if (b.videocap_profile != p) ids_ok = 0;
+        }
+        check(ids_ok, "profile tokens parse to their stable identities");
+    }
 
     /* Audio control-plane keys (firmware U5): absent from pre-audio
      * files' output, parsed and regenerated exactly when present. */

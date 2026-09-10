@@ -132,11 +132,11 @@
 
 
 ; --------------------------------------------------------------------
-; Scandoubler cap (ZZ9000-VCAP)
+; Native-video output and refresh
 ; --------------------------------------------------------------------
 
-(message "Native video normally defaults to filtered_60 (800x600 at 60 Hz).\n\nUse ZZTop to choose another profile and save it to ZZ9000.CFG for the next cold boot. Native video settings are separate from Picasso96 RTG screenmodes."
-   (help "The nonstandard-sync firmware variant defaults to PAL timing. Legacy ENVARC:ZZ9000-VCAP-800x600, ENVARC:ZZ9000-NS-VSYNC, and ENVARC:ZZ9000-NS-VSYNC-NTSC settings override the saved profile; remove those overrides when using ZZTop."))
+(message "Native video normally defaults to filtered_60: PAL 800x600 or NTSC 720x480, at nominal 60 Hz.\n\nIn ZZTop, open Project > Scandoubler..., select Output and Refresh, then Save and power-cycle. Capture... in that window controls sampling, framing and calibration. General Settings no longer contains native-video controls.\n\nNative video settings are separate from Picasso96 RTG screenmodes."
+   (help "The Project menu opens Settings, Scandoubler and Audio even when the main buttons are off-screen. Centered 1080p at nominal 60 or 50 Hz needs matching firmware, bitstream, ZZ9000.card and ZZTop; unsupported choices are hidden.\n\nThe nonstandard-sync firmware variant defaults to PAL timing. Legacy ENVARC:ZZ9000-VCAP-800x600, ENVARC:ZZ9000-NS-VSYNC, and ENVARC:ZZ9000-NS-VSYNC-NTSC settings override the saved profile; remove those overrides when using ZZTop."))
 
 (complete 50)
 
@@ -541,7 +541,7 @@
 
       (copyfiles
          (prompt ("Install ZZTop into %s/" #zz-drawer))
-         (help "Configuration GUI - resolution, scanlines, hardware toggles, and firmware status readback.")
+         (help "Configuration GUI with separate Settings, Scandoubler and Audio windows, plus hardware readback and firmware update/restore. Open the windows from ZZTop's Project menu; native Output/Refresh, scanlines and Capture controls are in Scandoubler.")
          (source "Tools/ZZTop")
          (infos)
          (dest #zz-drawer)
