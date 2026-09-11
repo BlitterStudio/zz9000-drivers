@@ -19,6 +19,7 @@
 #include <exec/execbase.h>
 #include <exec/resident.h>
 #include <exec/initializers.h>
+#include <dos/dos.h>
 
 #include <proto/exec.h>
 
@@ -172,7 +173,7 @@ BPTR CloseLib(struct MHI_LibBase *MhiBase __asm("a6")) {
 		}
 	}
 
-	return NULL;
+	return (BPTR)NULL;
 }
 
 /* ----------------------------------------------------------------------------------------
@@ -214,7 +215,7 @@ BPTR ExpungeLib(struct MHI_LibBase *mpb __asm("a6")) {
 
 	MhiBase->mhi_Library.lib_Flags |= LIBF_DELEXP;
 
-	return NULL;
+	return (BPTR)NULL;
 }
 
 /* ----------------------------------------------------------------------------------------
@@ -232,7 +233,7 @@ BPTR ExpungeLib(struct MHI_LibBase *mpb __asm("a6")) {
    ---------------------------------------------------------------------------------------- */
 
 ULONG ExtFuncLib(void) {
-	return NULL;
+	return 0;
 }
 
 struct MHI_LibBase *MhiBase = NULL;

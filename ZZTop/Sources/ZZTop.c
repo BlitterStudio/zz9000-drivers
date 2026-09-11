@@ -940,7 +940,7 @@ static void do_fw_update(struct Window *win)
 	 * this frame smashed it — Guru 8000 0004 on firmware upload. */
 	static char path[256];
 	static char wrapped[320];
-	static char msg[400];
+	static char msg[448];
 	UWORD st;
 
 	if (!fwup_probe_board((ULONG)zz_regs)) {
@@ -2903,7 +2903,7 @@ static void scandoubler_populate(struct Window *win,
 		env_native = settings_apply_env_native(sv);
 		if (centered_fallback) {
 			snprintf(sd_status_buf, sizeof(sd_status_buf),
-				"Centered 1080p needs matching firmware/bitstream; Full 60 staged");
+			"Centered 1080p needs matching FW/bitstream; Full 60 staged");
 		} else if (env_native) {
 			snprintf(sd_status_buf, sizeof(sd_status_buf),
 				"%u bytes + ENV: video overrides", (unsigned)rawlen);
@@ -2970,7 +2970,7 @@ static BOOL scandoubler_update_save_gate(struct Window *win,
 		GA_Disabled, !allowed, TAG_END);
 	if (!allowed && settings_have_cfg && explain)
 		sd_set_status(win,
-			"Custom crop belongs to another capture path; use Automatic, Save and reboot");
+			"Use Automatic, Save and reboot (custom crop is per-path)");
 	return allowed;
 }
 
@@ -4225,7 +4225,7 @@ static void audio_format_peak(char *buf, size_t size, uint32_t peak)
  * a meter read and holds its state between reads; a fresh event also
  * echoes into the status line, where it survives until the next
  * operator action overwrites it. */
-static char audio_peak_bufs[2][24];
+static char audio_peak_bufs[2][32];
 static char audio_counts_bufs[2][32];
 static char audio_gr_buf[24];
 static uint32_t audio_gr_seen[2];
@@ -5215,7 +5215,7 @@ static BOOL audio_scene_editor_window(struct Screen *mysc, void *vi,
 				 * slider committed on MOUSEMOVE for this reason). Commit
 				 * every move; the firmware's coalescing commit machine
 				 * collapses a drag into a couple of machine runs. */
-				int is_move = (imsg_class == IDCMP_MOUSEMOVE);
+
 				UWORD id = gad->GadgetID;
 				UWORD *field;
 				uint32_t param;
@@ -5495,7 +5495,7 @@ VOID handleGadgetEvent(struct Window *win, struct Gadget *gad, ULONG code)
 			if (errors == 0) {
 				zztop_set_text_display(win, MYGAD_TEST_RESULT, "OK read-only");
 			} else {
-				snprintf(txt_buf, 20, "%lu read errs", (unsigned long)errors);
+				snprintf(txt_buf, sizeof(txt_buf), "%lu read errs", (unsigned long)errors);
 				zztop_set_text_display(win, MYGAD_TEST_RESULT, txt_buf);
 			}
 			refresh_zz_info(win);
