@@ -174,23 +174,51 @@ static int zzcfg_audio_scene_key(struct zzcfg_values *v, int scene,
 
 struct zzcfg_profile_desc {
     const char *name;
-    UWORD pal_mode;
+    UWORD pal_mode;         /* legacy-key translation for old firmware */
     UWORD full;
     UWORD vsync;
+    UWORD output;           /* enum zzcfg_vcap_output */
+    UWORD refresh;          /* enum zzcfg_vcap_refresh */
     UWORD required_capability;
     UWORD fallback_profile;
 };
 
-/* One schema drives parsing, rendering and legacy-firmware translation. */
+/* One schema drives parsing, rendering and legacy-firmware translation.
+ * Order matches the firmware parser's videocap_profile branch and
+ * tools/check-cfg-keys.sh; append-only so saved numeric identities and
+ * tokens stay stable. Each row is a distinct output/refresh pair:
+ * zzcfg_profile_for_output_refresh is its inverse. */
 static const struct zzcfg_profile_desc zzcfg_profiles[] = {
-    { "full_60",             0, 1, 0, 0, ZZCFG_VCAP_FULL_60 },
-    { "full_exact",          0, 1, 1, 0, ZZCFG_VCAP_FULL_EXACT },
-    { "filtered_60",         0, 0, 0, 0, ZZCFG_VCAP_FILTERED_60 },
-    { "filtered_pal",        1, 0, 0, 0, ZZCFG_VCAP_FILTERED_PAL },
-    { "filtered_pal_exact",  1, 0, 1, 0, ZZCFG_VCAP_FILTERED_PAL_EXACT },
-    { "filtered_ntsc_exact", 1, 0, 2, 0, ZZCFG_VCAP_FILTERED_NTSC_EXACT },
+    { "full_60",             0, 1, 0,
+      ZZCFG_VCAP_OUTPUT_FULL,        ZZCFG_VCAP_REFRESH_60,
+      0, ZZCFG_VCAP_FULL_60 },
+    { "full_exact",          0, 1, 1,
+      ZZCFG_VCAP_OUTPUT_FULL,        ZZCFG_VCAP_REFRESH_MATCH_INPUT,
+      0, ZZCFG_VCAP_FULL_EXACT },
+    { "filtered_60",         0, 0, 0,
+      ZZCFG_VCAP_OUTPUT_FILTERED_VGA, ZZCFG_VCAP_REFRESH_60,
+      0, ZZCFG_VCAP_FILTERED_60 },
+    { "filtered_pal",        1, 0, 0,
+      ZZCFG_VCAP_OUTPUT_FILTERED_SD, ZZCFG_VCAP_REFRESH_AUTO_50_60,
+      0, ZZCFG_VCAP_FILTERED_PAL },
+    { "filtered_pal_exact",  1, 0, 1,
+      ZZCFG_VCAP_OUTPUT_FILTERED_SD, ZZCFG_VCAP_REFRESH_PAL_CLOCK,
+      0, ZZCFG_VCAP_FILTERED_PAL_EXACT },
+    { "filtered_ntsc_exact", 1, 0, 2,
+      ZZCFG_VCAP_OUTPUT_FILTERED_SD, ZZCFG_VCAP_REFRESH_NTSC_CLOCK,
+      0, ZZCFG_VCAP_FILTERED_NTSC_EXACT },
     { "centered_1080p_60",   0, 1, 0,
-      ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P, ZZCFG_VCAP_FULL_60 }
+      ZZCFG_VCAP_OUTPUT_CENTERED,    ZZCFG_VCAP_REFRESH_60,
+      ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P, ZZCFG_VCAP_FULL_60 },
+    { "centered_1080p_50",   0, 1, 0,
+      ZZCFG_VCAP_OUTPUT_CENTERED,    ZZCFG_VCAP_REFRESH_50,
+      ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P |
+      ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P_50, ZZCFG_VCAP_FULL_60 },
+    { "centered_1080p_match", 0, 1, 0,
+      ZZCFG_VCAP_OUTPUT_CENTERED,    ZZCFG_VCAP_REFRESH_MATCH_INPUT,
+      ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P |
+      ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P_50 |
+      ZZ_FW_CAP_VIDEOCAP_SOURCE_SYNC, ZZCFG_VCAP_FULL_60 }
 };
 
 typedef char zzcfg_profile_count_matches_enum[
@@ -247,6 +275,40 @@ UWORD zzcfg_profile_sanitize(UWORD profile, UWORD firmware_capabilities)
     if (!zzcfg_profile_supported(profile, firmware_capabilities))
         return zzcfg_profiles[profile].fallback_profile;
     return profile;
+}
+
+UWORD zzcfg_profile_output(UWORD profile)
+{
+    if (profile >= ZZCFG_VCAP_PROFILE_COUNT)
+        return ZZCFG_VCAP_OUTPUT_COUNT;
+    return zzcfg_profiles[profile].output;
+}
+
+UWORD zzcfg_profile_refresh(UWORD profile)
+{
+    if (profile >= ZZCFG_VCAP_PROFILE_COUNT)
+        return ZZCFG_VCAP_REFRESH_COUNT;
+    return zzcfg_profiles[profile].refresh;
+}
+
+UWORD zzcfg_profile_for_output_refresh(UWORD output, UWORD refresh,
+    UWORD capabilities)
+{
+    UWORD i;
+
+    if (output >= ZZCFG_VCAP_OUTPUT_COUNT ||
+            refresh >= ZZCFG_VCAP_REFRESH_COUNT)
+        return ZZCFG_VCAP_PROFILE_COUNT;
+    for (i = 0; i < ZZCFG_VCAP_PROFILE_COUNT; i++) {
+        if (zzcfg_profiles[i].output != output) continue;
+        if (zzcfg_profiles[i].refresh != refresh) continue;
+        /* Each pair maps to exactly one profile, so an unsupported
+         * match is a dead end, not something a later row could fix. */
+        if (!zzcfg_profile_supported(i, capabilities))
+            return ZZCFG_VCAP_PROFILE_COUNT;
+        return i;
+    }
+    return ZZCFG_VCAP_PROFILE_COUNT;
 }
 
 static int zzcfg_parse_profile(const char *value, UWORD *profile)
@@ -312,6 +374,7 @@ void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v)
             UWORD profile;
             if (zzcfg_parse_profile(value, &profile)) {
                 v->videocap_profile = profile;
+                v->videocap_profile_present = 1;
                 zzcfg_profile_to_legacy(profile, &legacy_pal, &legacy_full,
                     &legacy_vsync);
             }
@@ -322,11 +385,13 @@ void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v)
                 legacy_full = 0;
                 v->videocap_profile = zzcfg_profile_from_legacy(legacy_pal,
                     legacy_full, legacy_vsync);
+                v->videocap_profile_present = 1;
             } else if (zzcfg_str_eq_ci(value, "800x600")) {
                 legacy_pal = 0;
                 legacy_full = 0;
                 v->videocap_profile = zzcfg_profile_from_legacy(legacy_pal,
                     legacy_full, legacy_vsync);
+                v->videocap_profile_present = 1;
             }
         } else if (zzcfg_str_eq_ci(key, "videocap_sample")) {
             if (zzcfg_str_eq_ci(value, "average"))
@@ -335,15 +400,19 @@ void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v)
                 v->videocap_sample = 1;
             else if (zzcfg_str_eq_ci(value, "odd"))
                 v->videocap_sample = 2;
+            else continue;
+            v->videocap_sample_present = 1;
         } else if (zzcfg_str_eq_ci(key, "videocap_shres")) {
             if (zzcfg_str_eq_ci(value, "filter")) {
                 legacy_full = 0;
                 v->videocap_profile = zzcfg_profile_from_legacy(legacy_pal,
                     legacy_full, legacy_vsync);
+                v->videocap_profile_present = 1;
             } else if (zzcfg_str_eq_ci(value, "full")) {
                 legacy_full = 1;
                 v->videocap_profile = zzcfg_profile_from_legacy(legacy_pal,
                     legacy_full, legacy_vsync);
+                v->videocap_profile_present = 1;
             }
         } else if (zzcfg_str_eq_ci(key, "videocap_crop_h")) {
             UWORD crop;
@@ -365,12 +434,17 @@ void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v)
             else continue;
             v->videocap_profile = zzcfg_profile_from_legacy(legacy_pal,
                 legacy_full, legacy_vsync);
+            v->videocap_profile_present = 1;
         } else if (zzcfg_str_eq_ci(key, "scanline_mode")) {
-            if (value[1] == '\0' && value[0] >= '0' && value[0] <= '3')
+            if (value[1] == '\0' && value[0] >= '0' && value[0] <= '3') {
                 v->scanline_mode = (UWORD)(value[0] - '0');
+                v->scanline_mode_present = 1;
+            }
         } else if (zzcfg_str_eq_ci(key, "scanline_parity")) {
-            if (value[1] == '\0' && (value[0] == '0' || value[0] == '1'))
+            if (value[1] == '\0' && (value[0] == '0' || value[0] == '1')) {
                 v->scanline_parity = (UWORD)(value[0] - '0');
+                v->scanline_parity_present = 1;
+            }
         } else if (zzcfg_str_eq_ci(key, "int2")) {
             if (zzcfg_str_eq_ci(value, "on") || zzcfg_str_eq_ci(value, "1"))
                 v->int2 = 1;
@@ -761,21 +835,23 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
     UWORD profile = zzcfg_profile_sanitize(v->videocap_profile,
         v->firmware_capabilities);
     UWORD legacy_pal, legacy_full, legacy_vsync;
+    const char *profile_prefix = v->videocap_profile_present ? "" : "#";
     char video_config[128];
     int n;
 
     zzcfg_profile_to_legacy(profile, &legacy_pal, &legacy_full, &legacy_vsync);
     if (v->use_videocap_profile_key) {
         snprintf(video_config, sizeof(video_config),
-            "videocap_profile = %s\n", zzcfg_profiles[profile].name);
+            "%svideocap_profile = %s\n", profile_prefix,
+            zzcfg_profiles[profile].name);
     } else {
         snprintf(video_config, sizeof(video_config),
-            "videocap_mode = %s\n"
-            "videocap_shres = %s\n"
-            "nonstandard_vsync = %s\n",
-            legacy_pal ? "pal" : "800x600",
-            legacy_full ? "full" : "filter",
-            vsync_names[legacy_vsync]);
+            "%svideocap_mode = %s\n"
+            "%svideocap_shres = %s\n"
+            "%snonstandard_vsync = %s\n",
+            profile_prefix, legacy_pal ? "pal" : "800x600",
+            profile_prefix, legacy_full ? "full" : "filter",
+            profile_prefix, vsync_names[legacy_vsync]);
     }
 
     /* Share the firmware's 4 KiB budget with all eight audio scenes.
@@ -784,23 +860,25 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
     n = snprintf(out, outsz,
         "# ZZ9000.CFG written by ZZTop; power-cycle to apply\n"
         "%s"
-        "videocap_sample = %s\n"
+        "%svideocap_sample = %s\n"
         "%svideocap_crop_h = %u\n"
         "%svideocap_crop_v = %u\n"
-        "scanline_mode = %u\n"
-        "scanline_parity = %u\n"
+        "%sscanline_mode = %u\n"
+        "%sscanline_parity = %u\n"
         "int2 = %s\n"
         "offscreen_bitmaps = %s\n"
         "video_overlay = %s\n"
         "%smac = %s\n"
         "%shdf = %s\n",
         video_config,
-        sample_names[sample],
+        v->videocap_sample_present ? "" : "#", sample_names[sample],
         v->videocap_crop_h_present ? "" : "#",
         (unsigned)(v->videocap_crop_h & 4095),
         v->videocap_crop_v_present ? "" : "#",
         (unsigned)(v->videocap_crop_v & 4095),
+        v->scanline_mode_present ? "" : "#",
         (unsigned)(v->scanline_mode & 3),
+        v->scanline_parity_present ? "" : "#",
         (unsigned)(v->scanline_parity & 1),
         v->int2 ? "on" : "off",
         v->offscreen_bitmaps ? "on" : "off",

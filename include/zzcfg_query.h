@@ -52,8 +52,14 @@
 /* enum zz_video_modes values the config interface deals in. */
 #define ZZ_VMODE_800x600         1
 #define ZZ_VMODE_CENTERED_1080P_60 5
+#define ZZ_VMODE_CENTERED_1080P_50 7
 #define ZZ_VMODE_720x576         6
-
+/* Virtual id for the centered source-sync capture profile: never a
+ * preset_video_modes row. Only firmware advertising all three
+ * ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P/_50/_SOURCE_SYNC bits understands
+ * it; older firmware never reports it, and the driver-side sanitize
+ * maps it away on mixed stacks. */
+#define ZZ_VMODE_CENTERED_1080P_MATCH 0x100
 /* Query one parsed ZZ9000.CFG value. *present is set to 1 if the key
  * was given in the config file (for ZZ_CFG_KEY_LOADED: whether the
  * file was found at cold boot); the value reads as 0 when absent. */

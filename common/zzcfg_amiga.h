@@ -32,15 +32,44 @@ enum zzcfg_videocap_profile {
     ZZCFG_VCAP_FILTERED_PAL_EXACT,
     ZZCFG_VCAP_FILTERED_NTSC_EXACT,
     ZZCFG_VCAP_CENTERED_1080P_60,
+    ZZCFG_VCAP_CENTERED_1080P_50,
+    ZZCFG_VCAP_CENTERED_1080P_MATCH,
     ZZCFG_VCAP_PROFILE_COUNT
 };
 
-/* Everything ZZTop's Settings window edits. mac/hdf are C strings;
+/* Independent axes behind the profiles: what the capture path produces
+ * (output) and the refresh it runs at. Every profile is exactly one
+ * output/refresh pair; the UI presents the pair as two dependent
+ * selectors rebuilt via zzcfg_profile_for_output_refresh. */
+enum zzcfg_vcap_output {
+    ZZCFG_VCAP_OUTPUT_FULL,        /* unscaled 1280x1024 detail */
+    ZZCFG_VCAP_OUTPUT_CENTERED,    /* 1280x1024 centered in 1920x1080 */
+    ZZCFG_VCAP_OUTPUT_FILTERED_VGA,/* 800x600 PAL / 720x480 NTSC */
+    ZZCFG_VCAP_OUTPUT_FILTERED_SD, /* 720x576 / 720x480 filtered */
+    ZZCFG_VCAP_OUTPUT_COUNT
+};
+
+enum zzcfg_vcap_refresh {
+    ZZCFG_VCAP_REFRESH_50,
+    ZZCFG_VCAP_REFRESH_60,
+    ZZCFG_VCAP_REFRESH_MATCH_INPUT,
+    ZZCFG_VCAP_REFRESH_AUTO_50_60,
+    ZZCFG_VCAP_REFRESH_PAL_CLOCK,
+    ZZCFG_VCAP_REFRESH_NTSC_CLOCK,
+    ZZCFG_VCAP_REFRESH_COUNT
+};
+
+/* Configuration shared by ZZTop's Settings, Scandoubler and Audio windows.
+ * mac/hdf are C strings;
  * an empty string means "not configured" and is emitted as a
  * commented-out example line. */
 struct zzcfg_values {
     UWORD videocap_profile;  /* enum zzcfg_videocap_profile */
     UWORD videocap_sample;   /* 0 = average, 1 = even, 2 = odd */
+    /* Keep omitted native settings inactive when another window saves.
+     * Scandoubler Save explicitly activates its displayed values. */
+    UWORD videocap_profile_present;
+    UWORD videocap_sample_present;
     UWORD videocap_crop_h;   /* 0-4095, 28 MHz samples */
     UWORD videocap_crop_v;   /* 0-4095, captured lines */
     /* Presence is independent per axis. A missing key means Automatic;
@@ -56,10 +85,12 @@ struct zzcfg_values {
     UWORD firmware_capabilities;
     UWORD scanline_mode;     /* 0-3 */
     UWORD scanline_parity;   /* 0-1 */
+    UWORD scanline_mode_present;
+    UWORD scanline_parity_present;
     UWORD int2;              /* 0-1 */
     /* Feature kill-switches. Both default ON in ZZ9000.card when the key is
-     * absent, so these must default to 1 here too: ZZTop writes every
-     * supported key on save, and defaulting them to 0 would silently
+     * absent, so these must default to 1 here too: Settings writes these
+     * keys on save, and defaulting them to 0 would silently
      * disable accelerated paths for anyone who opens Settings. */
     UWORD offscreen_bitmaps; /* 0-1, default 1 */
     UWORD video_overlay;     /* 0-1, default 1 */
@@ -100,6 +131,20 @@ void zzcfg_profile_to_legacy(UWORD profile, UWORD *pal_mode, UWORD *full,
 int zzcfg_profile_supported(UWORD profile, UWORD firmware_capabilities);
 UWORD zzcfg_profile_sanitize(UWORD profile, UWORD firmware_capabilities);
 
+/* Decompose a profile into its independent output/refresh axes. An
+ * out-of-range profile yields the respective *_COUNT so callers can
+ * reject it instead of rendering a bogus selector position. */
+UWORD zzcfg_profile_output(UWORD profile);
+UWORD zzcfg_profile_refresh(UWORD profile);
+
+/* Inverse mapping for the dependent selectors: the profile realizing
+ * this output/refresh pair under these capabilities, or
+ * ZZCFG_VCAP_PROFILE_COUNT when no supported profile does -- NOT a
+ * fallback. The caller picks a valid visible selection (e.g. keep the
+ * refresh when the new output supports it, else a shown default). */
+UWORD zzcfg_profile_for_output_refresh(UWORD output, UWORD refresh,
+    UWORD capabilities);
+
 /* Fetch the raw file contents into out (NUL-terminated, maxlen must be
  * >= 1). Returns a ZZ_CFG_FILE_* status; *outlen is the byte count.
  * ZZ_CFG_FILE_IDLE means the firmware never answered (no support). */
@@ -117,18 +162,19 @@ int zzcfg_hdf_name_valid(const char *name);
 /* Decode the ZZTop-editable keys from raw config text into v, using
  * the firmware parser's line rules (comments, case-insensitive keys,
  * last value wins). Keys absent from the text leave v untouched; valid
- * crop keys additionally set their axis's *_present flag. Pre-fill v
- * with the desired defaults and clear those flags before parsing a new
- * file. This is what makes the raw
+ * native keys additionally set their *_present flag. Pre-fill v with
+ * desired defaults and clear presence flags before parsing a new file.
+ * This is what makes the raw
  * SD file — not the firmware's boot-time parse — the editor's source
  * of truth: values saved or externally edited after boot survive a
  * Reload instead of being reverted to the cold-boot state. */
 void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v);
 
 /* Render a compact ZZ9000.CFG from v, leaving room for all eight audio
- * scenes within ZZCFG_MAX_SIZE. Returns the byte count, or 0 when the
- * rendered file does not fit in outsz. zzcfg_save refuses 0, so an
- * oversized model is never written as a partial file. */
+ * scenes within ZZCFG_MAX_SIZE. Native fields with a clear *_present
+ * flag remain commented out; an editor must set the flags for values it
+ * explicitly saves. Returns the byte count, or 0 when the rendered file
+ * does not fit. zzcfg_save refuses 0 rather than writing a partial file. */
 UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz);
 
 /* Generate and push the file to the SD card as ZZ9000.CFG via FWUP.

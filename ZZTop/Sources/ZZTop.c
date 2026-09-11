@@ -55,7 +55,8 @@
 static const char version[] __attribute__((used)) =
 	"$VER: ZZTop " ZZTOP_RELEASE " (" ZZTOP_DATE ")\r\n";
 
-/* Scanline mode/parity moved to the Settings window (Project menu). */
+/* Scanline mode/parity and every other native-video control live in
+ * the Scandoubler window. */
 #define MYGAD_ZORROVER     (0)
 #define MYGAD_FWVER        (1)
 #define MYGAD_TEMP         (2)
@@ -76,22 +77,35 @@ static const char version[] __attribute__((used)) =
  * window moved there with the rest of the master-chain controls. */
 #define MYGAD_FW_STATUS    (16)
 #define MYGAD_BTN_AUDIO    (17)
-#define MYGAD_COUNT        (18)
+/* Opens the Scandoubler window: fills the free third-column slot in
+ * the first button row, directly above the Audio button. */
+#define MYGAD_BTN_SCANDOUBLER (18)
+#define MYGAD_COUNT        (19)
 
-/* Settings window gadgets (own id space, own window). */
-#define SGAD_VIDEOCAP      (0)
-#define SGAD_VCAP_ADVANCED (1)
-#define SGAD_SCANMODE      (2)
-#define SGAD_PARITY        (3)
-#define SGAD_INT2          (4)
-#define SGAD_MAC           (5)
-#define SGAD_HDF           (6)
-#define SGAD_OFFSCREEN     (7)
-#define SGAD_OVERLAY       (8)
-#define SGAD_CFG_STATUS    (9)
-#define SGAD_BTN_SAVE      (10)
-#define SGAD_BTN_RELOAD    (11)
-#define SGAD_COUNT         (12)
+/* Settings window gadgets (own id space, own window): everything
+ * except native video. Output/refresh, scanlines/parity and capture
+ * calibration moved to the Scandoubler window. */
+#define SGAD_INT2          (0)
+#define SGAD_MAC           (1)
+#define SGAD_HDF           (2)
+#define SGAD_OFFSCREEN     (3)
+#define SGAD_OVERLAY       (4)
+#define SGAD_CFG_STATUS    (5)
+#define SGAD_BTN_SAVE      (6)
+#define SGAD_BTN_RELOAD    (7)
+#define SGAD_COUNT         (8)
+
+/* Scandoubler window gadgets (own id space, own window). */
+#define SDGAD_OUTPUT       (0)
+#define SDGAD_REFRESH      (1)
+#define SDGAD_DESC         (2)
+#define SDGAD_SCANMODE     (3)
+#define SDGAD_PARITY       (4)
+#define SDGAD_CAPTURE      (5)
+#define SDGAD_STATUS       (6)
+#define SDGAD_BTN_SAVE     (7)
+#define SDGAD_BTN_RELOAD   (8)
+#define SDGAD_COUNT        (9)
 
 /* Advanced native-video window gadgets. */
 #define AGAD_VCAP_SAMPLE   (0)
@@ -154,6 +168,8 @@ static const char version[] __attribute__((used)) =
 #define MENU_ID_FWUPDATE   (3)
 #define MENU_ID_FWRESTORE  (4)
 #define MENU_ID_AUDIOLOG   (5)
+#define MENU_ID_SCANDOUBLER (6)
+#define MENU_ID_AUDIO      (7)
 
 #define LABEL_ZORROVER     "Zorro Version"
 #define LABEL_FWVER        "Firmware ABI"
@@ -168,11 +184,12 @@ static const char version[] __attribute__((used)) =
 #define LABEL_SCANLINES    "Scanlines"
 #define LABEL_PARITY       "Parity"
 #define LABEL_REFRESHMODE  "Auto Refresh"
-#define LABEL_VCAPMODE     "Native Output"
+#define LABEL_SD_OUTPUT    "Output"
+#define LABEL_SD_REFRESH   "Refresh"
 #define LABEL_VCAP_SAMPLE  "Capture Sample"
 #define LABEL_VCAP_FRAMING "Framing"
 #define LABEL_VCAP_CROP    "Crop H / V"
-#define LABEL_VCAP_ADVANCED "Advanced Video..."
+#define LABEL_SD_CAPTURE   "Capture..."
 #define LABEL_INT2         "Interrupt"
 #define LABEL_OFFSCREEN    "Offscreen BMs"
 #define LABEL_OVERLAY      "Video overlay"
@@ -188,6 +205,7 @@ static const char version[] __attribute__((used)) =
 #define LABEL_BTN_RESTORE  "Restore Backup"
 #define LABEL_FW_STATUS    "Firmware Op"
 #define LABEL_BTN_AUDIO    "Audio..."
+#define LABEL_BTN_SCANDOUBLER "Scandoubler..."
 #define LABEL_AUDIO_SCENE  "Scene"
 #define LABEL_BTN_EDITSCN  "Edit..."
 #define LABEL_BTN_RENAME   "Rename..."
@@ -332,6 +350,7 @@ static CONST_STRPTR zztop_button_samples[] = {
 	(CONST_STRPTR)LABEL_BTN_TEST,
 	(CONST_STRPTR)LABEL_BTN_RESTORE,
 	(CONST_STRPTR)LABEL_BTN_AUDIO,
+	(CONST_STRPTR)LABEL_BTN_SCANDOUBLER,
 	(CONST_STRPTR)LABEL_BTN_UPDATE,
 	NULL
 };
@@ -358,8 +377,8 @@ struct MsgPort *timerport;
 struct Library *TimerBase;
 BOOL timer_pending = FALSE;
 char readout_bufs[MYGAD_COUNT][64];
-
-/* Shared with the Settings window (opened from the Project menu). */
+/* Shared with the Settings/Scandoubler/Audio windows (Project menu and
+ * main-window buttons). */
 static struct Screen *zztop_screen;
 static void *zztop_vi;
 static struct ZZTopLayout zztop_layout;
@@ -368,6 +387,11 @@ static struct Menu *zztop_menustrip;
 static struct NewMenu zztop_newmenus[] = {
 	{ NM_TITLE, (STRPTR)"Project",     NULL, 0, 0, NULL },
 	{ NM_ITEM,  (STRPTR)"Settings...", (STRPTR)"S", 0, 0, (APTR)MENU_ID_SETTINGS },
+	{ NM_ITEM,  (STRPTR)"Scandoubler...", (STRPTR)"C", 0, 0, (APTR)MENU_ID_SCANDOUBLER },
+	/* Audio shares the main-window button's guard: the window opens
+	 * only when the AX codec and the control-plane capability are
+	 * present (audio_window checks and explains otherwise). */
+	{ NM_ITEM,  (STRPTR)"Audio...", (STRPTR)"A", 0, 0, (APTR)MENU_ID_AUDIO },
 	{ NM_ITEM,  NM_BARLABEL,           NULL, 0, 0, NULL },
 	/* Also on buttons near the bottom of the window. Duplicated here so
 	 * they stay reachable on a short screen (PAL HighRes) where the
@@ -375,9 +399,27 @@ static struct NewMenu zztop_newmenus[] = {
 	{ NM_ITEM,  (STRPTR)"Update Firmware...", (STRPTR)"U", 0, 0, (APTR)MENU_ID_FWUPDATE },
 	{ NM_ITEM,  (STRPTR)"Restore Backup...",  (STRPTR)"R", 0, 0, (APTR)MENU_ID_FWRESTORE },
 	{ NM_ITEM,  NM_BARLABEL,           NULL, 0, 0, NULL },
-	{ NM_ITEM,  (STRPTR)"Audio Debug Log", (STRPTR)"A", CHECKIT, 0, (APTR)MENU_ID_AUDIOLOG },
+	/* 'L' for Log: plain 'A' now opens the Audio window. */
+	{ NM_ITEM,  (STRPTR)"Audio Debug Log", (STRPTR)"L", CHECKIT, 0, (APTR)MENU_ID_AUDIOLOG },
 	{ NM_END,   NULL,                  NULL, 0, 0, NULL }
 };
+
+/* First Project-menu item carrying this userdata, or NULL. Menu-item
+ * positions are layout details; userdata ids are the stable handle. */
+static struct MenuItem *zztop_menu_item_by_id(UWORD menu_id)
+{
+	UWORD item_index;
+
+	if (!zztop_menustrip) return NULL;
+	for (item_index = 0; item_index < 32; item_index++) {
+		struct MenuItem *item = ItemAddress(zztop_menustrip,
+			FULLMENUNUM(0, item_index, NOSUB));
+		if (!item) break;
+		if ((ULONG)GTMENUITEM_USERDATA(item) == (ULONG)menu_id)
+			return item;
+	}
+	return NULL;
+}
 
 static WORD zztop_max_word(WORD a, WORD b)
 {
@@ -918,33 +960,18 @@ static void do_fw_restore(struct Window *win)
 }
 
 /* ------------------------------------------------------------------ */
-/* Settings window: edits ZZ9000.CFG on the SD card (issue #33).      */
-/* Values load from the firmware's parsed config (cold-boot state)    */
-/* plus the raw file; Save regenerates the file and pushes it over    */
-/* the FWUP path. Scanline changes also apply live, everything else   */
-/* takes effect on the next power cycle.                              */
+/* Settings and Scandoubler windows: both edit ZZ9000.CFG on the SD   */
+/* card (issue #33). Values load from the raw file (not the cold-boot */
+/* query, so externally saved or edited values survive Reload); Save  */
+/* regenerates the whole file and pushes it over the FWUP path.       */
+/*                                                                    */
+/* Save ownership is split by section: the Scandoubler window owns    */
+/* native video (output/refresh, scanlines/parity, capture            */
+/* sampling/framing/crop/calibration) and the Settings window owns    */
+/* everything else (interrupt, MAC, HDF, offscreen bitmaps, video     */
+/* overlay). Each window re-reads the raw file when it opens, so a    */
+/* Save from one never clobbers unsaved edits staged in the other.    */
 /* ------------------------------------------------------------------ */
-
-static STRPTR vcapmode_labels[] = {
-	(STRPTR)"1280x1024 Fixed 60Hz (Full detail)",
-	(STRPTR)"1280x1024 Match PAL/NTSC (Full detail)",
-	(STRPTR)"800x600 60Hz (Filtered)",
-	(STRPTR)"720x576 50Hz (Filtered)",
-	(STRPTR)"Exact PAL Amiga (Filtered)",
-	(STRPTR)"Exact NTSC Amiga (Filtered)",
-	(STRPTR)"1280x1024 Centered in 1080p60",
-	NULL
-};
-
-static STRPTR vcapmode_legacy_labels[] = {
-	(STRPTR)"1280x1024 Fixed 60Hz (Full detail)",
-	(STRPTR)"1280x1024 Match PAL/NTSC (Full detail)",
-	(STRPTR)"800x600 60Hz (Filtered)",
-	(STRPTR)"720x576 50Hz (Filtered)",
-	(STRPTR)"Exact PAL Amiga (Filtered)",
-	(STRPTR)"Exact NTSC Amiga (Filtered)",
-	NULL
-};
 
 static STRPTR vcapsample_labels[] = {
 	(STRPTR)"Average (recommended)",
@@ -996,6 +1023,19 @@ struct settings_live_session {
 	struct zz_vcap_anchors anchors;
 	struct zz_vcap_control preview_control;
 	BOOL preview_valid;
+};
+
+/* Shared context for the Settings and Scandoubler config windows.
+ * Both are modal, so one context stack object serves either. The
+ * Settings window leaves `live` zeroed (unsupported): live native
+ * video control, including its close/restore gate, belongs to the
+ * Scandoubler window only. */
+struct zztop_cfg_ctx {
+	struct Screen *sc;
+	void *vi;
+	const struct ZZTopLayout *mainlayout;
+	UWORD fw_capabilities;
+	struct settings_live_session live;
 };
 
 static ULONG vcap_read32(ULONG offset)
@@ -1651,9 +1691,6 @@ static int vcap_calibration_run(struct Screen *return_screen,
 }
 
 static CONST_STRPTR settings_label_samples[] = {
-	(CONST_STRPTR)LABEL_VCAPMODE,
-	(CONST_STRPTR)LABEL_SCANLINES,
-	(CONST_STRPTR)LABEL_PARITY,
 	(CONST_STRPTR)LABEL_INT2,
 	(CONST_STRPTR)LABEL_MAC,
 	(CONST_STRPTR)LABEL_HDF,
@@ -1664,9 +1701,10 @@ static CONST_STRPTR settings_label_samples[] = {
 
 /* Sized from the widest cycle/string content only; the status line
  * spans the full row instead, so long messages don't inflate the
- * control column (and with it the whole window). */
+ * control column (and with it the whole window). The 24-char floor
+ * keeps the MAC/HDF string gadgets wide enough to edit without
+ * opening the column to the old (video-cycle-sized) width. */
 static CONST_STRPTR settings_value_samples[] = {
-	(CONST_STRPTR)"1280x1024 Match PAL/NTSC (Full detail)",
 	(CONST_STRPTR)"INT6 (default)",
 	(CONST_STRPTR)"aa:bb:cc:dd:ee:ff",
 	NULL
@@ -1678,16 +1716,22 @@ static CONST_STRPTR settings_button_samples[] = {
 	NULL
 };
 
+/* Status-line plumbing shared by both config windows: each has its own
+ * buffer and TEXT gadget, same no-self-copy rule as before. */
+static void cfg_status_set(struct Window *win, struct Gadget *status_gad,
+	char *buf, const char *text)
+{
+	/* callers may pass buf itself - don't self-copy */
+	if (text != buf) snprintf(buf, 64, "%s", text);
+	if (win && status_gad) {
+		GT_SetGadgetAttrs(status_gad, win, NULL,
+			GTTX_Text, buf, TAG_END);
+	}
+}
+
 static void settings_set_status(struct Window *win, const char *text)
 {
-	/* callers may pass settings_status_buf itself - don't self-copy */
-	if (text != settings_status_buf) {
-		snprintf(settings_status_buf, sizeof(settings_status_buf), "%s", text);
-	}
-	if (win && sgads[SGAD_CFG_STATUS]) {
-		GT_SetGadgetAttrs(sgads[SGAD_CFG_STATUS], win, NULL,
-			GTTX_Text, settings_status_buf, TAG_END);
-	}
+	cfg_status_set(win, sgads[SGAD_CFG_STATUS], settings_status_buf, text);
 }
 
 static int settings_parse_mac(const char *s)
@@ -1744,39 +1788,48 @@ static int settings_env_read_mac(char *out, int outsz)
 	return settings_parse_mac(out);
 }
 
-/* The drivers apply ENV: variables over the config file, so show the
- * effective values: pre-filling the editor from ENV both matches what
- * the system actually does and turns Save into the migration path
- * (values land in ZZ9000.CFG, then the ENV variables can go). Returns
- * 1 if any override is active so the status line can say so. */
-static int settings_apply_env_overrides(struct zzcfg_values *sv)
+/* The drivers apply ENV: variables over the config file, so the
+ * owning window shows the effective values: pre-filling its editor
+ * from ENV both matches what the system actually does and turns Save
+ * into the migration path (values land in ZZ9000.CFG, then the ENV
+ * variables can go). Split by owner so neither window rewrites the
+ * other's section with ENV values it does not display. Each returns
+ * 1 if any of its overrides is active, for the status line. */
+
+/* Native-video overrides (Scandoubler window): ZZ9000-VCAP-800x600
+ * and the nonstandard-vsync switches select a legacy capture path. */
+static int settings_apply_env_native(struct zzcfg_values *sv)
 {
-	char envmac[ZZCFG_MAC_CHARS + 3];
 	UWORD pal_mode, full, vsync;
-	int any = 0;
 	int native_override = 0;
 
 	zzcfg_profile_to_legacy(sv->videocap_profile, &pal_mode, &full, &vsync);
 	if (settings_env_exists("ENV:ZZ9000-VCAP-800x600")) {
 		pal_mode = 0;
 		full = 0;
-		any = 1;
 		native_override = 1;
 	}
 	if (settings_env_exists("ENV:ZZ9000-NS-VSYNC")) {
 		vsync = 1;
-		any = 1;
 		native_override = 1;
 	} else if (settings_env_exists("ENV:ZZ9000-NS-VSYNC-NTSC")) {
 		vsync = 2;
-		any = 1;
 		native_override = 1;
 	}
-	/* MAC/INT2 overrides are unrelated and must not collapse a centered
-	 * profile through the lossy legacy tuple. Native-video ENV overrides
-	 * intentionally select a legacy profile. */
+	/* Native-video ENV overrides intentionally select a legacy profile;
+	 * the conversion goes through the lossy legacy tuple either way. */
 	if (native_override)
-		sv->videocap_profile = zzcfg_profile_from_legacy(pal_mode, full, vsync);
+		sv->videocap_profile =
+			zzcfg_profile_from_legacy(pal_mode, full, vsync);
+	return native_override;
+}
+
+/* MAC/INT2 overrides (Settings window). */
+static int settings_apply_env_general(struct zzcfg_values *sv)
+{
+	char envmac[ZZCFG_MAC_CHARS + 3];
+	int any = 0;
+
 	if (settings_env_exists("ENV:ZZ9K_INT2")) {
 		sv->int2 = 1;
 		any = 1;
@@ -1788,14 +1841,20 @@ static int settings_apply_env_overrides(struct zzcfg_values *sv)
 	return any;
 }
 
+/* ENV variables each window offers to clean up after a successful
+ * save: only the ones its own section migrated into the file. */
+static const char *settings_env_names_general[] = {
+	"ZZ9K_MAC", "ZZ9K_INT2", NULL
+};
+static const char *settings_env_names_native[] = {
+	"ZZ9000-VCAP-800x600", "ZZ9000-NS-VSYNC",
+	"ZZ9000-NS-VSYNC-NTSC", NULL
+};
+
 /* After a save the config file holds the effective values, so offer
  * to delete the ENV: variables that would keep overriding it. */
-static void settings_offer_env_cleanup(void)
+static void settings_offer_env_cleanup(const char *const *env_names)
 {
-	static const char *env_names[] = {
-		"ZZ9K_MAC", "ZZ9K_INT2", "ZZ9000-VCAP-800x600",
-		"ZZ9000-NS-VSYNC", "ZZ9000-NS-VSYNC-NTSC", NULL
-	};
 	char path[40];
 	char msg[400];
 	int i, any = 0;
@@ -1834,18 +1893,19 @@ static void settings_offer_env_cleanup(void)
 	}
 }
 
-/* Populate settings_vals from the board and push into the gadgets. */
-static void settings_populate(struct Window *win, UWORD fw_capabilities)
+/* Shared editor seed for both config windows: board/live defaults,
+ * then the raw SD file over them. The raw file - not the firmware's
+ * cold-boot parse (REG_ZZ_CONFIG_KEY) - is the editor's source of
+ * truth: the query would revert values saved or externally edited
+ * since boot on every Reload, and a subsequent Save would write those
+ * stale values back. Returns the raw read status for the status line;
+ * *rawlen is valid on ZZ_CFG_FILE_OK. */
+static UWORD settings_reload_from_card(struct zzcfg_values *sv,
+	UWORD fw_capabilities, UWORD *rawlen)
 {
-	ULONG board = (ULONG)zz_regs;
-	struct zzcfg_values *sv = &settings_vals;
-	UWORD st, rawlen = 0;
-	BOOL centered_fallback = FALSE;
+	UWORD st;
 
-	/* Editor defaults; keys present in the raw file override them.
-	 * Scanlines default to the live FPGA state - the config applied
-	 * it at cold boot and this tool/ZZScanlines may have changed it
-	 * since. */
+	*rawlen = 0;
 	memset(sv, 0, sizeof(*sv));
 	sv->videocap_profile = ZZCFG_VCAP_FULL_60;
 	sv->use_videocap_profile_key =
@@ -1853,6 +1913,8 @@ static void settings_populate(struct Window *win, UWORD fw_capabilities)
 	sv->firmware_capabilities = fw_capabilities;
 	sv->videocap_crop_h = ZZCFG_VIDEOCAP_CROP_H_COMPAT;
 	sv->videocap_crop_v = ZZCFG_VIDEOCAP_CROP_V_COMPAT;
+	/* Scanlines default to the live FPGA state - the config applied it
+	 * at cold boot and this tool/ZZScanlines may have changed it since. */
 	sv->scanline_mode = zz_get_scanline_mode();
 	sv->scanline_parity = zz_get_scanline_parity();
 	/* ZZ9000.card enables both of these when the key is absent, so the
@@ -1862,64 +1924,56 @@ static void settings_populate(struct Window *win, UWORD fw_capabilities)
 	sv->offscreen_bitmaps = 1;
 	sv->video_overlay = 1;
 
+	/* Pre-2.3 firmware has no config-file interface at all: skip the
+	 * mailbox read (and its timeout) and leave the defaults in place;
+	 * callers report the scanlines-only state themselves. */
+	st = ZZ_CFG_FILE_IDLE;
 	if (settings_have_cfg) {
-		int env_active;
+		st = zzcfg_read_raw((ULONG)zz_regs, settings_cfg_text,
+			sizeof(settings_cfg_text), rawlen);
+		if (st == ZZ_CFG_FILE_OK)
+			zzcfg_parse_text(settings_cfg_text, *rawlen, sv);
+	}
+	return st;
+}
 
-		st = zzcfg_read_raw(board, settings_cfg_text,
-			sizeof(settings_cfg_text), &rawlen);
-		if (st == ZZ_CFG_FILE_OK) {
-			/* The raw SD file - not the firmware's cold-boot parse
-			 * (REG_ZZ_CONFIG_KEY) - is the editor's source of truth:
-			 * the query would revert values saved or externally
-			 * edited since boot on every Reload, and a subsequent
-			 * Save would then write those stale values back. */
-			zzcfg_parse_text(settings_cfg_text, rawlen, sv);
-			if (!zzcfg_profile_supported(sv->videocap_profile,
-					fw_capabilities)) {
-				sv->videocap_profile = zzcfg_profile_sanitize(
-					sv->videocap_profile, fw_capabilities);
-				centered_fallback = TRUE;
-			}
-			env_active = settings_apply_env_overrides(sv);
-			if (centered_fallback) {
-				snprintf(settings_status_buf, sizeof(settings_status_buf),
-					"Centered 1080p needs matching firmware/bitstream; Full 60 staged");
-			} else if (env_active) {
-				snprintf(settings_status_buf, sizeof(settings_status_buf),
-					"%u bytes on card + ENV overrides", (unsigned)rawlen);
-			} else {
-				snprintf(settings_status_buf, sizeof(settings_status_buf),
-					"ZZ9000.CFG: %u bytes on card", (unsigned)rawlen);
-			}
-		} else if (st == ZZ_CFG_FILE_NO_FILE) {
-			env_active = settings_apply_env_overrides(sv);
-			if (env_active) {
-				snprintf(settings_status_buf, sizeof(settings_status_buf),
-					"No file yet - showing ENV settings");
-			} else {
-				snprintf(settings_status_buf, sizeof(settings_status_buf),
-					"No ZZ9000.CFG on card yet");
-			}
-		} else if (st == ZZ_CFG_FILE_IDLE) {
+/* General Settings preserves parsed native values and their absence.
+ * Native ENV overrides belong to Scandoubler; the shared generator
+ * still sanitizes an explicitly stored unsupported centered profile. */
+static void settings_populate(struct Window *win, UWORD fw_capabilities)
+{
+	struct zzcfg_values *sv = &settings_vals;
+	UWORD st, rawlen = 0;
+
+	st = settings_reload_from_card(sv, fw_capabilities, &rawlen);
+
+	if (!settings_have_cfg) {
+		snprintf(settings_status_buf, sizeof(settings_status_buf),
+			"Config needs FW 2.3+ (scanlines: Scandoubler window)");
+	} else if (st == ZZ_CFG_FILE_OK) {
+		if (settings_apply_env_general(sv))
 			snprintf(settings_status_buf, sizeof(settings_status_buf),
-				"Firmware lacks config support");
-		} else {
+				"%u bytes on card + ENV: MAC/INT2", (unsigned)rawlen);
+		else
 			snprintf(settings_status_buf, sizeof(settings_status_buf),
-				"Config read failed (SD error)");
-		}
+				"ZZ9000.CFG: %u bytes on card", (unsigned)rawlen);
+	} else if (st == ZZ_CFG_FILE_NO_FILE) {
+		if (settings_apply_env_general(sv))
+			snprintf(settings_status_buf, sizeof(settings_status_buf),
+				"No file yet - showing ENV settings");
+		else
+			snprintf(settings_status_buf, sizeof(settings_status_buf),
+				"No ZZ9000.CFG on card yet");
+	} else if (st == ZZ_CFG_FILE_IDLE) {
+		snprintf(settings_status_buf, sizeof(settings_status_buf),
+			"Firmware lacks config support");
 	} else {
 		snprintf(settings_status_buf, sizeof(settings_status_buf),
-			"Scanlines only (needs FW 2.3+)");
+			"Config read failed (SD error)");
 	}
 
 	if (!win) return;
 
-	GT_SetGadgetAttrs(sgads[SGAD_VIDEOCAP], win, NULL,
-		GTCY_Active, sv->videocap_profile, TAG_END);
-	GT_SetGadgetAttrs(sgads[SGAD_SCANMODE], win, NULL,
-		GTCY_Active, sv->scanline_mode, TAG_END);
-	GT_SetGadgetAttrs(sgads[SGAD_PARITY], win, NULL,
-		GTCY_Active, sv->scanline_parity, TAG_END);
 	GT_SetGadgetAttrs(sgads[SGAD_INT2], win, NULL,
 		GTCY_Active, sv->int2 ? 1 : 0, TAG_END);
 	GT_SetGadgetAttrs(sgads[SGAD_MAC], win, NULL,
@@ -1933,11 +1987,43 @@ static void settings_populate(struct Window *win, UWORD fw_capabilities)
 	settings_set_status(win, settings_status_buf);
 }
 
+/* Shared save tail: write the model, offer to drop the ENV overrides
+ * this window's section migrated, and read back for confirmation that
+ * the write landed. Gating (and which sections the caller validated)
+ * stays with the caller. */
+static BOOL settings_save_to_card(struct Window *win,
+	struct Gadget *status_gad, char *status_buf,
+	const char *const *env_cleanup_names)
+{
+	UWORD st;
+
+	cfg_status_set(win, status_gad, status_buf, "Saving...");
+	st = zzcfg_save((ULONG)zz_regs, &settings_vals);
+	if (st == FWUP_OK) {
+		UWORD rawlen = 0;
+
+		settings_offer_env_cleanup(env_cleanup_names);
+
+		if (zzcfg_read_raw((ULONG)zz_regs, settings_cfg_text,
+				sizeof(settings_cfg_text), &rawlen) == ZZ_CFG_FILE_OK) {
+			snprintf(status_buf, 64, "Saved (%u bytes) - power-cycle",
+				(unsigned)rawlen);
+			cfg_status_set(win, status_gad, status_buf, status_buf);
+		} else {
+			cfg_status_set(win, status_gad, status_buf,
+				"Saved - power-cycle to apply");
+		}
+		return TRUE;
+	}
+	snprintf(status_buf, 64, "Save failed: %s", fwup_strerror(st));
+	cfg_status_set(win, status_gad, status_buf, status_buf);
+	return FALSE;
+}
+
 static BOOL settings_save(struct Window *win)
 {
 	struct zzcfg_values *sv = &settings_vals;
 	struct StringInfo *si;
-	UWORD st;
 
 	if (!settings_have_cfg) {
 		settings_set_status(win, "Config needs firmware 2.3+");
@@ -1961,31 +2047,8 @@ static BOOL settings_save(struct Window *win)
 		return FALSE;
 	}
 
-	settings_set_status(win, "Saving...");
-	st = zzcfg_save((ULONG)zz_regs, sv);
-	if (st == FWUP_OK) {
-		UWORD rawlen = 0;
-
-		/* The file now holds the effective values - offer to drop the
-		 * ENV variables that would keep overriding it. */
-		settings_offer_env_cleanup();
-
-		/* Read back for confirmation that the write landed. */
-		if (zzcfg_read_raw((ULONG)zz_regs, settings_cfg_text,
-				sizeof(settings_cfg_text), &rawlen) == ZZ_CFG_FILE_OK) {
-			snprintf(settings_status_buf, sizeof(settings_status_buf),
-				"Saved (%u bytes) - power-cycle", (unsigned)rawlen);
-			settings_set_status(win, settings_status_buf);
-		} else {
-			settings_set_status(win, "Saved - power-cycle to apply");
-		}
-		return TRUE;
-	} else {
-		snprintf(settings_status_buf, sizeof(settings_status_buf),
-			"Save failed: %s", fwup_strerror(st));
-		settings_set_status(win, settings_status_buf);
-	}
-	return FALSE;
+	return settings_save_to_card(win, sgads[SGAD_CFG_STATUS],
+		settings_status_buf, settings_env_names_general);
 }
 
 static struct Gadget *settings_create_gadgets(struct Gadget **glistptr,
@@ -1998,6 +2061,8 @@ static struct Gadget *settings_create_gadgets(struct Gadget **glistptr,
 	WORD label_width, value_width, button_width, y, i;
 	WORD content_right, button_gap;
 
+	(void)fw_capabilities; /* no capability-conditional rows here */
+
 	/* Same font metrics as the main window, own column widths (the
 	 * main window's are sized for its wider content, e.g. the
 	 * "Update Firmware" button). */
@@ -2009,7 +2074,7 @@ static struct Gadget *settings_create_gadgets(struct Gadget **glistptr,
 			zztop_max_text_width(rp, settings_button_samples, 8) + 32);
 	}
 	l.gadget_left = l.margin_x + label_width + l.label_gap;
-	l.gadget_width = zztop_max_word(160, value_width + 48);
+	l.gadget_width = zztop_max_word(192, value_width + 48);
 	content_right = l.gadget_left + l.gadget_width;
 	button_gap = 16;
 
@@ -2027,39 +2092,6 @@ static struct Gadget *settings_create_gadgets(struct Gadget **glistptr,
 	ng.ng_VisualInfo = vi;
 	ng.ng_Flags      = PLACETEXT_LEFT;
 
-	ng.ng_GadgetID   = SGAD_VIDEOCAP;
-	ng.ng_GadgetText = (STRPTR)LABEL_VCAPMODE;
-	sgads[SGAD_VIDEOCAP] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
-		GTCY_Labels,
-		(fw_capabilities & ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P) ?
-			vcapmode_labels : vcapmode_legacy_labels,
-		GTCY_Active, 0, TAG_END);
-	y += l.row_step;
-
-	ng.ng_TopEdge    = y;
-	ng.ng_GadgetID   = SGAD_VCAP_ADVANCED;
-	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_ADVANCED;
-	ng.ng_Flags      = PLACETEXT_IN;
-	sgads[SGAD_VCAP_ADVANCED] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
-		TAG_END);
-	ng.ng_Flags      = PLACETEXT_LEFT;
-	y += l.row_step;
-
-	ng.ng_TopEdge    = y;
-	ng.ng_GadgetID   = SGAD_SCANMODE;
-	ng.ng_GadgetText = (STRPTR)LABEL_SCANLINES;
-	sgads[SGAD_SCANMODE] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
-		GTCY_Labels, scanline_labels, GTCY_Active, 0, TAG_END);
-	y += l.row_step;
-
-	ng.ng_TopEdge    = y;
-	ng.ng_GadgetID   = SGAD_PARITY;
-	ng.ng_GadgetText = (STRPTR)LABEL_PARITY;
-	sgads[SGAD_PARITY] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
-		GTCY_Labels, parity_labels, GTCY_Active, 0, TAG_END);
-	y += l.row_step;
-
-	ng.ng_TopEdge    = y;
 	ng.ng_GadgetID   = SGAD_INT2;
 	ng.ng_GadgetText = (STRPTR)LABEL_INT2;
 	sgads[SGAD_INT2] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
@@ -2245,12 +2277,13 @@ settings_video_calibration_availability(
 	return VCAP_CALIBRATION_READY;
 }
 
-/* Sampling phase and capture origin are calibration/diagnostic controls, not
- * independent output-mode choices. Keeping them in a small secondary window
- * makes the normal Settings path describe outcomes instead of implementation
- * details. Values are committed to settings_vals only by Done; the main
- * window's Save button still writes the card. */
-static BOOL settings_video_advanced_window(struct Screen *mysc, void *vi,
+/* Capture sampling phase and capture origin are calibration/diagnostic
+ * controls, not independent output-mode choices. They stay in this
+ * small secondary window below the Scandoubler window's Capture...
+ * button so the main scandoubler rows describe outcomes instead of
+ * implementation details. Values are committed to settings_vals only
+ * by Done; the Scandoubler window's Save button still writes the card. */
+static BOOL scandoubler_capture_window(struct Screen *mysc, void *vi,
 	const struct ZZTopLayout *mainlayout,
 	struct settings_live_session *live_session)
 {
@@ -2395,7 +2428,7 @@ static BOOL settings_video_advanced_window(struct Screen *mysc, void *vi,
 	for (i = 0; i < AGAD_COUNT; i++) {
 		if (!agads[i]) {
 			if (glist) FreeGadgets(glist);
-			errorMessage("Advanced Video: gadget creation failed");
+			errorMessage("Capture: gadget creation failed");
 			return FALSE;
 		}
 	}
@@ -2404,7 +2437,7 @@ static BOOL settings_video_advanced_window(struct Screen *mysc, void *vi,
 		l.margin_x + button_width + button_gap + button_width + l.margin_x);
 	h = y + l.gadget_height + (l.margin_y / 2) - l.topborder;
 	win = OpenWindowTags(NULL,
-		WA_Title, "Advanced Native Video",
+		WA_Title, "Scandoubler Capture",
 		WA_Gadgets, glist, WA_AutoAdjust, TRUE,
 		WA_Width, w, WA_MinWidth, w,
 		WA_InnerHeight, h, WA_MinHeight, h,
@@ -2417,7 +2450,7 @@ static BOOL settings_video_advanced_window(struct Screen *mysc, void *vi,
 		TAG_END);
 	if (!win) {
 		FreeGadgets(glist);
-		errorMessage("Advanced Video: OpenWindow() failed");
+		errorMessage("Capture: OpenWindow() failed");
 		return FALSE;
 	}
 
@@ -2542,22 +2575,637 @@ static BOOL settings_video_advanced_window(struct Screen *mysc, void *vi,
 	return changed;
 }
 
-static BOOL settings_update_save_gate(struct Window *win,
+/* ---- Scandoubler window ----
+ *
+ * Native video only: output/refresh as two dependent selectors over
+ * the shared profile model, an honest one-line description of the
+ * selected pair, live scanlines/parity, and the capture calibration
+ * path one level down. Saving here preserves every non-video key
+ * exactly as parsed from the card. */
+
+static struct Gadget *sdgads[SDGAD_COUNT];
+static char sd_status_buf[64];
+static char sd_desc_buf[96];
+
+/* Cycle entries are enum values behind a per-session map: cycle index
+ * order must never be assumed to match enum order. */
+static STRPTR sd_output_labels[ZZCFG_VCAP_OUTPUT_COUNT] = {
+	(STRPTR)"1280x1024 - full detail",
+	(STRPTR)"1920x1080 - centered",
+	(STRPTR)"800x600 / 720x480 - filtered",
+	(STRPTR)"720x576 / 720x480 - filtered"
+};
+
+static STRPTR sd_refresh_labels[ZZCFG_VCAP_REFRESH_COUNT] = {
+	(STRPTR)"50Hz",
+	(STRPTR)"60Hz",
+	(STRPTR)"Match Amiga",
+	(STRPTR)"50Hz PAL,60Hz NTSC",
+	(STRPTR)"PAL Amiga clock",
+	(STRPTR)"NTSC Amiga clock"
+};
+
+static UWORD sd_output_map[ZZCFG_VCAP_OUTPUT_COUNT];
+static UWORD sd_output_count;
+static STRPTR sd_output_active[ZZCFG_VCAP_OUTPUT_COUNT + 1];
+
+static UWORD sd_refresh_map[ZZCFG_VCAP_REFRESH_COUNT];
+static UWORD sd_refresh_count;
+static STRPTR sd_refresh_active[ZZCFG_VCAP_REFRESH_COUNT + 1];
+
+
+static void sd_set_status(struct Window *win, const char *text)
+{
+	cfg_status_set(win, sdgads[SDGAD_STATUS], sd_status_buf, text);
+}
+
+static BOOL scandoubler_update_save_gate(struct Window *win,
+	struct settings_live_session *live_session, BOOL explain);
+
+/* First refresh that pairs with this output: the visible default when
+ * the current refresh is not valid for a newly selected output. */
+static UWORD scandoubler_first_refresh(UWORD output, UWORD fw_capabilities)
+{
+	UWORD refresh;
+
+	for (refresh = 0; refresh < ZZCFG_VCAP_REFRESH_COUNT; refresh++)
+		if (zzcfg_profile_for_output_refresh(output, refresh,
+				fw_capabilities) != ZZCFG_VCAP_PROFILE_COUNT)
+			return refresh;
+	return ZZCFG_VCAP_REFRESH_COUNT; /* outputs are choices only with one */
+}
+/* An output is a choice only if some refresh combines with it into a
+ * supported profile under these capabilities. That single rule also
+ * hides Centered when the firmware/bitstream does not advertise the
+ * 1080p path - no special case needed. */
+static void scandoubler_build_output_choices(UWORD fw_capabilities)
+{
+	UWORD output, count = 0;
+
+	for (output = 0; output < ZZCFG_VCAP_OUTPUT_COUNT; output++) {
+		if (scandoubler_first_refresh(output, fw_capabilities) ==
+				ZZCFG_VCAP_REFRESH_COUNT)
+			continue;
+		sd_output_map[count] = output;
+		sd_output_active[count] = sd_output_labels[output];
+		count++;
+	}
+	sd_output_active[count] = NULL;
+	sd_output_count = count;
+}
+
+/* Refresh choices depend on the selected output: only pairs that map
+ * to a supported profile are offered. */
+static UWORD scandoubler_build_refresh_choices(UWORD output,
+	UWORD fw_capabilities)
+{
+	UWORD refresh, count = 0;
+
+	for (refresh = 0; refresh < ZZCFG_VCAP_REFRESH_COUNT; refresh++) {
+		if (zzcfg_profile_for_output_refresh(output, refresh,
+				fw_capabilities) == ZZCFG_VCAP_PROFILE_COUNT)
+			continue;
+		sd_refresh_map[count] = refresh;
+		sd_refresh_active[count] = sd_refresh_labels[refresh];
+		count++;
+	}
+	sd_refresh_active[count] = NULL;
+	sd_refresh_count = count;
+	return count;
+}
+
+/* Cycle index of an enum value inside a choice map, or -1. */
+static WORD scandoubler_choice_index(const UWORD *map, UWORD count,
+	UWORD value)
+{
+	UWORD i;
+
+	for (i = 0; i < count; i++)
+		if (map[i] == value) return (WORD)i;
+	return -1;
+}
+
+
+/* One-line description of a selected pair and its expected refresh with
+ * matching firmware. Clock approximations are rounded for display here;
+ * these values are not live measurements. */
+static void scandoubler_description(char *buf, size_t size, UWORD output,
+	UWORD refresh)
+{
+	static const char *const output_text[ZZCFG_VCAP_OUTPUT_COUNT] = {
+		"1280x1024, full SuperHires detail",
+		"1920x1080, unchanged 1280x1024, black borders",
+		"800x600 PAL / 720x480 NTSC, filtered",
+		"720x576 PAL / 720x480 NTSC, filtered"
+	};
+	const char *rate = NULL;
+
+	switch (refresh) {
+	case ZZCFG_VCAP_REFRESH_50:
+		if (output == ZZCFG_VCAP_OUTPUT_CENTERED) rate = "50.02Hz";
+		break;
+	case ZZCFG_VCAP_REFRESH_60:
+		if (output == ZZCFG_VCAP_OUTPUT_FULL) rate = "60.02Hz";
+		else if (output == ZZCFG_VCAP_OUTPUT_CENTERED) rate = "60.03Hz";
+		else if (output == ZZCFG_VCAP_OUTPUT_FILTERED_VGA)
+			rate = "60.32Hz";
+		break;
+	case ZZCFG_VCAP_REFRESH_MATCH_INPUT:
+		if (output == ZZCFG_VCAP_OUTPUT_FULL)
+			rate = "49.93/59.95Hz PAL/NTSC";
+		else if (output == ZZCFG_VCAP_OUTPUT_CENTERED)
+			/* Experimental source sync: the rate follows the Amiga
+			 * input, so quoting a fixed number would be invented. */
+			rate = "source-synced to the Amiga";
+		break;
+	case ZZCFG_VCAP_REFRESH_AUTO_50_60:
+		if (output == ZZCFG_VCAP_OUTPUT_FILTERED_SD)
+			rate = "50.20/60.32Hz PAL/NTSC";
+		break;
+	case ZZCFG_VCAP_REFRESH_PAL_CLOCK:
+		if (output == ZZCFG_VCAP_OUTPUT_FILTERED_SD)
+			rate = "49.92/59.28Hz PAL/NTSC";
+		break;
+	case ZZCFG_VCAP_REFRESH_NTSC_CLOCK:
+		if (output == ZZCFG_VCAP_OUTPUT_FILTERED_SD)
+			rate = "50.35/59.93Hz PAL/NTSC";
+		break;
+	}
+
+	if (output >= ZZCFG_VCAP_OUTPUT_COUNT) {
+		snprintf(buf, size, "%s", "");
+		return;
+	}
+	if (rate) snprintf(buf, size, "%s - %s", output_text[output], rate);
+	else snprintf(buf, size, "%s", output_text[output]);
+}
+
+/* Widest description the current capabilities can show: sizes the
+ * description row (which spans the window) without inflating the
+ * control column. */
+static WORD scandoubler_max_description_width(struct RastPort *rp,
+	UWORD fw_capabilities, WORD fallback_char_width)
+{
+	char probe[96];
+	WORD width = 0;
+	UWORD output, refresh;
+
+	for (output = 0; output < ZZCFG_VCAP_OUTPUT_COUNT; output++) {
+		for (refresh = 0; refresh < ZZCFG_VCAP_REFRESH_COUNT; refresh++) {
+			if (zzcfg_profile_for_output_refresh(output, refresh,
+					fw_capabilities) == ZZCFG_VCAP_PROFILE_COUNT)
+				continue;
+			scandoubler_description(probe, sizeof(probe), output, refresh);
+			width = zztop_max_word(width,
+				zztop_text_width(rp, (CONST_STRPTR)probe,
+					fallback_char_width));
+		}
+	}
+	return width;
+}
+
+/* Render the staged profile through the supported output/refresh choices. */
+static void scandoubler_sync_choices(struct Window *win,
+	UWORD fw_capabilities)
+{
+	UWORD output = zzcfg_profile_output(settings_vals.videocap_profile);
+	UWORD refresh = zzcfg_profile_refresh(settings_vals.videocap_profile);
+	WORD output_index = scandoubler_choice_index(sd_output_map,
+		sd_output_count, output);
+	WORD refresh_index;
+	UWORD profile;
+
+	if (output_index < 0 && sd_output_count > 0) {
+		output = sd_output_map[0];
+		output_index = 0;
+	}
+	scandoubler_build_refresh_choices(output, fw_capabilities);
+	refresh_index = scandoubler_choice_index(sd_refresh_map,
+		sd_refresh_count, refresh);
+	if (refresh_index < 0 && sd_refresh_count > 0) {
+		refresh = sd_refresh_map[0];
+		refresh_index = 0;
+	}
+	profile = zzcfg_profile_for_output_refresh(output, refresh,
+		fw_capabilities);
+	if (profile != ZZCFG_VCAP_PROFILE_COUNT)
+		settings_vals.videocap_profile = profile;
+
+	if (!win) return;
+	GT_SetGadgetAttrs(sdgads[SDGAD_OUTPUT], win, NULL,
+		GTCY_Active, output_index < 0 ? 0 : output_index, TAG_END);
+	GT_SetGadgetAttrs(sdgads[SDGAD_REFRESH], win, NULL,
+		GTCY_Labels, sd_refresh_active,
+		GTCY_Active, refresh_index < 0 ? 0 : refresh_index, TAG_END);
+	scandoubler_description(sd_desc_buf, sizeof(sd_desc_buf),
+		output, refresh);
+	GT_SetGadgetAttrs(sdgads[SDGAD_DESC], win, NULL,
+		GTTX_Text, sd_desc_buf, TAG_END);
+}
+
+/* Commit a new output/refresh selection to the model, restoring any
+ * live calibration preview first (the flow the single Settings cycle
+ * handler used). Returns FALSE while the restore is still pending;
+ * the selectors are snapped back to the staged profile then. */
+static BOOL scandoubler_stage_profile(struct Window *win,
+	struct zztop_cfg_ctx *ctx, UWORD profile)
+{
+	struct settings_live_session *live = &ctx->live;
+
+	if (live->preview_valid &&
+		!settings_profile_matches(live, profile,
+			settings_vals.videocap_sample)) {
+		if (!settings_live_restore(live, ZZ_VCAP_ANCHOR_SETTINGS)) {
+			scandoubler_sync_choices(win, ctx->fw_capabilities);
+			sd_set_status(win,
+				"Profile change waiting for live restore; retry");
+			return FALSE;
+		}
+		live->preview_valid = FALSE;
+	}
+	settings_vals.videocap_profile = profile;
+	if (scandoubler_update_save_gate(win, live, TRUE))
+		sd_set_status(win, "Output changed - Save, then power-cycle");
+	return TRUE;
+}
+
+/* Load the model for the Scandoubler window and push everything into
+ * the gadgets. The native ENV overrides apply here (this window owns
+ * video), and an unsupported centered profile from the card visibly
+ * falls back to Full 60 as before. */
+static void scandoubler_populate(struct Window *win,
+	struct zztop_cfg_ctx *ctx)
+{
+	struct zzcfg_values *sv = &settings_vals;
+	UWORD caps = ctx->fw_capabilities;
+	UWORD st, rawlen = 0;
+	BOOL centered_fallback = FALSE;
+
+	st = settings_reload_from_card(sv, caps, &rawlen);
+	/* Save in this window owns all displayed native controls. Other
+	 * windows retain the presence flags from the raw file instead. */
+	sv->videocap_profile_present = 1;
+	sv->videocap_sample_present = 1;
+	sv->scanline_mode_present = 1;
+	sv->scanline_parity_present = 1;
+
+	if (!settings_have_cfg) {
+		snprintf(sd_status_buf, sizeof(sd_status_buf),
+			"Scanlines only (needs FW 2.3+)");
+	} else if (st == ZZ_CFG_FILE_OK) {
+		int env_native;
+
+		if (!zzcfg_profile_supported(sv->videocap_profile, caps)) {
+			sv->videocap_profile =
+				zzcfg_profile_sanitize(sv->videocap_profile, caps);
+			centered_fallback = TRUE;
+		}
+		env_native = settings_apply_env_native(sv);
+		if (centered_fallback) {
+			snprintf(sd_status_buf, sizeof(sd_status_buf),
+				"Centered 1080p needs matching firmware/bitstream; Full 60 staged");
+		} else if (env_native) {
+			snprintf(sd_status_buf, sizeof(sd_status_buf),
+				"%u bytes + ENV: video overrides", (unsigned)rawlen);
+		} else {
+			snprintf(sd_status_buf, sizeof(sd_status_buf),
+				"ZZ9000.CFG: %u bytes on card", (unsigned)rawlen);
+		}
+	} else if (st == ZZ_CFG_FILE_NO_FILE) {
+		if (settings_apply_env_native(sv))
+			snprintf(sd_status_buf, sizeof(sd_status_buf),
+				"No file yet - showing ENV settings");
+		else
+			snprintf(sd_status_buf, sizeof(sd_status_buf),
+				"No ZZ9000.CFG on card yet");
+	} else if (st == ZZ_CFG_FILE_IDLE) {
+		snprintf(sd_status_buf, sizeof(sd_status_buf),
+			"Firmware lacks config support");
+	} else {
+		snprintf(sd_status_buf, sizeof(sd_status_buf),
+			"Config read failed (SD error)");
+	}
+
+	scandoubler_build_output_choices(caps);
+	if (sv->videocap_profile >= ZZCFG_VCAP_PROFILE_COUNT)
+		sv->videocap_profile = ZZCFG_VCAP_FULL_60;
+
+	if (win) {
+		scandoubler_sync_choices(win, caps);
+		GT_SetGadgetAttrs(sdgads[SDGAD_SCANMODE], win, NULL,
+			GTCY_Active, sv->scanline_mode, TAG_END);
+		GT_SetGadgetAttrs(sdgads[SDGAD_PARITY], win, NULL,
+			GTCY_Active, sv->scanline_parity, TAG_END);
+		sd_set_status(win, sd_status_buf);
+
+		if (!settings_have_cfg) {
+			/* Live scanline controls stay usable on 2.0-2.2 firmware
+			 * (they were on the main window before); everything that
+			 * needs the config-file interface is greyed out. */
+			static const UWORD cfg_only_gadgets[] = {
+				SDGAD_OUTPUT, SDGAD_REFRESH, SDGAD_DESC,
+				SDGAD_CAPTURE, SDGAD_BTN_SAVE, SDGAD_BTN_RELOAD
+			};
+			size_t i;
+			for (i = 0; i < sizeof(cfg_only_gadgets) /
+					sizeof(cfg_only_gadgets[0]); i++) {
+				GT_SetGadgetAttrs(sdgads[cfg_only_gadgets[i]], win,
+					NULL, GA_Disabled, TRUE, TAG_END);
+			}
+		}
+		/* Seed the live-video anchor so Close/Reload can restore,
+		 * then apply the custom-crop save gate to the button state. */
+		settings_live_refresh(&ctx->live);
+		scandoubler_update_save_gate(win, &ctx->live, FALSE);
+	}
+}
+
+static BOOL scandoubler_update_save_gate(struct Window *win,
 	struct settings_live_session *live_session, BOOL explain)
 {
 	BOOL allowed = settings_have_cfg &&
 		settings_custom_save_allowed(live_session);
 
-	GT_SetGadgetAttrs(sgads[SGAD_BTN_SAVE], win, NULL,
+	GT_SetGadgetAttrs(sdgads[SDGAD_BTN_SAVE], win, NULL,
 		GA_Disabled, !allowed, TAG_END);
 	if (!allowed && settings_have_cfg && explain)
-		settings_set_status(win,
+		sd_set_status(win,
 			"Custom crop belongs to another capture path; use Automatic, Save and reboot");
 	return allowed;
 }
 
-static VOID settings_window(struct Screen *mysc, void *vi,
-	const struct ZZTopLayout *mainlayout)
+static struct Gadget *scandoubler_create_gadgets(struct Gadget **glistptr,
+	void *vi, const struct ZZTopLayout *mainlayout, UWORD fw_capabilities,
+	WORD *out_w, WORD *out_h)
+{
+	static CONST_STRPTR label_samples[] = {
+		(CONST_STRPTR)LABEL_SD_OUTPUT,
+		(CONST_STRPTR)LABEL_SD_REFRESH,
+		(CONST_STRPTR)LABEL_SCANLINES,
+		(CONST_STRPTR)LABEL_PARITY,
+		NULL
+	};
+	struct NewGadget ng;
+	struct Gadget *gad;
+	struct ZZTopLayout l = *mainlayout;
+	struct RastPort *rp = zztop_screen ? &zztop_screen->RastPort : NULL;
+	CONST_STRPTR value_samples[ZZCFG_VCAP_OUTPUT_COUNT +
+		ZZCFG_VCAP_REFRESH_COUNT + 1];
+	WORD label_width, value_width, button_width, desc_width;
+	WORD content_right, button_gap, y;
+	int i, n;
+
+	/* Choices come from the same capability the handlers use, so the
+	 * created cycles never offer an entry the model would reject. */
+	scandoubler_build_output_choices(fw_capabilities);
+	scandoubler_build_refresh_choices(ZZCFG_VCAP_OUTPUT_FULL,
+		fw_capabilities);
+
+	n = 0;
+	for (i = 0; i < (int)sd_output_count; i++)
+		value_samples[n++] = sd_output_active[i];
+	for (i = 0; i < (int)sd_refresh_count; i++)
+		value_samples[n++] = sd_refresh_active[i];
+	value_samples[n] = NULL;
+
+	label_width = zztop_max_text_width(rp, label_samples, 8);
+	value_width = zztop_max_text_width(rp, value_samples, 8);
+	button_width = zztop_max_word(90,
+		zztop_max_text_width(rp, settings_button_samples, 8) + 32);
+	desc_width = scandoubler_max_description_width(rp, fw_capabilities, 8);
+
+	l.gadget_left = l.margin_x + label_width + l.label_gap;
+	l.gadget_width = zztop_max_word(184, value_width + 48);
+	content_right = zztop_max_word(l.gadget_left + l.gadget_width,
+		l.margin_x + desc_width + 8);
+	button_gap = 16;
+
+	gad = CreateContext(glistptr);
+	for (i = 0; i < SDGAD_COUNT; i++) sdgads[i] = NULL;
+
+	y = l.topborder + l.margin_y;
+
+	ng.ng_LeftEdge   = l.gadget_left;
+	ng.ng_TopEdge    = y;
+	ng.ng_Width      = l.gadget_width;
+	ng.ng_Height     = l.gadget_height;
+	ng.ng_TextAttr   = l.text_attr;
+	ng.ng_VisualInfo = vi;
+	ng.ng_Flags      = PLACETEXT_LEFT;
+
+	ng.ng_GadgetID   = SDGAD_OUTPUT;
+	ng.ng_GadgetText = (STRPTR)LABEL_SD_OUTPUT;
+	sdgads[SDGAD_OUTPUT] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+		GTCY_Labels, sd_output_active, GTCY_Active, 0, TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge    = y;
+	ng.ng_GadgetID   = SDGAD_REFRESH;
+	ng.ng_GadgetText = (STRPTR)LABEL_SD_REFRESH;
+	sdgads[SDGAD_REFRESH] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+		GTCY_Labels, sd_refresh_active, GTCY_Active, 0, TAG_END);
+	y += l.row_step;
+
+	/* Description of the selected pair spans the whole row; the window
+	 * is sized so the widest one fits without opening the control
+	 * column to it. */
+	ng.ng_LeftEdge   = l.margin_x;
+	ng.ng_TopEdge    = y;
+	ng.ng_Width      = content_right - l.margin_x;
+	ng.ng_GadgetID   = SDGAD_DESC;
+	ng.ng_GadgetText = NULL;
+	sdgads[SDGAD_DESC] = gad = CreateGadget(TEXT_KIND, gad, &ng,
+		GTTX_Text, sd_desc_buf, GTTX_Border, TRUE, TAG_END);
+	y += l.row_step + l.section_gap;
+
+	ng.ng_LeftEdge   = l.gadget_left;
+	ng.ng_TopEdge    = y;
+	ng.ng_Width      = l.gadget_width;
+	ng.ng_GadgetID   = SDGAD_SCANMODE;
+	ng.ng_GadgetText = (STRPTR)LABEL_SCANLINES;
+	sdgads[SDGAD_SCANMODE] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+		GTCY_Labels, scanline_labels, GTCY_Active, 0, TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge    = y;
+	ng.ng_GadgetID   = SDGAD_PARITY;
+	ng.ng_GadgetText = (STRPTR)LABEL_PARITY;
+	sdgads[SDGAD_PARITY] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+		GTCY_Labels, parity_labels, GTCY_Active, 0, TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge    = y;
+	ng.ng_GadgetID   = SDGAD_CAPTURE;
+	ng.ng_GadgetText = (STRPTR)LABEL_SD_CAPTURE;
+	ng.ng_Flags      = PLACETEXT_IN;
+	sdgads[SDGAD_CAPTURE] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		TAG_END);
+	ng.ng_Flags      = PLACETEXT_LEFT;
+	y += l.row_step + l.section_gap;
+
+	ng.ng_LeftEdge   = l.margin_x;
+	ng.ng_TopEdge    = y;
+	ng.ng_Width      = content_right - l.margin_x;
+	ng.ng_GadgetID   = SDGAD_STATUS;
+	ng.ng_GadgetText = NULL;
+	sdgads[SDGAD_STATUS] = gad = CreateGadget(TEXT_KIND, gad, &ng,
+		GTTX_Text, sd_status_buf, GTTX_Border, TRUE, TAG_END);
+	y += l.row_step + l.section_gap;
+
+	ng.ng_TopEdge    = y;
+	ng.ng_Width      = button_width;
+	ng.ng_GadgetID   = SDGAD_BTN_SAVE;
+	ng.ng_GadgetText = (STRPTR)LABEL_BTN_SAVE;
+	ng.ng_Flags      = PLACETEXT_IN;
+	sdgads[SDGAD_BTN_SAVE] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		TAG_END);
+
+	ng.ng_LeftEdge   = l.margin_x + button_width + button_gap;
+	ng.ng_GadgetID   = SDGAD_BTN_RELOAD;
+	ng.ng_GadgetText = (STRPTR)LABEL_BTN_RELOAD;
+	sdgads[SDGAD_BTN_RELOAD] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		TAG_END);
+	y += l.row_step;
+
+	*out_w = zztop_max_word(content_right + l.margin_x,
+		l.margin_x + button_width + button_gap + button_width + l.margin_x);
+	/* Same WA_InnerHeight convention as the main window: gadget
+	 * positions include the title bar, the inner height does not. */
+	*out_h = y + l.gadget_height + (l.margin_y / 2) - l.topborder;
+
+	for (i = 0; i < SDGAD_COUNT; i++) {
+		if (!sdgads[i]) return NULL;
+	}
+
+	return gad;
+}
+
+static BOOL scandoubler_gadget_up(struct Window *win, struct Gadget *gad,
+	UWORD code, struct zztop_cfg_ctx *ctx)
+{
+	struct settings_live_session *live = &ctx->live;
+
+	switch (gad->GadgetID) {
+	case SDGAD_OUTPUT: {
+		UWORD new_output, new_refresh, profile;
+		BOOL kept_refresh;
+
+		if (code >= sd_output_count) break;
+		new_output = sd_output_map[code];
+		if (new_output ==
+				zzcfg_profile_output(settings_vals.videocap_profile)) break;
+		/* Keep the refresh when the pair exists; otherwise visibly
+		 * fall to the first valid refresh for the new output. */
+		new_refresh = zzcfg_profile_refresh(settings_vals.videocap_profile);
+		kept_refresh = TRUE;
+		profile = zzcfg_profile_for_output_refresh(new_output, new_refresh,
+			ctx->fw_capabilities);
+		if (profile == ZZCFG_VCAP_PROFILE_COUNT) {
+			new_refresh = scandoubler_first_refresh(new_output,
+				ctx->fw_capabilities);
+			kept_refresh = FALSE;
+			profile = zzcfg_profile_for_output_refresh(new_output,
+				new_refresh, ctx->fw_capabilities);
+		}
+		if (profile == ZZCFG_VCAP_PROFILE_COUNT) break;
+		if (!scandoubler_stage_profile(win, ctx, profile)) break;
+		scandoubler_sync_choices(win, ctx->fw_capabilities);
+		if (!kept_refresh)
+			sd_set_status(win,
+				"Refresh follows the new output - Save, then power-cycle");
+		break;
+	}
+	case SDGAD_REFRESH: {
+		UWORD new_refresh, profile;
+
+		if (code >= sd_refresh_count) break;
+		new_refresh = sd_refresh_map[code];
+		if (new_refresh ==
+				zzcfg_profile_refresh(settings_vals.videocap_profile)) break;
+		profile = zzcfg_profile_for_output_refresh(
+			zzcfg_profile_output(settings_vals.videocap_profile), new_refresh,
+			ctx->fw_capabilities);
+		if (profile == ZZCFG_VCAP_PROFILE_COUNT) break;
+		if (!scandoubler_stage_profile(win, ctx, profile)) break;
+		scandoubler_sync_choices(win, ctx->fw_capabilities);
+		break;
+	}
+	case SDGAD_SCANMODE:
+		/* live, like the old main-window control */
+		settings_vals.scanline_mode = code;
+		zz_set_scanline_mode(code);
+		break;
+	case SDGAD_PARITY:
+		settings_vals.scanline_parity = code;
+		zz_set_scanline_parity(code);
+		break;
+	case SDGAD_CAPTURE:
+		if (scandoubler_capture_window(ctx->sc, ctx->vi, ctx->mainlayout,
+				live))
+			sd_set_status(win, "Capture staged - Save to persist");
+		scandoubler_update_save_gate(win, live, TRUE);
+		break;
+	case SDGAD_BTN_SAVE:
+		if (!settings_have_cfg) {
+			sd_set_status(win, "Config needs firmware 2.3+");
+		} else if (!settings_custom_save_allowed(live)) {
+			scandoubler_update_save_gate(win, live, TRUE);
+		} else if (settings_save_to_card(win, sdgads[SDGAD_STATUS],
+				sd_status_buf, settings_env_names_native)) {
+			if (live->preview_valid) {
+				settings_live_refresh(live);
+				zz_vcap_anchor_store(&live->anchors,
+					ZZ_VCAP_ANCHOR_SETTINGS, &live->current);
+			} else if (settings_live_refresh(live)) {
+				zz_vcap_anchor_store(&live->anchors,
+					ZZ_VCAP_ANCHOR_SETTINGS, &live->current);
+			}
+			live->preview_valid = FALSE;
+		}
+		break;
+	case SDGAD_BTN_RELOAD:
+		if (settings_live_restore(live, ZZ_VCAP_ANCHOR_SETTINGS)) {
+			live->preview_valid = FALSE;
+			scandoubler_populate(win, ctx);
+			scandoubler_update_save_gate(win, live, FALSE);
+		} else {
+			sd_set_status(win,
+				"Reload waiting for acknowledged live restore; retry");
+		}
+		break;
+	}
+	return FALSE;
+}
+
+static BOOL scandoubler_allow_close(struct Window *win,
+	struct zztop_cfg_ctx *ctx)
+{
+	if (settings_live_restore(&ctx->live, ZZ_VCAP_ANCHOR_SETTINGS))
+		return TRUE;
+	sd_set_status(win,
+		"Close waiting for acknowledged live restore; retry or cold boot");
+	return FALSE;
+}
+
+/* ---- Shared config-window shell ----
+ *
+ * Settings and Scandoubler are both fixed-size modal GadTools windows
+ * with a status line and a Save/Reload row. The shell owns the
+ * open/dispatch/close mechanics once; each window supplies its rows
+ * and semantics through these callbacks. */
+struct zztop_cfg_ops {
+	const char *title;
+	struct Gadget *(*create_gadgets)(struct Gadget **glistptr, void *vi,
+		const struct ZZTopLayout *mainlayout, UWORD fw_capabilities,
+		WORD *out_w, WORD *out_h);
+	void (*populate)(struct Window *win, struct zztop_cfg_ctx *ctx);
+	BOOL (*gadget_up)(struct Window *win, struct Gadget *gad, UWORD code,
+		struct zztop_cfg_ctx *ctx);
+	BOOL (*allow_close)(struct Window *win, struct zztop_cfg_ctx *ctx);
+};
+
+static void zztop_cfg_window_run(const struct zztop_cfg_ops *ops,
+	struct zztop_cfg_ctx *ctx)
 {
 	struct Window *win;
 	struct Gadget *glist = NULL;
@@ -2565,26 +3213,22 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 	struct Gadget *gad;
 	ULONG imsgClass;
 	UWORD imsgCode;
-	UWORD fw_version;
-	UWORD fw_capabilities;
-	struct settings_live_session live_session;
 	BOOL done = FALSE;
 	WORD w = 0, h = 0;
 
-	fw_version = zz_get_reg16(REG_ZZ_FW_VERSION);
-	fw_capabilities = zz_get_reg16(REG_ZZ_FW_CAPABILITIES);
-	settings_have_cfg = (fw_version >= 0x0203);
-	settings_live_init(&live_session, fw_version, fw_capabilities);
+	if (NULL == ops->create_gadgets(&glist, ctx->vi, ctx->mainlayout,
+			ctx->fw_capabilities, &w, &h)) {
+		char err[80];
 
-	if (NULL == settings_create_gadgets(&glist, vi, mainlayout,
-			fw_capabilities, &w, &h)) {
 		if (glist) FreeGadgets(glist);
-		errorMessage("Settings: gadget creation failed");
+		snprintf(err, sizeof(err), "%s: gadget creation failed",
+			ops->title);
+		errorMessage(err);
 		return;
 	}
 
 	win = OpenWindowTags(NULL,
-		WA_Title,        "ZZ9000 Settings (SD card)",
+		WA_Title,        (STRPTR)ops->title,
 		WA_Gadgets,      glist,   WA_AutoAdjust,    TRUE,
 		WA_Width,        w,       WA_MinWidth,      w,
 		WA_InnerHeight,  h,       WA_MinHeight,     h,
@@ -2593,40 +3237,24 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 		WA_SizeGadget,   FALSE,   WA_SmartRefresh, TRUE,
 		WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
 			BUTTONIDCMP | CYCLEIDCMP | STRINGIDCMP,
-		WA_PubScreen, mysc,
+		WA_PubScreen, ctx->sc,
 		TAG_END);
 	if (!win) {
+		char err[80];
+
 		FreeGadgets(glist);
-		errorMessage("Settings: OpenWindow() failed");
+		snprintf(err, sizeof(err), "%s: OpenWindow() failed", ops->title);
+		errorMessage(err);
 		return;
 	}
 
-	settings_populate(win, fw_capabilities);
-	settings_live_refresh(&live_session);
-
-	if (!settings_have_cfg) {
-		/* Live scanline controls stay usable on 2.0-2.2 firmware
-		 * (they were on the main window before); everything that
-		 * needs the config-file interface is greyed out. */
-		static const UWORD cfg_only_gadgets[] = {
-			SGAD_VIDEOCAP, SGAD_VCAP_ADVANCED, SGAD_INT2,
-			SGAD_MAC, SGAD_HDF, SGAD_OFFSCREEN, SGAD_OVERLAY,
-			SGAD_BTN_SAVE, SGAD_BTN_RELOAD
-		};
-		size_t i;
-		for (i = 0; i < sizeof(cfg_only_gadgets) / sizeof(cfg_only_gadgets[0]); i++) {
-			GT_SetGadgetAttrs(sgads[cfg_only_gadgets[i]], win, NULL,
-				GA_Disabled, TRUE, TAG_END);
-		}
-	}
-	settings_update_save_gate(win, &live_session, FALSE);
-
+	if (ops->populate) ops->populate(win, ctx);
 	GT_RefreshWindow(win, NULL);
 
 	while (!done) {
 		Wait(1UL << win->UserPort->mp_SigBit);
 
-		while ((imsg = GT_GetIMsg(win->UserPort))) {
+		while ((!done) && (imsg = GT_GetIMsg(win->UserPort))) {
 			gad = (struct Gadget *)imsg->IAddress;
 			imsgClass = imsg->Class;
 			imsgCode = imsg->Code;
@@ -2634,95 +3262,13 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 
 			switch (imsgClass) {
 				case IDCMP_GADGETUP:
-					if (!gad) break;
-					switch (gad->GadgetID) {
-					case SGAD_VIDEOCAP:
-							if (imsgCode < ZZCFG_VCAP_PROFILE_COUNT &&
-								zzcfg_profile_supported(imsgCode, fw_capabilities)) {
-								if (live_session.preview_valid &&
-									!settings_profile_matches(&live_session,
-										imsgCode, settings_vals.videocap_sample)) {
-									if (!settings_live_restore(&live_session,
-										ZZ_VCAP_ANCHOR_SETTINGS)) {
-										GT_SetGadgetAttrs(sgads[SGAD_VIDEOCAP], win,
-											NULL, GTCY_Active,
-											settings_vals.videocap_profile, TAG_END);
-										settings_set_status(win,
-											"Profile change waiting for live restore; retry");
-										break;
-									}
-									live_session.preview_valid = FALSE;
-								}
-								settings_vals.videocap_profile = imsgCode;
-								if (settings_update_save_gate(win,
-									&live_session, TRUE))
-									settings_set_status(win,
-										"Native output changed - Save, then power-cycle");
-							}
-							break;
-						case SGAD_VCAP_ADVANCED:
-							if (settings_video_advanced_window(mysc, vi, mainlayout,
-								&live_session))
-								settings_set_status(win,
-									"Advanced video staged - Save to persist");
-							settings_update_save_gate(win, &live_session, TRUE);
-							break;
-						case SGAD_SCANMODE:
-							/* live, like the old main-window control */
-							settings_vals.scanline_mode = imsgCode;
-							zz_set_scanline_mode(imsgCode);
-							break;
-						case SGAD_PARITY:
-							settings_vals.scanline_parity = imsgCode;
-							zz_set_scanline_parity(imsgCode);
-							break;
-						case SGAD_INT2:
-							settings_vals.int2 = imsgCode;
-							break;
-						case SGAD_OFFSCREEN:
-							settings_vals.offscreen_bitmaps = imsgCode;
-							break;
-						case SGAD_OVERLAY:
-							settings_vals.video_overlay = imsgCode;
-							break;
-						case SGAD_BTN_SAVE:
-							if (!settings_custom_save_allowed(&live_session)) {
-								settings_update_save_gate(win, &live_session, TRUE);
-							} else if (settings_save(win)) {
-								if (live_session.preview_valid) {
-									settings_live_refresh(&live_session);
-									zz_vcap_anchor_store(&live_session.anchors,
-										ZZ_VCAP_ANCHOR_SETTINGS,
-										&live_session.current);
-								} else if (settings_live_refresh(&live_session)) {
-									zz_vcap_anchor_store(&live_session.anchors,
-										ZZ_VCAP_ANCHOR_SETTINGS,
-										&live_session.current);
-								}
-								live_session.preview_valid = FALSE;
-							}
-							break;
-						case SGAD_BTN_RELOAD:
-							if (settings_live_restore(&live_session,
-								ZZ_VCAP_ANCHOR_SETTINGS)) {
-								live_session.preview_valid = FALSE;
-								settings_populate(win, fw_capabilities);
-								settings_update_save_gate(win, &live_session, FALSE);
-							} else {
-								settings_set_status(win,
-									"Reload waiting for acknowledged live restore; retry");
-							}
-							break;
-					}
+					if (gad && ops->gadget_up)
+						done = ops->gadget_up(win, gad, imsgCode, ctx);
 					break;
 				case IDCMP_CLOSEWINDOW:
-					if (settings_live_restore(&live_session,
-						ZZ_VCAP_ANCHOR_SETTINGS)) {
+					if (!ops->allow_close ||
+						ops->allow_close(win, ctx))
 						done = TRUE;
-					} else {
-						settings_set_status(win,
-							"Close waiting for acknowledged live restore; retry or cold boot");
-					}
 					break;
 				case IDCMP_REFRESHWINDOW:
 					GT_BeginRefresh(win);
@@ -2734,6 +3280,99 @@ static VOID settings_window(struct Screen *mysc, void *vi,
 
 	CloseWindow(win);
 	FreeGadgets(glist);
+}
+
+/* ---- Settings window entry (generic, non-video config) ---- */
+
+static void settings_window_populate(struct Window *win,
+	struct zztop_cfg_ctx *ctx)
+{
+	settings_populate(win, ctx->fw_capabilities);
+	if (!settings_have_cfg) {
+		/* No live controls remain in this window on pre-2.3 firmware
+		 * (scanlines moved to the Scandoubler window), so the whole
+		 * editor is greyed out with an explanatory status line. */
+		UWORD i;
+		for (i = 0; i < SGAD_COUNT; i++)
+			GT_SetGadgetAttrs(sgads[i], win, NULL,
+				GA_Disabled, TRUE, TAG_END);
+	}
+}
+
+static BOOL settings_gadget_up(struct Window *win, struct Gadget *gad,
+	UWORD code, struct zztop_cfg_ctx *ctx)
+{
+	switch (gad->GadgetID) {
+		case SGAD_INT2:
+			settings_vals.int2 = code;
+			break;
+		case SGAD_OFFSCREEN:
+			settings_vals.offscreen_bitmaps = code;
+			break;
+		case SGAD_OVERLAY:
+			settings_vals.video_overlay = code;
+			break;
+		case SGAD_BTN_SAVE:
+			settings_save(win);
+			break;
+		case SGAD_BTN_RELOAD:
+			/* No live video session is owned here, so Reload is a
+			 * plain re-read of the card. */
+			settings_populate(win, ctx->fw_capabilities);
+			break;
+	}
+	return FALSE;
+}
+
+static const struct zztop_cfg_ops settings_cfg_ops = {
+	"ZZ9000 Settings (SD card)",
+	settings_create_gadgets,
+	settings_window_populate,
+	settings_gadget_up,
+	NULL /* closes unconditionally */
+};
+
+static VOID settings_window(struct Screen *mysc, void *vi,
+	const struct ZZTopLayout *mainlayout)
+{
+	struct zztop_cfg_ctx ctx;
+
+	ctx.sc = mysc;
+	ctx.vi = vi;
+	ctx.mainlayout = mainlayout;
+	ctx.fw_capabilities = zz_get_reg16(REG_ZZ_FW_CAPABILITIES);
+	/* Zeroed session = unsupported: this window never performs (or
+	 * waits on) a live native-video restore. */
+	memset(&ctx.live, 0, sizeof(ctx.live));
+	settings_have_cfg = (zz_get_reg16(REG_ZZ_FW_VERSION) >= 0x0203);
+
+	zztop_cfg_window_run(&settings_cfg_ops, &ctx);
+}
+
+/* ---- Scandoubler window entry ---- */
+
+static const struct zztop_cfg_ops scandoubler_cfg_ops = {
+	"ZZ9000 Scandoubler",
+	scandoubler_create_gadgets,
+	scandoubler_populate,
+	scandoubler_gadget_up,
+	scandoubler_allow_close
+};
+
+static VOID scandoubler_window(struct Screen *mysc, void *vi,
+	const struct ZZTopLayout *mainlayout)
+{
+	struct zztop_cfg_ctx ctx;
+	UWORD fw_version = zz_get_reg16(REG_ZZ_FW_VERSION);
+
+	ctx.sc = mysc;
+	ctx.vi = vi;
+	ctx.mainlayout = mainlayout;
+	ctx.fw_capabilities = zz_get_reg16(REG_ZZ_FW_CAPABILITIES);
+	settings_have_cfg = (fw_version >= 0x0203);
+	settings_live_init(&ctx.live, fw_version, ctx.fw_capabilities);
+
+	zztop_cfg_window_run(&scandoubler_cfg_ops, &ctx);
 }
 
 /* ---- Audio control plane (the Audio window, plan R13/R18) ----
@@ -2809,10 +3448,11 @@ static void audio_log_toggle(struct Window *win)
 		audio_log("log opened (fh=%ld)\n",
 			(long)(audio_log_fh ? 1 : 0));
 	}
-	/* Flip the menu checkmark so the toggle state is visible. */
+	/* Flip the menu checkmark so the toggle state is visible. Found by
+	 * userdata, not item number: the Project menu gained the
+	 * Scandoubler and Audio items, so indices shift. */
 	if (win && zztop_menustrip) {
-		item = ItemAddress(zztop_menustrip,
-			FULLMENUNUM(0, 5, NOSUB));
+		item = zztop_menu_item_by_id(MENU_ID_AUDIOLOG);
 		if (item) {
 			if (audio_log_on)
 				item->Flags |= CHECKED;
@@ -4328,7 +4968,7 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 	FreeGadgets(glist);
 }
 
-/* Scene editor (sub-window, the settings_video_advanced_window
+/* Scene editor (sub-window, the scandoubler_capture_window
  * precedent): every master-chain parameter of one scene as a slider.
  * Edits commit on gadget release through the staged scene-write path
  * (F3/KTD7) -- there is deliberately no per-mousemove writing. */
@@ -4835,6 +5475,10 @@ VOID handleGadgetEvent(struct Window *win, struct Gadget *gad, ULONG code)
 			audio_window(zztop_screen, zztop_vi, &zztop_layout);
 			break;
 		}
+		case MYGAD_BTN_SCANDOUBLER: {
+			scandoubler_window(zztop_screen, zztop_vi, &zztop_layout);
+			break;
+		}
 		case MYGAD_REFRESHMODE: {
 			refresh_mode = (refresh_mode + 1) % REFRESH_MODE_COUNT;
 			if (!zztop_restart_timer()) {
@@ -4965,6 +5609,17 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, const struct
 	gads[MYGAD_BTN_REFRESH] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
 											TAG_END);
 
+	/* Opens the Scandoubler window (issue #97): fills the free third
+	 * column of the first row, directly above the Audio button - no
+	 * extra window height. Also reachable from the Project menu when
+	 * the button row is clipped on short screens. */
+	ng.ng_LeftEdge	= layout->button_col3;
+	ng.ng_GadgetID	 = MYGAD_BTN_SCANDOUBLER;
+	ng.ng_GadgetText = (STRPTR)LABEL_BTN_SCANDOUBLER;
+
+	gads[MYGAD_BTN_SCANDOUBLER] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+											TAG_END);
+
 	/* Firmware update / restore (issue #26): a second button row mirroring
 	 * the Test/Refresh row, plus a status line below it. */
 	ng.ng_LeftEdge	 = layout->margin_x;
@@ -5057,6 +5712,15 @@ VOID process_window_events(struct Window *mywin)
 						switch ((ULONG)GTMENUITEM_USERDATA(item)) {
 							case MENU_ID_SETTINGS:
 								settings_window(zztop_screen, zztop_vi, &zztop_layout);
+								break;
+							case MENU_ID_SCANDOUBLER:
+								scandoubler_window(zztop_screen, zztop_vi, &zztop_layout);
+								break;
+							case MENU_ID_AUDIO:
+								/* Same window and guard as the Audio
+								 * button; audio_window explains when
+								 * the surface is absent. */
+								audio_window(zztop_screen, zztop_vi, &zztop_layout);
 								break;
 							case MENU_ID_FWUPDATE:
 								do_fw_update(mywin);

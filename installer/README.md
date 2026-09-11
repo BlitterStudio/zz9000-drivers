@@ -80,14 +80,29 @@ utilities can reach the firmware-gated `ZZ9000.card` callback.
 The installer backs up the previous settings file as
 `Devs:Picasso96Settings.pre-ZZ9000-2.4` before installing the migrated
 settings file.
+The current 1920x1080 timing uses a 148571429 Hz pixel clock in both stock
+templates, matching the updated firmware and RTG callbacks. Preserve a
+backup of custom settings; do not overwrite them merely to test the
+native Scandoubler output.
 
-Native Amiga chipset video normally defaults to `filtered_60` (800x600 at
-60 Hz). The nonstandard-sync firmware variant defaults to PAL timing.
-Use ZZTop to select another profile and save it to `ZZ9000.CFG` for the
-next cold boot. These settings are separate from Picasso96 RTG screenmodes.
+
+Native Amiga chipset video normally defaults to `filtered_60`: PAL input
+uses 800x600 and NTSC input uses 720x480, both at nominal 60 Hz. The
+nonstandard-sync firmware variant defaults to PAL timing. In ZZTop, open
+**Project → Scandoubler…**, select **Output** and **Refresh**, then **Save**
+and power-cycle. **Capture…** in that window owns sampling, framing and
+calibration; general **Settings…** no longer contains native-video controls.
+The Project menu also opens Settings and Audio when the main buttons are
+off-screen.
+
+Centered 1920x1080 output preserves the 1280x1024 native picture and offers
+nominal 60 Hz or 50 Hz only with matching firmware/bitstream capabilities.
+Install the matching `ZZ9000.card` and ZZTop as well. These choices are
+separate from Picasso96 RTG screenmodes; see the
+[profile table and compatibility rules](../README.md#scandoubler-output-and-refresh).
 Remove legacy `ENVARC:ZZ9000-VCAP-800x600`, `ENVARC:ZZ9000-NS-VSYNC`,
-and `ENVARC:ZZ9000-NS-VSYNC-NTSC` overrides when using ZZTop to manage the
-profile.
+and `ENVARC:ZZ9000-NS-VSYNC-NTSC` overrides when using ZZTop to manage
+native output.
 
 Release packaging converts the README, manuals, and installer script to
 Amiga-compatible ISO-8859-1 (Latin-1), replacing Unicode punctuation and

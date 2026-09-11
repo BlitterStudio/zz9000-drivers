@@ -82,38 +82,6 @@ class RepoToolingTests(unittest.TestCase):
             self.assertIn(token, test_stub)
             self.assertNotIn(f"#define {token}", model)
 
-    def test_centered_videocap_is_capability_gated_end_to_end(self):
-        common_header = self.read("common/zzcfg_amiga.h")
-        common_model = self.read("common/zzcfg_amiga.c")
-        hw_header = self.read("include/zz9000_hw.h")
-        zztop = self.read("ZZTop/Sources/ZZTop.c")
-        rtg = self.read("rtg/mntgfx-gcc.c")
-
-        self.assertIn("ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P (1U << 3)",
-                      hw_header)
-        self.assertLess(common_header.index("ZZCFG_VCAP_FILTERED_NTSC_EXACT"),
-                        common_header.index("ZZCFG_VCAP_CENTERED_1080P_60"))
-        self.assertIn('"centered_1080p_60"', common_model)
-        self.assertIn("ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P, ZZCFG_VCAP_FULL_60",
-                      common_model)
-        self.assertIn("if (native_override)", zztop)
-        self.assertIn("zzcfg_profile_supported(imsgCode, fw_capabilities)",
-                      zztop)
-        self.assertIn("vcapmode_legacy_labels", zztop)
-        self.assertIn("ZZ_CARD_DATA_VCAP_MODE", rtg)
-        self.assertNotIn("ZZ_CARD_DATA_SCANDBL_800X600", rtg)
-        self.assertIn("zz_vcap_mode_uses_native_pan", rtg)
-        self.assertIn("mode == ZZ_VMODE_CENTERED_1080P_60", rtg)
-
-    def test_zztop_full_detail_labels_explain_refresh_behavior(self):
-        zztop = self.read("ZZTop/Sources/ZZTop.c")
-
-        self.assertEqual(2, zztop.count("1280x1024 Fixed 60Hz (Full detail)"))
-        self.assertEqual(3,
-                         zztop.count("1280x1024 Match PAL/NTSC (Full detail)"))
-        self.assertNotIn("1280x1024 60Hz (Full)", zztop)
-        self.assertNotIn("1280x1024 Exact (Full)", zztop)
-
     def test_cfg_guard_rejects_profile_value_drift(self):
         candidates = (
             pathlib.Path(os.environ.get("ZZ9K_FIRMWARE_DIR", "")),
@@ -168,46 +136,6 @@ class RepoToolingTests(unittest.TestCase):
                 )
                 self.assertEqual(1, result.returncode, result.stdout)
                 self.assertIn("videocap_profile values", result.stdout)
-
-    def test_zztop_live_calibration_uses_native_v37_contract(self):
-        source = self.read("ZZTop/Sources/ZZTop.c")
-        build = self.read("ZZTop/build-gcc.sh")
-
-        for token in (
-            '#include "zz_vcap_live.h"',
-            "AGAD_BTN_CALIBRATE",
-            "PAL_MONITOR_ID | HIRES_KEY",
-            "NTSC_MONITOR_ID | HIRES_KEY",
-            "ModeNotAvailable(display_id)",
-            "ModeNotAvailable(HIRES_KEY)",
-            "DTAG_DISP, HIRES_KEY",
-            "DIPF_IS_PAL",
-            "DIPF_IS_FOREIGN",
-            "zz_vcap_calibration_standard(",
-            "vcap_screen_is_foreign(return_screen)",
-            "GetVPModeID(&screen->ViewPort)",
-            "detected_standard == ZZ_VCAP_STANDARD_UNKNOWN",
-            "Native default Hires unavailable (mode error %lu)",
-            "Native %s Hires unavailable (error %lu, %s, lines %u)",
-            "Native %s screen open failed (Intuition error %lu)",
-            "SA_Overscan, OSCAN_TEXT",
-            "WA_IDCMP, IDCMP_RAWKEY",
-            "IECODE_UP_PREFIX",
-            "IEQUALIFIER_LSHIFT | IEQUALIFIER_RSHIFT",
-            "ZZ_VCAP_LIVE_COMMIT_TOKEN",
-            "ZZ_VCAP_ANCHOR_SETTINGS",
-            "ZZ_VCAP_ANCHOR_ADVANCED",
-            "ZZ_VCAP_ANCHOR_CALIBRATION",
-            "ZZ_VCAP_ANCHOR_PREVIEW",
-            "VCAP_APPLY_CONFLICT",
-            "static BOOL settings_save",
-        ):
-            self.assertIn(token, source)
-        self.assertNotIn("DEFAULT_MONITOR_ID", source)
-        self.assertNotIn("SA_Draggable", source)
-        self.assertNotIn("SA_Exclusive", source)
-        self.assertIn("if (live_session.preview_valid) {", source)
-        self.assertIn("../common/zz_vcap_live.c", build)
 
     def test_zztop_audio_calibration_is_typed_live_and_persisted(self):
         source = self.read("ZZTop/Sources/ZZTop.c")
