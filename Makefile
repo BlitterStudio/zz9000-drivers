@@ -1,7 +1,5 @@
 AMIGA_IMAGE ?= amigadev/crosstools:m68k-amigaos-gcc10
 AMIGA_DOCKER = ./tools/amiga-docker.sh
-# LRA (-mlra) exists on Bebbo GCC 10+ only; the older 6.5.0b rejects it.
-LRA_SH = lra=; m68k-amigaos-gcc -mlra -x c -fsyntax-only /dev/null 2>/dev/null && lra=-mlra; exec
 
 .PHONY: all build-all package-local check-release quality rtg-tests mhi-tests \
 	rtg zztop zzscanlines zzfwupdate usb-poseidon sd-boot net ZZNetStats \
@@ -37,15 +35,15 @@ zztop:
 	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) ZZTop ./build-gcc.sh
 
 zzscanlines:
-	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) ZZScanlines sh -c \
-		'$(LRA_SH) m68k-amigaos-gcc -O2 $$lra -noixemul -I../include \
-		-o ZZScanlines ZZScanlines.c -lamiga'
+	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) ZZScanlines \
+		m68k-amigaos-gcc -O2 -noixemul -I../include \
+		-o ZZScanlines ZZScanlines.c -lamiga
 
 zzfwupdate:
-	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) ZZFwUpdate sh -c \
-		'$(LRA_SH) m68k-amigaos-gcc -O2 $$lra -noixemul -Wall -Wextra -I../include \
-		-I../common -o ZZFwUpdate ZZFwUpdate.c ../common/fwup_amiga.c \
-		../common/fwup_client.c -lamiga'
+	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) ZZFwUpdate \
+		m68k-amigaos-gcc -O2 -noixemul -Wall -Wextra -I../include -I../common \
+		-o ZZFwUpdate ZZFwUpdate.c ../common/fwup_amiga.c \
+		../common/fwup_client.c -lamiga
 
 usb-poseidon:
 	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) usb-poseidon ./build.sh
@@ -57,10 +55,10 @@ net:
 	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) net make
 
 ZZNetStats:
-	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) net/ZZNetStats sh -c \
-		'$(LRA_SH) m68k-amigaos-gcc -O2 $$lra -noixemul -Wall -Wextra \
+	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) net/ZZNetStats \
+		m68k-amigaos-gcc -O2 -noixemul -Wall -Wextra \
 		-Wno-unused-parameter -I../../include \
-		-o ZZNetStats ZZNetStats.c -lamiga'
+		-o ZZNetStats ZZNetStats.c -lamiga
 
 # mhi/build.sh stages zz9k headers from the sibling zz9000-sdk checkout on
 # the host, then re-execs itself through amiga-docker.sh.

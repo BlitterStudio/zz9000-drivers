@@ -8,9 +8,6 @@
 # /opt/m68k-amigaos, already on the image's default PATH). Locally,
 # `make net` or ./build.sh wrap that in tools/amiga-docker.sh.
 
-# LRA (-mlra) exists on Bebbo GCC 10+ only; the older 6.5.0b rejects it.
-LRA := $(shell m68k-amigaos-gcc -mlra -x c -fsyntax-only /dev/null 2>/dev/null && echo -mlra)
-
 DEVICEID = ZZ9000Net.device
 
 CC      = m68k-amigaos-gcc
@@ -19,7 +16,7 @@ CPU     = 68020
 SOURCES = deviceheader.c deviceinit.c device.c
 
 # DEVICEVERSION/DEVICEREVISION/DEVICEDATE come from version.h (HAVE_VERSION_H).
-CFLAGS  = -m$(CPU) -mtune=68020-60 -msoft-float -O2 $(LRA) \
+CFLAGS  = -m$(CPU) -mtune=68020-60 -msoft-float -O2 \
           -Wall -Wextra -Wno-unused-parameter -Wno-pointer-sign \
           -fomit-frame-pointer \
           -I../include \

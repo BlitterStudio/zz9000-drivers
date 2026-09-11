@@ -38,14 +38,7 @@ if ! command -v m68k-amigaos-gcc >/dev/null 2>&1; then
   exec "$script_dir/../tools/amiga-docker.sh" ZZTop ./build-gcc.sh --zz9k-staged "$@"
 fi
 
-# LRA register allocation (-mlra) exists on Bebbo GCC 10+ only; the older
-# 6.5.0b toolchain rejects the flag, so enable it where supported.
-lra=
-if m68k-amigaos-gcc -mlra -x c -fsyntax-only /dev/null 2>/dev/null; then
-  lra=-mlra
-fi
-
 m68k-amigaos-gcc Sources/ZZTop.c ../common/fwup_amiga.c ../common/fwup_client.c \
   ../common/zzcfg_amiga.c ../common/zz_vcap_live.c \
-  -m68030 -O2 $lra -I../common -I../include -Izz9k-headers -o ZZTop \
+  -m68030 -O2 -I../common -I../include -Izz9k-headers -o ZZTop \
   -Wall -Wextra -Wno-unused-parameter -lamiga -ldebug -noixemul -lm

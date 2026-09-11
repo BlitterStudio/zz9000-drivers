@@ -51,11 +51,4 @@ vasmm68k_mot -quiet -phxass -Fhunk -m68020 -o PREFSFILE.uncut prefsfile.a -I"$nd
 # remove 0x28 bytes from the start
 dd bs=1 skip=40 if=PREFSFILE.uncut of=ZZ9000AX
 
-# LRA register allocation (-mlra) exists on Bebbo GCC 10+ only; the older
-# 6.5.0b toolchain rejects the flag, so enable it where supported.
-lra=
-if m68k-amigaos-gcc -mlra -x c -fsyntax-only /dev/null 2>/dev/null; then
-  lra=-mlra
-fi
-
-m68k-amigaos-gcc zz9000ax-ahi.c asmfuncs.s -O3 $lra -I../../include -Izz9k-headers -o zz9000ax.audio -Wall -Wextra -Wno-unused-parameter -nostartfiles -m68020 -ldebug
+m68k-amigaos-gcc zz9000ax-ahi.c asmfuncs.s -O3 -I../../include -Izz9k-headers -o zz9000ax.audio -Wall -Wextra -Wno-unused-parameter -nostartfiles -m68020 -ldebug
