@@ -1240,14 +1240,12 @@ UWORD SetSwitch(__REGA0(struct BoardInfo *b), __REGD0(UWORD enabled)) {
 	if (enabled == 0) {
 		// capture 24 bit amiga video to 0xe00000
 
-		if (zz_vcap_mode_uses_native_pan(
-			(UWORD)b->CardData[ZZ_CARD_DATA_VCAP_MODE])) {
-			// slightly adjusted centering
-			zzwrite16(&registers->pan_ptr_hi, 0x00df);
-			zzwrite16(&registers->pan_ptr_lo, 0xf2f8);
-		} else {
-			zzwrite16(&registers->pan_ptr_hi, 0x00e0);
-			zzwrite16(&registers->pan_ptr_lo, 0x0000);
+		{
+			ULONG pan = zz_vcap_native_pan_offset(
+				(UWORD)b->CardData[ZZ_CARD_DATA_VCAP_MODE]);
+
+			zzwrite16(&registers->pan_ptr_hi, (UWORD)(pan >> 16));
+			zzwrite16(&registers->pan_ptr_lo, (UWORD)(pan & 0xffff));
 		}
 
 		// firmware will detect that we are capturing and viewing the capture area
