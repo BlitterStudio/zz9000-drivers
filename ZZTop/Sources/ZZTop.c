@@ -882,6 +882,38 @@ static int fw_pick_file(char *out, int outsz)
 	return ok;
 }
 
+/* EasyRequest never wraps its text: one long firmware path widened the
+ * confirmation requester past the screen edge (zz9000-drivers #95).
+ * Break the path on ':', '/', or space boundaries - hard-breaking runs
+ * with no separator - so no line exceeds FW_CONFIRM_PATH_COLS
+ * characters (40 fits Topaz-8 text on a 320-pixel screen). */
+#define FW_CONFIRM_PATH_COLS 40
+
+static void fw_wrap_path(char *out, size_t outsz, const char *path)
+{
+	size_t col = 0, run = 0, o = 0;
+
+	while (path[0] != '\0' && o + 1 < outsz) {
+		char c = *path++;
+
+		out[o++] = c;
+		col++;
+		if (c == ':' || c == '/' || c == ' ')
+			run = 0;
+		else
+			run++;
+		if (col >= FW_CONFIRM_PATH_COLS && run > 0 && path[0] != '\0') {
+			o -= run;
+			path -= run;
+			out[o++] = '\n';
+			col = 0;
+			run = 0;
+		}
+	}
+	out[o] = '\0';
+}
+
+
 static void fw_progress(void *ctx, ULONG done, LONG total)
 {
 	struct Window *win = (struct Window *)ctx;
@@ -907,6 +939,7 @@ static void do_fw_update(struct Window *win)
 	 * is the only stack a WB launch gets), and 656 bytes of locals in
 	 * this frame smashed it — Guru 8000 0004 on firmware upload. */
 	static char path[256];
+	static char wrapped[320];
 	static char msg[400];
 	UWORD st;
 
@@ -918,9 +951,11 @@ static void do_fw_update(struct Window *win)
 	if (!fw_pick_file(path, sizeof(path)))
 		return;
 
+	fw_wrap_path(wrapped, sizeof(wrapped), path);
 	snprintf(msg, sizeof(msg),
 		"Upload\n  %s\nto the ZZ9000 as BOOT.bin?\n\n"
-		"Power-cycle the Amiga afterwards to boot the new firmware.", path);
+		"Power-cycle the Amiga afterwards to boot the new firmware.",
+		wrapped);
 	if (!fw_confirm(msg))
 		return;
 

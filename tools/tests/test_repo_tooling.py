@@ -190,6 +190,17 @@ class RepoToolingTests(unittest.TestCase):
                 struct.unpack(">l", data[74:78])[0], 16384,
                 "%s must grant at least 16 KiB of stack" % relpath)
 
+    def test_zztop_fw_confirm_wraps_long_paths(self):
+        """EasyRequest never wraps, so the upload confirmation must wrap
+        the path itself or a long drawer pushes the requester off screen
+        (zz9000-drivers #95)."""
+        source = self.read("ZZTop/Sources/ZZTop.c")
+        self.assertIn("#define FW_CONFIRM_PATH_COLS 40", source)
+        self.assertIn("static void fw_wrap_path(", source)
+        self.assertIn("fw_wrap_path(wrapped, sizeof(wrapped), path);",
+                      source)
+        self.assertIn('"Upload\\n  %s\\nto the ZZ9000 as BOOT.bin?', source)
+
     def test_zzdiag_capture_dump_has_fixed_header_and_size_gate(self):
         text = self.read("ZZDiag/ZZDiag.c")
         self.assertIn('"P6\\n1280 320\\n255\\n"', text)
