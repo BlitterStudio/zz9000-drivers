@@ -4,8 +4,8 @@
 # (C) 2026 Dimitris Panokostas <midwan@gmail.com> — GCC-only build
 #
 # Uses m68k-amigaos-gcc from https://github.com/bebbo/amiga-gcc.
-# CI uses the `sacredbanana/amiga-compiler:m68k-amigaos` image; for
-# local builds this script puts /opt/amiga/bin on PATH before make.
-export PATH="$PATH":/opt/amiga/bin
+# Builds run inside the `amigadev/crosstools:m68k-amigaos-gcc10` image
+# (via make net or tools/amiga-docker.sh), which has the toolchain on
+# its default PATH.
 
 exec make "$@"

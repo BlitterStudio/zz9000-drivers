@@ -14,8 +14,6 @@ if [ -n "${DEBUG:-}" ]; then
   set -- -DZZSD_DRIVER_DEBUG=1
 fi
 
-export PATH=/opt/amiga/bin:"$PATH"
-
 write_c_array() {
   input=$1
   output=$2

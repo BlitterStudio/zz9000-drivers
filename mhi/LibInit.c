@@ -36,10 +36,9 @@ struct ExecBase   *SysBase = NULL;
 struct DosLibrary *DOSBase = NULL;
 
 
-const char __aligned MpLibName [] __attribute__((used)) = LIBNAME".library";
-const char __aligned MpLibID   [] __attribute__((used)) = LIBNAME" "NUM2STR(VERSION)"."NUM2STR(REVISION)" ("NUM2STR(DATE)")\0";
-const char __aligned VERSTRING [] __attribute__((used)) = "\0$VER: " LIBNAME".library "NUM2STR(VERSION)"."NUM2STR(REVISION)" ("NUM2STR(DATE)")\0";
-
+const char __attribute__((aligned(4))) MpLibName [] __attribute__((used)) = LIBNAME".library";
+const char __attribute__((aligned(4))) MpLibID   [] __attribute__((used)) = LIBNAME" "NUM2STR(VERSION)"."NUM2STR(REVISION)" ("NUM2STR(DATE)")\0";
+const char __attribute__((aligned(4))) VERSTRING [] __attribute__((used)) = "\0$VER: " LIBNAME".library "NUM2STR(VERSION)"."NUM2STR(REVISION)" ("NUM2STR(DATE)")\0";
 /* ----------------------------------------------------------------------------------------
    ! ROMTag and Library inilitalization structure:
    !
@@ -59,7 +58,7 @@ const char __aligned VERSTRING [] __attribute__((used)) = "\0$VER: " LIBNAME".li
 extern ULONG InitTab[];
 extern APTR EndResident; /* below */
 
-struct Resident __aligned ROMTag = {    /* do not change */
+struct Resident __attribute__((aligned(4))) ROMTag = {    /* do not change */
 	RTC_MATCHWORD,
 	&ROMTag,
 	&EndResident,

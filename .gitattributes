@@ -21,6 +21,7 @@ CMakeLists.txt text eol=lf
 Dockerfile     text eol=lf
 *.fd           text eol=lf
 *.b64          text eol=lf
+SDK_REF        text eol=lf
 # .a here is m68k assembly source (e.g. ahi/driver/prefsfile.a), not an archive
 *.a            text eol=lf
 

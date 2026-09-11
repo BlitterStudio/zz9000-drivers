@@ -418,13 +418,13 @@ state; to make scanlines survive a power cycle, save them to
 
 GitHub Actions is the source of truth for release builds. Every push and
 pull request builds each component inside
-`sacredbanana/amiga-compiler:m68k-amigaos`; tag builds assemble the
-release zip.
+`amigadev/crosstools:m68k-amigaos-gcc10` (Bebbo GCC 16.2.0b); tag builds
+assemble the release zip.
 
 The same image can be used locally with Docker or Podman:
 
 ```bash
-IMAGE=sacredbanana/amiga-compiler:m68k-amigaos
+IMAGE=amigadev/crosstools:m68k-amigaos-gcc10
 ```
 
 Top-level helpers mirror the CI build and package flow:

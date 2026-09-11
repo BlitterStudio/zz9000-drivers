@@ -81,7 +81,7 @@ Validation:
 - `python3 -m unittest tools/tests/test_repo_tooling.py`
 - `make rtg-tests`
 - `make quality`
-- `make ahi` using `sacredbanana/amiga-compiler:m68k-amigaos`
+- `make ahi` using `amigadev/crosstools:m68k-amigaos-gcc10`
 - inspect the final diff for generated binaries
 
 ## 3. Hardware acceptance (completed 2026-07-29)

@@ -11,7 +11,7 @@ shift
 
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH='' cd -- "$script_dir/.." && pwd)
-image=${AMIGA_IMAGE:-sacredbanana/amiga-compiler:m68k-amigaos}
+image=${AMIGA_IMAGE:-amigadev/crosstools:m68k-amigaos-gcc10}
 engine=${CONTAINER_ENGINE:-}
 
 if [ -z "$engine" ]; then
@@ -25,10 +25,10 @@ if [ -z "$engine" ]; then
     fi
 fi
 
-# Expand PATH inside the container, not on the host.
-# shellcheck disable=SC2016
+# The image ships the toolchain on its default PATH (GCC 16.2.0b under
+# /opt/m68k-amigaos/bin), so no PATH setup is needed here.
 exec "$engine" run --rm \
     -v "$repo_root":/src \
     -w "/src/$workdir" \
     "$image" \
-    sh -lc 'export PATH=/opt/amiga/bin:$PATH; exec "$@"' sh "$@"
+    sh -c 'exec "$@"' sh "$@"

@@ -9,6 +9,7 @@
 
 #include "zz9k/audio.h"
 #include "zz9k/host.h"
+#include <dos/dos.h>
 
 struct MHI_LibBase {
 	struct Library mhi_Library;

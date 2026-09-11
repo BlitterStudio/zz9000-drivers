@@ -42,6 +42,15 @@ static void my_NewList(struct List *l) {
     l->lh_TailPred = (struct Node *)l;
 }
 
+/* Freestanding build (-nostdlib): GCC 16 lowers the 96-byte parmPkt
+ * clear below to a memset() call instead of open-coding it, so the ROM
+ * window build has to provide its own. */
+void *memset(void *dst, int c, size_t n) {
+    uint8_t *d = dst;
+    while (n--) *d++ = (uint8_t)c;
+    return dst;
+}
+
 /* Last reason fsrelocate_simple bailed, 0 == success, for diag printing. */
 static uint32_t fsreloc_last_err = 0;
 static uint32_t fsreloc_last_idx = 0;

@@ -1,4 +1,4 @@
-AMIGA_IMAGE ?= sacredbanana/amiga-compiler:m68k-amigaos
+AMIGA_IMAGE ?= amigadev/crosstools:m68k-amigaos-gcc10
 AMIGA_DOCKER = ./tools/amiga-docker.sh
 
 .PHONY: all build-all package-local check-release quality rtg-tests mhi-tests \
@@ -41,8 +41,9 @@ zzscanlines:
 
 zzfwupdate:
 	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) ZZFwUpdate \
-		m68k-amigaos-gcc -O2 -noixemul -Wall -Wextra -I../include \
-		-o ZZFwUpdate ZZFwUpdate.c -lamiga
+		m68k-amigaos-gcc -O2 -noixemul -Wall -Wextra -I../include -I../common \
+		-o ZZFwUpdate ZZFwUpdate.c ../common/fwup_amiga.c \
+		../common/fwup_client.c -lamiga
 
 usb-poseidon:
 	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) usb-poseidon ./build.sh
