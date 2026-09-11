@@ -885,7 +885,7 @@ static int fw_pick_file(char *out, int outsz)
 static void fw_progress(void *ctx, ULONG done, LONG total)
 {
 	struct Window *win = (struct Window *)ctx;
-	char buf[48];
+	static char buf[48];
 
 	if (total > 0) {
 		ULONG pct = (ULONG)(((ULONG)done * 100UL) / (ULONG)total);
@@ -901,8 +901,13 @@ static void fw_progress(void *ctx, ULONG done, LONG total)
 
 static void do_fw_update(struct Window *win)
 {
-	char path[256];
-	char msg[400];
+	/* File-scope static scratch, matching the Settings/Scandoubler/Audio
+	 * window idiom: this handler nests the ASL file requester and
+	 * EasyRequest on a Workbench-launched stack (the icon's stack field
+	 * is the only stack a WB launch gets), and 656 bytes of locals in
+	 * this frame smashed it — Guru 8000 0004 on firmware upload. */
+	static char path[256];
+	static char msg[400];
 	UWORD st;
 
 	if (!fwup_probe_board((ULONG)zz_regs)) {
@@ -934,7 +939,7 @@ static void do_fw_update(struct Window *win)
 
 static void do_fw_restore(struct Window *win)
 {
-	char msg[256];
+	static char msg[256];
 	UWORD st;
 
 	if (!fwup_probe_board((ULONG)zz_regs)) {

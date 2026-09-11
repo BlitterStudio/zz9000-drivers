@@ -150,11 +150,16 @@ def disk_object(icon_type, stack, drawer):
     return body
 
 
-def build(icon_type=WB_TOOL, stack=8192):
+def build(icon_type=WB_TOOL, stack=32768):
     """No drawer icon is generated here on purpose: the installer creates
     the ZZ9000 drawer with (infos), which takes the system default drawer
     icon. That matches whatever icon set the user runs - a custom 4-colour
-    drawer would look out of place next to MagicWB or NewIcons."""
+    drawer would look out of place next to MagicWB or NewIcons.
+
+    The 32 KiB stack covers the deepest ZZTop path: the firmware-update
+    handler nests the ASL file requester and EasyRequest dialogs, and
+    asl.library alone can exhaust an 8 KiB stack (the Guru 8000 0004 on
+    firmware upload, zz9000-drivers #84)."""
     out = disk_object(icon_type, stack, drawer=False)
     out += image_struct() + to_planes(draw(selected=False))
     out += image_struct() + to_planes(draw(selected=True))
