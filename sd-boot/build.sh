@@ -14,8 +14,6 @@ if [ -n "${DEBUG:-}" ]; then
   set -- -DZZSD_DRIVER_DEBUG=1
 fi
 
-export PATH=/opt/amiga/bin:"$PATH"
-
 write_c_array() {
   input=$1
   output=$2
@@ -41,8 +39,15 @@ write_c_array() {
   } > "$output"
 }
 
+# LRA register allocation (-mlra) exists on Bebbo GCC 10+ only; the older
+# 6.5.0b toolchain rejects the flag, so enable it where supported.
+lra=
+if m68k-amigaos-gcc -mlra -x c -fsyntax-only /dev/null 2>/dev/null; then
+  lra=-mlra
+fi
+
 m68k-amigaos-gcc -m68000 -s -Wall -Wextra -Wno-unused-parameter \
-  -fomit-frame-pointer -nostdlib -nostartfiles -Os \
+  -fomit-frame-pointer -nostdlib -nostartfiles -Os $lra \
   "$@" \
   -o zzsd.device zzsd_device.c zzsd_cmd.c zzsd_boot.c
 

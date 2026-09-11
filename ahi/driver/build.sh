@@ -41,11 +41,21 @@ if ! command -v m68k-amigaos-gcc >/dev/null 2>&1; then
   exec "$script_dir/../../tools/amiga-docker.sh" ahi/driver ./build.sh --zz9k-staged "$@"
 fi
 
-export PATH=/opt/amiga/bin:"$PATH"
+# The NDK include root differs per toolchain image: gcc10 images install
+# under /opt/m68k-amigaos, the legacy compiler image under /opt/amiga.
+ndkroot=/opt/m68k-amigaos/m68k-amigaos
+[ -d "$ndkroot" ] || ndkroot=/opt/amiga/m68k-amigaos
 
-vasmm68k_mot -quiet -phxass -Fhunk -m68020 -o PREFSFILE.uncut prefsfile.a -I/opt/amiga/m68k-amigaos/ndk-include -I/opt/amiga/m68k-amigaos/include
+vasmm68k_mot -quiet -phxass -Fhunk -m68020 -o PREFSFILE.uncut prefsfile.a -I"$ndkroot/ndk-include" -I"$ndkroot/include"
 
 # remove 0x28 bytes from the start
 dd bs=1 skip=40 if=PREFSFILE.uncut of=ZZ9000AX
 
-m68k-amigaos-gcc zz9000ax-ahi.c asmfuncs.s -O3 -I../../include -Izz9k-headers -o zz9000ax.audio -Wall -Wextra -Wno-unused-parameter -nostartfiles -m68020 -ldebug
+# LRA register allocation (-mlra) exists on Bebbo GCC 10+ only; the older
+# 6.5.0b toolchain rejects the flag, so enable it where supported.
+lra=
+if m68k-amigaos-gcc -mlra -x c -fsyntax-only /dev/null 2>/dev/null; then
+  lra=-mlra
+fi
+
+m68k-amigaos-gcc zz9000ax-ahi.c asmfuncs.s -O3 $lra -I../../include -Izz9k-headers -o zz9000ax.audio -Wall -Wextra -Wno-unused-parameter -nostartfiles -m68020 -ldebug

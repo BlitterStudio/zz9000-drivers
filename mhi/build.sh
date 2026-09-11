@@ -54,19 +54,24 @@ if ! command -v m68k-amigaos-gcc >/dev/null 2>&1; then
   exec "$script_dir/../tools/amiga-docker.sh" mhi ./build.sh --zz9k-staged "$@"
 fi
 
-export PATH=/opt/amiga/bin:"$PATH"
+# LRA register allocation (-mlra) exists on Bebbo GCC 10+ only; the older
+# 6.5.0b toolchain rejects the flag, so enable it where supported.
+lra=
+if m68k-amigaos-gcc -mlra -x c -fsyntax-only /dev/null 2>/dev/null; then
+  lra=-mlra
+fi
 
-m68k-amigaos-gcc StartUp.c LibInit.c mhizz9000.c asmfuncs.s -m68020 -O3 -I../include -Izz9k-headers -o mhizz9000.library.debug -g -ggdb -Wall -Wextra -Wno-unused-parameter -Wno-pointer-to-int-cast -Wno-pointer-sign -nostartfiles -ldebug
+m68k-amigaos-gcc StartUp.c LibInit.c mhizz9000.c asmfuncs.s -m68020 -O3 $lra -I../include -Izz9k-headers -o mhizz9000.library.debug -g -ggdb -Wall -Wextra -Wno-unused-parameter -Wno-pointer-to-int-cast -Wno-pointer-sign -nostartfiles -ldebug
 m68k-amigaos-strip -s -o mhizz9000.library mhizz9000.library.debug
 
 # Trace variant: same driver with KPrintF tracing compiled in; capture
 # the output on the Amiga with Sashimi. Swap it in for mhizz9000.library
 # when diagnosing player behaviour.
-m68k-amigaos-gcc StartUp.c LibInit.c mhizz9000.c asmfuncs.s -m68020 -O3 -DZZ_MHI_TRACE=1 -I../include -Izz9k-headers -o mhizz9000.library.trace.debug -g -ggdb -Wall -Wextra -Wno-unused-parameter -Wno-pointer-to-int-cast -Wno-pointer-sign -nostartfiles -ldebug
+m68k-amigaos-gcc StartUp.c LibInit.c mhizz9000.c asmfuncs.s -m68020 -O3 $lra -DZZ_MHI_TRACE=1 -I../include -Izz9k-headers -o mhizz9000.library.trace.debug -g -ggdb -Wall -Wextra -Wno-unused-parameter -Wno-pointer-to-int-cast -Wno-pointer-sign -nostartfiles -ldebug
 m68k-amigaos-strip -s -o mhizz9000.library.trace mhizz9000.library.trace.debug
 
 # Decode-only diagnostic: exercises the MHI feeder and accelerated decoder but
 # suppresses AX binding and drains PCM through READ. It is intentionally silent
 # and is packaged only for feeder-vs-pump hardware isolation.
-m68k-amigaos-gcc StartUp.c LibInit.c mhizz9000.c asmfuncs.s -m68020 -O3 -DZZ_MHI_TRACE=1 -DZZ_MHI_DIAG_DECODE_ONLY=1 -I../include -Izz9k-headers -o mhizz9000.library.decode-only.debug -g -ggdb -Wall -Wextra -Wno-unused-parameter -Wno-pointer-to-int-cast -Wno-pointer-sign -nostartfiles -ldebug
+m68k-amigaos-gcc StartUp.c LibInit.c mhizz9000.c asmfuncs.s -m68020 -O3 $lra -DZZ_MHI_TRACE=1 -DZZ_MHI_DIAG_DECODE_ONLY=1 -I../include -Izz9k-headers -o mhizz9000.library.decode-only.debug -g -ggdb -Wall -Wextra -Wno-unused-parameter -Wno-pointer-to-int-cast -Wno-pointer-sign -nostartfiles -ldebug
 m68k-amigaos-strip -s -o mhizz9000.library.decode-only mhizz9000.library.decode-only.debug

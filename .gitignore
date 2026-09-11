@@ -11,6 +11,8 @@
 *.library.debug
 *.library.trace
 *.library.trace.debug
+*.library.decode-only
+*.library.decode-only.debug
 PREFSFILE*
 ZZFwUpdate/ZZFwUpdate
 ZZScanlines/ZZScanlines

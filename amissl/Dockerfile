@@ -1,7 +1,7 @@
 # AmiSSL build environment: ubuntu + the adtools m68k toolchain AmiSSL's own
 # CI uses (gcc 2.95.3 cross-compiler is a 32-bit binary, hence the i386 libc).
-# The sacredbanana image used by the other components cannot build AmiSSL from
-# source (NDK/libcmt clashes, no bumprev) — this image can.
+# The amigadev/crosstools m68k image used by the other components cannot build
+# AmiSSL from source (NDK/libcmt clashes, no bumprev) — this image can.
 FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN dpkg --add-architecture i386 \

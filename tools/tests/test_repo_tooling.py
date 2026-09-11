@@ -462,7 +462,7 @@ class RepoToolingTests(unittest.TestCase):
             first_line = path.read_text(encoding="utf-8").splitlines()[0]
             self.assertTrue(first_line.startswith("#!"), relpath)
 
-        self.assertIn("sacredbanana/amiga-compiler:m68k-amigaos",
+        self.assertIn("amigadev/crosstools:m68k-amigaos-gcc10",
                       self.read("tools/amiga-docker.sh"))
 
     def test_ci_runs_host_checks_and_builds_zzdiag(self):

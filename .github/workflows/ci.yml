@@ -17,7 +17,7 @@ permissions:
   contents: write  # needed by the release job on tag pushes
 
 env:
-  AMIGA_IMAGE: sacredbanana/amiga-compiler:m68k-amigaos
+  AMIGA_IMAGE: amigadev/crosstools:m68k-amigaos-gcc10
 
 jobs:
   lint:
@@ -87,7 +87,7 @@ jobs:
       - name: Build ZZ9000.card
         run: |
           docker run --rm -v "$PWD":/src -w /src/rtg "$AMIGA_IMAGE" \
-            m68k-amigaos-gcc mntgfx-gcc.c -m68020 -mtune=68020-60 -O2 \
+            m68k-amigaos-gcc mntgfx-gcc.c -m68020 -mtune=68020-60 -O2 -mlra \
               -I../include \
               -o ZZ9000.card -noixemul -Wall -Wextra \
               -Wno-unused-parameter -fomit-frame-pointer \
@@ -100,7 +100,7 @@ jobs:
       - name: Build ZZ9000.card (debug/probe, KPrintF via Sashimi)
         run: |
           docker run --rm -v "$PWD":/src -w /src/rtg "$AMIGA_IMAGE" \
-            m68k-amigaos-gcc mntgfx-gcc.c -DDEBUG -m68020 -mtune=68020-60 -O2 \
+            m68k-amigaos-gcc mntgfx-gcc.c -DDEBUG -m68020 -mtune=68020-60 -O2 -mlra \
               -I../include \
               -o ZZ9000-debug.card -noixemul -Wall -Wextra \
               -Wno-unused-parameter -fomit-frame-pointer \
@@ -137,7 +137,7 @@ jobs:
       - name: Build ZZScanlines
         run: |
           docker run --rm -v "$PWD":/src -w /src/ZZScanlines "$AMIGA_IMAGE" \
-            m68k-amigaos-gcc -O2 -noixemul -I../include \
+            m68k-amigaos-gcc -O2 -mlra -noixemul -I../include \
               -o ZZScanlines ZZScanlines.c -lamiga
       - uses: actions/upload-artifact@v7
         with:
@@ -153,7 +153,7 @@ jobs:
       - name: Build ZZFwUpdate
         run: |
           docker run --rm -v "$PWD":/src -w /src/ZZFwUpdate "$AMIGA_IMAGE" \
-            m68k-amigaos-gcc -O2 -noixemul -Wall -Wextra -I../include -I../common \
+            m68k-amigaos-gcc -O2 -mlra -noixemul -Wall -Wextra -I../include -I../common \
               -o ZZFwUpdate ZZFwUpdate.c ../common/fwup_amiga.c ../common/fwup_client.c -lamiga
       - uses: actions/upload-artifact@v7
         with:
@@ -171,7 +171,7 @@ jobs:
           docker run --rm -v "$PWD":/src -w /src/usb-poseidon "$AMIGA_IMAGE" \
             m68k-amigaos-gcc -m68020 -mtune=68020-60 -msoft-float -s \
               -Wall -Wextra -Wno-unused-parameter -fomit-frame-pointer \
-              -nostdlib -nostartfiles -O2 -I. -I../include \
+              -nostdlib -nostartfiles -O2 -mlra -I. -I../include \
               -o zzusbhw.device zzusbhw_device.c zzusb_engine.c zzusb_iso.c zzusb_policy.c \
               -lgcc -lc
       - uses: actions/upload-artifact@v7
@@ -190,7 +190,7 @@ jobs:
           docker run --rm -v "$PWD":/src -w /src/sd-boot "$AMIGA_IMAGE" \
             m68k-amigaos-gcc -m68000 -s -Wall -Wextra \
               -Wno-unused-parameter -fomit-frame-pointer \
-              -nostdlib -nostartfiles -Os \
+              -nostdlib -nostartfiles -Os -mlra \
               -o zzsd.device zzsd_device.c zzsd_cmd.c zzsd_boot.c
       - name: Enforce ROM-window size ceiling (7424 bytes)
         # Must fit inside the FPGA-decoded 8 KB boot ROM window minus
@@ -229,7 +229,7 @@ jobs:
       - name: Build ZZNetStats
         run: |
           docker run --rm -v "$PWD":/src -w /src/net/ZZNetStats "$AMIGA_IMAGE" \
-            m68k-amigaos-gcc -O2 -noixemul -Wall -Wextra \
+            m68k-amigaos-gcc -O2 -mlra -noixemul -Wall -Wextra \
               -Wno-unused-parameter -I../../include \
               -o ZZNetStats ZZNetStats.c -lamiga
       - uses: actions/upload-artifact@v7
@@ -246,7 +246,7 @@ jobs:
       - name: Build ZZDiag
         run: |
           docker run --rm -v "$PWD":/src -w /src/ZZDiag "$AMIGA_IMAGE" \
-            m68k-amigaos-gcc ZZDiag.c -m68030 -O2 -o ZZDiag \
+            m68k-amigaos-gcc ZZDiag.c -m68030 -O2 -mlra -o ZZDiag \
               -Wall -Wextra -Wno-unused-parameter -I../include -I../usb-poseidon \
               -lamiga -noixemul
       - uses: actions/upload-artifact@v7
@@ -321,7 +321,10 @@ jobs:
       - uses: actions/checkout@v6
       - name: Build SDK payloads at the pinned ref
         # Clones zz9000-sdk at sdk/SDK_REF and drives the SDK's own Docker
-        # build; requires the zz9000-sdk repository to be public.
+        # build (the SDK script follows this IMAGE); requires the
+        # zz9000-sdk repository to be public.
+        env:
+          IMAGE: ${{ env.AMIGA_IMAGE }}
         run: sdk/build.sh
       - uses: actions/upload-artifact@v7
         with:

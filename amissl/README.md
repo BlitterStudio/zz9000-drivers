@@ -22,7 +22,8 @@ path.
 The integration (provider sources, AmiSSL patch, pinned AmiSSL ref) lives in
 the zz9000-sdk repo under `integration/amissl/`; this component only builds
 and stages the result. `build.sh` creates the adtools toolchain image
-(`Dockerfile` — AmiSSL cannot be built with the sacredbanana image) and runs
+(`Dockerfile` — AmiSSL cannot be built with the amigadev/crosstools m68k
+image) and runs
 the SDK's `integration/amissl/build.sh` inside it. It produces both CPU builds
 AmiSSL itself ships — `amissl/out/68020-40/amissl_v362.library` (68020/030/040,
 and the Apollo 68080) and `amissl/out/68060/amissl_v362.library` — and the

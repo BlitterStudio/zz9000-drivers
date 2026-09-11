@@ -3,10 +3,13 @@
 # (C) 2026 Dimitris Panokostas <midwan@gmail.com> — GCC-only build
 #
 # Builds with m68k-amigaos-gcc from https://github.com/bebbo/amiga-gcc.
-# CI uses the `sacredbanana/amiga-compiler:m68k-amigaos` image, which has
-# the Bebbo toolchain plus the Roadshow SDK pre-installed under
-# /opt/amiga/m68k-amigaos. For local builds, run ./build.sh which puts
-# /opt/amiga/bin on PATH before invoking make.
+# Builds run inside the `amigadev/crosstools:m68k-amigaos-gcc10` image
+# (Bebbo GCC 16.2.0b plus the NDK and the Roadshow SDK under
+# /opt/m68k-amigaos, already on the image's default PATH). Locally,
+# `make net` or ./build.sh wrap that in tools/amiga-docker.sh.
+
+# LRA (-mlra) exists on Bebbo GCC 10+ only; the older 6.5.0b rejects it.
+LRA := $(shell m68k-amigaos-gcc -mlra -x c -fsyntax-only /dev/null 2>/dev/null && echo -mlra)
 
 DEVICEID = ZZ9000Net.device
 
@@ -16,7 +19,7 @@ CPU     = 68020
 SOURCES = deviceheader.c deviceinit.c device.c
 
 # DEVICEVERSION/DEVICEREVISION/DEVICEDATE come from version.h (HAVE_VERSION_H).
-CFLAGS  = -m$(CPU) -mtune=68020-60 -msoft-float -O2 \
+CFLAGS  = -m$(CPU) -mtune=68020-60 -msoft-float -O2 $(LRA) \
           -Wall -Wextra -Wno-unused-parameter -Wno-pointer-sign \
           -fomit-frame-pointer \
           -I../include \
