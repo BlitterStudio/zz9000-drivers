@@ -4,13 +4,17 @@
 #include "zz9000_hw.h"
 #include "zzcfg_query.h"
 
-/* Both centered modes reuse the firmware's centered-output path: the
+/* Fixed centered modes reuse the firmware's centered-output path: the
  * 50 Hz variant additionally needs capability bit 4, so a 60-only
- * stack never receives a mode id it would silently run at 60 Hz. */
+ * stack never receives a mode id it would silently run at 60 Hz.
+ * ZZ_VMODE_CENTERED_1080P_MATCH is a virtual id (never a preset row):
+ * it drives the centered output with source-synced refresh and needs
+ * all three capability bits, so mixed stacks never see 0x100. */
 static inline int zz_vcap_mode_is_centered(UWORD mode)
 {
     return mode == ZZ_VMODE_CENTERED_1080P_60 ||
-        mode == ZZ_VMODE_CENTERED_1080P_50;
+        mode == ZZ_VMODE_CENTERED_1080P_50 ||
+        mode == ZZ_VMODE_CENTERED_1080P_MATCH;
 }
 
 static inline UWORD zz_vcap_mode_sanitize(UWORD mode, UWORD firmware_capabilities)
@@ -25,6 +29,14 @@ static inline UWORD zz_vcap_mode_sanitize(UWORD mode, UWORD firmware_capabilitie
             (ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P |
              ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P_50))
         return ZZ_VMODE_CENTERED_1080P_50;
+    if (mode == ZZ_VMODE_CENTERED_1080P_MATCH &&
+        (firmware_capabilities & (ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P |
+            ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P_50 |
+            ZZ_FW_CAP_VIDEOCAP_SOURCE_SYNC)) ==
+            (ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P |
+             ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P_50 |
+             ZZ_FW_CAP_VIDEOCAP_SOURCE_SYNC))
+        return ZZ_VMODE_CENTERED_1080P_MATCH;
     return ZZ_VMODE_800x600;
 }
 

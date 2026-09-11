@@ -370,6 +370,8 @@ static LONG tooltype_vcap_mode(char **tool_types, LONG current) {
 		return ZZ_VMODE_CENTERED_1080P_60;
 	if (string_equal_ci(value, "CENTERED_1080P_50"))
 		return ZZ_VMODE_CENTERED_1080P_50;
+	if (string_equal_ci(value, "CENTERED_1080P_MATCH"))
+		return ZZ_VMODE_CENTERED_1080P_MATCH;
 
 	if (string_equal_ci(value, "720x576") ||
 		string_equal_ci(value, "50") ||
@@ -419,7 +421,10 @@ static struct ConfigDev *find_unconfigured_configdev(struct ExpansionBase *Expan
 }
 
 static void apply_vcap_settings(MNTZZ9KRegs *regs, LONG mode) {
-	if (mode == ZZ_VMODE_CENTERED_1080P_50) {
+	if (mode == ZZ_VMODE_CENTERED_1080P_MATCH) {
+		KPrintF("ZZ9000.card: centered 1280x1024, source-synced to the Amiga.\n");
+		regs->videocap_vmode = ZZ_VMODE_CENTERED_1080P_MATCH;
+	} else if (mode == ZZ_VMODE_CENTERED_1080P_50) {
 		KPrintF("ZZ9000.card: centered 1280x1024 in 1080p50 mode.\n");
 		regs->videocap_vmode = ZZ_VMODE_CENTERED_1080P_50;
 	} else if (mode == ZZ_VMODE_CENTERED_1080P_60) {

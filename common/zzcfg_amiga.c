@@ -213,7 +213,12 @@ static const struct zzcfg_profile_desc zzcfg_profiles[] = {
     { "centered_1080p_50",   0, 1, 0,
       ZZCFG_VCAP_OUTPUT_CENTERED,    ZZCFG_VCAP_REFRESH_50,
       ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P |
-      ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P_50, ZZCFG_VCAP_FULL_60 }
+      ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P_50, ZZCFG_VCAP_FULL_60 },
+    { "centered_1080p_match", 0, 1, 0,
+      ZZCFG_VCAP_OUTPUT_CENTERED,    ZZCFG_VCAP_REFRESH_MATCH_INPUT,
+      ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P |
+      ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P_50 |
+      ZZ_FW_CAP_VIDEOCAP_SOURCE_SYNC, ZZCFG_VCAP_FULL_60 }
 };
 
 typedef char zzcfg_profile_count_matches_enum[

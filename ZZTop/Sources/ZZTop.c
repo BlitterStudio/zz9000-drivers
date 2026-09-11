@@ -2713,6 +2713,10 @@ static void scandoubler_description(char *buf, size_t size, UWORD output,
 	case ZZCFG_VCAP_REFRESH_MATCH_INPUT:
 		if (output == ZZCFG_VCAP_OUTPUT_FULL)
 			rate = "49.93/59.95Hz PAL/NTSC";
+		else if (output == ZZCFG_VCAP_OUTPUT_CENTERED)
+			/* Experimental source sync: the rate follows the Amiga
+			 * input, so quoting a fixed number would be invented. */
+			rate = "source-synced to the Amiga";
 		break;
 	case ZZCFG_VCAP_REFRESH_AUTO_50_60:
 		if (output == ZZCFG_VCAP_OUTPUT_FILTERED_SD)

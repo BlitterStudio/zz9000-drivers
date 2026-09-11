@@ -487,10 +487,6 @@ int main(void)
      * the firmware advertises BOTH centered capability bits. A 60-only
      * stack keeps centered 60 working and visibly falls back to
      * full_60 for 50 -- never a silent save of an unsupported value. */
-    check(ZZCFG_VCAP_CENTERED_1080P_60 == 6 &&
-          ZZCFG_VCAP_CENTERED_1080P_50 == 7 &&
-          ZZCFG_VCAP_PROFILE_COUNT == 8,
-          "centered profiles keep their appended identities");
     check(zzcfg_profile_sanitize(ZZCFG_VCAP_CENTERED_1080P_50,
           ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P) == ZZCFG_VCAP_FULL_60,
           "60-only stack sanitizes centered 50 to full_60");
@@ -538,6 +534,68 @@ int main(void)
           strstr(text, "nonstandard_vsync = off") != NULL,
           "legacy firmware receives the centered 50 fallback trio");
 
+    /* Centered Match Amiga (experimental source sync): appended profile
+     * 8, serialized only when the firmware advertises the whole
+     * experimental stack (bits 3|4|5). Anything less keeps the
+     * documented full_60 fallback; the lossy legacy tuple still
+     * resolves to full_exact, never to the new row. */
+    check(zzcfg_profile_sanitize(ZZCFG_VCAP_CENTERED_1080P_MATCH,
+          ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P |
+          ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P_50) == ZZCFG_VCAP_FULL_60,
+          "stack without source sync sanitizes centered match");
+    check(zzcfg_profile_sanitize(ZZCFG_VCAP_CENTERED_1080P_MATCH,
+          ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P |
+          ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P_50 |
+          ZZ_FW_CAP_VIDEOCAP_SOURCE_SYNC) ==
+          ZZCFG_VCAP_CENTERED_1080P_MATCH,
+          "experimental stack preserves centered match");
+    check(zzcfg_profile_for_output_refresh(ZZCFG_VCAP_OUTPUT_CENTERED,
+          ZZCFG_VCAP_REFRESH_MATCH_INPUT,
+          ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P |
+          ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P_50) ==
+          ZZCFG_VCAP_PROFILE_COUNT,
+          "centered match pair is hidden without the sync capability");
+
+    defaults(&a);
+    a.firmware_capabilities = ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P |
+        ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P_50 |
+        ZZ_FW_CAP_VIDEOCAP_SOURCE_SYNC;
+    a.videocap_profile = ZZCFG_VCAP_CENTERED_1080P_MATCH;
+    n = zzcfg_generate(&a, text, sizeof(text));
+    check(n > 0 && n < ZZCFG_MAX_SIZE - 1,
+          "centered match save stays inside the 4 KiB parse budget");
+    defaults(&b);
+    b.firmware_capabilities = a.firmware_capabilities;
+    zzcfg_parse_text(text, n, &b);
+    check(b.videocap_profile == ZZCFG_VCAP_CENTERED_1080P_MATCH,
+          "centered match round-trips");
+
+    defaults(&a);
+    a.firmware_capabilities = ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P;
+    a.videocap_profile = ZZCFG_VCAP_CENTERED_1080P_MATCH;
+    n = zzcfg_generate(&a, text, sizeof(text));
+    defaults(&b);
+    b.firmware_capabilities = a.firmware_capabilities;
+    zzcfg_parse_text(text, n, &b);
+    check(b.videocap_profile == ZZCFG_VCAP_FULL_60,
+          "mixed stack saves centered match as the full_60 fallback");
+
+    /* Adding the centered match profile must not alter legacy full_exact. */
+    check(zzcfg_profile_from_legacy(0, 1, 1) == ZZCFG_VCAP_FULL_EXACT,
+          "legacy full_exact mapping is unchanged by the new row");
+
+    defaults(&a);
+    a.use_videocap_profile_key = 0;
+    a.firmware_capabilities = ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P |
+        ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P_50 |
+        ZZ_FW_CAP_VIDEOCAP_SOURCE_SYNC;
+    a.videocap_profile = ZZCFG_VCAP_CENTERED_1080P_MATCH;
+    n = zzcfg_generate(&a, text, sizeof(text));
+    check(strstr(text, "videocap_mode = 800x600") != NULL &&
+          strstr(text, "videocap_shres = full") != NULL &&
+          strstr(text, "nonstandard_vsync = off") != NULL,
+          "legacy firmware receives the safe full_60 fallback trio");
+
     /* Output/refresh decomposition and its inverse drive the dependent
      * selectors: every supported pair is reversible, unsupported pairs
      * report PROFILE_COUNT instead of a hidden fallback. */
@@ -558,10 +616,13 @@ int main(void)
             { ZZCFG_VCAP_OUTPUT_CENTERED, ZZCFG_VCAP_REFRESH_60,
               ZZCFG_VCAP_CENTERED_1080P_60 },
             { ZZCFG_VCAP_OUTPUT_CENTERED, ZZCFG_VCAP_REFRESH_50,
-              ZZCFG_VCAP_CENTERED_1080P_50 }
+              ZZCFG_VCAP_CENTERED_1080P_50 },
+            { ZZCFG_VCAP_OUTPUT_CENTERED, ZZCFG_VCAP_REFRESH_MATCH_INPUT,
+              ZZCFG_VCAP_CENTERED_1080P_MATCH }
         };
         UWORD all_caps = ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P |
-            ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P_50;
+            ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P_50 |
+            ZZ_FW_CAP_VIDEOCAP_SOURCE_SYNC;
         int pairs_ok = 1;
         UWORD p;
 
@@ -575,8 +636,8 @@ int main(void)
         check(pairs_ok,
               "every profile is a reversible output/refresh pair");
 
-        check(zzcfg_profile_for_output_refresh(ZZCFG_VCAP_OUTPUT_CENTERED,
-              ZZCFG_VCAP_REFRESH_MATCH_INPUT, all_caps) ==
+        check(zzcfg_profile_for_output_refresh(ZZCFG_VCAP_OUTPUT_FULL,
+              ZZCFG_VCAP_REFRESH_50, all_caps) ==
               ZZCFG_VCAP_PROFILE_COUNT,
               "pair with no profile reports COUNT, not a fallback");
         check(zzcfg_profile_for_output_refresh(ZZCFG_VCAP_OUTPUT_FULL,
@@ -617,7 +678,8 @@ int main(void)
         static const char *tokens[] = {
             "full_60", "full_exact", "filtered_60", "filtered_pal",
             "filtered_pal_exact", "filtered_ntsc_exact",
-            "centered_1080p_60", "centered_1080p_50"
+            "centered_1080p_60", "centered_1080p_50",
+            "centered_1080p_match"
         };
         int ids_ok = 1;
         UWORD p;
