@@ -42,9 +42,10 @@ zzscanlines:
 		-o ZZScanlines ZZScanlines.c -lamiga'
 
 zzfwupdate:
-	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) ZZFwUpdate \
-		m68k-amigaos-gcc -O2 $lra -noixemul -Wall -Wextra -I../include \
-		-o ZZFwUpdate ZZFwUpdate.c -lamiga
+	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) ZZFwUpdate sh -c \
+		'$(LRA_SH) m68k-amigaos-gcc -O2 $$lra -noixemul -Wall -Wextra -I../include \
+		-I../common -o ZZFwUpdate ZZFwUpdate.c ../common/fwup_amiga.c \
+		../common/fwup_client.c -lamiga'
 
 usb-poseidon:
 	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) usb-poseidon ./build.sh
