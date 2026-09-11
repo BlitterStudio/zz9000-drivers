@@ -1242,7 +1242,8 @@ UWORD SetSwitch(__REGA0(struct BoardInfo *b), __REGD0(UWORD enabled)) {
 
 		{
 			ULONG pan = zz_vcap_native_pan_offset(
-				(UWORD)b->CardData[ZZ_CARD_DATA_VCAP_MODE]);
+				(UWORD)b->CardData[ZZ_CARD_DATA_VCAP_MODE],
+				(UWORD)b->CardData[ZZ_CARD_DATA_FW_CAPABILITIES]);
 
 			zzwrite16(&registers->pan_ptr_hi, (UWORD)(pan >> 16));
 			zzwrite16(&registers->pan_ptr_lo, (UWORD)(pan & 0xffff));

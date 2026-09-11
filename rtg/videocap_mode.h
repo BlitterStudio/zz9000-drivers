@@ -42,13 +42,22 @@ static inline UWORD zz_vcap_mode_sanitize(UWORD mode, UWORD firmware_capabilitie
 
 /* Capture-area pan written at native-screen activation. Only the
  * centered profiles keep the legacy tuned origin 0x00dff2f8: there the
- * firmware never overrides the driver-provided canvas base. Every
- * other path is firmware-owned geometry — the firmware re-derives the
- * scanout origin from the detected standard at each capture restart —
- * so the driver just points at the plain capture base (issue #84). */
-static inline ULONG zz_vcap_native_pan_offset(UWORD mode)
+ * firmware never overrides the driver-provided canvas base. The
+ * filtered/full-width paths are firmware-owned geometry, but only
+ * firmware advertising ZZ_FW_CAP_VIDEOCAP_SCANOUT_ORIGIN re-derives the
+ * origin (and stride width) at every capture restart (issue #84); older
+ * firmware corrects it only inside the mode-change trigger, so the
+ * 800x600 family keeps the legacy constant there and mixed stacks keep
+ * their existing behavior. */
+static inline ULONG zz_vcap_native_pan_offset(UWORD mode,
+    UWORD firmware_capabilities)
 {
-    return zz_vcap_mode_is_centered(mode) ? 0x00dff2f8UL : 0x00e00000UL;
+    if (zz_vcap_mode_is_centered(mode))
+        return 0x00dff2f8UL;
+    if (mode == ZZ_VMODE_800x600 &&
+        !(firmware_capabilities & ZZ_FW_CAP_VIDEOCAP_SCANOUT_ORIGIN))
+        return 0x00dff2f8UL;
+    return 0x00e00000UL;
 }
 
 #endif
