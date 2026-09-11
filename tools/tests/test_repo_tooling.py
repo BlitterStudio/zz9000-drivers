@@ -173,6 +173,34 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn('"audio_ceiling_paula"', cfg_source)
         self.assertIn('"audio_ceiling_ax"', cfg_source)
 
+
+    def test_zztop_icon_grants_asl_sized_stack(self):
+        """do_StackSize is the last header LONG at offset 74 (do_Type is a
+        UBYTE and Amiga pointers are 2-aligned, so the DiskObject header is
+        78 bytes). The firmware-update handler nests the ASL requester and
+        EasyRequest; an 8 KiB icon stack Guru'd ZZTop with 8000 0004 on
+        upload (zz9000-drivers #84)."""
+        import struct
+
+        for relpath in ("ZZTop/ZZTop.info",
+                        "installer/ZZ9000Installer/Tools/ZZTop.info"):
+            data = (ROOT / relpath).read_bytes()
+            self.assertEqual(0xE310, struct.unpack(">H", data[0:2])[0])
+            self.assertGreaterEqual(
+                struct.unpack(">l", data[74:78])[0], 16384,
+                "%s must grant at least 16 KiB of stack" % relpath)
+
+    def test_zztop_fw_confirm_wraps_long_paths(self):
+        """EasyRequest never wraps, so the upload confirmation must wrap
+        the path itself or a long drawer pushes the requester off screen
+        (zz9000-drivers #95)."""
+        source = self.read("ZZTop/Sources/ZZTop.c")
+        self.assertIn("#define FW_CONFIRM_PATH_COLS 40", source)
+        self.assertIn("static void fw_wrap_path(", source)
+        self.assertIn("fw_wrap_path(wrapped, sizeof(wrapped), path);",
+                      source)
+        self.assertIn('"Upload\\n  %s\\nto the ZZ9000 as BOOT.bin?', source)
+
     def test_zzdiag_capture_dump_has_fixed_header_and_size_gate(self):
         text = self.read("ZZDiag/ZZDiag.c")
         self.assertIn('"P6\\n1280 320\\n255\\n"', text)
