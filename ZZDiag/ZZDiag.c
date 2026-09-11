@@ -400,7 +400,9 @@ static void print_aperture_layout(const struct ZZ9000Board *board)
         printf("Z2ExpectedBoardSize    = 0x%08lx\n",
             (unsigned long)layout.aperture_size);
     } else {
-        printf("Z2ApertureLayout       = generation 1, %lu MiB profile\n",
+        printf("Z2ApertureLayout       = generation %lu, %lu MiB profile\n",
+            (unsigned long)(((descriptor & ZZ_Z2_APERTURE_INFO_GENERATION_MASK) ==
+                             ZZ_Z2_APERTURE_INFO_GENERATION_2) ? 2UL : 1UL),
             (unsigned long)(layout.aperture_size >> 20));
     }
     printf("Z2Framebuffer          = 0x%08lx + 0x%08lx\n",
