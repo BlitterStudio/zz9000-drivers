@@ -214,16 +214,19 @@ The drivers in this repo consult it too:
   native Amiga chipset video, not the separate Picasso96 1920x1080x32 RTG
   screen mode. Its fixed 148.5714286 MHz clock and 2200x1125 totals
   produce approximately 60.02886 Hz.
-- On stacks that also advertise capability bit 4, `centered_1080p_50`
-  centers the same unchanged 1280x1024 content the same way at nominal
-  50 Hz. Its 2640x1125 totals and the same clock produce approximately
-  50.02405 Hz. Both use the closest legal 100 MHz integer-PLL setting
-  to 148.5 MHz (52/5/7), retaining standard blanking. They remain
-  free-running, not Amiga-genlocked.
-- Install matching firmware, bitstream, `ZZ9000.card`, and ZZTop.
+- On stacks that also advertise the source-sync capability bit (bit 5,
+  which implies bits 3 and 4), the experimental `centered_1080p_match`
+  centers the same unchanged 1280x1024 content and locks the output
+  cadence to the captured Amiga raster instead of free-running: refresh
+  follows the input (PAL or NTSC, progressive or interlaced), so no
+  fixed rate applies. It needs bitstream, firmware, `ZZ9000.card` and
+  ZZTop from the same build; during acquisition the picture stays
+  hidden until the capture/read phase is safe.
+  Install matching firmware, bitstream, `ZZ9000.card`, and ZZTop.
   ZZTop gates centered choices on the firmware capability register:
-  bit 3 for centered 60 Hz, and both bits 3 and 4 for centered 50 Hz.
-  Current ZZTop substitutes `full_60` for an unsupported stored centered
+  bit 3 for centered 60 Hz, both bits 3 and 4 for centered 50 Hz, and
+  all of bits 3-5 for `centered_1080p_match`. Current ZZTop substitutes
+  `full_60` for an unsupported stored centered
   profile, including when another configuration window saves. This is
   separate from the normal `filtered_60` default. Older firmware can
   ignore an unknown profile token, so hand-editing that token is not a
@@ -242,7 +245,8 @@ The drivers in this repo consult it too:
 
 The existing `1280x1024` / `Match Amiga` pair (`full_exact`) selects fixed
 PAL/NTSC approximations of about 49.93/59.95 Hz; the label does not imply
-input genlock. Centered output currently offers fixed 50 Hz and 60 Hz only.
+input genlock. Centered output offers fixed 50 Hz and 60 Hz, plus the
+experimental genlocked `centered_1080p_match` above on matched stacks.
 
 ### Scandoubler output and refresh
 
@@ -255,6 +259,7 @@ are offered; the centered rows require the capabilities described above.
 | 1280x1024 - full detail | Match Amiga | `full_exact` |
 | 1920x1080 - centered | 60Hz | `centered_1080p_60` |
 | 1920x1080 - centered | 50Hz | `centered_1080p_50` |
+| 1920x1080 - centered | Match Amiga (experimental) | `centered_1080p_match` |
 | 800x600 / 720x480 - filtered | 60Hz | `filtered_60` |
 | 720x576 / 720x480 - filtered | 50Hz PAL,60Hz NTSC | `filtered_pal` |
 | 720x576 / 720x480 - filtered | PAL Amiga clock | `filtered_pal_exact` |
