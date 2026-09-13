@@ -3,6 +3,8 @@
  * Copyright (C) 2016-2026, Lucie L. Hartmann <lucie@mntre.com>
  *													MNT Research GmbH, Berlin
  *													https://mntre.com
+ * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
+ *	(ZZTop V2 and all later versions)
  *
  * More Info: https://mntre.com/zz9000
  *
@@ -162,7 +164,9 @@ static const char version[] __attribute__((used)) =
 #define VCAP_RAWKEY_LEFT         0x4f
 #define VCAP_APPLY_TIMEOUT_TICKS 100
 
-/* Project menu userdata values. */
+/* Menu userdata values: stable handles for the MENUPICK dispatcher and
+ * zztop_menu_item_by_id(). Items now span the Project and Settings
+ * titles; positions shift with layout, ids must not. */
 #define MENU_ID_SETTINGS   (1)
 #define MENU_ID_QUIT       (2)
 #define MENU_ID_FWUPDATE   (3)
@@ -170,6 +174,7 @@ static const char version[] __attribute__((used)) =
 #define MENU_ID_AUDIOLOG   (5)
 #define MENU_ID_SCANDOUBLER (6)
 #define MENU_ID_AUDIO      (7)
+#define MENU_ID_ABOUT      (8)
 
 #define LABEL_ZORROVER     "Zorro Version"
 #define LABEL_FWVER        "Firmware ABI"
@@ -377,7 +382,7 @@ struct MsgPort *timerport;
 struct Library *TimerBase;
 BOOL timer_pending = FALSE;
 char readout_bufs[MYGAD_COUNT][64];
-/* Shared with the Settings/Scandoubler/Audio windows (Project menu and
+/* Shared with the Settings/Scandoubler/Audio windows (Settings menu and
  * main-window buttons). */
 static struct Screen *zztop_screen;
 static void *zztop_vi;
@@ -385,38 +390,43 @@ static struct ZZTopLayout zztop_layout;
 static struct Menu *zztop_menustrip;
 
 static struct NewMenu zztop_newmenus[] = {
-	{ NM_TITLE, (STRPTR)"Project",     NULL, 0, 0, NULL },
-	{ NM_ITEM,  (STRPTR)"Settings...", (STRPTR)"S", 0, 0, (APTR)MENU_ID_SETTINGS },
+	{ NM_TITLE, (STRPTR)"Project", NULL, 0, 0, NULL },
+	/* Firmware actions are also buttons near the bottom of the window.
+	 * Duplicated here so they stay reachable on a short screen (PAL
+	 * HighRes) where the button row can be below the visible area. */
+	{ NM_ITEM,  (STRPTR)"Update Firmware...", (STRPTR)"U", 0, 0, (APTR)MENU_ID_FWUPDATE },
+	{ NM_ITEM,  (STRPTR)"Restore Backup...",  (STRPTR)"R", 0, 0, (APTR)MENU_ID_FWRESTORE },
+	/* 'L' for Log: plain 'A' opens the Audio window (Settings menu). */
+	{ NM_ITEM,  (STRPTR)"Audio Debug Log", (STRPTR)"L", CHECKIT, 0, (APTR)MENU_ID_AUDIOLOG },
+	{ NM_ITEM,  NM_BARLABEL,           NULL, 0, 0, NULL },
+	{ NM_ITEM,  (STRPTR)"About...", (STRPTR)"?", 0, 0, (APTR)MENU_ID_ABOUT },
+	{ NM_ITEM,  (STRPTR)"Quit",     (STRPTR)"Q", 0, 0, (APTR)MENU_ID_QUIT },
+	/* The configuration windows, most specific first: Scandoubler and
+	 * Audio own their domains, Other Settings holds the rest. */
+	{ NM_TITLE, (STRPTR)"Settings", NULL, 0, 0, NULL },
 	{ NM_ITEM,  (STRPTR)"Scandoubler...", (STRPTR)"C", 0, 0, (APTR)MENU_ID_SCANDOUBLER },
 	/* Audio shares the main-window button's guard: the window opens
 	 * only when the AX codec and the control-plane capability are
 	 * present (audio_window checks and explains otherwise). */
 	{ NM_ITEM,  (STRPTR)"Audio...", (STRPTR)"A", 0, 0, (APTR)MENU_ID_AUDIO },
-	{ NM_ITEM,  NM_BARLABEL,           NULL, 0, 0, NULL },
-	/* Also on buttons near the bottom of the window. Duplicated here so
-	 * they stay reachable on a short screen (PAL HighRes) where the
-	 * button row can be below the visible area. */
-	{ NM_ITEM,  (STRPTR)"Update Firmware...", (STRPTR)"U", 0, 0, (APTR)MENU_ID_FWUPDATE },
-	{ NM_ITEM,  (STRPTR)"Restore Backup...",  (STRPTR)"R", 0, 0, (APTR)MENU_ID_FWRESTORE },
-	{ NM_ITEM,  NM_BARLABEL,           NULL, 0, 0, NULL },
-	/* 'L' for Log: plain 'A' now opens the Audio window. */
-	{ NM_ITEM,  (STRPTR)"Audio Debug Log", (STRPTR)"L", CHECKIT, 0, (APTR)MENU_ID_AUDIOLOG },
+	{ NM_ITEM,  (STRPTR)"Other Settings...", (STRPTR)"O", 0, 0, (APTR)MENU_ID_SETTINGS },
 	{ NM_END,   NULL,                  NULL, 0, 0, NULL }
 };
 
-/* First Project-menu item carrying this userdata, or NULL. Menu-item
- * positions are layout details; userdata ids are the stable handle. */
+/* First item carrying this userdata across every menu title, or NULL.
+ * Menu-item positions are layout details; userdata ids are the stable
+ * handle. */
 static struct MenuItem *zztop_menu_item_by_id(UWORD menu_id)
 {
-	UWORD item_index;
+	struct Menu *menu;
 
 	if (!zztop_menustrip) return NULL;
-	for (item_index = 0; item_index < 32; item_index++) {
-		struct MenuItem *item = ItemAddress(zztop_menustrip,
-			FULLMENUNUM(0, item_index, NOSUB));
-		if (!item) break;
-		if ((ULONG)GTMENUITEM_USERDATA(item) == (ULONG)menu_id)
-			return item;
+	for (menu = zztop_menustrip; menu; menu = menu->NextMenu) {
+		struct MenuItem *item;
+		for (item = menu->FirstItem; item; item = item->NextItem) {
+			if ((ULONG)GTMENUITEM_USERDATA(item) == (ULONG)menu_id)
+				return item;
+		}
 	}
 	return NULL;
 }
@@ -596,6 +606,25 @@ void errorMessage(const char* error)
 	} else {
 		printf("Error: %s\n", error);
 	}
+}
+
+/* Project > About...: the same EasyRequest idiom as errorMessage(), so
+ * it needs no extra setup on any screen depth. */
+static void zztop_about(struct Window *win)
+{
+	struct EasyStruct about = {
+		sizeof(struct EasyStruct),
+		0,
+		(UBYTE *)"About ZZTop",
+		(UBYTE *)"ZZTop " ZZTOP_RELEASE " (" ZZTOP_DATE ")\n\n"
+			"Control centre for the MNT ZZ9000\n"
+			"(C) 2016-2026 MNT Research GmbH\n"
+			"(C) 2026 Dimitris Panokostas\n"
+			"https://mntre.com/zz9000",
+		(UBYTE *)"OK"
+	};
+
+	EasyRequestArgs(win, &about, NULL, NULL);
 }
 
 uint16_t zz_get_reg16(uint32_t offset)
@@ -882,38 +911,6 @@ static int fw_pick_file(char *out, int outsz)
 	return ok;
 }
 
-/* EasyRequest never wraps its text: one long firmware path widened the
- * confirmation requester past the screen edge (zz9000-drivers #95).
- * Break the path on ':', '/', or space boundaries - hard-breaking runs
- * with no separator - so no line exceeds FW_CONFIRM_PATH_COLS
- * characters (40 fits Topaz-8 text on a 320-pixel screen). */
-#define FW_CONFIRM_PATH_COLS 40
-
-static void fw_wrap_path(char *out, size_t outsz, const char *path)
-{
-	size_t col = 0, run = 0, o = 0;
-
-	while (path[0] != '\0' && o + 1 < outsz) {
-		char c = *path++;
-
-		out[o++] = c;
-		col++;
-		if (c == ':' || c == '/' || c == ' ')
-			run = 0;
-		else
-			run++;
-		if (col >= FW_CONFIRM_PATH_COLS && run > 0 && path[0] != '\0') {
-			o -= run;
-			path -= run;
-			out[o++] = '\n';
-			col = 0;
-			run = 0;
-		}
-	}
-	out[o] = '\0';
-}
-
-
 static void fw_progress(void *ctx, ULONG done, LONG total)
 {
 	struct Window *win = (struct Window *)ctx;
@@ -939,7 +936,6 @@ static void do_fw_update(struct Window *win)
 	 * is the only stack a WB launch gets), and 656 bytes of locals in
 	 * this frame smashed it — Guru 8000 0004 on firmware upload. */
 	static char path[256];
-	static char wrapped[320];
 	static char msg[400];
 	UWORD st;
 
@@ -951,11 +947,15 @@ static void do_fw_update(struct Window *win)
 	if (!fw_pick_file(path, sizeof(path)))
 		return;
 
-	fw_wrap_path(wrapped, sizeof(wrapped), path);
+	/* Confirm with the filename only, never the full path: EasyRequest
+	 * never wraps, and long drawers wrecked the confirmation requester
+	 * even with the old 40-column wrap (#95 plus the 2026-09
+	 * very-long-path report). The ASL picker this file was just chosen
+	 * from already showed the full path. */
 	snprintf(msg, sizeof(msg),
-		"Upload\n  %s\nto the ZZ9000 as BOOT.bin?\n\n"
+		"Upload %s to the ZZ9000 as BOOT.bin?\n\n"
 		"Power-cycle the Amiga afterwards to boot the new firmware.",
-		wrapped);
+		FilePart((CONST_STRPTR)path));
 	if (!fw_confirm(msg))
 		return;
 
@@ -3489,8 +3489,8 @@ static void audio_log_toggle(struct Window *win)
 			(long)(audio_log_fh ? 1 : 0));
 	}
 	/* Flip the menu checkmark so the toggle state is visible. Found by
-	 * userdata, not item number: the Project menu gained the
-	 * Scandoubler and Audio items, so indices shift. */
+	 * userdata, not item number: items moved to the Settings menu and
+	 * positions shift whenever titles or items change. */
 	if (win && zztop_menustrip) {
 		item = zztop_menu_item_by_id(MENU_ID_AUDIOLOG);
 		if (item) {
@@ -5651,7 +5651,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, const struct
 
 	/* Opens the Scandoubler window (issue #97): fills the free third
 	 * column of the first row, directly above the Audio button - no
-	 * extra window height. Also reachable from the Project menu when
+	 * extra window height. Also reachable from the Settings menu when
 	 * the button row is clipped on short screens. */
 	ng.ng_LeftEdge	= layout->button_col3;
 	ng.ng_GadgetID	 = MYGAD_BTN_SCANDOUBLER;
@@ -5768,6 +5768,9 @@ VOID process_window_events(struct Window *mywin)
 							case MENU_ID_FWRESTORE:
 								do_fw_restore(mywin);
 								break;
+							case MENU_ID_ABOUT:
+								zztop_about(mywin);
+								break;
 							case MENU_ID_QUIT:
 								terminated = TRUE;
 								break;
@@ -5815,7 +5818,7 @@ VOID gadtoolsWindow(VOID) {
 			zztop_vi = vi;
 
 			/* Menu strip is optional: without it the tool still works,
-			 * just without the Settings window. */
+			 * just without the menu-only windows. */
 			zztop_menustrip = CreateMenus(zztop_newmenus, TAG_END);
 			if (zztop_menustrip &&
 					!LayoutMenus(zztop_menustrip, vi, GTMN_NewLookMenus, TRUE, TAG_END)) {
