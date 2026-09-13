@@ -89,11 +89,11 @@ native Scandoubler output.
 Native Amiga chipset video normally defaults to `filtered_60`: PAL input
 uses 800x600 and NTSC input uses 720x480, both at nominal 60 Hz. The
 nonstandard-sync firmware variant defaults to PAL timing. In ZZTop, open
-**Project → Scandoubler…**, select **Output** and **Refresh**, then **Save**
+**Settings → Scandoubler…**, select **Output** and **Refresh**, then **Save**
 and power-cycle. **Capture…** in that window owns sampling, framing and
-calibration; general **Settings…** no longer contains native-video controls.
-The Project menu also opens Settings and Audio when the main buttons are
-off-screen.
+calibration; the **Other Settings…** window no longer contains native-video
+controls. The Settings menu also opens Audio and Other Settings when the
+main buttons are off-screen.
 
 Centered 1920x1080 output preserves the 1280x1024 native picture and offers
 nominal 60 Hz or 50 Hz only with matching firmware/bitstream capabilities.

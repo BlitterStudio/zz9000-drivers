@@ -123,7 +123,7 @@ exists for future work, but no 8 MiB bitstream variant is shipped.
 | MHI audio | `mhizz9000.library` | `Libs:MHI/` | Exposes the AX hardware MP3 decoder to MHI-aware players. |
 | USB | `zzusbhw.device` | `Devs:USBHardware/` | Capability-gated Poseidon USB hardware driver. See [usb-poseidon/README.md](usb-poseidon/README.md) and the [qualification matrix](docs/usb-qualification-matrix.md). |
 | SD boot | `zzsd.device` | Firmware `BOOT.bin` | Size-constrained boot driver for FAT32-hosted HDF boot. See [sd-boot/README.md](sd-boot/README.md). |
-| Configuration | `ZZTop` | `SYS:Utilities/ZZ9000/` | GUI for hardware readback, firmware update/restore, and `ZZ9000.CFG` settings. The **Project** menu opens **Settings…**, **Scandoubler…** and **Audio…**; the main window also has a **Scandoubler** button directly above **Audio**. The capability-gated **Scandoubler** window owns native-video **Output**/**Refresh** selection, advanced capture framing, scanlines, and live calibration; the **Audio** window owns scenes, meters, Paula/AX baseline and measured per-card ceilings. Edits apply live, and each window's **Save** persists its keys. |
+| Configuration | `ZZTop` | `SYS:Utilities/ZZ9000/` | GUI for hardware readback, firmware update/restore, and `ZZ9000.CFG` settings. The **Settings** menu opens **Scandoubler…**, **Audio…** and **Other Settings…**; the **Project** menu carries **Update Firmware…**, **Restore Backup…**, the **Audio Debug Log** toggle, **About…** and **Quit**. The main window also has a **Scandoubler** button directly above **Audio**. The capability-gated **Scandoubler** window owns native-video **Output**/**Refresh** selection, advanced capture framing, scanlines, and live calibration; the **Audio** window owns scenes, meters, Paula/AX baseline and measured per-card ceilings. Edits apply live, and each window's **Save** persists its keys. |
 | Scanlines | `ZZScanlines` | `C:` | CLI for scanline V1/V2 modes. |
 | Firmware update | `ZZFwUpdate` | `C:` | Pushes `BOOT.bin` or another root-level file to the ZZ9000 FAT32 microSD card over Zorro. |
 | SDK services | `zz9k.library` | `Libs:` | AmigaOS gateway to the SDK v2 firmware services (image/video decode, audio, compression, crypto). Built from the pinned [zz9000-sdk](https://github.com/BlitterStudio/zz9000-sdk) ref by `sdk/build.sh`. |
@@ -165,8 +165,8 @@ the modal dialogs non-modal or change the background readout update rate.
 Firmware 2.3+ reads an optional `ZZ9000.CFG` file from the root of the
 ZZ9000's FAT32 microSD card at cold boot (documented in the
 [zz9000-firmware README](https://github.com/BlitterStudio/zz9000-firmware#configuration-file-zz9000cfg)).
-ZZTop's **Project → Settings…**, **Project → Scandoubler…** and
-**Project → Audio…** windows (plus the main window's **Scandoubler** and
+ZZTop's **Settings → Scandoubler…**, **Settings → Audio…** and
+**Settings → Other Settings…** windows (plus the main window's **Scandoubler** and
 **Audio** buttons) read and write it directly from AmigaOS, so the card
 never needs to leave the slot. Each window applies only its own edits and
 ENV overrides, preserving supported values from the other sections.
@@ -179,11 +179,11 @@ stay within the firmware's 4 KiB configuration limit; explanatory
 per-setting comments are not retained. A generation failure leaves the
 existing SD file untouched.
 
-General **Settings** contains INT2, MAC, HDF, offscreen bitmaps and video
-overlay; native-video controls are only in **Scandoubler**. The main
-**Scandoubler…** button sits directly above **Audio…**, without an extra
-button row. Use the **Project** menu on screens where those buttons are
-off-screen.
+The **Other Settings…** window contains INT2, MAC, HDF, offscreen bitmaps
+and video overlay; native-video controls are only in **Scandoubler**. The
+main **Scandoubler…** button sits directly above **Audio…**, without an
+extra button row. Use the **Settings** menu on screens where those
+buttons are off-screen.
 
 The drivers in this repo consult it too:
 
@@ -279,7 +279,7 @@ live-control bit as well as the exact RTL capability, so either half of an
 older/mixed install—including 2.8 RC1 firmware—leaves the existing Automatic
 and numeric Custom controls available but keeps **Calibrate** disabled.
 
-In **Project → Scandoubler…**, leave the staged Output/Refresh path
+In **Settings → Scandoubler…**, leave the staged Output/Refresh path
 matching the currently applied path, then choose **Capture… → Calibrate…**. ZZTop opens
 an explicit native PAL or NTSC Hires screen—never an RTG fallback—so its edge,
 safe-area, and centre guides pass through the physical capture path being
