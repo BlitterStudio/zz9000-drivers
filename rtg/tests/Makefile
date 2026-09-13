@@ -6,7 +6,7 @@ TARGET := $(BUILD_DIR)/register_cache_test
 TARGETS := $(TARGET) $(BUILD_DIR)/p96_settings_test \
 	$(BUILD_DIR)/offscreen_bitmap_test $(BUILD_DIR)/overlay_feature_test \
 	$(BUILD_DIR)/memory_layout_test $(BUILD_DIR)/videocap_mode_test \
-	$(BUILD_DIR)/mode_timing_test
+	$(BUILD_DIR)/mode_timing_test $(BUILD_DIR)/custom_modeline_test
 
 .PHONY: test clean
 
@@ -18,6 +18,7 @@ test: $(TARGETS)
 	$(BUILD_DIR)/memory_layout_test
 	$(BUILD_DIR)/videocap_mode_test
 	$(BUILD_DIR)/mode_timing_test
+	$(BUILD_DIR)/custom_modeline_test
 
 $(TARGET): register_cache_test.c ../blitter_cache.h
 	@mkdir -p $(BUILD_DIR)
@@ -47,6 +48,12 @@ $(BUILD_DIR)/videocap_mode_test: videocap_mode_test.c ../videocap_mode.h
 $(BUILD_DIR)/mode_timing_test: mode_timing_test.c ../mode_timing.h
 	@mkdir -p $(BUILD_DIR)
 	$(CC) -Wall -Wextra $(CFLAGS) -I.. -o $@ mode_timing_test.c
+
+
+$(BUILD_DIR)/custom_modeline_test: custom_modeline_test.c ../custom_modeline.h \
+		../mode_timing.h ../../include/zz_custom_mode.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) -Wall -Wextra $(CFLAGS) -I.. -I../../include -o $@ custom_modeline_test.c
 
 clean:
 	rm -rf $(BUILD_DIR)

@@ -325,6 +325,40 @@ the staged file, which is read at the next cold boot; valid runtime native-mode
 writes take effect at the next stable vblank. The centered profile does not
 add a monitor hot-plug or HDMI mode-switch guarantee.
 
+## Custom Picasso96 Modelines
+
+`ZZ9000.card` 2.11 uses custom progressive timings when the firmware
+advertises `ZZ_FW_CAP_CUSTOM_MODE` (capability bit 7). Install the matched
+firmware and card driver; older firmware continues to use fixed presets
+and rejects unknown dimensions.
+
+Create a mode in P96Prefs/Picasso96Mode and use its temporary **Test**
+display before saving. Custom timings require:
+
+- Width 320–2560, aligned to 8 pixels; height at least 200.
+- Positive front porch, sync width, and back porch; totals no greater
+  than 4095 on either axis.
+- A requested pixel clock from 25 to 165 MHz. The driver reports the
+  nearest achievable clock, with at most 0.5% error. Requests with no
+  legal PLL clock inside that tolerance are rejected.
+- Progressive scan without doubled-clock/doubled-scan flags, and equal
+  HSync/VSync polarity. Mixed polarity requires an FPGA change.
+
+For an initial 960x720 test, use 53.000 MHz, horizontal total 1184,
+front porch 48 and sync width 96; vertical total 746, front porch 3 and
+sync width 4; both syncs negative. This resolves to approximately
+60.00471 Hz. Monitor acceptance still needs hardware verification.
+
+Back up `LIBS:Picasso96/ZZ9000.card` and your P96 settings. Do not replace
+your configured settings with a stock template. Exact packaged numeric
+timings preserve the old fixed-preset path, including its historical
+polarity handling; changing only their polarity flags does not create a
+custom modeline. Timing or clock edits use the custom path instead.
+
+A rejected mode does not replace the accepted `BoardInfo.ModeInfo`.
+Subsequent panning is blocked until a mode is successfully applied, so a
+failed mode switch cannot independently replace the scanout's layout.
+
 ## Command-Line Tools
 
 ### Firmware Updates

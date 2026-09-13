@@ -8,7 +8,7 @@
 #ifndef ZZ9000_HW_H
 #define ZZ9000_HW_H
 
-#include "zz9000_aperture.h"
+#include "zz_custom_mode.h"
 
 #include <exec/types.h>
 #include <libraries/expansion.h>

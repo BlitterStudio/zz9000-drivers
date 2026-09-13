@@ -36,7 +36,7 @@
 #include "zzcfg_query.h"
 #include "blitter_cache.h"
 #include "memory_layout.h"
-#include "mode_timing.h"
+#include "custom_modeline.h"
 #include "offscreen_bitmap.h"
 #include "overlay_feature.h"
 #include "zz9000_hw.h"
@@ -65,13 +65,13 @@ struct DOSBase;
 #define __saveds__
 
 #define DEVICE_VERSION 2
-#define DEVICE_REVISION 10
+#define DEVICE_REVISION 11
 #define REQUIRED_FW_VERSION_MAJOR 2
 #define REQUIRED_FW_VERSION_MINOR 0
 #define DEVICE_PRIORITY 0
 #define DEVICE_ID_STRING "$VER: ZZ9000.card+blitter " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
 #define DEVICE_NAME "ZZ9000.card"
-#define DEVICE_DATE "(30.08.2026)"
+#define DEVICE_DATE "(12.09.2026)"
 
 int __attribute__((no_reorder)) _start()
 {
@@ -131,6 +131,8 @@ char dummies[128];
 #define ZZ_CARD_DATA_PIP_OFFSET 10
 #define ZZ_CARD_DATA_PIP_SIZE 11
 #define ZZ_CARD_DATA_FW_CAPABILITIES 12
+/* Refused SetGC requests must not reach scanout through later panning. */
+#define ZZ_CARD_DATA_GC_REJECTED 13
 /* first firmware whose surface allocator really frees (major<<8|minor) */
 #define OFFSCREEN_BITMAPS_MIN_FWREV 0x0204
 /* first firmware with OP_VIDEO_OVERLAY + the shadow-scanout compositor */
@@ -804,6 +806,7 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 	b->CardData[ZZ_CARD_DATA_PIP_OFFSET] = 0;
 	b->CardData[ZZ_CARD_DATA_PIP_SIZE] = 0;
 	b->CardData[ZZ_CARD_DATA_FW_CAPABILITIES] = 0;
+	b->CardData[ZZ_CARD_DATA_GC_REJECTED] = 0;
 	zz_overlay_hooks_enabled = FALSE;
 	memset(&zz_z2_pip_request, 0, sizeof(zz_z2_pip_request));
 	zz_z2_pip_bitmap = NULL;
@@ -1150,47 +1153,30 @@ void SetReadPlane (__REGA0(struct BoardInfo *b), __REGD0(UBYTE plane)) { }
 	#define dmy_cache
 #endif
 
-static BOOL modeline_id(uint16_t w, uint16_t h, uint16_t *mode) {
-	const struct zz_rtg_mode_timing *timing =
-		zz_rtg_mode_timing_for_output_size(w, h);
-
-	if (!timing)
-		return FALSE;
-
-	*mode = timing->mode_id;
-
-	return TRUE;
+static void zz_p96_mode_of(const struct ModeInfo *mode_info,
+	uint32_t pixel_clock, struct zz_p96_mode *p96) {
+	p96->width = mode_info->Width;
+	p96->height = mode_info->Height;
+	p96->hor_total = mode_info->HorTotal;
+	p96->hor_sync_start = mode_info->HorSyncStart;
+	p96->hor_sync_size = mode_info->HorSyncSize;
+	p96->ver_total = mode_info->VerTotal;
+	p96->ver_sync_start = mode_info->VerSyncStart;
+	p96->ver_sync_size = mode_info->VerSyncSize;
+	p96->flags = mode_info->Flags;
+	p96->pixel_clock = pixel_clock;
 }
 
-static BOOL adjusted_mode_dimensions(struct ModeInfo *mode_info, uint16_t *w, uint16_t *h, uint16_t *scale) {
-	uint16_t mode;
-
-	if (!mode_info || mode_info->Width < 320 || mode_info->Height < 200)
-		return FALSE;
-
-	if (mode_info->Height >= 480 || mode_info->Width >= 640) {
-		*scale = 0;
-		*w = mode_info->Width;
-		*h = mode_info->Height;
-	} else {
-		// small doublescan modes are scaled 2x
-		// and output as 640x480 wrapped in 800x600 sync
-		*scale = 3;
-		*w = 2 * mode_info->Width;
-		*h = 2 * mode_info->Height;
-	}
-
-	return modeline_id(*w, *h, &mode);
+static uint16_t zz_firmware_capabilities(struct BoardInfo *b) {
+	return (uint16_t)b->CardData[ZZ_CARD_DATA_FW_CAPABILITIES];
 }
 
-static BOOL init_modeline(MNTZZ9KRegs* registers, uint16_t w, uint16_t h, uint8_t colormode, uint8_t scalemode) {
-	uint16_t mode;
+static void zz_custom_reg_write(void *context, uint16_t offset, uint16_t value) {
+	zzwrite16((volatile uint16_t *)((uint32_t)context + offset), value);
+}
 
-	if (!modeline_id(w, h, &mode))
-		return FALSE;
-
-	zzwrite16(&registers->mode, mode|(colormode<<8)|(scalemode<<12));
-	return TRUE;
+static uint16_t zz_custom_reg_status(void *context) {
+	return zz9000_read_reg16((ULONG)context, ZZ_CUSTOM_REG_COMMIT);
 }
 
 static inline void sanitize_mode_flags(struct ModeInfo *mode_info) {
@@ -1198,19 +1184,17 @@ static inline void sanitize_mode_flags(struct ModeInfo *mode_info) {
 }
 
 void SetGC(__REGA0(struct BoardInfo *b), __REGA1(struct ModeInfo *mode_info), __REGD0(BOOL border)) {
-	uint16_t scale = 0;
-	uint16_t w;
-	uint16_t h;
 	uint16_t colormode;
+	struct zz_p96_mode p96;
+	struct zz_modeline_plan plan;
 
-	if (!b || !mode_info)
+	if (!b)
+		return;
+	b->CardData[ZZ_CARD_DATA_GC_REJECTED] = 1;
+	if (!mode_info)
 		return;
 
 	MNTZZ9KRegs* registers = (MNTZZ9KRegs *)b->RegisterBase;
-
-	b->ModeInfo = mode_info;
-	b->Border = border;
-	sanitize_mode_flags(mode_info);
 
 	if (mode_info->Width < 320 || mode_info->Height < 200)
 		return;
@@ -1219,12 +1203,36 @@ void SetGC(__REGA0(struct BoardInfo *b), __REGA1(struct ModeInfo *mode_info), __
 	if (colormode == MNTVA_COLOR_NO_USE)
 		return;
 
-	if (!adjusted_mode_dimensions(mode_info, &w, &h, &scale))
+	zz_p96_mode_of(mode_info, mode_info->PixelClock, &p96);
+	if (!zz_p96_plan_modeline(&p96, zz_firmware_capabilities(b), &plan)) {
+		/* Refused mode: keep the accepted ModeInfo pointer, Border and
+		 * scanout untouched, and arm the SetPanning guard so a
+		 * following panning call cannot apply this layout. */
+		KPrintF("ZZ9000.card: refused mode %ldx%ld.\n",
+			(LONG)mode_info->Width, (LONG)mode_info->Height);
 		return;
-
-	if (!init_modeline(registers, w, h, colormode, scale)) {
-		KPrintF("ZZ9000.card: unsupported mode %ldx%ld.\n", (LONG)w, (LONG)h);
 	}
+
+	if (plan.action == ZZ_MODELINE_CUSTOM) {
+		if (!zz_custom_stage_and_commit(&plan.custom, (uint8_t)colormode,
+				zz_custom_reg_write, (void *)registers,
+				zz_custom_reg_status)) {
+			KPrintF("ZZ9000.card: firmware refused custom mode %ldx%ld.\n",
+				(LONG)mode_info->Width, (LONG)mode_info->Height);
+			return;
+		}
+	} else {
+		/* Fixed preset (exact packaged timing on new firmware, plain
+		 * dimension selection on older firmware). */
+		sanitize_mode_flags(mode_info);
+		zzwrite16(&registers->mode,
+			plan.preset->mode_id | ((uint16_t)colormode << 8) |
+			((uint16_t)plan.scale << 12));
+	}
+
+	b->ModeInfo = mode_info;
+	b->Border = border;
+	b->CardData[ZZ_CARD_DATA_GC_REJECTED] = 0;
 }
 
 UWORD SetSwitch(__REGA0(struct BoardInfo *b), __REGD0(UWORD enabled)) {
@@ -1265,6 +1273,12 @@ UWORD SetSwitch(__REGA0(struct BoardInfo *b), __REGD0(UWORD enabled)) {
 
 void SetPanning(__REGA0(struct BoardInfo *b), __REGA1(UBYTE *addr), __REGD0(UWORD width), __REGD1(WORD x_offset), __REGD2(WORD y_offset), __REGD4(UWORD height), __REGD7(RGBFTYPE format)) {
 	if (!b) return;
+
+	/* Width and format cannot identify which framebuffer belongs to a
+	 * refused mode. Resume panning only after a successful SetGC. */
+	if (b->CardData[ZZ_CARD_DATA_GC_REJECTED])
+		return;
+
 	b->XOffset = x_offset;
 	b->YOffset = y_offset;
 	MNTZZ9KRegs* registers = (MNTZZ9KRegs *)b->RegisterBase;
@@ -1418,21 +1432,29 @@ void SetDPMSLevel(__REGA0(struct BoardInfo *b), __REGD0(ULONG level)) {
 }
 
 LONG ResolvePixelClock(__REGA0(struct BoardInfo *b), __REGA1(struct ModeInfo *mode_info), __REGD0(ULONG pixel_clock), __REGD7(RGBFTYPE format)) {
-	const struct zz_rtg_mode_timing *timing;
-	uint16_t w;
-	uint16_t h;
-	uint16_t scale;
+	struct zz_p96_mode p96;
+	struct zz_modeline_plan plan;
 
 	if (!mode_info || !supported_rgb_format(format))
 		return -1;
-	sanitize_mode_flags(mode_info);
-	if (!adjusted_mode_dimensions(mode_info, &w, &h, &scale))
-		return -1;
-	timing = zz_rtg_mode_timing_for_output_size(w, h);
-	if (!timing)
+
+	/* Honor the clock P96 selected from the GetPixelClock list; the
+	 * negotiation reports the nearest clock the card can actually
+	 * generate so P96 never computes refresh rates from a promise.
+	 * Timing completeness is not required here: P96 settings tooling
+	 * resolves clocks mid-edit; SetGC performs the full validation. */
+	zz_p96_mode_of(mode_info, pixel_clock, &p96);
+	if (!zz_p96_negotiate_pixel_clock(&p96, zz_firmware_capabilities(b), &plan))
 		return -1;
 
-	mode_info->PixelClock = timing->pixel_clock_hz;
+	if (plan.action == ZZ_MODELINE_PRESET) {
+		/* Presets and the legacy fixed table have one clock each; the
+		 * historical overwrite behavior is kept. */
+		sanitize_mode_flags(mode_info);
+		mode_info->PixelClock = plan.preset->pixel_clock_hz;
+	} else {
+		mode_info->PixelClock = plan.achieved_clock;
+	}
 	mode_info->pll1.Clock = 0;
 	mode_info->pll2.ClockDivide = 1;
 
@@ -1440,20 +1462,24 @@ LONG ResolvePixelClock(__REGA0(struct BoardInfo *b), __REGA1(struct ModeInfo *mo
 }
 
 ULONG GetPixelClock(__REGA0(struct BoardInfo *b), __REGA1(struct ModeInfo *mode_info), __REGD0(ULONG index), __REGD7(RGBFTYPE format)) {
-	const struct zz_rtg_mode_timing *timing;
-	uint16_t w;
-	uint16_t h;
-	uint16_t scale;
+	struct zz_p96_mode p96;
+	struct zz_modeline_plan plan;
 
 	if (index != 0 || !mode_info || !supported_rgb_format(format))
 		return 0;
-	if (!adjusted_mode_dimensions(mode_info, &w, &h, &scale))
-		return 0;
-	timing = zz_rtg_mode_timing_for_output_size(w, h);
-	if (!timing)
+
+	/* The single advertised clock is the one ResolvePixelClock and
+	 * SetGC will actually program for this timing (PixelClockCount is
+	 * one entry per format). Like ResolvePixelClock this answers for
+	 * timings still being edited. */
+	zz_p96_mode_of(mode_info, mode_info->PixelClock, &p96);
+	if (!zz_p96_negotiate_pixel_clock(&p96, zz_firmware_capabilities(b), &plan))
 		return 0;
 
-	return timing->pixel_clock_hz;
+	if (plan.action == ZZ_MODELINE_PRESET)
+		return plan.preset->pixel_clock_hz;
+
+	return plan.achieved_clock;
 }
 
 #define VBLANK_WAIT_LIMIT 200000UL
