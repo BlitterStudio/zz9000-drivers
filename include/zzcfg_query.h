@@ -39,9 +39,10 @@
 #define ZZ_CFG_KEY_VIDEOCAP_CROP_H   14
 #define ZZ_CFG_KEY_VIDEOCAP_CROP_V   15
 /* 1 when the loaded file exceeded the 4 KiB parse budget, so trailing
- * keys (the audio block serializes last) were ignored. Audio keys
- * start at slot 16. */
+ * keys (the audio block serializes last) were ignored. */
 #define ZZ_CFG_KEY_AUDIO_TRUNCATED   16
+#define ZZ_CFG_KEY_VIDEOCAP_PHASE    17 /* signed E7M phase, -255..255 */
+#define ZZ_CFG_KEY_VIDEOCAP_C28_PHASE 18 /* signed C28 phase, -896..895 */
 
 /* ZZ_REG_CONFIG_FILE statuses (mirror firmware zz_config_file_status). */
 #define ZZ_CFG_FILE_OK           0

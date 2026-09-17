@@ -77,6 +77,12 @@ struct zzcfg_values {
      * is a literal Custom override. */
     UWORD videocap_crop_h_present;
     UWORD videocap_crop_v_present;
+    /* Preserve calibration for both clock sources across every GUI save.
+     * Values belong to different phase domains and are never converted. */
+    WORD videocap_phase;       /* legacy E7M MMCM steps, -255..255 */
+    WORD videocap_c28_phase;   /* C28 MMCM steps, -896..895 */
+    UWORD videocap_phase_present;
+    UWORD videocap_c28_phase_present;
     /* Firmware with the profile capability accepts the atomic key; older
      * firmware gets an equivalent legacy key trio. */
     UWORD use_videocap_profile_key;

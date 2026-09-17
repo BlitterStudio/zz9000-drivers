@@ -23,6 +23,7 @@ rtg/tests/build/
 sd-boot/zzsd-device.h
 sd-boot/boot-rom/boot.bin
 ZZDiag/ZZDiag
+ZZCapture/ZZCapture
 net/ZZ9000Net.device.68000
 net/ZZNetStats/ZZNetStats
 *.datatype

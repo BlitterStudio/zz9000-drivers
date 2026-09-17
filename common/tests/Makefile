@@ -6,6 +6,8 @@ BUILD_DIR := build
 TARGET := $(BUILD_DIR)/fwup_client_test
 CFG_TARGET := $(BUILD_DIR)/zzcfg_test
 VCAP_TARGET := $(BUILD_DIR)/zz_vcap_live_test
+CAPTURE_TARGET := $(BUILD_DIR)/capture_calibration_test
+CAPTURE_LIFECYCLE_TARGET := $(BUILD_DIR)/zzcapture_lifecycle_test
 
 CPPFLAGS += -I$(COMMON_DIR)
 
@@ -26,10 +28,12 @@ VCAP_CPPFLAGS := -Istubs -I$(COMMON_DIR) -I$(COMMON_DIR)/../include
 
 .PHONY: test clean
 
-test: $(TARGET) $(CFG_TARGET) $(VCAP_TARGET)
+test: $(TARGET) $(CFG_TARGET) $(VCAP_TARGET) $(CAPTURE_TARGET) $(CAPTURE_LIFECYCLE_TARGET)
 	$(TARGET)
 	$(CFG_TARGET)
 	$(VCAP_TARGET)
+	$(CAPTURE_TARGET)
+	$(CAPTURE_LIFECYCLE_TARGET)
 
 $(TARGET): $(SOURCES) $(DEPS)
 	@mkdir -p $(BUILD_DIR)
@@ -44,6 +48,15 @@ $(CFG_TARGET): $(CFG_SOURCES) $(CFG_DEPS)
 $(VCAP_TARGET): $(VCAP_SOURCES) $(VCAP_DEPS)
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(VCAP_CPPFLAGS) $(CFLAGS) -o $@ $(VCAP_SOURCES)
+
+$(CAPTURE_TARGET): ../../tests/capture_calibration_test.c ../../include/zz9000_capture_calibration.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -std=c99 -Werror -I../../include -o $@ $<
+
+$(CAPTURE_LIFECYCLE_TARGET): zzcapture_lifecycle_test.c stubs/zzcapture_test_platform.h \
+		../../ZZCapture/ZZCapture.c ../../include/zz9000_capture_calibration.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -std=c99 -Werror -DZZCAPTURE_TEST_IO -Istubs -I../../include -o $@ $<
 
 clean:
 	rm -rf $(BUILD_DIR)

@@ -98,10 +98,79 @@ UBYTE zzcfg_test_buffer_read(ULONG board, UWORD offset)
 /* Every canonical key ZZTop writes with the firmware profile capability. */
 static const char *firmware_keys[] = {
     "videocap_profile", "videocap_sample", "videocap_crop_h",
-    "videocap_crop_v",
+    "videocap_crop_v", "videocap_phase", "videocap_c28_phase",
     "scanline_mode", "scanline_parity", "int2", "mac",
     "offscreen_bitmaps", "video_overlay", "hdf", NULL
 };
+
+static void test_capture_phase_preservation(void)
+{
+    static const char *valid[] = { "-896", "895", "0", "-1" };
+    static const char *invalid[] = {
+        "896", "-897", "65536", "-65536", "99999999999999999999",
+        "--8", "+8", "-", "eight", "1.5", "0x20"
+    };
+    struct zzcfg_values staged, reloaded;
+    char input[128], expected[64], text[ZZCFG_MAX_SIZE];
+    UWORD len;
+    unsigned i;
+
+    check(ZZ_CFG_KEY_VIDEOCAP_PHASE == 17 && ZZ_CFG_KEY_VIDEOCAP_C28_PHASE == 18,
+        "clock-specific phase query ABI slots remain stable");
+    for (i = 0; i < sizeof(valid) / sizeof(valid[0]); i++) {
+        memset(&staged, 0, sizeof(staged));
+        snprintf(input, sizeof(input),
+            "videocap_phase = -255\nVIDEOCAP_C28_PHASE = %s # phase\n", valid[i]);
+        zzcfg_parse_text(input, (UWORD)strlen(input), &staged);
+        /* Both GUI saves retain the loaded model while changing their
+         * section. Neither window has a sampling-phase gadget. */
+        staged.int2 = 1;
+        staged.videocap_profile_present = 1;
+        staged.videocap_profile = ZZCFG_VCAP_FILTERED_60;
+        check(zzcfg_save(0, &staged) == FWUP_OK, "phase values save");
+        snprintf(expected, sizeof(expected), "\nvideocap_c28_phase = %s\n", valid[i]);
+        check(strstr(fwup_test_saved_text, expected) != NULL,
+            "C28 phase survives general/scandoubler model save");
+        check(strstr(fwup_test_saved_text, "\nvideocap_phase = -255\n") != NULL,
+            "legacy phase survives alongside C28 phase");
+        memset(&reloaded, 0, sizeof(reloaded));
+        zzcfg_parse_text(fwup_test_saved_text, fwup_test_saved_len, &reloaded);
+        len = zzcfg_generate(&reloaded, text, sizeof(text));
+        check(len > 0 && strstr(text, expected) != NULL,
+            "C28 phase survives save and reload round trip");
+    }
+    for (i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        memset(&staged, 0, sizeof(staged));
+        snprintf(input, sizeof(input), "videocap_c28_phase = %s\n", invalid[i]);
+        zzcfg_parse_text(input, (UWORD)strlen(input), &staged);
+        len = zzcfg_generate(&staged, text, sizeof(text));
+        check(len > 0 && strstr(text, "\nvideocap_c28_phase = ") == NULL,
+            "invalid C28 phase remains inactive");
+        staged.videocap_c28_phase = -64;
+        staged.videocap_c28_phase_present = 1;
+        zzcfg_parse_text(input, (UWORD)strlen(input), &staged);
+        check(staged.videocap_c28_phase == -64 && staged.videocap_c28_phase_present,
+            "invalid later C28 phase preserves previous valid calibration");
+    }
+    memset(&staged, 0, sizeof(staged));
+    snprintf(input, sizeof(input), "videocap_phase = 255\n");
+    zzcfg_parse_text(input, (UWORD)strlen(input), &staged);
+    len = zzcfg_generate(&staged, text, sizeof(text));
+    check(len > 0 && strstr(text, "\nvideocap_phase = 255\n") != NULL &&
+        strstr(text, "\nvideocap_c28_phase = ") == NULL,
+        "legacy phase does not activate a C28 calibration");
+    snprintf(input, sizeof(input), "videocap_phase = -256\nvideocap_phase = 256\n");
+    zzcfg_parse_text(input, (UWORD)strlen(input), &staged);
+    check(staged.videocap_phase == 255 && staged.videocap_phase_present,
+        "legacy phase range stays -255..255");
+    memset(&staged, 0, sizeof(staged));
+    snprintf(input, sizeof(input), "videocap_c28_phase = 0\n");
+    zzcfg_parse_text(input, (UWORD)strlen(input), &staged);
+    len = zzcfg_generate(&staged, text, sizeof(text));
+    check(len > 0 && strstr(text, "\nvideocap_c28_phase = 0\n") != NULL &&
+        strstr(text, "\nvideocap_phase = ") == NULL,
+        "explicit C28 zero does not activate a legacy calibration");
+}
 
 static void defaults(struct zzcfg_values *v)
 {
@@ -206,6 +275,7 @@ int main(void)
     int i;
 
     test_native_key_presence();
+    test_capture_phase_preservation();
 
     /* 1. every firmware key appears in generated output */
     defaults(&a);
@@ -837,6 +907,9 @@ int main(void)
     b.use_videocap_profile_key = 0;
     b.videocap_crop_h = b.videocap_crop_v = 4095;
     b.videocap_crop_h_present = b.videocap_crop_v_present = 1;
+    b.videocap_phase = -255;
+    b.videocap_c28_phase = -896;
+    b.videocap_phase_present = b.videocap_c28_phase_present = 1;
     strcpy(b.mac, "AA:BB:CC:DD:EE:FF");
     memset(b.hdf, 'h', ZZCFG_HDF_CHARS);
     b.hdf[ZZCFG_HDF_CHARS] = '\0';
@@ -889,6 +962,9 @@ int main(void)
           a.videocap_crop_h == b.videocap_crop_h &&
           a.videocap_crop_v == b.videocap_crop_v,
           "saved audio file preserves network, storage and video settings");
+    check(a.videocap_phase == -255 && a.videocap_phase_present &&
+          a.videocap_c28_phase == -896 && a.videocap_c28_phase_present,
+          "full audio file also preserves both capture calibrations");
     check(n != 0 && zzcfg_generate(&b, text, n) == 0,
           "undersized audio output is refused rather than truncated");
 
