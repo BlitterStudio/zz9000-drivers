@@ -27,6 +27,9 @@ static struct {
     unsigned delivery_count, delivered, delivery_sequence, delivery_stop_after;
     unsigned corrupt_at_read, cancel_after_reads, escape_after_reads;
     unsigned clock_fail_after_reads, geometry_change_after_reads, startup_bad_until_ticks;
+    unsigned diagnostic_snapshot;
+    int diagnostic_shift;
+    int evidence_while_live;
     uint32_t snapshot_status, snapshot_geometry;
     int cancel_phase, cancel_snapshot, cancel_always, escape_snapshot;
     int cancel_sent, screen_failure, all_clean;
@@ -67,6 +70,9 @@ static uint32_t screen_pixel(unsigned sample)
     unsigned y = 64 + sample / ZZ_CAPTURE_COLUMNS;
     unsigned p, pen = 0;
     uint32_t rgb;
+    if (mock.diagnostic_snapshot == (mock.data_reads - 1) / ZZ_CAPTURE_SAMPLES + 1 &&
+            (mock.diagnostic_shift == 2 ||
+             (mock.diagnostic_shift == 1 && sample / ZZ_CAPTURE_COLUMNS == 1))) ++x;
     for (p = 0; p < 8; ++p)
         if (planes[p][y * 160 + x / 8] & (0x80U >> (x & 7))) pen |= 1U << p;
     rgb = (uint32_t)(loaded_colors[1 + pen * 3] >> 24) << 16 |
@@ -356,6 +362,9 @@ int zzcapture_test_printf(const char *format, ...)
 {
     va_list ap;
     int result;
+    if (!strncmp(format, "Failure evidence v1:", 20) &&
+            (mock.live_screens || mock.live_windows || mock.live_devices))
+        mock.evidence_while_live = 1;
     va_start(ap, format);
     result = vsnprintf(mock.output + mock.output_length,
         sizeof(mock.output) - mock.output_length, format, ap);
@@ -858,6 +867,96 @@ static void test_startup_pixel_evidence(void)
     CHECK(mock.phase == 890); check_closed();
 }
 
+static void test_failure_evidence(void)
+{
+    char *run[] = {"ZZCapture", "check", "ntsc", "lace"};
+    char *startup[] = {"ZZCapture", "startup", "ntsc"};
+    const char *packet, *restored;
+    unsigned kind, i, x, reference;
+    for (kind = 1; kind <= 2; ++kind) {
+        reset_fixture(); mock.require_restore = 1;
+        mock.diagnostic_snapshot = 2; mock.diagnostic_shift = kind;
+        CHECK(zzcapture_main(3, run) == 20);
+        packet = strstr(mock.output, "Failure evidence v1:");
+        restored = strstr(mock.output, "Original phase -77 restored and acknowledged");
+        CHECK(packet && restored && packet > restored);
+        CHECK(strstr(mock.output, "measurement=1 sample=2 phase=-77 parity=0 reference=1") != NULL);
+        CHECK(strstr(mock.output, kind == 1 ? "wrong=256 changed=256" : "wrong=0 changed=1024") != NULL);
+        CHECK(strstr(mock.output, kind == 1 ? "Expected-pixel errors: 256; changed pixels: 512." :
+            "Expected-pixel errors: 0; changed pixels: 2048.") != NULL);
+        CHECK(strstr(mock.output, "Row failed y=1 origin=212 ties=1 residual_pixels=0 residual_bits=0 bit_mask=000000") != NULL);
+        CHECK(strstr(mock.output, "Row reference y=1 origin=211 ties=1 residual_pixels=0") != NULL);
+        CHECK(strstr(mock.output, "RAW failed 0000:") != NULL);
+        CHECK(strstr(mock.output, "RAW reference 1016:") != NULL);
+        CHECK(packet && strstr(packet + 1, "Failure evidence v1:") == NULL);
+        CHECK(mock.data_reads == 51 * ZZ_CAPTURE_SAMPLES); /* No diagnostic reads. */
+        CHECK(mock.phase == mock.entry && !mock.closed_before_restore);
+        CHECK(!mock.evidence_while_live);
+        /* Parse every dumped word; subsequent good captures must not have
+         * overwritten either member of the frozen packet. */
+        for (reference = 0; reference < 2; ++reference) {
+            for (i = 0; i < ZZ_CAPTURE_SAMPLES; i += 8) {
+                char label[64], *end;
+                const char *line;
+                snprintf(label, sizeof(label), "RAW %s %04u:", reference ? "reference" : "failed", i);
+                line = strstr(mock.output, label);
+                CHECK(line != NULL);
+                if (!line) continue;
+                line += strlen(label);
+                for (x = 0; x < 8; ++x) {
+                    unsigned shift = !reference && (kind == 2 || (i + x) / 256 == 1);
+                    unsigned long value = strtoul(line, &end, 16);
+                    CHECK(end > line && value == zz_capture_pattern_rgb(211 + (i + x) % 256 + shift));
+                    line = end;
+                }
+            }
+        }
+        check_closed();
+    }
+    /* A corrupted origin on the first snapshot has no temporal reference. */
+    reset_fixture(); mock.corrupt_at_read = 1;
+    CHECK(zzcapture_main(3, run) == 20);
+    CHECK(strstr(mock.output, "measurement=1 sample=1 phase=-77 parity=0 reference=0 wrong=1024 changed=0") != NULL);
+    CHECK(strstr(mock.output, "Row failed y=0 origin=211 ties=1 residual_pixels=1 residual_bits=1 bit_mask=000001") != NULL);
+    CHECK(strstr(mock.output, "RAW reference") == NULL);
+
+    /* Interlace uses the previous snapshot of this parity, not its neighbor. */
+    reset_fixture(); mock.corrupt_at_read = 2 * ZZ_CAPTURE_SAMPLES + 18;
+    CHECK(zzcapture_main(4, run) == 20);
+    CHECK(strstr(mock.output, "sample=3 phase=-77 parity=1 reference=1") != NULL);
+    CHECK(strstr(mock.output, "Snapshot failed status=000500") != NULL);
+    CHECK(strstr(mock.output, "Snapshot reference status=000300") != NULL);
+    check_closed();
+
+    reset_fixture(); mock.corrupt_at_read = ZZ_CAPTURE_SAMPLES + 18;
+    mock.cancel_after_reads = 3 * ZZ_CAPTURE_SAMPLES;
+    CHECK(zzcapture_main(3, startup) == 20);
+    CHECK(strstr(mock.output, "Startup diagnostic stopped:") != NULL);
+    CHECK(strstr(mock.output, "Failure evidence v1:") != NULL);
+    CHECK(strstr(mock.output, "sample=2 phase=-77") != NULL);
+    CHECK(!mock.evidence_while_live);
+    check_closed();
+
+    reset_fixture(); mock.corrupt_at_read = 18; mock.fail_commit = 2;
+    CHECK(zzcapture_main(3, run) == 20);
+    packet = strstr(mock.output, "Failure evidence v1:");
+    restored = strstr(mock.output, "RESTORE FAILED:");
+    CHECK(packet && restored && packet > restored);
+    CHECK(!mock.evidence_while_live);
+    check_closed();
+
+    reset_fixture(); mock.corrupt_at_read = 18;
+    mock.geometry_change_after_reads = 20;
+    CHECK(zzcapture_main(3, run) == 20);
+    CHECK(strstr(mock.output, "Failure evidence v1:") == NULL); /* Incomplete read discarded. */
+    check_closed();
+
+    reset_fixture(); CHECK(zzcapture_main(3, run) == 0);
+    CHECK(strstr(mock.output, "Failure evidence: none") != NULL);
+    CHECK(strstr(mock.output, "RAW failed") == NULL);
+    check_closed();
+}
+
 int main(void)
 {
     test_wire_and_phase_waits();
@@ -872,6 +971,7 @@ int main(void)
     test_startup_sequence();
     test_startup_errors_and_guards();
     test_startup_pixel_evidence();
+    test_failure_evidence();
     printf("ZZCapture lifecycle: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

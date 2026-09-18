@@ -197,4 +197,45 @@ static inline unsigned zz_capture_changed_pixels(const uint32_t *a,
     return changed;
 }
 
+struct zz_capture_row_analysis {
+    int origin; /* -1 if several offsets are equally good. */
+    unsigned ties, residual_pixels, residual_bits;
+    uint32_t bit_mask; /* Residual bit metrics are valid only for a unique origin. */
+};
+
+/* Diagnostic only: never substitute this per-row alignment for the strict
+ * four-row pattern check above. Each exact palette colour votes for its
+ * implied origin. The most votes minimize pixel mismatches, without letting
+ * a damaged first pixel choose the entire row's interpretation. */
+static inline void zz_capture_analyze_row(const uint32_t *pixels,
+    struct zz_capture_row_analysis *result)
+{
+    unsigned short votes[ZZ_CAPTURE_COLUMNS] = {0};
+    unsigned x, best = 0, origin = 0;
+    result->origin = -1;
+    result->ties = result->residual_bits = 0;
+    result->bit_mask = 0;
+    for (x = 0; x < ZZ_CAPTURE_COLUMNS; ++x) {
+        /* 13 is the inverse of the red permutation's 197 modulo 256. */
+        unsigned pen = (((pixels[x] >> 16) - 101U) * 13U) & 255U;
+        if (pixels[x] == zz_capture_pattern_rgb(pen))
+            ++votes[(pen - x) & 255U];
+    }
+    for (x = 0; x < ZZ_CAPTURE_COLUMNS; ++x) {
+        if (votes[x] > best) {
+            best = votes[x];
+            origin = x;
+            result->ties = 1;
+        } else if (votes[x] == best) ++result->ties;
+    }
+    result->residual_pixels = ZZ_CAPTURE_COLUMNS - best;
+    if (result->ties != 1) return;
+    result->origin = (int)origin;
+    for (x = 0; x < ZZ_CAPTURE_COLUMNS; ++x) {
+        uint32_t bits = pixels[x] ^ zz_capture_pattern_rgb(origin + x);
+        result->bit_mask |= bits;
+        for (; bits; bits &= bits - 1) ++result->residual_bits;
+    }
+}
+
 #endif

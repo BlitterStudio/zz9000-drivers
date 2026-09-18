@@ -148,12 +148,52 @@ static void test_pattern(void)
     }
 }
 
+static void test_row_analysis(void)
+{
+    uint32_t pixels[ZZ_CAPTURE_SAMPLES];
+    struct zz_capture_row_analysis row;
+    unsigned origin, bit, x;
+    for (origin = 0; origin < 256; ++origin) {
+        make_pattern(pixels, origin);
+        zz_capture_analyze_row(pixels, &row);
+        CHECK(row.origin == (int)origin && row.ties == 1);
+        CHECK(row.residual_pixels == 0 && row.residual_bits == 0 && row.bit_mask == 0);
+    }
+    for (bit = 0; bit < 32; ++bit) {
+        make_pattern(pixels, 255);
+        pixels[0] ^= UINT32_C(1) << bit;
+        zz_capture_analyze_row(pixels, &row);
+        CHECK(row.origin == 255 && row.ties == 1);
+        CHECK(row.residual_pixels == 1 && row.residual_bits == 1);
+        CHECK(row.bit_mask == (UINT32_C(1) << bit));
+        CHECK(zz_capture_pattern_errors(pixels) != 0); /* Strict score untouched. */
+    }
+    make_pattern(pixels, 17);
+    for (x = 128; x < 256; ++x) pixels[x] = zz_capture_pattern_rgb(18 + x);
+    zz_capture_analyze_row(pixels, &row);
+    CHECK(row.origin == -1 && row.ties == 2 && row.residual_pixels == 128);
+    CHECK(row.residual_bits == 0 && row.bit_mask == 0);
+    for (x = 0; x < 256; ++x) pixels[x] = zz_capture_pattern_rgb(99);
+    zz_capture_analyze_row(pixels, &row);
+    CHECK(row.origin == -1 && row.ties == 256 && row.residual_pixels == 255);
+    memset(pixels, 0, sizeof(pixels));
+    zz_capture_analyze_row(pixels, &row);
+    CHECK(row.origin == -1 && row.ties == 256 && row.residual_pixels == 256);
+    make_pattern(pixels, 0);
+    pixels[32] ^= 0x010101;
+    pixels[33] ^= 0x000101;
+    zz_capture_analyze_row(pixels, &row);
+    CHECK(row.origin == 0 && row.residual_pixels == 2 && row.residual_bits == 5);
+    CHECK(row.bit_mask == 0x010101);
+}
+
 int main(void)
 {
     test_phase();
     test_eye();
     test_refinement();
     test_pattern();
+    test_row_analysis();
     printf("capture calibration: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

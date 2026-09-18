@@ -32,7 +32,7 @@ struct GfxBase *GfxBase;
 struct IntuitionBase *IntuitionBase;
 struct Device *TimerBase;
 
-#define ZZ_CAPTURE_VERSION "0.5"
+#define ZZ_CAPTURE_VERSION "0.6"
 static const char version[] __attribute__((used)) =
     "$VER: ZZCapture " ZZ_CAPTURE_VERSION " (18.09.2026)\r\n";
 
@@ -61,6 +61,13 @@ static struct Screen *screen;
 static struct Window *window;
 static UWORD *empty_pointer;
 static struct snapshot current, previous[2];
+/* One bounded packet per check/startup command. No extra hardware captures,
+ * allocations, analysis or bulk output inside the measurement loop. */
+static struct {
+    int enabled, valid, have_reference, phase;
+    unsigned measurement, captured_measurement, sample, parity, wrong, changed;
+    struct snapshot failed, reference;
+} first_failure;
 static char failure[192];
 static int aborted;
 static int wanted_ntsc, wanted_lace;
@@ -248,6 +255,7 @@ static int measure_phase(int target, unsigned count, struct score *score)
     unsigned captured, parity, i, last_parity = 2;
     memset(&coverage, 0, sizeof(coverage));
     coverage.phase = target;
+    if (first_failure.enabled) ++first_failure.measurement;
     score->wrong = score->changed = 0;
     if (!apply_phase(target, 0)) return 0;
     /* Two complete post-acknowledgement captures are deliberately discarded. */
@@ -256,6 +264,7 @@ static int measure_phase(int target, unsigned count, struct score *score)
     /* Per-parity counters require ten comparisons of EACH interlaced field,
      * not ten accidental comparisons between opposite fields. */
     for (captured = 0; captured < total_limit; ++captured) {
+        unsigned wrong, changed = 0;
         if (!take_snapshot(&current, target, 1)) return 0;
         parity = wanted_lace ? !!(current.status & ZZ_CAPTURE_SNAPSHOT_PARITY) : 0;
         if (captured) {
@@ -266,11 +275,25 @@ static int measure_phase(int target, unsigned count, struct score *score)
         coverage.last_sequence = current.status >> 16;
         ++coverage.samples[parity];
         last_sample[parity] = captured + 1;
-        score->wrong += zz_capture_pattern_errors(current.pixels);
+        wrong = zz_capture_pattern_errors(current.pixels);
+        score->wrong += wrong;
         if (have_previous[parity]) {
-            score->changed += zz_capture_changed_pixels(
+            changed = zz_capture_changed_pixels(
                 current.pixels, previous[parity].pixels);
+            score->changed += changed;
             ++coverage.comparisons[parity];
+        }
+        if (first_failure.enabled && !first_failure.valid && (wrong || changed)) {
+            first_failure.failed = current;
+            first_failure.have_reference = have_previous[parity];
+            if (have_previous[parity]) first_failure.reference = previous[parity];
+            first_failure.phase = target;
+            first_failure.captured_measurement = first_failure.measurement;
+            first_failure.sample = captured + 1;
+            first_failure.parity = parity;
+            first_failure.wrong = wrong;
+            first_failure.changed = changed;
+            first_failure.valid = 1;
         }
         previous[parity] = current;
         have_previous[parity] = 1;
@@ -308,6 +331,51 @@ static void print_coverage(void)
         coverage.comparisons[0], coverage.comparisons[1],
         coverage.first_sequence, coverage.last_sequence,
         coverage.min_step, coverage.max_step, coverage.cadence_waits);
+}
+
+static void print_snapshot_evidence(const char *name, const struct snapshot *sample)
+{
+    struct zz_capture_row_analysis row;
+    unsigned y, i, x;
+    printf("Snapshot %s status=%08lx geometry=%08lx pattern_wrong=%u\n", name,
+        (unsigned long)sample->status, (unsigned long)sample->geometry,
+        zz_capture_pattern_errors(sample->pixels));
+    for (y = 0; y < ZZ_CAPTURE_ROWS; ++y) {
+        zz_capture_analyze_row(sample->pixels + y * ZZ_CAPTURE_COLUMNS, &row);
+        printf("Row %s y=%u origin=%d ties=%u residual_pixels=%u ",
+            name, y, row.origin, row.ties, row.residual_pixels);
+        if (row.origin >= 0)
+            printf("residual_bits=%u bit_mask=%06lx\n", row.residual_bits,
+                (unsigned long)row.bit_mask);
+        else puts("residual_bits=unknown bit_mask=unknown");
+    }
+    for (i = 0; i < ZZ_CAPTURE_SAMPLES; i += 8) {
+        printf("RAW %s %04u:", name, i);
+        for (x = 0; x < 8; ++x) printf(" %08lx", (unsigned long)sample->pixels[i + x]);
+        printf("\n");
+    }
+}
+
+/* Called only after restoration and resource cleanup, including on abort.
+ * The reference may itself be bad; its strict pattern score is printed too.
+ * A first-sample failure has no temporal reference and must say so. */
+static void print_failure_evidence(void)
+{
+    if (!first_failure.valid) {
+        puts("Failure evidence: none (no scored pixel failure retained).");
+        return;
+    }
+    printf("Failure evidence v1: measurement=%u sample=%u phase=%d parity=%u reference=%u wrong=%u changed=%u\n",
+        first_failure.captured_measurement, first_failure.sample, first_failure.phase,
+        first_failure.parity, first_failure.have_reference,
+        first_failure.wrong, first_failure.changed);
+    puts("Diagnostic row alignment only; strict scores above remain authoritative.\n"
+         "Origins are modulo 256; -1 means ambiguous. Bit metrics use a unique best origin.\n"
+         "Raw words follow in capture order, four rows of 256 pixels.\n"
+         "Reference is the previous scored snapshot of this parity at the same phase, if present.");
+    print_snapshot_evidence("failed", &first_failure.failed);
+    if (first_failure.have_reference) print_snapshot_evidence("reference", &first_failure.reference);
+    puts("End failure evidence v1.");
 }
 
 static int valid_mode(ULONG id, int ntsc, int lace)
@@ -565,6 +633,8 @@ static int startup_test(int entry, int reverse)
     unsigned long elapsed = 0;
     int complete = 0, restore_ok = 1, restore_needed = 0;
     char saved_failure[sizeof(failure)];
+    memset(&first_failure, 0, sizeof(first_failure));
+    first_failure.enabled = 1;
     printf("Startup diagnostic: %s progressive, entry=%d, minus=%d, plus=%d, order=%s.\n",
         wanted_ntsc ? "NTSC" : "PAL", entry, zz_capture_phase_wrap(entry - 28),
         zz_capture_phase_wrap(entry + 28), reverse ? "plus-first" : "minus-first");
@@ -599,6 +669,7 @@ finished:
     if (!restore_needed) puts("Entry phase unchanged; measurements did not start.");
     else if (restore_ok) printf("Original phase %d restored and acknowledged. Nothing saved.\n", entry);
     else printf("RESTORE FAILED: %s Current phase is unknown; cold-boot to restore saved settings.\n", failure);
+    print_failure_evidence();
     return complete && restore_ok ? 0 : 20;
 }
 
@@ -607,6 +678,8 @@ static int check_current_phase(int entry)
     struct score score = {0, 0};
     char saved_failure[sizeof(failure)];
     int success = 0, restore_ok;
+    memset(&first_failure, 0, sizeof(first_failure));
+    first_failure.enabled = 1;
     printf("Checking native %s SuperHires %s at current phase %d. Nothing is saved.\n",
         wanted_ntsc ? "NTSC" : "PAL", wanted_lace ? "interlace" : "progressive", entry);
     fflush(stdout);
@@ -624,6 +697,7 @@ static int check_current_phase(int entry)
     else puts("Current phase passed the longer raw-pixel check.");
     if (restore_ok) printf("Original phase %d restored and acknowledged. Nothing saved.\n", entry);
     else printf("RESTORE FAILED: %s Current phase is unknown; cold-boot to restore saved settings.\n", failure);
+    print_failure_evidence();
     return success && restore_ok ? 0 : 20;
 }
 
@@ -638,6 +712,7 @@ static int calibrate(int entry)
     int success = 0, restore_ok;
     int first_clean = 0, last_clean = 0;
     char message[120], saved_failure[sizeof(failure)];
+    first_failure.enabled = 0; /* Sweeps deliberately visit bad phases. */
     memset(clean, 0, sizeof(clean));
     memset(scores, 0, sizeof(scores));
     printf("Testing native %s SuperHires %s. Keep the test screen in front.\n",

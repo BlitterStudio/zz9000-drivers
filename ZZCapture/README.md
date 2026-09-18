@@ -46,8 +46,8 @@ and 50 comparisons per field parity, without a sweep or a new phase choice.
 It restores and checks the entry phase before closing the screen. Use it to
 separate field-collection problems from the deliberately bad phases visited
 by calibration, or to repeat a suspicious position with `phase N` then `check`.
-It never saves settings. Version 0.5 works with the original C28 BOOT images;
-the startup diagnostic requires no firmware change.
+It never saves settings. Version 0.6 works with the original C28 BOOT images;
+the startup and first-failure diagnostics require no firmware change.
 
 `startup pal|ntsc [reverse]` measures startup behavior on one continuous
 progressive screen for three minutes. The baseline is the phase read on entry.
@@ -108,6 +108,55 @@ Save the complete report, not just its chosen
 phase.
 
 ## What is measured
+
+### First-failure evidence (0.6)
+
+`check` and `startup` retain the first fully read, scored snapshot with wrong
+or changing pixels. If a previous scored snapshot of the same field parity
+exists at that measurement's phase, it is retained too. This reference may
+also contain errors; its pattern score is printed explicitly. A failure on
+the first snapshot has no temporal reference. Incomplete or invalid reads
+are not retained as pixel evidence. `calibrate` does not emit this packet:
+its sweep deliberately visits bad phases.
+
+The tool copies at most two snapshots into about 8 KiB of static memory.
+It makes no additional captures or register reads. Analysis and raw output
+occur after measurement, phase restoration attempt, screen cleanup and
+timer cleanup, including on cancellation or restoration failure. Only one
+packet is retained, even if later phases also fail. Startup `measurement=N`
+identifies the existing `Startup row=N` and its timestamp/clock records;
+`sample` is the scored snapshot number within that measurement, excluding
+the two discarded captures. Snapshot status contains sequence and field
+metadata; geometry contains the captured crop. There is no separate
+per-snapshot timestamp or atomic clock trace.
+
+Each `Row` line reports the best horizontal pattern origin modulo 256,
+the number of equally good origins (`ties`), and remaining mismatched
+pixels. When the origin is unique, it also reports the total differing
+bits and their OR mask against that pattern. If several origins tie,
+`origin=-1` and bit metrics are `unknown`; a flat or severely damaged row
+must not acquire a fabricated alignment. Origins are inferred from all
+exact palette matches, so a damaged first pixel cannot dictate the result.
+
+Different row origins with zero residual errors describe intact colour
+sequences at different horizontal positions. Residual errors indicate that
+a horizontal shift alone does not explain the row. Neither result proves
+a physical cause such as HSYNC jitter or RGB setup/hold failure. The strict
+four-row pattern and temporal scores remain unchanged: diagnostic alignment
+never turns a failed check into a pass. In particular, damage to the first
+pixel can make the strict comparator report 1024 wrong pixels, whereas
+the diagnostic may identify only one damaged pixel.
+
+`RAW failed` and optional `RAW reference` lines preserve every 32-bit word
+in capture order, eight hexadecimal words per line. Offsets run from 0000
+to 1016; four consecutive groups of 256 words are the four source rows.
+Keep the entire log through `End failure evidence v1.` for offline analysis.
+The packet adds about 12-25 KiB of output after the test. Redirect output to
+a file, for example `ZZCapture check pal >RAM:c28-check-pal-v06.txt`, and
+copy it to disk before powering off. A clean run prints `Failure evidence:
+none`; a hardware abort without a scored pixel failure may also do so.
+
+### Pattern and phase measurements
 
 The FPGA supplies a frozen snapshot of 1024 raw RGB samples before any
 filtering: 256 adjacent capture pixels on each of four consecutive source
@@ -282,3 +331,12 @@ E-clock low-word wrap, frozen/backwards/changed/slow/jumped timing, partial
 timer/screen setup, cancellation during a candidate, capture/framing/clock
 faults, checked restoration and launch guards. Real AmigaOS timer/display
 operation and startup behavior still require hardware testing.
+
+First-failure tests verify exact raw-word round trips, retention through
+later clean captures, same-parity references, missing references, invalid
+read rejection, cancellation and failed restoration. Row analysis covers
+all 256 origins, corruption of each of 32 word bits, equally good offsets,
+flat/invalid rows and multiple residual bits. Shifted rows still fail the
+strict checks. The existing startup timestamps and capture counts are
+unchanged in the host model; physical copy/printing costs need an Amiga
+smoke check.
