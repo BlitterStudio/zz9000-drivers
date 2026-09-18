@@ -9,6 +9,7 @@
 #include <exec/types.h>
 #include <exec/memory.h>
 #include <exec/tasks.h>
+#include <devices/timer.h>
 #include <graphics/gfxbase.h>
 #include <graphics/modeid.h>
 #include <intuition/intuitionbase.h>
@@ -16,6 +17,7 @@
 #include <proto/dos.h>
 #include <proto/graphics.h>
 #include <proto/intuition.h>
+#include <proto/timer.h>
 #include "zz9000_hw.h"
 #endif
 #include <stdio.h>
@@ -28,15 +30,18 @@
 
 struct GfxBase *GfxBase;
 struct IntuitionBase *IntuitionBase;
+struct Device *TimerBase;
 
-#define ZZ_CAPTURE_VERSION "0.4"
+#define ZZ_CAPTURE_VERSION "0.5"
 static const char version[] __attribute__((used)) =
-    "$VER: ZZCapture " ZZ_CAPTURE_VERSION " (17.09.2026)\r\n";
+    "$VER: ZZCapture " ZZ_CAPTURE_VERSION " (18.09.2026)\r\n";
 
 #define PHASE_WAIT_TICKS 250U
 #define FRAME_WAIT_TICKS 100U
 #define SWEEP_COMPARISONS 10U
 #define RETEST_COMPARISONS 50U
+#define STARTUP_DURATION_MS 180000UL
+#define STARTUP_MAX_PAIRS 200U
 #define ZZ_CAPTURE_RAWKEY_ESCAPE 0x45U
 #define ZZ_CAPTURE_MIN_STACK 32768UL
 
@@ -451,6 +456,152 @@ static void print_info(void)
             !!(status & ZZ_CAPTURE_SNAPSHOT_LACE), !!(status & ZZ_CAPTURE_SNAPSHOT_NTSC));
 }
 
+/* ReadEClock measures elapsed time independently of wall-clock adjustments.
+ * No asynchronous timer requests are submitted. Keep the device open until
+ * after phase restoration and close every resource on partial setup failure. */
+struct startup_timer {
+    struct MsgPort *port;
+    struct timerequest *request;
+    ULONG frequency;
+    uint64_t origin, last;
+};
+
+static uint64_t eclock_value(const struct EClockVal *value)
+{
+    return (uint64_t)value->ev_hi << 32 | value->ev_lo;
+}
+
+static int open_startup_timer(struct startup_timer *timer)
+{
+    struct EClockVal value;
+    timer->port = CreateMsgPort();
+    if (!timer->port) return fail("Could not create the startup timer port.");
+    timer->request = (struct timerequest *)CreateIORequest(timer->port, sizeof(*timer->request));
+    if (!timer->request) return fail("Could not allocate the startup timer request.");
+    if (OpenDevice((CONST_STRPTR)TIMERNAME, UNIT_ECLOCK, (struct IORequest *)timer->request, 0))
+        return fail("Could not open timer.device for startup timestamps.");
+    TimerBase = timer->request->tr_node.io_Device;
+    timer->frequency = ReadEClock(&value);
+    if (!timer->frequency) return fail("The startup timer has no E-clock frequency.");
+    timer->origin = timer->last = eclock_value(&value);
+    return 1;
+}
+
+static void close_startup_timer(struct startup_timer *timer)
+{
+    if (TimerBase) {
+        CloseDevice((struct IORequest *)timer->request);
+        TimerBase = NULL;
+    }
+    if (timer->request) DeleteIORequest((struct IORequest *)timer->request);
+    if (timer->port) DeleteMsgPort(timer->port);
+}
+
+static int startup_elapsed(struct startup_timer *timer, unsigned long *milliseconds)
+{
+    struct EClockVal value;
+    uint64_t now, delta;
+    if (ReadEClock(&value) != timer->frequency)
+        return fail("The startup timer frequency changed.");
+    now = eclock_value(&value);
+    if (now < timer->last) return fail("The startup timer moved backwards.");
+    timer->last = now;
+    delta = now - timer->origin;
+    /* Runs longer than an hour indicate a stalled test or unusable timing. */
+    if (delta / timer->frequency >= 3600)
+        return fail("The startup timer exceeded the one-hour safety bound.");
+    *milliseconds = (unsigned long)(delta * 1000 / timer->frequency);
+    return 1;
+}
+
+struct startup_telemetry {
+    ULONG clock, counts, phase;
+};
+
+static void startup_telemetry(struct startup_telemetry *sample)
+{
+    sample->clock = read32(ZZ_CAPTURE_CLOCK_STATUS_REG);
+    sample->counts = read32(ZZ_CAPTURE_CLOCK_COUNTS_REG);
+    sample->phase = read32(ZZ_CAPTURE_PHASE_STATUS_REG);
+}
+
+static int startup_measure(struct startup_timer *timer, unsigned row, const char *role,
+    int phase, unsigned long *elapsed, unsigned *pixel_failures)
+{
+    struct score score;
+    struct startup_telemetry before, after;
+    unsigned long start, end;
+    int measured, timed;
+    char saved_failure[sizeof(failure)];
+    if (!startup_elapsed(timer, &start)) return 0;
+    startup_telemetry(&before);
+    measured = measure_phase(phase, RETEST_COMPARISONS, &score);
+    snprintf(saved_failure, sizeof(saved_failure), "%s", failure);
+    startup_telemetry(&after);
+    timed = startup_elapsed(timer, &end);
+    if (timed && end <= start) timed = fail("The startup timer did not advance during measurement.");
+    printf("Startup row=%u role=%s phase=%d start_ms=%lu ", row, role, phase, start);
+    if (timed) printf("end_ms=%lu ", end);
+    else printf("end_ms=unknown ");
+    printf("complete=%u wrong=%lu changed=%lu\n", measured && timed, score.wrong, score.changed);
+    printf("Before: clock=0x%08lx counts=0x%08lx phase=0x%08lx; after: clock=0x%08lx counts=0x%08lx phase=0x%08lx\n",
+        (unsigned long)before.clock, (unsigned long)before.counts, (unsigned long)before.phase,
+        (unsigned long)after.clock, (unsigned long)after.counts, (unsigned long)after.phase);
+    if (have_geometry) printf("Framing: H=%lu V=%lu.\n",
+        (unsigned long)(geometry & 0xfff), (unsigned long)((geometry >> 12) & 0xfff));
+    print_coverage();
+    fflush(stdout);
+    if (!measured) return fail(saved_failure);
+    if (!timed) return 0;
+    *elapsed = end;
+    if (score.wrong || score.changed) ++*pixel_failures;
+    return 1;
+}
+
+static int startup_test(int entry, int reverse)
+{
+    struct startup_timer timer = {0};
+    unsigned pair, row = 0, pixel_failures = 0;
+    unsigned long elapsed = 0;
+    int complete = 0, restore_ok = 1, restore_needed = 0;
+    char saved_failure[sizeof(failure)];
+    printf("Startup diagnostic: %s progressive, entry=%d, minus=%d, plus=%d, order=%s.\n",
+        wanted_ntsc ? "NTSC" : "PAL", entry, zz_capture_phase_wrap(entry - 28),
+        zz_capture_phase_wrap(entry + 28), reverse ? "plus-first" : "minus-first");
+    puts("One screen for 180 seconds, ending after a baseline check. Esc or Ctrl-C cancels.\n"
+         "Times are milliseconds from timer start BEFORE screen setup, not from power-on.\n"
+         "Each row reapplies its phase, discards two captures, then makes 50 comparisons.\n"
+         "Pixel failures are recorded and testing continues. No phase is selected or saved.");
+    print_info();
+    fflush(stdout);
+    if (!open_startup_timer(&timer) || !open_screen()) goto finished;
+    restore_needed = 1;
+    draw_message("Startup diagnostic: leave this screen in front for three minutes...");
+    if (!startup_measure(&timer, ++row, "baseline", entry, &elapsed, &pixel_failures)) goto finished;
+    for (pair = 0; pair < STARTUP_MAX_PAIRS && elapsed < STARTUP_DURATION_MS; ++pair) {
+        int plus = (pair & 1) ^ reverse;
+        int phase = zz_capture_phase_wrap(entry + (plus ? 28 : -28));
+        if (!startup_measure(&timer, ++row, plus ? "plus" : "minus", phase,
+                &elapsed, &pixel_failures) ||
+            !startup_measure(&timer, ++row, "baseline", entry, &elapsed, &pixel_failures))
+            goto finished;
+    }
+    if (elapsed < STARTUP_DURATION_MS) fail("Startup measurement limit reached before three minutes elapsed.");
+    else complete = 1;
+finished:
+    snprintf(saved_failure, sizeof(saved_failure), "%s", failure);
+    if (restore_needed) restore_ok = apply_phase(entry, 1);
+    close_screen();
+    close_startup_timer(&timer);
+    if (complete) printf("Startup diagnostic completed: %u rows, %u rows with pixel errors, elapsed_ms=%lu.\n",
+        row, pixel_failures, elapsed);
+    else printf("Startup diagnostic stopped: %s\n", saved_failure);
+    if (!restore_needed) puts("Entry phase unchanged; measurements did not start.");
+    else if (restore_ok) printf("Original phase %d restored and acknowledged. Nothing saved.\n", entry);
+    else printf("RESTORE FAILED: %s Current phase is unknown; cold-boot to restore saved settings.\n", failure);
+    return complete && restore_ok ? 0 : 20;
+}
+
 static int check_current_phase(int entry)
 {
     struct score score = {0, 0};
@@ -586,8 +737,9 @@ static void usage(void)
     puts("ZZCapture info\n"
          "ZZCapture phase -896..895\n"
          "ZZCapture check pal|ntsc [lace]\n"
+         "ZZCapture startup pal|ntsc [reverse]\n"
          "ZZCapture calibrate pal|ntsc [lace]\n"
-         "Run Stack 32768 in this Shell before phase, check or calibrate.\n"
+         "Run Stack 32768 in this Shell before phase, check, startup or calibrate.\n"
          "A4000 C28 diagnostic build only. Calibration never saves settings.");
 }
 
@@ -603,7 +755,10 @@ int main(int argc, char **argv)
         (strcmp(argv[1], "phase") || argc != 3) &&
         ((strcmp(argv[1], "calibrate") && strcmp(argv[1], "check")) || argc < 3 || argc > 4 ||
          (strcmp(argv[2], "pal") && strcmp(argv[2], "ntsc")) ||
-         (argc == 4 && strcmp(argv[3], "lace")))) {
+         (argc == 4 && strcmp(argv[3], "lace"))) &&
+        (strcmp(argv[1], "startup") || argc < 3 || argc > 4 ||
+         (strcmp(argv[2], "pal") && strcmp(argv[2], "ntsc")) ||
+         (argc == 4 && strcmp(argv[3], "reverse")))) {
         usage();
         return 10;
     }
@@ -649,7 +804,8 @@ int main(int argc, char **argv)
         return 20;
     }
     wanted_ntsc = !strcmp(argv[2], "ntsc");
-    wanted_lace = argc == 4;
+    wanted_lace = argc == 4 && !strcmp(argv[3], "lace");
+    if (!strcmp(argv[1], "startup")) return startup_test(entry, argc == 4);
     if (!strcmp(argv[1], "check")) return check_current_phase(entry);
     return calibrate(entry);
 }

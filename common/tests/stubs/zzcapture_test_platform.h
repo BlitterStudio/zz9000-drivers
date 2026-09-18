@@ -12,6 +12,11 @@ typedef uint16_t UWORD;
 typedef uintptr_t ULONG;
 typedef const char *CONST_STRPTR;
 struct Library { int unused; };
+struct Device { int unused; };
+struct MsgPort { int unused; };
+struct IORequest { struct Device *io_Device; };
+struct timerequest { struct IORequest tr_node; };
+struct EClockVal { uint32_t ev_hi, ev_lo; };
 struct Task { void *tc_SPLower, *tc_SPUpper; };
 struct BitMap { unsigned Depth, BytesPerRow; UBYTE *Planes[8]; };
 struct RastPort { struct BitMap *BitMap; };
@@ -27,6 +32,8 @@ struct DimensionInfo { unsigned MaxDepth; };
 struct ZZ9000Board { ULONG address; unsigned zorro_version; };
 
 #define SIGBREAKF_CTRL_C 0x1000UL
+#define TIMERNAME "timer.device"
+#define UNIT_ECLOCK 2
 #define IDCMP_RAWKEY 1UL
 #define GFXF_AA_ALICE 1U
 #define GFXF_AA_LISA 2U
@@ -66,6 +73,13 @@ void *GetMsg(void *port);
 void ReplyMsg(struct Message *message);
 void Delay(ULONG ticks);
 void WaitTOF(void);
+struct MsgPort *CreateMsgPort(void);
+void DeleteMsgPort(struct MsgPort *port);
+void *CreateIORequest(struct MsgPort *port, ULONG size);
+void DeleteIORequest(struct IORequest *request);
+int OpenDevice(CONST_STRPTR name, ULONG unit, struct IORequest *request, ULONG flags);
+void CloseDevice(struct IORequest *request);
+ULONG ReadEClock(struct EClockVal *value);
 void *OpenLibrary(CONST_STRPTR name, ULONG version);
 void CloseLibrary(struct Library *library);
 ULONG ModeNotAvailable(ULONG id);

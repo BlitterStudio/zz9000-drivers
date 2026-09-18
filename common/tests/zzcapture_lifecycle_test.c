@@ -26,12 +26,17 @@ static struct {
     const unsigned *delivery_steps;
     unsigned delivery_count, delivered, delivery_sequence, delivery_stop_after;
     unsigned corrupt_at_read, cancel_after_reads, escape_after_reads;
+    unsigned clock_fail_after_reads, geometry_change_after_reads, startup_bad_until_ticks;
     uint32_t snapshot_status, snapshot_geometry;
     int cancel_phase, cancel_snapshot, cancel_always, escape_snapshot;
     int cancel_sent, screen_failure, all_clean;
     unsigned screen_opens, live_libraries, live_screens, live_windows, live_memory;
     int closed_before_restore, require_restore, entry;
-    char output[32768];
+    unsigned live_ports, live_requests, live_devices, timer_reads;
+    int timer_failure, timer_fault;
+    uint64_t timer_origin;
+    int committed_phases[512];
+    char output[262144];
     size_t output_length;
 } mock;
 static struct Task task;
@@ -44,6 +49,9 @@ static UBYTE planes[8][160 * 512];
 static UWORD pointer_memory[8];
 static ULONG loaded_colors[770];
 static struct IntuiMessage escape_message;
+static struct MsgPort timer_port;
+static struct timerequest timer_request;
+static struct Device timer_device;
 
 static uint32_t applied_status(void)
 {
@@ -65,6 +73,7 @@ static uint32_t screen_pixel(unsigned sample)
           (uint32_t)(loaded_colors[2 + pen * 3] >> 24) << 8 |
           (uint32_t)(loaded_colors[3 + pen * 3] >> 24);
     if (!mock.all_clean && (mock.phase < -140 || mock.phase > 140)) rgb ^= 1;
+    if (mock.ticks < mock.startup_bad_until_ticks) rgb ^= 2;
     return rgb;
 }
 
@@ -104,10 +113,12 @@ ULONG zz9000_read_reg32(ULONG base, ULONG reg)
     case ZZ_CAPTURE_CAP_REG: return ZZ_CAPTURE_CAP_C28;
     case ZZ_CAPTURE_PHASE_STATUS_REG: return applied_status();
     case ZZ_CAPTURE_CLOCK_STATUS_REG:
-        return mock.clock_ok ? ZZ_CAPTURE_CLOCK_FREQUENCY | ZZ_CAPTURE_CLOCK_LOCKED |
+        return mock.clock_ok && (!mock.clock_fail_after_reads ||
+            mock.data_reads < mock.clock_fail_after_reads) ? ZZ_CAPTURE_CLOCK_FREQUENCY | ZZ_CAPTURE_CLOCK_LOCKED |
             ZZ_CAPTURE_CLOCK_READY | ZZ_CAPTURE_CLOCK_C28 : ZZ_CAPTURE_CLOCK_C28;
     case ZZ_CAPTURE_SNAPSHOT_REG: return mock.snapshot_status;
-    case ZZ_CAPTURE_GEOMETRY_REG: return mock.snapshot_geometry;
+    case ZZ_CAPTURE_GEOMETRY_REG: return mock.snapshot_geometry +
+        (mock.geometry_change_after_reads && mock.data_reads >= mock.geometry_change_after_reads);
     case ZZ_CAPTURE_CLOCK_COUNTS_REG: return 7100UL << 16 | 28400;
     case ZZ_CAPTURE_DATA_REG: {
         uint32_t rgb;
@@ -136,6 +147,8 @@ void zz9000_write_reg16(ULONG base, ULONG reg, UWORD value)
     case ZZ_CAPTURE_PHASE_COMMIT_REG:
         assert(value == ZZ_CAPTURE_PHASE_TOKEN);
         ++mock.commits;
+        assert(mock.commits <= sizeof(mock.committed_phases) / sizeof(mock.committed_phases[0]));
+        mock.committed_phases[mock.commits - 1] = mock.target;
         mock.arms_at_commit = mock.arms;
         mock.reads_at_commit = mock.data_reads;
         mock.error = !zz_capture_phase_valid(mock.target);
@@ -228,6 +241,48 @@ void *OpenLibrary(CONST_STRPTR name, ULONG version)
     if (mock.screen_failure == (gfx ? 1 : 2)) return NULL;
     ++mock.live_libraries;
     return gfx ? (void *)&graphics : (void *)&intuition;
+}
+struct MsgPort *CreateMsgPort(void)
+{
+    if (mock.timer_failure == 1) return NULL;
+    ++mock.live_ports;
+    return &timer_port;
+}
+void DeleteMsgPort(struct MsgPort *port)
+{ assert(port == &timer_port && mock.live_ports); --mock.live_ports; }
+void *CreateIORequest(struct MsgPort *port, ULONG size)
+{
+    assert(port == &timer_port && size == sizeof(timer_request));
+    if (mock.timer_failure == 2) return NULL;
+    ++mock.live_requests;
+    return &timer_request;
+}
+void DeleteIORequest(struct IORequest *request)
+{ assert(request == &timer_request.tr_node && mock.live_requests); --mock.live_requests; }
+int OpenDevice(CONST_STRPTR name, ULONG unit, struct IORequest *request, ULONG flags)
+{
+    assert(!strcmp(name, TIMERNAME) && unit == UNIT_ECLOCK && !flags);
+    assert(request == &timer_request.tr_node && mock.live_requests);
+    if (mock.timer_failure == 3) return 1;
+    ++mock.live_devices;
+    request->io_Device = &timer_device;
+    return 0;
+}
+void CloseDevice(struct IORequest *request)
+{ assert(request == &timer_request.tr_node && mock.live_devices); --mock.live_devices; }
+ULONG ReadEClock(struct EClockVal *value)
+{
+    uint64_t now = mock.timer_origin + (uint64_t)mock.ticks * 14188;
+    assert(mock.live_devices);
+    ++mock.timer_reads;
+    if (mock.timer_fault == 1) now = mock.timer_origin; /* Frozen clock. */
+    if (mock.timer_fault == 2 && mock.timer_reads > 2) now = mock.timer_origin - 1;
+    if (mock.timer_fault == 4) now = mock.timer_origin + mock.timer_reads * 7094; /* Implausibly slow. */
+    if (mock.timer_fault == 5 && mock.timer_reads > 2) now += 3600ULL * 709400;
+    value->ev_hi = now >> 32;
+    value->ev_lo = (uint32_t)now;
+    return mock.timer_failure == 4 ? 0 :
+        (mock.timer_fault == 3 && mock.timer_reads > 2 ? 709399 : 709400);
 }
 void CloseLibrary(struct Library *library)
 { assert(library && mock.live_libraries); --mock.live_libraries; }
@@ -322,6 +377,7 @@ static void reset_fixture(void)
     memset(planes, 0, sizeof(planes));
     memset(loaded_colors, 0, sizeof(loaded_colors));
     mock.phase = mock.entry = -77;
+    mock.timer_origin = UINT64_C(0xfffffff0); /* Cross the low-word wrap. */
     mock.clock_ok = 1;
     mock.delay_minimum = 1;
     mock.field_time = mock.delay_time = FIELD_TIME;
@@ -346,6 +402,7 @@ static void check_closed(void)
 {
     CHECK(!screen && !window && !empty_pointer && !GfxBase && !IntuitionBase);
     CHECK(!mock.live_libraries && !mock.live_screens && !mock.live_windows && !mock.live_memory);
+    CHECK(!TimerBase && !mock.live_ports && !mock.live_requests && !mock.live_devices);
 }
 
 static void test_wire_and_phase_waits(void)
@@ -693,6 +750,114 @@ static void test_pal_ntsc_read_cadence(void)
         close_screen(); check_closed();
     }
 }
+static void test_startup_sequence(void)
+{
+    char *forward[] = {"ZZCapture", "startup", "ntsc"};
+    char *reverse[] = {"ZZCapture", "startup", "pal", "reverse"};
+    unsigned order, i;
+    for (order = 0; order < 2; ++order) {
+        reset_fixture(); mock.require_restore = 1;
+        CHECK(zzcapture_main(order ? 4 : 3, order ? reverse : forward) == 0);
+        CHECK(mock.screen_opens == 1 && !wanted_lace && wanted_ntsc == !order);
+        CHECK(mock.ticks * 20 >= 180000 && mock.ticks * 20 < 190000);
+        CHECK(mock.commits >= 6 && mock.commits < 512);
+        CHECK(mock.committed_phases[0] == mock.entry);
+        for (i = 1; i + 1 < mock.commits; ++i)
+            CHECK(mock.committed_phases[i] == (i % 2 == 0 ? mock.entry :
+                mock.entry + ((i % 4 == 1) == !order ? -28 : 28)));
+        CHECK(mock.phase == mock.entry && !mock.closed_before_restore);
+        CHECK(coverage.comparisons[0] == 50 && coverage.comparisons[1] == 0);
+        CHECK(strstr(mock.output, "Startup diagnostic completed") != NULL);
+        CHECK(strstr(mock.output, "Original phase -77 restored and acknowledged") != NULL);
+        CHECK(strstr(mock.output, "role=minus phase=-105") != NULL);
+        CHECK(strstr(mock.output, "role=plus phase=-49") != NULL);
+        CHECK(strstr(mock.output, "Before: clock=0x") != NULL);
+        CHECK(strstr(mock.output, "counts=0x1bbc6ef0") != NULL);
+        CHECK(strstr(mock.output, "samples 51/0, comparisons 50/0") != NULL);
+        CHECK(strstr(mock.output, "complete=0") == NULL);
+        CHECK(strstr(mock.output, "0 rows with pixel errors") != NULL);
+        check_closed();
+    }
+}
+
+static void test_startup_errors_and_guards(void)
+{
+    char *run[] = {"ZZCapture", "startup", "ntsc"};
+    char *invalid[] = {"ZZCapture", "startup", "ntsc", "lace"};
+    unsigned kind;
+    reset_fixture();
+    CHECK(zzcapture_main(4, invalid) == 10 && !mock.writes && !mock.screen_opens);
+    invalid[2] = "bogus"; invalid[3] = "reverse";
+    CHECK(zzcapture_main(4, invalid) == 10 && !mock.writes && !mock.screen_opens);
+    reset_fixture(); task.tc_SPUpper = (void *)(uintptr_t)0x2000;
+    CHECK(zzcapture_main(3, run) == 20 && !mock.writes && !mock.screen_opens);
+    CHECK(mock.timer_reads == 0); check_closed();
+
+    for (kind = 1; kind <= 4; ++kind) {
+        reset_fixture(); mock.timer_failure = kind;
+        CHECK(zzcapture_main(3, run) == 20);
+        CHECK(!mock.writes && !mock.screen_opens);
+        CHECK(strstr(mock.output, "measurements did not start") != NULL);
+        check_closed();
+    }
+    for (kind = 1; kind <= 6; ++kind) {
+        reset_fixture(); mock.screen_failure = kind;
+        CHECK(zzcapture_main(3, run) == 20 && !mock.writes);
+        check_closed();
+    }
+    for (kind = 1; kind <= 5; ++kind) {
+        reset_fixture(); mock.timer_fault = kind; mock.require_restore = 1;
+        CHECK(zzcapture_main(3, run) == 20);
+        CHECK(strstr(mock.output, "Startup diagnostic completed") == NULL);
+        CHECK(strstr(mock.output, "Startup diagnostic stopped:") != NULL);
+        CHECK(mock.commits <= 402 && mock.phase == mock.entry && !mock.closed_before_restore);
+        CHECK(mock.timer_reads < 810);
+        check_closed();
+    }
+    for (kind = 0; kind < 6; ++kind) {
+        /* Interrupt during the first candidate, after a complete baseline. */
+        const unsigned after_baseline = 52U * ZZ_CAPTURE_SAMPLES;
+        reset_fixture(); mock.require_restore = 1;
+        if (kind == 0 || kind == 2) mock.cancel_after_reads = after_baseline;
+        if (kind == 1) mock.escape_after_reads = after_baseline;
+        if (kind == 2) mock.fail_commit = 3; /* Restore cannot be acknowledged. */
+        if (kind == 3) mock.clock_fail_after_reads = after_baseline;
+        if (kind == 4) mock.geometry_change_after_reads = after_baseline;
+        if (kind == 5) mock.snapshot_never = 1;
+        CHECK(zzcapture_main(3, run) == 20);
+        CHECK(strstr(mock.output, "complete=0") != NULL);
+        CHECK(strstr(mock.output, "Startup diagnostic completed") == NULL);
+        if (kind == 2 || kind == 3) {
+            CHECK(strstr(mock.output, "RESTORE FAILED") != NULL);
+            CHECK(strstr(mock.output, "restored and acknowledged") == NULL);
+        } else CHECK(mock.phase == mock.entry && !mock.closed_before_restore);
+        if (kind == 1) CHECK(mock.replies == 1);
+        CHECK(mock.ticks < 1000);
+        check_closed();
+    }
+}
+
+static void test_startup_pixel_evidence(void)
+{
+    char *run[] = {"ZZCapture", "startup", "ntsc"};
+    unsigned i;
+    reset_fixture(); mock.phase = mock.entry = -135; mock.require_restore = 1;
+    mock.startup_bad_until_ticks = 1000;
+    CHECK(zzcapture_main(3, run) == 0); /* Completed experiment, including bad rows. */
+    CHECK(strstr(mock.output, "Startup row=1 role=baseline phase=-135 start_ms=200 end_ms=2360 complete=1 wrong=52224 changed=0") != NULL);
+    CHECK(strstr(mock.output, "complete=1 wrong=0 changed=0") != NULL);
+    CHECK(strstr(mock.output, "0 rows with pixel errors") == NULL);
+    CHECK(strstr(mock.output, "Startup diagnostic completed") != NULL);
+    CHECK(mock.phase == -135 && !mock.closed_before_restore);
+    check_closed();
+
+    reset_fixture(); mock.phase = mock.entry = 890; mock.all_clean = 1;
+    CHECK(zzcapture_main(3, run) == 0);
+    CHECK(strstr(mock.output, "minus=862, plus=-874") != NULL);
+    for (i = 0; i < mock.commits; ++i) CHECK(zz_capture_phase_valid(mock.committed_phases[i]));
+    CHECK(mock.phase == 890); check_closed();
+}
+
 int main(void)
 {
     test_wire_and_phase_waits();
@@ -704,6 +869,9 @@ int main(void)
     test_extended_collection_lifecycle();
     test_collection_progress_bounds();
     test_pal_ntsc_read_cadence();
+    test_startup_sequence();
+    test_startup_errors_and_guards();
+    test_startup_pixel_evidence();
     printf("ZZCapture lifecycle: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

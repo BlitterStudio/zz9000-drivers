@@ -16,7 +16,7 @@ palette, and refuses an RTG replacement or a lower-depth screen.
 
 ## Commands
 
-Run `Stack 32768` in the same Shell before `phase`, `check` or `calibrate`. These
+Run `Stack 32768` in the same Shell before `phase`, `check`, `startup` or `calibrate`. These
 commands check the process stack and refuse to open the test screen or
 write registers if it is smaller than 32 KiB. `info` remains read-only and
 does not require the larger stack.
@@ -27,6 +27,8 @@ ZZCapture info
 ZZCapture phase -140
 ZZCapture check pal
 ZZCapture check pal lace
+ZZCapture startup ntsc
+ZZCapture startup ntsc reverse
 ZZCapture calibrate pal
 ZZCapture calibrate ntsc
 ZZCapture calibrate pal lace
@@ -44,7 +46,49 @@ and 50 comparisons per field parity, without a sweep or a new phase choice.
 It restores and checks the entry phase before closing the screen. Use it to
 separate field-collection problems from the deliberately bad phases visited
 by calibration, or to repeat a suspicious position with `phase N` then `check`.
-It never saves settings. Version 0.4 works with the original C28 BOOT images.
+It never saves settings. Version 0.5 works with the original C28 BOOT images;
+the startup diagnostic requires no firmware change.
+
+`startup pal|ntsc [reverse]` measures startup behavior on one continuous
+progressive screen for three minutes. The baseline is the phase read on entry.
+The sequence is baseline, baseline minus 28, baseline, baseline plus 28,
+baseline, repeated until the duration has elapsed. `reverse` visits the plus
+candidate first. Phases wrap at +895/-896. These are nearby experimental
+positions, not recommended settings; for entry -58 they are -86 and -30.
+
+Every row reapplies its phase, discards two captures, then scores 51 snapshots
+and 50 temporal comparisons. Wrong or changing pixels are recorded without
+stopping the experiment. Capture, clock, mode, framing, timer or cancellation
+failures stop it. A started candidate is followed by a baseline check before
+the duration is tested, so the run can finish slightly after three minutes.
+The entry phase is restored and acknowledged before the screen closes on
+both completion and failure. Nothing is selected or saved.
+
+Rows include elapsed start/end milliseconds, phase and role, raw pixel-error
+counts, complete/incomplete status, framing, and field coverage. Clock status,
+edge counts and phase status are sampled before and after each measurement;
+these separate register reads are not an atomic trace. In `counts`, the low
+16 bits are C28 edges and the high 16 bits are E7M edges per 1 ms. Elapsed time
+uses `timer.device`'s E-clock, starting before screen setup. It is **not time
+since power-on**; record the launch delay separately. These checks do not
+observe every video frame, and phase reapplication is part of the experiment.
+
+For startup only, exit status 0 means the timed experiment completed and
+restored the entry phase, even if rows contain pixel errors. It does not mean
+all phases passed. Syntax errors return 10; interrupted or incomplete runs,
+unusable timing, or restoration failures return 20. The timer and all screen
+resources are released on failure. A frozen/backwards clock, changed E-clock
+frequency, one-hour elapsed bound, and hard limit of 200 candidate/baseline
+pairs keep faulty timing from extending the run indefinitely.
+
+Compare cold boots with opposite candidate orders, then a warm control. Keep
+the firmware, saved phase, output profile, cable and crop unchanged. Start as
+soon after boot as practical; do not run calibration first. Save each complete
+log before another test or power-off, and record time since power-on and
+visible behavior. If a candidate improves before the following baseline,
+that supports a phase effect; if the baseline also improves with elapsed time,
+startup settling remains possible. Neither result alone establishes a thermal
+cause or justifies persisting a phase.
 
 `calibrate` opens its own native 1280-pixel SuperHires, 256-color screen. PAL
 or NTSC is explicit, including when launched from an RTG Workbench. It keeps
@@ -59,7 +103,8 @@ On success the chosen phase remains live. **The tool never writes
 `ZZ9000.CFG`.** It prints the candidate `videocap_c28_phase` setting, the
 original phase restoration command, the clean interval, and its tested
 margin. Exit status is 0 on success, 10 for command syntax, and 20 for a
-hardware/calibration failure. Save the complete report, not just its chosen
+hardware/calibration failure (see the startup-specific completion meaning above).
+Save the complete report, not just its chosen
 phase.
 
 ## What is measured
@@ -230,3 +275,10 @@ Tests cover sequence wrap, stuck/stalled fields, the hard total limit despite
 occasional progress, complete calibration, and current-phase checks. Late
 pixel errors, Ctrl-C/Escape and restoration failures are tested beyond the
 old limit. Hardware retesting on the affected machine remains necessary.
+Startup regressions exercise both orders and standards, signed phase wrap,
+fixed screen lifetime, complete comparison counts, early pixel errors followed
+by recovery, and continued collection at bad candidates. They also cover
+E-clock low-word wrap, frozen/backwards/changed/slow/jumped timing, partial
+timer/screen setup, cancellation during a candidate, capture/framing/clock
+faults, checked restoration and launch guards. Real AmigaOS timer/display
+operation and startup behavior still require hardware testing.
