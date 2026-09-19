@@ -638,6 +638,111 @@ static void configure_skewed_delivery(void)
     mock.delivery_count = sizeof(steps) / sizeof(steps[0]);
 }
 
+/* Periodic synthetic delivery, not an exact hardware timing trace. Account
+ * for the two discarded captures so the first scored sample is position 0. */
+static void configure_sparse_fields(unsigned period, unsigned minority,
+    unsigned shift, unsigned invert)
+{
+    static unsigned steps[307];
+    unsigned parity[307], i, previous_parity;
+    assert(period >= 3 && period <= 307 && minority > 0 && minority < period);
+    for (i = 0; i < period; ++i) parity[i] = 1 ^ invert;
+    for (i = 0; i < minority; ++i)
+        parity[(i * period / minority + shift) % period] = invert;
+    previous_parity = parity[period - 3];
+    mock.delivery_sequence = previous_parity;
+    for (i = 0; i < period; ++i) {
+        unsigned next = parity[(i + period - 2) % period];
+        steps[i] = next == previous_parity ? 2 : 3;
+        previous_parity = next;
+    }
+    mock.timed_fields = 1;
+    mock.field_time = FIELD_TIME;
+    mock.delivery_steps = steps;
+    mock.delivery_count = period;
+}
+
+static void test_progressing_minority_reaches_its_quota(void)
+{
+    unsigned minority, invert, longer;
+    for (minority = 4; minority <= 6; minority += 2)
+        for (invert = 0; invert < 2; ++invert)
+            for (longer = 0; longer < 2; ++longer) {
+                struct score score;
+                unsigned quota = longer ? RETEST_COMPARISONS : SWEEP_COMPARISONS;
+                reset_fixture(); wanted_lace = 1;
+                configure_sparse_fields(66, minority, 0, invert);
+                CHECK(open_screen());
+                CHECK(measure_phase(-77, quota, &score));
+                CHECK(coverage.comparisons[0] >= quota && coverage.comparisons[1] >= quota);
+                CHECK(!score.wrong && !score.changed);
+                if (minority == 4)
+                    CHECK(coverage.samples[0] + coverage.samples[1] == (longer ? 826 : 166));
+                close_screen(); check_closed();
+            }
+}
+
+static void test_minority_progress_deadline(void)
+{
+    unsigned longer, invert, late;
+    for (longer = 0; longer < 2; ++longer)
+        for (invert = 0; invert < 2; ++invert)
+            for (late = 0; late < 2; ++late) {
+                struct score score;
+                unsigned quota = longer ? RETEST_COMPARISONS : SWEEP_COMPARISONS;
+                unsigned limit = 6 * (quota + 1), period = limit + late;
+                int completed;
+                reset_fixture(); wanted_lace = 1;
+                configure_sparse_fields(period, 1, period - 1, invert);
+                CHECK(open_screen());
+                completed = measure_phase(-77, quota, &score);
+                if (late) {
+                    CHECK(!completed && coverage.samples[invert] == 0);
+                    CHECK(coverage.samples[0] + coverage.samples[1] == limit);
+                    CHECK(strstr(failure, "Both interlaced fields") != NULL);
+                } else {
+                    CHECK(completed && coverage.comparisons[invert] == quota);
+                    CHECK(coverage.samples[0] + coverage.samples[1] == limit * (quota + 1));
+                }
+                CHECK(!score.wrong && !score.changed);
+                close_screen(); check_closed();
+            }
+}
+
+static void test_sparse_collection_cleanup_and_late_errors(void)
+{
+    char *check_lace[] = {"ZZCapture", "check", "pal", "lace"};
+    char *calibrate_lace[] = {"ZZCapture", "calibrate", "pal", "lace"};
+    unsigned kind;
+    for (kind = 0; kind < 4; ++kind) {
+        reset_fixture(); configure_sparse_fields(66, 4, 0, 0);
+        mock.require_restore = 1;
+        if (kind == 0) mock.corrupt_at_read = 612U * ZZ_CAPTURE_SAMPLES + 18;
+        else if (kind == 1) mock.escape_after_reads = 613U * ZZ_CAPTURE_SAMPLES;
+        else mock.cancel_after_reads = 613U * ZZ_CAPTURE_SAMPLES;
+        if (kind == 3) mock.fail_commit = 2;
+        CHECK(zzcapture_main(4, check_lace) == 20);
+        CHECK(mock.data_reads > 612U * ZZ_CAPTURE_SAMPLES);
+        if (kind == 0) {
+            CHECK(coverage.comparisons[0] >= 50 && coverage.comparisons[1] >= 50);
+            CHECK(strstr(mock.output, "Expected-pixel errors: 1;") != NULL);
+            CHECK(strstr(mock.output, "Failure evidence v1:") != NULL);
+            CHECK(strstr(mock.output, "Current phase passed") == NULL);
+        } else {
+            CHECK(mock.cancel_sent && aborted);
+            CHECK(mock.data_reads == 613U * ZZ_CAPTURE_SAMPLES);
+        }
+        if (kind == 3) CHECK(strstr(mock.output, "RESTORE FAILED") != NULL);
+        else CHECK(mock.phase == -77 && !mock.closed_before_restore);
+        check_closed();
+    }
+    reset_fixture(); configure_sparse_fields(66, 4, 0, 0);
+    CHECK(zzcapture_main(4, calibrate_lace) == 0);
+    CHECK(coverage.comparisons[0] >= 50 && coverage.comparisons[1] >= 50);
+    CHECK(strstr(mock.output, "Candidate setting:") != NULL);
+    check_closed();
+}
+
 static void test_skewed_interlace_delivery(void)
 {
     /* Synthetic delivery reproduces the reported 56/10 snapshots and 55/9
@@ -729,16 +834,16 @@ static void test_collection_progress_bounds(void)
     CHECK(strstr(failure, "Both interlaced fields") != NULL);
     close_screen(); check_closed();
 
-    /* Rare progress must not keep extending the total budget forever. */
+    /* Rare progress completes a finite quota rather than extending it. */
     for (i = 0; i < 64; ++i) sparse_steps[i] = 2;
     sparse_steps[2] = sparse_steps[3] = 3;
     reset_fixture(); configure_skewed_delivery(); wanted_ntsc = wanted_lace = 1;
     mock.delivery_steps = sparse_steps; mock.delivery_count = 64;
     CHECK(open_screen());
-    CHECK(!measure_phase(-77, SWEEP_COMPARISONS, &score));
-    CHECK(coverage.samples[0] + coverage.samples[1] == 132);
-    CHECK(coverage.comparisons[1] > 0 && coverage.comparisons[1] < SWEEP_COMPARISONS);
-    CHECK(strstr(failure, "Both interlaced fields") != NULL);
+    CHECK(measure_phase(-77, SWEEP_COMPARISONS, &score));
+    CHECK(coverage.samples[0] + coverage.samples[1] == 641);
+    CHECK(coverage.comparisons[0] >= SWEEP_COMPARISONS &&
+        coverage.comparisons[1] == SWEEP_COMPARISONS);
     close_screen(); check_closed();
 }
 
@@ -965,6 +1070,9 @@ int main(void)
     test_success_and_entry_guard();
     test_interlace_polling_cadence();
     test_skewed_interlace_delivery();
+    test_progressing_minority_reaches_its_quota();
+    test_minority_progress_deadline();
+    test_sparse_collection_cleanup_and_late_errors();
     test_extended_collection_lifecycle();
     test_collection_progress_bounds();
     test_pal_ntsc_read_cadence();

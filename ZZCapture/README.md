@@ -185,11 +185,20 @@ The host can repeatedly skip an even number of fields while polling and
 reading snapshots. The tool waits for the next vertical blank with
 `WaitTOF()` before rearming when a parity repeats and the other still needs
 comparisons. The previous DOS-duration wait could round to two fields and
-leave the same parity starvation in place. Version 0.4 permits more snapshots
-when field delivery is unbalanced: up to 132 per sweep/refinement position
-or 612 for the longer check. It also stops if a field still needing comparisons
-has not appeared for 66 or 306 snapshots, respectively. A completed field
-cannot keep extending that wait. Progressive limits stay at 66/306 snapshots.
+leave the same parity starvation in place. Version 0.7 lets a progressing
+minority field reach its quota even when it supplies fewer than one in twelve
+snapshots. Each needed field retains its no-progress limit of 66 captures
+for a sweep/refinement position, or 306 for a longer check. It must arrive
+within that window or collection stops; a completed field cannot extend
+the other field's deadline.
+
+The total interlace bound is the no-progress limit multiplied by the required
+samples per field (comparisons plus one): 726 captures for a sweep/refinement
+position and 15,606 for a longer check. These bounds allow every required
+sample to arrive at the last permitted capture without failing early.
+Balanced capture finishes as soon as both quotas are met. Severe but continuing
+imbalance can make a test take much longer; Escape or Ctrl-C cancels and
+restores the entry phase. Progressive limits stay at 66/306 snapshots.
 These limits exclude the two discarded transition captures.
 Every captured sample remains scored, including samples from a field whose
 comparison count is already sufficient. Both parities must reach the full
@@ -320,10 +329,14 @@ A synthetic delivery sequence reproduces the 0.3 report's 56/10 snapshots,
 verifies completion with the extended budget. That report does not include
 the exact field trace or read latencies, so the fixture establishes the
 collection-accounting failure, not its physical timing cause.
-Tests cover sequence wrap, stuck/stalled fields, the hard total limit despite
-occasional progress, complete calibration, and current-phase checks. Late
-pixel errors, Ctrl-C/Escape and restoration failures are tested beyond the
-old limit. Hardware retesting on the affected machine remains necessary.
+Tests cover sequence wrap, stuck/stalled fields, finite completion with rare
+progress, complete calibration, and current-phase checks. Periodic fixtures
+matching 4/62 and 6/60 initial snapshot totals exercise both parity orientations
+and both quotas. A sample on the no-progress deadline completes; one arriving
+after it fails. Late pixel errors, Ctrl-C/Escape and restoration failures are
+tested beyond the former 132/612-capture limits. These are synthetic delivery
+patterns, not recorded hardware traces; affected-machine retesting remains
+necessary.
 Startup regressions exercise both orders and standards, signed phase wrap,
 fixed screen lifetime, complete comparison counts, early pixel errors followed
 by recovery, and continued collection at bad candidates. They also cover

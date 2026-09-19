@@ -32,9 +32,9 @@ struct GfxBase *GfxBase;
 struct IntuitionBase *IntuitionBase;
 struct Device *TimerBase;
 
-#define ZZ_CAPTURE_VERSION "0.6"
+#define ZZ_CAPTURE_VERSION "0.7"
 static const char version[] __attribute__((used)) =
-    "$VER: ZZCapture " ZZ_CAPTURE_VERSION " (18.09.2026)\r\n";
+    "$VER: ZZCapture " ZZ_CAPTURE_VERSION " (19.09.2026)\r\n";
 
 #define PHASE_WAIT_TICKS 250U
 #define FRAME_WAIT_TICKS 100U
@@ -251,7 +251,10 @@ static int measure_phase(int target, unsigned count, struct score *score)
     unsigned have_previous[2] = {0, 0};
     unsigned last_sample[2] = {0, 0};
     const unsigned field_limit = 6 * (count + 1);
-    const unsigned total_limit = field_limit * (wanted_lace ? 2 : 1);
+    /* Each needed parity must arrive within field_limit captures. It can
+     * refresh that deadline only count times before its next sample completes
+     * the quota, so (count + 1) * field_limit also bounds sparse progress. */
+    const unsigned total_limit = field_limit * (wanted_lace ? count + 1 : 1);
     unsigned captured, parity, i, last_parity = 2;
     memset(&coverage, 0, sizeof(coverage));
     coverage.phase = target;
@@ -300,9 +303,7 @@ static int measure_phase(int target, unsigned count, struct score *score)
         if (coverage.comparisons[0] >= count &&
                 (!wanted_lace || coverage.comparisons[1] >= count))
             return 1;
-        /* A skewed but progressing field may need more than the old shared
-         * budget. Keep that budget as the no-progress bound for EACH needed
-         * field, plus a hard total cap of twice it in interlace. Completed
+        /* Each needed field keeps its own no-progress deadline. Completed
          * fields cannot prolong a stalled field; every sample still scores. */
         for (i = 0; i < (wanted_lace ? 2U : 1U); ++i)
             if (coverage.comparisons[i] < count &&
