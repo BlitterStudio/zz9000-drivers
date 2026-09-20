@@ -933,6 +933,58 @@ void DevTermIO( DEVBASEP, struct IORequest *ioreq )
   }
 }
 
+/* Single-copy direct drain (KTD4): MMIO → the opener's answered buffer,
+ * accumulating the published ones-complement sum (end-around carry over
+ * big-endian longwords, zero-padded tail — n68k_port_in_l_sum
+ * semantics) at copy cost. Source is the FPGA window (volatile); dst is
+ * opener RAM where unaligned longs are legal on 68020+. Returns the
+ * sum of the transferred bytes. */
+static ULONG zznet_mmio_read_sum(volatile UBYTE *src, UBYTE *dst, ULONG n)
+{
+	ULONG sum = 0;
+
+	/* Reach 4-byte source alignment with one leading word. */
+	if (((ULONG)src & 2) && n >= 2) {
+		USHORT w0 = *(volatile USHORT *)src;
+		*(USHORT *)dst = w0;
+		src += 2; dst += 2; n -= 2;
+		{
+			ULONG v = (ULONG)w0 << 16;
+			sum += v;
+			if (sum < v) sum++;
+		}
+	}
+
+	while (n >= 4) {
+		ULONG v = *(volatile ULONG *)src;
+		*(ULONG *)dst = v;
+		src += 4; dst += 4; n -= 4;
+		sum += v;
+		if (sum < v) sum++;
+	}
+
+	if (n) {
+		/* Zero-padded BE tail: assemble the remaining 1-3 bytes into
+		 * the low bytes of a longword value. */
+		ULONG v = 0;
+		if (n >= 2) {
+			USHORT w = *(volatile USHORT *)src;
+			*(USHORT *)dst = w;
+			src += 2; dst += 2; n -= 2;
+			v |= (ULONG)w << 16;
+		}
+		if (n) {
+			UBYTE b = *src;
+			*dst = b;
+			v |= (ULONG)b << 8; /* zero low byte pads the tail */
+		}
+		sum += v;
+		if (sum < v) sum++;
+	}
+
+	return sum;
+}
+
 /* Frame header layout in the ZZ9000 RX window (MMIO-backed):
  *   +0..+1   USHORT  total size
  *   +2..+3   USHORT  serial (increments each new frame)
@@ -1528,10 +1580,78 @@ SAVEDS void frame_proc() {
           /* No listener matched — frame dropped. A future change could
            * route these to S2_READORPHAN requests. */
           global_stats.UnknownTypesReceived++;
+        } else if (nmatch == 1 &&
+                   !(reqs[0]->ios2_Req.io_Flags & SANA2IOF_RAW) &&
+                   sz >= HW_ETH_HDR_SIZE && sz <= HW_ETH_MAX_STD &&
+                   zznet_ext_can_claim(1, 0, &mbs[0]->bm_Ext)) {
+          /* Single-copy direct delivery (KTD4). Validation ran before
+           * the claim (wire bounds above, cooked size policy here), the
+           * request is unlinked and pinned, and the opener offered the
+           * pair without a filter: ask where the payload should land
+           * and drain the window straight into it. */
+          struct IOSana2Req *req = reqs[0];
+          struct zznet_ext  *xe  = &mbs[0]->bm_Ext;
+          ULONG plen = (ULONG)sz - HW_ETH_HDR_SIZE;
+          UBYTE *dst = ((AnxdS2RxDirect)xe->xe_RxDirect)(req->ios2_Data, plen);
+
+          if (dst) {
+            ULONG sum;
+
+            /* The link header, written at the 14 bytes the opener
+             * reserved before the payload, instead of taken apart and
+             * re-synthesised (anxs2ext.h). */
+            if (xe->xe_RxLinkHdr) {
+              int li;
+              for (li = 0; li < HW_ETH_HDR_SIZE; li++) {
+                dst[li - HW_ETH_HDR_SIZE] = frm[4 + li];
+              }
+            }
+
+            sum = zznet_mmio_read_sum(frm + 4 + HW_ETH_HDR_SIZE, dst, plen);
+
+            /* Request fields exactly as the staging path sets them. */
+            {
+              ULONG m0 = *(volatile ULONG *)(frm + 4);
+              ULONG m1 = *(volatile ULONG *)(frm + 8);
+              ULONG m2 = *(volatile ULONG *)(frm + 12);
+              USHORT *wd = (USHORT *)req->ios2_DstAddr;
+              USHORT *ws = (USHORT *)req->ios2_SrcAddr;
+              wd[0] = (USHORT)(m0 >> 16);
+              wd[1] = (USHORT)(m0 & 0xFFFF);
+              wd[2] = (USHORT)(m1 >> 16);
+              ws[0] = (USHORT)(m1 & 0xFFFF);
+              ws[1] = (USHORT)(m2 >> 16);
+              ws[2] = (USHORT)(m2 & 0xFFFF);
+              req->ios2_Req.io_Flags = 0;
+              if (m0 == 0xFFFFFFFFUL && (m1 & 0xFFFF0000UL) == 0xFFFF0000UL) {
+                req->ios2_Req.io_Flags |= SANA2IOF_BCAST;
+              }
+            }
+            req->ios2_PacketType = packet_type;
+            req->ios2_DataLength = plen;
+            req->ios2_Req.io_Error = req->ios2_WireError = 0;
+
+            ((AnxdS2RxFilled)xe->xe_RxFilled)(req->ios2_Data, plen, sum,
+                                              ANXD_S2_RXF_SUMMED);
+            ReplyMsg((struct Message *)req);
+
+            /* Unpin (KTD11). */
+            ObtainSemaphore(&db->db_ReadListSem);
+            if (mbs[0]->bm_Closing && --mbs[0]->bm_InUse == 0) {
+              ReleaseSemaphore(&db->db_ReadListSem);
+              FreeVec(mbs[0]);
+            } else {
+              ReleaseSemaphore(&db->db_ReadListSem);
+            }
+
+            global_stats.PacketsReceived++;
+          } else {
+            /* Claim declined: fall through to staging with the request
+             * already collected — read_frame delivers it (KTD4). */
+            goto staging;
+          }
         } else {
-          /* Stage the cooked payload once for all cooked recipients
-           * (KTD2). RAW requests below fall back to their own direct
-           * MMIO source inside read_frame. */
+        staging: {
           UBYTE *staged = NULL;
           int any_ok = 0;
 
@@ -1570,6 +1690,7 @@ SAVEDS void frame_proc() {
           if (any_ok) {
             global_stats.PacketsReceived++;
           }
+        }
         }
       }
 
