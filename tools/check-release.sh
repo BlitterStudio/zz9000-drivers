@@ -47,6 +47,7 @@ if [ "$quick" -eq 0 ]; then
     check_exec ZZScanlines/ZZScanlines
     check_exec ZZFwUpdate/ZZFwUpdate
     check_exec net/ZZNetStats/ZZNetStats
+    check_exec net/ZZNetBench/ZZNetBench
     check_exec ZZDiag/ZZDiag
 
     # SDK runtime payloads (sdk/build.sh).
@@ -101,6 +102,7 @@ tracked_artifacts=$(
         ZZScanlines/ZZScanlines \
         ZZTop/ZZTop \
         net/ZZNetStats/ZZNetStats \
+        net/ZZNetBench/ZZNetBench \
         ZZDiag/ZZDiag \
         ahi/axtest/axtest \
         ahi/duplextest/ZZAXDuplexTest

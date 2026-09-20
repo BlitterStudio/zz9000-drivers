@@ -19,6 +19,9 @@ cd "$repo_root"
 "$amiga_docker" net make
 "$amiga_docker" net/ZZNetStats m68k-amigaos-gcc -O2 -noixemul -Wall -Wextra \
     -Wno-unused-parameter -I../../include -o ZZNetStats ZZNetStats.c -lamiga
+"$amiga_docker" net/ZZNetBench m68k-amigaos-gcc -O2 -noixemul -Wall -Wextra \
+    -Wno-unused-parameter -Wno-incompatible-pointer-types \
+    -I../../include -I.. -o ZZNetBench ZZNetBench.c -lamiga -lgcc
 # mhi/build.sh stages zz9k headers from the sibling zz9000-sdk checkout on
 # the host, then re-execs itself through amiga-docker.sh.
 mhi/build.sh
