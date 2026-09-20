@@ -815,6 +815,64 @@ SAVEDS VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
     is_online = FALSE;
     break;
 
+  case ANXD_CMD_READ_BATCH: {
+    /* KTD6: many CMD_READs in one call. ios2_Data is the caller's Exec
+     * List of prepared IOSana2Req; queue each onto ITS opener's read
+     * list as its own CMD_READ would. Read semaphore at task level
+     * first, then Disable around the pure list work only (KTD6: a
+     * contested ObtainSemaphore waits, and waiting inside Disable()
+     * hangs Exec). The list is emptied either way. */
+    struct List *batch = (struct List *)ioreq->ios2_Data;
+    if (!batch || !ioreq->ios2_BufferManagement) {
+      ioreq->ios2_Req.io_Error = S2ERR_BAD_ARGUMENT;
+      ioreq->ios2_WireError = S2WERR_BUFF_ERROR;
+      break;
+    }
+    ObtainSemaphore(&db->db_ReadListSem);
+    Disable();
+    {
+      struct Node *bn, *bnext;
+      for (bn = batch->lh_Head; bn->ln_Succ; bn = bnext) {
+        struct IOSana2Req *br = (struct IOSana2Req *)bn;
+        struct BufferManagement *bbm =
+            (struct BufferManagement *)br->ios2_BufferManagement;
+        bnext = bn->ln_Succ;
+        if (bbm) {
+          br->ios2_Req.io_Flags &= ~SANA2IOF_QUICK;
+          br->ios2_Req.io_Error = S2ERR_NO_ERROR;
+          Remove(bn);
+          AddHead((struct List *)&bbm->bm_ReadList, bn);
+        }
+        /* A request without buffer management is dropped from the
+         * batch (the list is emptied either way, per the contract). */
+        else {
+          Remove(bn);
+          br->ios2_Req.io_Error = S2ERR_BAD_ARGUMENT;
+          br->ios2_WireError = S2WERR_BUFF_ERROR;
+          ReplyMsg((struct Message *)br);
+        }
+      }
+    }
+    Enable();
+    ReleaseSemaphore(&db->db_ReadListSem);
+    break;
+  }
+
+  case ANXD_CMD_RX_POLL:
+    /* KTD6: the single-frame serial-acknowledge window cannot hold a
+     * frame for a late read — withholding the ack stalls ALL reception
+     * while the firmware backlog fills. The honest answer is
+     * not-supported; the opener stops sending it. */
+    ioreq->ios2_Req.io_Error = S2ERR_NOT_SUPPORTED;
+    ioreq->ios2_WireError = S2WERR_GENERIC_ERROR;
+    break;
+
+  case ANXD_CMD_RX_CAPACITY:
+    /* KTD6: 0 — "no limit worth stating" — until U2's saturation blast
+     * proves the firmware does NOT pause the wire; if drops accumulate
+     * without pause, this becomes the measured backlog bytes (OQ2). */
+    ioreq->ios2_DataLength = 0;
+    break;
   case S2_GETSTATIONADDRESS:
     memcpy(ioreq->ios2_SrcAddr, HW_MAC, HW_ADDRFIELDSIZE); /* current */
     memcpy(ioreq->ios2_DstAddr, HW_MAC, HW_ADDRFIELDSIZE); /* default */
