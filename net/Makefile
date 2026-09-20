@@ -15,7 +15,14 @@ CPU     = 68020
 
 SOURCES = deviceheader.c deviceinit.c device.c
 
-# DEVICEVERSION/DEVICEREVISION/DEVICEDATE come from version.h (HAVE_VERSION_H).
+# U7 flag matrix (KTD9): the shipped set must build on the CI image
+# (sacredbanana/amiga-compiler, GCC 6.5, no -mlra). The candidates below
+# all build on amigadev/crosstools:m68k-amigaos-gcc10 and are A/B-measured
+# on the target before any ships (docs/plans/...-plan.md U7):
+#   -O3 -fomit-frame-pointer
+#   -O2 -mlra -fomit-frame-pointer          (gcc10 only)
+#   -O3 -mlra -fomit-frame-pointer -mtune=68060  (gcc10 only)
+
 CFLAGS  = -m$(CPU) -mtune=68020-60 -msoft-float -O2 \
           -Wall -Wextra -Wno-unused-parameter -Wno-pointer-sign \
           -fomit-frame-pointer \
