@@ -25,6 +25,7 @@ sd-boot/boot-rom/boot.bin
 ZZDiag/ZZDiag
 net/ZZ9000Net.device.68000
 net/ZZNetStats/ZZNetStats
+net/ZZNetBench/ZZNetBench
 *.datatype
 sdk/work/
 sdk/out/
@@ -36,6 +37,7 @@ installer/ZZ9000Installer/Tools/ZZTop
 installer/ZZ9000Installer/Tools/ZZScanlines
 installer/ZZ9000Installer/Tools/ZZFwUpdate
 installer/ZZ9000Installer/Tools/ZZNetStats
+installer/ZZ9000Installer/Tools/ZZNetBench
 installer/ZZ9000Installer/Tools/ZZDiag
 installer/ZZ9000Installer/Tools/zz9k-info
 installer/ZZ9000Installer/Tools/zz9k-services
