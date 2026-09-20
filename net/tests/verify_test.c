@@ -79,24 +79,21 @@ static int build_ip_tcp(UBYTE *buf, int tcp_payload_len, UWORD flags,
             buf[ip_hl + tcp_hl + i] = (UBYTE)(0x40 + i);
     }
 
-    /* TCP checksum: pseudo-header + segment */
+    /* TCP checksum: pseudo-header + segment, ones-complement combined
+     * (s2 is already the complement — see the builder comment). */
     {
         UBYTE ph[12];
-        ULONG sum;
+        UWORD phc, segc;
+        ULONG s2;
         put32(ph, 0, 0x0a000001);
         put32(ph, 4, 0x0a000002);
         ph[8] = 0; ph[9] = 6;
         put16(ph, 10, (UWORD)(total - ip_hl));
-        sum = ((ULONG)csum(ph, 12) << 16) >> 16; /* keep 16-bit */
-        /* combine via ones-complement addition of both complements */
-        {
-            UWORD phc = csum(ph, 12);            /* complement of pseudo sum */
-            UWORD segc = csum(buf + ip_hl, total - ip_hl); /* compl. of segment (csum field 0) */
-            ULONG s2 = (ULONG)phc + (ULONG)segc;
-            while (s2 >> 16) s2 = (s2 & 0xffff) + (s2 >> 16);
-            put16(buf, ip_hl + 16, (UWORD)s2);   /* TCP checksum: s2 is already the complement */
-        }
-        (void)sum;
+        phc = csum(ph, 12);
+        segc = csum(buf + ip_hl, total - ip_hl);
+        s2 = (ULONG)phc + (ULONG)segc;
+        while (s2 >> 16) s2 = (s2 & 0xffff) + (s2 >> 16);
+        put16(buf, ip_hl + 16, (UWORD)s2);
     }
     put16(buf, 10, csum(buf, ip_hl)); /* IP header checksum */
     return total;
@@ -186,11 +183,19 @@ int main(void) {
 
     /* ACK+PSH continuation is allowed. */
     memset(&cont, 0, sizeof(cont));
-    build_ip_tcp(pkt, 16, 0x10, 1000, 5, 8000, 5);
+    build_ip_tcp(pkt, 16, 0x18 /*ACK+PSH*/, 1000, 5, 8000, 5);
     (void)zznet_rx_flags(pkt, (ULONG)len, &cont, 1);
     build_ip_tcp(pkt, 16, 0x18 /*ACK+PSH*/, 1016, 5, 8000, 5);
     flags = zznet_rx_flags(pkt, (ULONG)len, &cont, 1);
-    CHECK(flags & ANXD_S2_RXF_CONTINUES, "ACK+PSH chain allowed");
+    CHECK(flags & ANXD_S2_RXF_CONTINUES, "same-flags ACK+PSH chain allowed");
+    /* Flags change (ACK -> ACK+PSH): the contract requires the SAME
+     * flags on both segments — no chain. */
+    build_ip_tcp(pkt, 16, 0x18, 1000, 5, 8000, 5);
+    memset(&cont, 0, sizeof(cont));
+    (void)zznet_rx_flags(pkt, (ULONG)len, &cont, 1);
+    build_ip_tcp(pkt, 16, 0x10, 1032, 5, 8000, 5);
+    flags = zznet_rx_flags(pkt, (ULONG)len, &cont, 1);
+    CHECK(!(flags & ANXD_S2_RXF_CONTINUES), "flags change breaks chain (contract: same flags)");
 
     /* TCP options (data offset 6): no CONTINUES. */
     memset(&cont, 0, sizeof(cont));

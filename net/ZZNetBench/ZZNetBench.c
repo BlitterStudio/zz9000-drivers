@@ -1,21 +1,15 @@
 /*
  * ZZNetBench — raw SANA-II throughput benchmark for ZZ9000Net.device.
  *
- * Modes:
- *   RX   post a depth of RAW CMD_READs, refill from replies, run N
- *        seconds, report Mbit/s + frames + SANA-II counter deltas.
- *        Measures the staging fallback path (the direct path refuses
- *        raw requests).
- *   RXD  negotiated-hook mode: offers the AmiNetXDuo extension pair
- *        (anxs2ext.h) and counts payload bytes delivered through the
- *        direct drain. This is the number the F3 gate reads (KTD8).
- *   TX   blast CMD_WRITEs of a size argument through a bounded
- *        in-flight window replenished from replies (KTD3 liveness:
- *        the final parked request must complete).
- *   BUS  one-time environment constants: bulk MMIO read bandwidth
- *        (repeated reads of the live RX window header) and write
- *        bandwidth (TX window writes without kicks). Recorded beside
- *        every matrix row for KTD10's yardstick.
+ * Modes (single-request pipeline in every mode — one IOSana2Req
+ * re-issued synchronously; see the caveat in run_rx):
+ *   RX   raw-mode receive loop (staging fallback path; the direct
+ *        path refuses raw requests)
+ *   RXD  negotiated-hook receive through the AmiNetXDuo extension
+ *        pair — the number the F3 gate reads (KTD8)
+ *   TX   transmit loop — verify on a receiver (KTD8); no FPGA TX
+ *        counter exists to cross-check locally
+ *   BUS  32-bit MMIO read-rate constant (KTD10 yardstick)
  *
  * A run counts only when the Overrun delta is ~0 and (KTD8) a
  * sender-side rate belongs beside every RX number on the peer; this
@@ -180,7 +174,7 @@ static ULONG elapsed_us(const struct timeval *from)
     struct timeval now;
     GetSysTime(&now);
     return (ULONG)(now.tv_secs - from->tv_secs) * 1000000UL +
-           (ULONG)(now.tv_micro - from->tv_micro);
+           (ULONG)((LONG)now.tv_micro - (LONG)from->tv_micro);
 }
 
 /* Mbit/s scaled by 100, from bytes and elapsed microseconds:
@@ -243,7 +237,6 @@ static void run_rx(int secs, int depth, int hook_mode)
      * request-to-completion pipeline including BeginIO/DoIO overhead —
      * the honest caveat printed below. AmiNetXDuo's batched path is
      * deliberately NOT used here (KTD8: raw layer = driver ceiling). */
-    (void)depth;
 
     printf("rx%s: secs=%d (single-request pipeline)\n",
            hook_mode ? "d" : "", secs);
@@ -285,7 +278,7 @@ static void run_rx(int secs, int depth, int hook_mode)
 
 static UBYTE g_txbuf[ZZ_BENCH_MAX_FRAME];
 
-static void run_tx(int secs, int size, int inflight_max)
+static void run_tx(int secs, int size)
 {
     struct timeval t0;
     ULONG frames = 0;
@@ -296,7 +289,7 @@ static void run_tx(int secs, int size, int inflight_max)
     snapshot_before();
     GetSysTime(&t0);
 
-    printf("tx: size=%d inflight=%d secs=%d\n", size, inflight_max, secs);
+    printf("tx: size=%d secs=%d (single-request pipeline)\n", size, secs);
     while (elapsed_us(&t0) < (ULONG)secs * 1000000UL) {
         g_ios2->ios2_Req.io_Command = CMD_WRITE;
         g_ios2->ios2_Req.io_Flags   = SANA2IOF_RAW;
@@ -408,7 +401,7 @@ int main(int argc, char **argv)
                (unsigned long)g_hook_frames, g_hook_flags_seen);
     } else if (!strcmp(argv[1], "TX")) {
         int size = (argc >= 4) ? atoi(argv[3]) : ZZ_BENCH_DEF_SIZE;
-        run_tx(secs, size, ZZ_BENCH_DEF_DEPTH);
+        run_tx(secs, size);
     } else {
         usage();
         rc = 20;

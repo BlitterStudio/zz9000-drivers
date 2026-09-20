@@ -84,37 +84,23 @@ ULONG rxv_empty_slot = 0;
 
 /* issue #29 residual-stall ACK probe (diagnostic).
  *
- * The residual stall is a TCP send-side wedge: the Amiga stops advancing
- * snd_una on an UPLOAD. The live monitor proved the card keeps delivering
- * inbound frames with zero loss during the wedge, so the open question is
- * whether the server's advancing cumulative ACK actually reaches the stack.
+ * We parse the TCP headers of the inbound (server -> Amiga, src port
+ * 445) SMB connection from the exact staged bytes handed to the stack
+ * in read_frame: the server's cumulative ACK = how far the server has
+ * received the Amiga's upload.
  *
- * We parse the TCP headers of the SMB (port 445) connection from the exact
- * bytes on each side of the SANA-II boundary:
- *   - inbound (server -> Amiga, src port 445): the server's cumulative ACK
- *     = how far the server has received the Amiga's upload. Parsed from the
- *     staged copy handed to the stack in read_frame.
- *   - outbound (Amiga -> server, dst port 445): the Amiga's own send seq,
- *     parsed from the staged TX-window frame in write_frame.
- *
- * DECISIVE read at the stall: if the Amiga keeps (re)transmitting at a seq
- * BELOW the server's cumulative ACK (rxv_tx_seq < rxv_srv_ack), it is
- * resending data the server has already acknowledged -> the stack is
- * ignoring a valid ACK (send-side / stack bug), NOT the card dropping it.
- * If instead rxv_srv_ack never reaches rxv_tx_seq_max, the server never
- * confirmed that data -> a genuine delivery gap to chase card-side. */
+ * Read at a stall: if the server's cumulative ACK (rxv_srv_ack) keeps
+ * advancing while the upload still stalls, the ACKs ARE reaching the
+ * Amiga — the stall is stack-side send handling, not card loss. (The
+ * outbound half of this probe — the Amiga's own send seq — was retired
+ * with the synchronous TX path; the stack in use, AmiNetXDuo, does not
+ * exhibit the Roadshow retransmit bug this diagnosed.) */
 volatile ULONG rxv_srv_ack     = 0;   /* last server cumulative ack (in, src 445) */
 volatile ULONG rxv_srv_ack_upd = 0;   /* # times srv ack advanced forward         */
 volatile ULONG rxv_p445_in     = 0;   /* inbound TCP frames parsed (src 445)       */
-volatile ULONG rxv_tx_seq      = 0;   /* last outbound seq (out, dst 445)          */
-volatile ULONG rxv_tx_seq_max  = 0;   /* highest outbound seq+payload (dst 445)    */
-volatile ULONG rxv_p445_out    = 0;   /* outbound TCP frames parsed (dst 445)      */
 #define ZZSS_RX_SRV_ACK      0x5A5A0022UL
 #define ZZSS_RX_SRV_ACK_UPD  0x5A5A0023UL
 #define ZZSS_RX_P445_IN      0x5A5A0024UL
-#define ZZSS_RX_TX_SEQ       0x5A5A0025UL
-#define ZZSS_RX_TX_SEQ_MAX   0x5A5A0026UL
-#define ZZSS_RX_P445_OUT     0x5A5A0027UL
 
 /* Minimal, bounds-checked IPv4/TCP header parse over `ip` (the IP header),
  * `len` bytes available. Reads byte-wise through a volatile pointer so it is
@@ -395,6 +381,9 @@ SAVEDS LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
       NEWLIST(&bm->bm_ReadList);
 
       ioreq->ios2_BufferManagement = (VOID *)bm;
+      ioreq->ios2_Req.io_Error = 0;
+      ioreq->ios2_Req.io_Unit = (struct Unit *)unit;
+      ioreq->ios2_Req.io_Device = (struct Device *)db;
       if (!first_open) {
         /* Secondary opener — hardware and worker process are already up.
          * Defensive: explicitly verify first-open init actually completed
@@ -417,13 +406,14 @@ SAVEDS LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
       memset(&global_stats, 0, sizeof(global_stats));
       NEWLIST((struct List*)&db->db_Openers);
       InitSemaphore(&db->db_ReadListSem);
+      NEWLIST((struct List*)&db->db_TXList);
+      InitSemaphore(&db->db_TXSem);
       /* Reset the file-scope diagnostic counters alongside global_stats so a
        * close/reopen presents a consistent baseline: S2_GETGLOBALSTATS starts
        * from zero here, and S2_GETSPECIALSTATS (RxEmptySlot) must too, else it
        * would report totals accumulated across previous device sessions. */
       rxv_empty_slot = 0;
       rxv_srv_ack = rxv_srv_ack_upd = rxv_p445_in = 0;
-      rxv_tx_seq = rxv_tx_seq_max = rxv_p445_out = 0;
 
       struct ProcInit init;
       struct MsgPort *port;
@@ -533,15 +523,19 @@ SAVEDS LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
 	if (ok) {
 		ret = 0;
     db->db_Lib.lib_Flags &= ~LIBF_DELEXP;
-    /* Register the opener now that open fully succeeded (the first-open
-     * path NEWLISTed db_Openers above; a failed open never registers, so
-     * its BM is simply freed by the caller-side error handling below). */
+    /* Register the opener now that open fully succeeded. */
     ObtainSemaphore(&db->db_ReadListSem);
     AddTail((struct List*)&db->db_Openers, (struct Node*)&bm->bm_Node);
     ReleaseSemaphore(&db->db_ReadListSem);
 	}
 
 	if (ret == IOERR_OPENFAIL) {
+		/* A failed open's BufferManagement is ours to free (the
+		 * secondary-open rejection already freed its own above). */
+		if (bm && ioreq->ios2_BufferManagement == (VOID *)bm) {
+			FreeVec(bm);
+			ioreq->ios2_BufferManagement = NULL;
+		}
 		ioreq->ios2_Req.io_Unit   = (0);
 		ioreq->ios2_Req.io_Device = (0);
 		ioreq->ios2_Req.io_Error  = ret;
@@ -630,6 +624,9 @@ SAVEDS BPTR DevClose(   ASMR(a1) struct IORequest *ioreq        ASMREG(a1),
 			s2->ios2_BufferManagement = NULL;
 		}
 	}
+
+	db->db_Lib.lib_OpenCnt--;
+
   if (db->db_Lib.lib_OpenCnt == 0) {
     /* Last opener gone: reply-abort every parked write before the
      * worker exits (KTD11) — frame_proc's exit must not strand them. */
@@ -727,6 +724,8 @@ static int zznet_tx_write(DEVBASETYPE *db, struct IOSana2Req *req);
 
 ULONG read_frame(DEVBASETYPE *db, struct IOSana2Req *req, volatile UBYTE *frame, USHORT sz, USHORT tp, UBYTE *pre_staged);
 
+static void zznet_rx_unpin(DEVBASETYPE *db, struct BufferManagement *bm);
+static void zznet_cont_reset_all(DEVBASETYPE *db);
 SAVEDS VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
                             ASMR(a6) DEVBASEP                       ASMREG(a6) )
 {
@@ -800,16 +799,7 @@ SAVEDS VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
     is_online = TRUE;
     /* KTD5: an offline-online transition invalidates every opener's
      * continuation record. */
-    {
-      struct BufferManagement *cbm;
-      ObtainSemaphore(&db->db_ReadListSem);
-      for (cbm = (struct BufferManagement *)db->db_Openers.lh_Head;
-           cbm->bm_Node.mln_Succ;
-           cbm = (struct BufferManagement *)cbm->bm_Node.mln_Succ) {
-        cbm->bm_Cont.c_valid = 0;
-      }
-      ReleaseSemaphore(&db->db_ReadListSem);
-    }
+    zznet_cont_reset_all(db);
     break;
   case S2_OFFLINE:
     is_online = FALSE;
@@ -912,9 +902,6 @@ SAVEDS VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
         if (n < max) { rec[n].Type = ZZSS_RX_P445_IN;    rec[n].Count = rxv_p445_in;      rec[n].String = (char*)"P445In";     n++; }
         if (n < max) { rec[n].Type = ZZSS_RX_SRV_ACK;    rec[n].Count = rxv_srv_ack;      rec[n].String = (char*)"SrvAck";     n++; }
         if (n < max) { rec[n].Type = ZZSS_RX_SRV_ACK_UPD;rec[n].Count = rxv_srv_ack_upd;  rec[n].String = (char*)"SrvAckUpd";  n++; }
-        if (n < max) { rec[n].Type = ZZSS_RX_P445_OUT;   rec[n].Count = rxv_p445_out;     rec[n].String = (char*)"P445Out";    n++; }
-        if (n < max) { rec[n].Type = ZZSS_RX_TX_SEQ;     rec[n].Count = rxv_tx_seq;       rec[n].String = (char*)"TxSeq";      n++; }
-        if (n < max) { rec[n].Type = ZZSS_RX_TX_SEQ_MAX; rec[n].Count = rxv_tx_seq_max;   rec[n].String = (char*)"TxSeqMax";   n++; }
         s2ssh->RecordCountSupplied = n;
       }
     }
@@ -1066,10 +1053,6 @@ static ULONG zznet_mmio_read_sum(volatile UBYTE *src, UBYTE *dst, ULONG n)
  * Byte-wise shift-and-OR loads used to cost two MMIO cycles each. Word
  * reads are a single bus cycle on a word-aligned address, which roughly
  * halves the per-packet overhead on Zorro. */
-
-static inline USHORT zznet_read_word(volatile UBYTE *frame, ULONG offset) {
-	return *(volatile USHORT*)(frame + offset);
-}
 
 /* Fetch [size:2][serial:2] in one bus cycle on Z3 (32-bit) — the two
  * values always move together and live in adjacent words, so there is
@@ -1277,16 +1260,25 @@ ULONG read_frame(DEVBASETYPE *db, struct IOSana2Req *req, volatile UBYTE *frame,
 	return err;
 }
 
-/* Stage a write's bytes into a TX slot (KTD3). Same shape as the old
- * synchronous path — header build for cooked frames, then the opener's
- * copy hook moves the payload — but the destination is Fast RAM, so
- * the caller's task pays a RAM-speed copy instead of Zorro-cycle MMIO
- * writes; the drainer feeds the window later. Returns the total frame
- * size (0 = nothing to send), or (USHORT)-1 on copy failure. */
+/* Stage a write's bytes (KTD3): header build for cooked frames, then
+ * the opener's copy hook moves the payload — into a TX slot (Fast RAM,
+ * for parked writes) or straight into the FPGA window (the inline fast
+ * path). A size policy up front rejects oversized lengths before they
+ * can overflow either destination. Returns the total frame size
+ * (0 = nothing to send), or (USHORT)-1 on rejection/copy failure. */
 static USHORT zznet_tx_stage(struct IOSana2Req *req, UBYTE *slot)
 {
 	struct BufferManagement *bm;
 	USHORT sz;
+
+	/* Size policy (mirror of read_frame's): MTU-conformant stacks never
+	 * hit this, but a buggy opener's oversized DataLength must not
+	 * overflow the 1538-byte staging slot (or the FPGA window). */
+	if (req->ios2_DataLength >
+	    ((req->ios2_Req.io_Flags & SANA2IOF_RAW) ? (ULONG)HW_ETH_MAX_RAW
+	                                             : (ULONG)HW_ETH_MTU)) {
+		return (USHORT)-1;
+	}
 
 	if (req->ios2_Req.io_Flags & SANA2IOF_RAW) {
 		sz = req->ios2_DataLength;
@@ -1344,7 +1336,9 @@ static ULONG zznet_tx_kick(DEVBASETYPE *db, const UBYTE *slot, USHORT sz)
 }
 
 /* Complete a sent write: status into the request's error fields (AE3),
- * wire counter, reply. Caller holds db_TXSem. */
+ * wire counter, reply with DevTermIO's QUICK semantics — a caller that
+ * submitted via DoIO left IOF_QUICK set and skips WaitIO, so an
+ * unconditional ReplyMsg would strand the reply on its port. */
 static void zznet_tx_complete(DEVBASETYPE *db, struct IOSana2Req *req,
                               ULONG rc)
 {
@@ -1356,7 +1350,7 @@ static void zznet_tx_complete(DEVBASETYPE *db, struct IOSana2Req *req,
 		req->ios2_WireError    = 0;
 		global_stats.PacketsSent++;
 	}
-	ReplyMsg((struct Message *)req);
+	DevTermIO(db, (struct IORequest *)req);
 }
 
 /* Drain parked writes: feed the window from TX slots while the list is
@@ -1398,11 +1392,11 @@ static void zznet_tx_drain(DEVBASETYPE *db)
 }
 
 /* CMD_WRITE entry (KTD3). Drain first (the BeginIO-entry trigger), then
- * either send inline when the pipe is empty — identical cost and
- * semantics to the old synchronous path — or stage into a free slot and
- * park. Returns 0 when the request was sent or parked (completion is
- * asynchronous), nonzero on immediate failure (the request is already
- * completed with an error). */
+ * either send inline when the pipe is empty — the opener's copy hook
+ * writes straight into the FPGA window, exactly one payload copy like
+ * the old synchronous path — or stage into a free slot and park.
+ * Returns 0 when the request was sent or parked, nonzero on immediate
+ * failure (the request is already completed with an error). */
 static int zznet_tx_write(DEVBASETYPE *db, struct IOSana2Req *req)
 {
 	int rc = 0;
@@ -1412,39 +1406,47 @@ static int zznet_tx_write(DEVBASETYPE *db, struct IOSana2Req *req)
 
 	ObtainSemaphore(&db->db_TXSem);
 	empty = !db->db_TXList.lh_Head->ln_Succ ? 1 : 0;
-	if (empty) {
-		/* Fast path: stage through slot 0 as scratch, kick, complete —
-		 * one RAM copy plus the MMIO cycle pair, under the sem. */
-		USHORT sz = zznet_tx_stage(req, db->db_TxSlots);
+	if (empty || !db->db_TxSlots) {
+		/* Fast path: header + payload copy straight into the TX
+		 * window (one payload copy, the old path's cost — and the
+		 * no-slots fallback for Fast-RAM-less machines), then kick
+		 * and complete. Runs under the sem so the window copy
+		 * cannot interleave with a drain. */
+		UBYTE *window = (UBYTE *)(ZZ9K_REGS + ZZ9K_TX);
+		USHORT sz = zznet_tx_stage(req, window);
 		if (sz == (USHORT)-1) {
+			zznet_tx_complete(db, req, 1);
 			rc = 1;
 		} else if (sz == 0) {
-			rc = 0; /* nothing to send: complete below, no error */
+			/* Nothing to send: complete immediately, no error. */
 			req->ios2_Req.io_Error = 0;
 			req->ios2_WireError = 0;
-			ReplyMsg((struct Message *)req);
+			DevTermIO(db, (struct IORequest *)req);
+			rc = 0;
 		} else {
-			ULONG st = zznet_tx_kick(db, db->db_TxSlots, sz);
+			ULONG st = zznet_tx_kick(db, window, sz);
 			zznet_tx_complete(db, req, st);
 		}
 	} else {
-		/* Pipe busy: park. No free slot means the burst outran four
-		 * slots — fail this write rather than block BeginIO (the same
-		 * visible error as the old NO_RESOURCES path). */
+		/* Pipe busy: park into a free staging slot. No free slot
+		 * means the burst outran four slots — fail this write
+		 * rather than block BeginIO (the old NO_RESOURCES error). */
 		int i;
 		for (i = 0; i < ZZNET_TX_SLOTS; i++) {
 			if (!db->db_TxSlotReq[i]) break;
 		}
 		if (i == ZZNET_TX_SLOTS) {
+			zznet_tx_complete(db, req, 1);
 			rc = 1;
 		} else {
 			USHORT sz = zznet_tx_stage(req, db->db_TxSlots + (ULONG)i * ZZNET_TX_STAGE_SIZE);
 			if (sz == (USHORT)-1) {
+				zznet_tx_complete(db, req, 1);
 				rc = 1;
 			} else if (sz == 0) {
 				req->ios2_Req.io_Error = 0;
 				req->ios2_WireError = 0;
-				ReplyMsg((struct Message *)req);
+				DevTermIO(db, (struct IORequest *)req);
 			} else {
 				db->db_TxSlotReq[i] = req;
 				req->ios2_Req.io_Flags &= ~SANA2IOF_QUICK;
@@ -1456,6 +1458,33 @@ static int zznet_tx_write(DEVBASETYPE *db, struct IOSana2Req *req)
 	ReleaseSemaphore(&db->db_TXSem);
 
 	return rc;
+}
+
+/* Unpin an opener record after a delivered request (KTD11): always
+ * decrement; free only a closing record whose last pin just dropped. */
+static void zznet_rx_unpin(DEVBASETYPE *db, struct BufferManagement *bm)
+{
+	ObtainSemaphore(&db->db_ReadListSem);
+	if (--bm->bm_InUse == 0 && bm->bm_Closing) {
+		ReleaseSemaphore(&db->db_ReadListSem);
+		FreeVec(bm);
+	} else {
+		ReleaseSemaphore(&db->db_ReadListSem);
+	}
+}
+
+/* KTD5: invalidate every opener's continuation record — run on a serial
+ * gap/overrun and on the offline-online transition. */
+static void zznet_cont_reset_all(DEVBASETYPE *db)
+{
+	struct BufferManagement *cbm;
+	ObtainSemaphore(&db->db_ReadListSem);
+	for (cbm = (struct BufferManagement *)db->db_Openers.lh_Head;
+	     cbm->bm_Node.mln_Succ;
+	     cbm = (struct BufferManagement *)cbm->bm_Node.mln_Succ) {
+		cbm->bm_Cont.c_valid = 0;
+	}
+	ReleaseSemaphore(&db->db_ReadListSem);
 }
 
 SAVEDS void frame_proc() {
@@ -1616,14 +1645,7 @@ SAVEDS void frame_proc() {
          * continuation record — a later CONTINUES would chain segments
          * across a loss boundary. */
         if (delta > 1) {
-          struct BufferManagement *cbm;
-          ObtainSemaphore(&db->db_ReadListSem);
-          for (cbm = (struct BufferManagement *)db->db_Openers.lh_Head;
-               cbm->bm_Node.mln_Succ;
-               cbm = (struct BufferManagement *)cbm->bm_Node.mln_Succ) {
-            cbm->bm_Cont.c_valid = 0;
-          }
-          ReleaseSemaphore(&db->db_ReadListSem);
+          zznet_cont_reset_all(db);
         }
       }
       have_baseline = TRUE;
@@ -1680,24 +1702,30 @@ SAVEDS void frame_proc() {
 
           if (dst) {
             ULONG sum;
+            ULONG m0 = *(volatile ULONG *)(frm + 4);
+            ULONG m1 = *(volatile ULONG *)(frm + 8);
+            ULONG m2 = *(volatile ULONG *)(frm + 12);
 
             /* The link header, written at the 14 bytes the opener
-             * reserved before the payload, instead of taken apart and
-             * re-synthesised (anxs2ext.h). */
+             * reserved before the payload, from the header longwords
+             * already read (three bus cycles, not fourteen byte reads),
+             * with the ethertype from the already-read packet_type. */
             if (xe->xe_RxLinkHdr) {
-              int li;
-              for (li = 0; li < HW_ETH_HDR_SIZE; li++) {
-                dst[li - HW_ETH_HDR_SIZE] = frm[4 + li];
-              }
+              UBYTE *h = dst - HW_ETH_HDR_SIZE;
+              h[0]  = (UBYTE)(m0 >> 24); h[1]  = (UBYTE)(m0 >> 16);
+              h[2]  = (UBYTE)(m0 >> 8);  h[3]  = (UBYTE)m0;
+              h[4]  = (UBYTE)(m1 >> 24); h[5]  = (UBYTE)(m1 >> 16);
+              h[6]  = (UBYTE)(m1 >> 8);  h[7]  = (UBYTE)m1;
+              h[8]  = (UBYTE)(m2 >> 24); h[9]  = (UBYTE)(m2 >> 16);
+              h[10] = (UBYTE)(m2 >> 8);  h[11] = (UBYTE)m2;
+              h[12] = (UBYTE)(packet_type >> 8);
+              h[13] = (UBYTE)packet_type;
             }
 
             sum = zznet_mmio_read_sum(frm + 4 + HW_ETH_HDR_SIZE, dst, plen);
 
             /* Request fields exactly as the staging path sets them. */
             {
-              ULONG m0 = *(volatile ULONG *)(frm + 4);
-              ULONG m1 = *(volatile ULONG *)(frm + 8);
-              ULONG m2 = *(volatile ULONG *)(frm + 12);
               USHORT *wd = (USHORT *)req->ios2_DstAddr;
               USHORT *ws = (USHORT *)req->ios2_SrcAddr;
               wd[0] = (USHORT)(m0 >> 16);
@@ -1716,28 +1744,25 @@ SAVEDS void frame_proc() {
             req->ios2_Req.io_Error = req->ios2_WireError = 0;
 
             /* VERIFIED/CONTINUES from the delivered bytes (now in Fast
-             * RAM at dst), gated by the negotiated intersection (KTD5);
-             * the previous-delivered record lives on the opener. */
+             * RAM at dst), gated by the negotiated intersection (KTD5).
+             * An opener that negotiated SUMMED-only verifies itself and
+             * skips the checksum pass entirely. */
             {
-                UBYTE earned = zznet_rx_flags(dst, plen,
-                                               &mbs[0]->bm_Cont, 1);
-                UBYTE delivered = (UBYTE)(ANXD_S2_RXF_SUMMED |
-                    (earned & (xe->xe_RxFlags &
-                               (ANXD_S2_RXF_VERIFIED |
-                                ANXD_S2_RXF_CONTINUES))));
+                UBYTE delivered = ANXD_S2_RXF_SUMMED;
+                if (xe->xe_RxFlags & (ANXD_S2_RXF_VERIFIED |
+                                      ANXD_S2_RXF_CONTINUES)) {
+                    UBYTE earned = zznet_rx_flags(dst, plen,
+                                                   &mbs[0]->bm_Cont, 1);
+                    delivered |= (UBYTE)(earned & (xe->xe_RxFlags &
+                                     (ANXD_S2_RXF_VERIFIED |
+                                      ANXD_S2_RXF_CONTINUES)));
+                }
                 ((AnxdS2RxFilled)xe->xe_RxFilled)(req->ios2_Data, plen,
                                                   sum, delivered);
             }
             ReplyMsg((struct Message *)req);
 
-            /* Unpin (KTD11). */
-            ObtainSemaphore(&db->db_ReadListSem);
-            if (mbs[0]->bm_Closing && --mbs[0]->bm_InUse == 0) {
-              ReleaseSemaphore(&db->db_ReadListSem);
-              FreeVec(mbs[0]);
-            } else {
-              ReleaseSemaphore(&db->db_ReadListSem);
-            }
+            zznet_rx_unpin(db, mbs[0]);
 
             global_stats.PacketsReceived++;
           } else {
@@ -1749,15 +1774,36 @@ SAVEDS void frame_proc() {
         staging: {
           UBYTE *staged = NULL;
           int any_ok = 0;
+          int any_cooked = 0;
 
-          if (db->db_RxStage && sz > HW_ETH_HDR_SIZE) {
+          /* Lazy staging (KTD8/perf): pass the shared staged payload only
+           * when at least one cooked recipient exists, and deliver cooked
+           * recipients BEFORE raw ones — a raw read_frame re-stages the
+           * full frame into db_RxStage, which would clobber the payload
+           * image a later cooked recipient still needs. */
+          for (i = 0; i < nmatch; i++) {
+            if (!(reqs[i]->ios2_Req.io_Flags & SANA2IOF_RAW)) {
+              any_cooked = 1;
+              break;
+            }
+          }
+          if (any_cooked && db->db_RxStage && sz > HW_ETH_HDR_SIZE) {
             staged = zznet_mmio_read_block(
                 frm + 4 + HW_ETH_HDR_SIZE, db->db_RxStage,
                 (ULONG)sz - HW_ETH_HDR_SIZE);
           }
 
-          for (i = 0; i < nmatch; i++) {
-            ULONG res = read_frame(db, reqs[i], frm, sz, packet_type, staged);
+          /* Cooked recipients first (shared staged payload), raw after. */
+          for (i = 0; i < nmatch * 2; i++) {
+            int idx = (i < nmatch)
+                ? i                       /* first pass: cooked */
+                : (i - nmatch);           /* second pass: raw */
+            ULONG res;
+            if ((i < nmatch) ==
+                ((reqs[idx]->ios2_Req.io_Flags & SANA2IOF_RAW) != 0)) {
+              continue; /* wrong pass for this recipient */
+            }
+            res = read_frame(db, reqs[idx], frm, sz, packet_type, staged);
             if (res == 0) {
               any_ok = 1;
             } else {
@@ -1765,19 +1811,18 @@ SAVEDS void frame_proc() {
                * the caller learns the request failed instead of leaving
                * it on a now-dangling list entry. */
               D(("RERR %ld\n", res));
-              global_stats.UnknownTypesReceived++;
             }
-            ReplyMsg((struct Message *)reqs[i]);
+            ReplyMsg((struct Message *)reqs[idx]);
+
+            /* A staged delivery is the opener's immediately-preceding
+             * frame: its continuation record cannot describe it (no
+             * verified direct drain), so the next CONTINUES must not
+             * chain across it (KTD5 / the published contract). */
+            mbs[idx]->bm_Cont.c_valid = 0;
 
             /* Unpin (KTD11): a closing opener's record is freed when the
              * last pinned request is replied. */
-            ObtainSemaphore(&db->db_ReadListSem);
-            if (mbs[i]->bm_Closing && --mbs[i]->bm_InUse == 0) {
-              ReleaseSemaphore(&db->db_ReadListSem);
-              FreeVec(mbs[i]);
-            } else {
-              ReleaseSemaphore(&db->db_ReadListSem);
-            }
+            zznet_rx_unpin(db, mbs[idx]);
           }
 
           /* Wire-level counter: once per wire frame, not per delivery

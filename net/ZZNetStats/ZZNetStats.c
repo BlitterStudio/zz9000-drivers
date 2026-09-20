@@ -107,10 +107,10 @@ struct ackprobe {
     ULONG p445_in;      /* inbound TCP frames from server (src 445)   */
     ULONG srv_ack;      /* server's cumulative ack of the Amiga's data */
     ULONG srv_ack_upd;  /* # times srv_ack advanced                    */
-    ULONG p445_out;     /* outbound TCP frames to server (dst 445)     */
-    ULONG tx_seq;       /* Amiga's last send seq                       */
-    ULONG tx_seq_max;   /* highest send seq+payload the Amiga reached  */
 };
+/* The outbound probe fields (P445Out/TxSeq/TxSeqMax) were retired with
+ * the synchronous TX path; older devices still return them, so the
+ * fetch keeps matching them harmlessly but the fields are dropped. */
 
 /* Fetch all special-stat records once and extract the ACK-probe fields by
  * name. Missing records stay 0 (older device without the probe). */
@@ -140,9 +140,6 @@ static void fetch_ackprobe(struct IOSana2Req *req, struct ackprobe *out)
         else if (!strcmp(s, "P445In"))      out->p445_in     = c;
         else if (!strcmp(s, "SrvAck"))      out->srv_ack     = c;
         else if (!strcmp(s, "SrvAckUpd"))   out->srv_ack_upd = c;
-        else if (!strcmp(s, "P445Out"))     out->p445_out    = c;
-        else if (!strcmp(s, "TxSeq"))       out->tx_seq      = c;
-        else if (!strcmp(s, "TxSeqMax"))    out->tx_seq_max  = c;
     }
 }
 
@@ -157,11 +154,9 @@ static int monitor_loop(struct IOSana2Req *req, LONG secs)
     if (secs < 1) secs = 1;
 
     printf("# ZZNetStats MONITOR (every %lds) — Ctrl-C to stop\n", (long)secs);
-    printf("# ACK probe: at the stall, TxSeq < SrvAck  ==>  the stack is\n");
-    printf("#   retransmitting already-acked data (send-side/stack bug),\n");
-    printf("#   NOT the card dropping the ACK. P445In climbing + SrvAck\n");
-    printf("#   pinned = the server's ACK is reaching the stack.\n");
-    printf("# n Rx Tx Empty | P445In SrvAck SrvAckUpd P445Out TxSeq TxSeqMax | FwRdy\n");
+    printf("# ACK probe: P445In climbing + SrvAck pinned = the server's\n");
+    printf("#   ACK is reaching the stack while the upload stalls.\n");
+    printf("# n Rx Tx Empty | P445In SrvAck SrvAckUpd | FwRdy\n");
     fflush(stdout);
 
     for (;;) {
@@ -182,8 +177,8 @@ static int monitor_loop(struct IOSana2Req *req, LONG secs)
             fetch_ackprobe(req, &ap);
             if (regs)
                 status = zz9000_read_reg16(regs, ZZ_REG_ETH_RX_STATUS);
-            /* seq/ack numbers in hex so advance/pin is obvious at a glance. */
-            printf("%lu %lu %lu %lu | %lu %08lx %lu %lu %08lx %08lx | %u\n",
+            /* srv_ack in hex so advance/pin is obvious at a glance. */
+            printf("%lu %lu %lu %lu | %lu %08lx %lu | %u\n",
                    (unsigned long)n,
                    (unsigned long)stats.PacketsReceived,
                    (unsigned long)stats.PacketsSent,
@@ -191,18 +186,10 @@ static int monitor_loop(struct IOSana2Req *req, LONG secs)
                    (unsigned long)ap.p445_in,
                    (unsigned long)ap.srv_ack,
                    (unsigned long)ap.srv_ack_upd,
-                   (unsigned long)ap.p445_out,
-                   (unsigned long)ap.tx_seq,
-                   (unsigned long)ap.tx_seq_max,
                    (unsigned)(status & 0x00ff));
             fflush(stdout);
         }
-
         n++;
-
-        /* Ctrl-C breaks out cleanly. */
-        if (SetSignal(0L, SIGBREAKF_CTRL_C) & SIGBREAKF_CTRL_C)
-            break;
         Delay((ULONG)secs * 50);   /* 50 ticks == 1 second */
         if (SetSignal(0L, SIGBREAKF_CTRL_C) & SIGBREAKF_CTRL_C)
             break;

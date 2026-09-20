@@ -32,11 +32,11 @@ struct zznet_tag {
 	ULONG tag;
 	zznet_tag_data data;
 };
-/* Frozen SANA-II buffer-management tag values (S2_Dummy = TAG_USER +
- * 0xB0000). Spelled out so the tests need no sana2.h; net/sana2.h defines
- * the same three and the driver uses either spelling interchangeably. */
-#define ZZNET_S2_CopyToBuff     (0x80000000UL + 0xB0000UL + 1)
-#define ZZNET_S2_CopyFromBuff   (0x80000000UL + 0xB0000UL + 2)
+
+/* Frozen SANA-II buffer-management tag value (S2_Dummy = TAG_USER +
+ * 0xB0000). Spelled out so the tests need no sana2.h; net/sana2.h
+ * defines the same tag and the driver reads the copy hooks through
+ * GetTagData there. */
 #define ZZNET_S2_PacketFilter   (0x80000000UL + 0xB0000UL + 3)
 
 /* Per-opener negotiated extension state. Zeroed at open; filled by
@@ -68,7 +68,8 @@ struct zznet_cont {
     ULONG c_seq_end;   /* previous seq + payload length */
     ULONG c_ack;
     UWORD c_win;
-    UBYTE c_flags;     /* ACK (0x10) or ACK|PSH (0x18) */
+    UBYTE c_flags;     /* predecessor's TCP flags (compared per contract) */
+    UBYTE c_doff;      /* predecessor's TCP data offset (options break chains) */
 };
 
 /*
@@ -138,10 +139,17 @@ static inline int zznet_ext_negotiate(const struct zznet_tag *tags,
 		xe->xe_RxLinkHdr = 1;
 	}
 
-	xe->xe_RxFlags = flags_preload
-		? (UBYTE)(flags_preload & ZZNET_EXT_RXF_SUPPORTED)
-		: (UBYTE)ZZNET_EXT_RXF_SUPPORTED;
-	if (flags_ptr) {
+	/* anxs2ext.h: "Without the tag a device sets SUMMED alone, whatever
+	 * it could have said." A present tag with zero preload asks for
+	 * everything supported ("A zero input retains the first published
+	 * contract and asks for every flag the device supports"); a present
+	 * preload yields the intersection. */
+	if (!flags_ptr) {
+		xe->xe_RxFlags = ANXD_S2_RXF_SUMMED;
+	} else {
+		xe->xe_RxFlags = flags_preload
+			? (UBYTE)(flags_preload & ZZNET_EXT_RXF_SUPPORTED)
+			: (UBYTE)ZZNET_EXT_RXF_SUPPORTED;
 		*flags_ptr = xe->xe_RxFlags;
 	}
 
@@ -281,8 +289,11 @@ static UBYTE zznet_rx_flags(const UBYTE *p, ULONG len,
 		UWORD doff2 = (UWORD)(p[32] >> 4) * 4;
 		UBYTE tfl   = p[33];
 
-		if ((tfl == 0x10 || tfl == 0x18) && /* ACK or ACK+PSH only */
-		    doff2 == 20 &&                   /* no TCP options */
+		/* Published conditions: same flags (ACK or ACK+PSH) and no TCP
+		 * options on BOTH sides — c_doff records the predecessor's. */
+		if ((tfl == 0x10 || tfl == 0x18) &&
+		    cont->c_flags == tfl &&
+		    doff2 == 20 && cont->c_doff == 20 &&
 		    cont->c_seq_end == seq &&
 		    cont->c_ack == ack &&
 		    cont->c_win == win &&
@@ -295,25 +306,32 @@ static UBYTE zznet_rx_flags(const UBYTE *p, ULONG len,
 		}
 	}
 
-	if (update && cont && (p[9] == 6)) {
-		/* Only a verified TCP frame is a useful predecessor; any
-		 * delivery replaces the record (KTD5), so interleaved flows
-		 * break the chain by construction. */
-		UWORD doff2 = (UWORD)(p[32] >> 4) * 4;
-		ULONG seq   = ((ULONG)p[24] << 24) | ((ULONG)p[25] << 16) |
-		              ((ULONG)p[26] << 8)  | (ULONG)p[27];
-		cont->c_valid = 1;
-		cont->c_src[0] = p[12]; cont->c_src[1] = p[13];
-		cont->c_src[2] = p[14]; cont->c_src[3] = p[15];
-		cont->c_dst[0] = p[16]; cont->c_dst[1] = p[17];
-		cont->c_dst[2] = p[18]; cont->c_dst[3] = p[19];
-		cont->c_sport = ((UWORD)p[20] << 8) | p[21];
-		cont->c_dport = ((UWORD)p[22] << 8) | p[23];
-		cont->c_seq_end = seq + (trans_len - doff2);
-		cont->c_ack = ((ULONG)p[28] << 24) | ((ULONG)p[29] << 16) |
-		              ((ULONG)p[30] << 8)  | (ULONG)p[31];
-		cont->c_win = ((UWORD)p[34] << 8) | p[35];
-		cont->c_flags = p[33];
+	if (update && cont) {
+		/* KTD5 + the published contract: the record describes the
+		 * frame delivered IMMEDIATELY before the next one. Every
+		 * delivery replaces it: a non-qualifying frame (non-TCP,
+		 * unverified, options-bearing) clears it, so a later segment
+		 * can never chain across an intervening delivery. */
+		if (p[9] == 6) {
+			UWORD doff2 = (UWORD)(p[32] >> 4) * 4;
+			ULONG seq   = ((ULONG)p[24] << 24) | ((ULONG)p[25] << 16) |
+			              ((ULONG)p[26] << 8)  | (ULONG)p[27];
+			cont->c_valid = (doff2 == 20) ? 1 : 0;
+			cont->c_doff  = (UBYTE)doff2;
+			cont->c_src[0] = p[12]; cont->c_src[1] = p[13];
+			cont->c_src[2] = p[14]; cont->c_src[3] = p[15];
+			cont->c_dst[0] = p[16]; cont->c_dst[1] = p[17];
+			cont->c_dst[2] = p[18]; cont->c_dst[3] = p[19];
+			cont->c_sport = ((UWORD)p[20] << 8) | p[21];
+			cont->c_dport = ((UWORD)p[22] << 8) | p[23];
+			cont->c_seq_end = seq + (trans_len - doff2);
+			cont->c_ack = ((ULONG)p[28] << 24) | ((ULONG)p[29] << 16) |
+			              ((ULONG)p[30] << 8)  | (ULONG)p[31];
+			cont->c_win = ((UWORD)p[34] << 8) | p[35];
+			cont->c_flags = p[33];
+		} else {
+			cont->c_valid = 0;
+		}
 	}
 
 	return out;
