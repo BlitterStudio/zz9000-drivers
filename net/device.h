@@ -39,6 +39,7 @@
 #include <exec/semaphores.h>
 #include "debug.h"
 #include "sana2.h"
+#include "zznet_ext.h"
 
 /* reassign Library bases from global definitions to own struct */
 #define SysBase       db->db_SysBase
@@ -69,7 +70,11 @@ struct devbase {
 	struct Library *db_ExpansionBase;
 	struct Interrupt *db_interrupt;
 
-	struct List db_ReadList;
+	/* Device-wide list of open BufferManagement records (one per opener,
+	 * struct MinNode bm_Node). Reads queue on the opener's own
+	 * bm_ReadList; the single semaphore below guards db_Openers and every
+	 * bm_ReadList. */
+	struct List db_Openers;
 	struct SignalSemaphore db_ReadListSem;
 	struct Process* db_Proc;
 	struct SignalSemaphore db_ProcExitSem;
@@ -141,9 +146,17 @@ typedef BOOL (*BMFunc)(void* a __asm("a0"), void* b __asm("a1"), long c __asm("d
 
 typedef struct BufferManagement
 {
-  struct MinNode   bm_Node;
+  struct MinNode   bm_Node;            /* db_Openers linkage                 */
   BMFunc           bm_CopyFromBuffer;
   BMFunc           bm_CopyToBuffer;
+  /* AmiNetXDuo extension negotiation (anxs2ext.h via zznet_ext.h) */
+  struct zznet_ext bm_Ext;             /* hooks, flags, filter                */
+  struct List      bm_ReadList;        /* this opener's posted CMD_READs      */
+  /* Drain pinning (KTD11): a request detached for delivery pins this
+   * record; a close that races the drain marks bm_Closing and defers the
+   * free to the last unpin, so the drainer never touches freed hooks. */
+  UWORD            bm_InUse;
+  UWORD            bm_Closing;
 } BufferManagement;
 
 struct HWFrame {

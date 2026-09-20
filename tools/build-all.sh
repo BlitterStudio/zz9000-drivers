@@ -35,5 +35,6 @@ sdk/build.sh
 # Run it explicitly when cutting a release; package-local.sh stages its
 # output when present.
 
+make -C net/tests test
 make -C rtg/tests test
 tools/check-release.sh --quick

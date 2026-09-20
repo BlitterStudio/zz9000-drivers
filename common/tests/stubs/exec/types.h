@@ -14,5 +14,15 @@ typedef uint16_t UWORD;
 typedef uint32_t ULONG;
 typedef int16_t  WORD;
 typedef int32_t  LONG;
+typedef short    BOOL;
+typedef void     VOID;
+typedef void    *APTR;
+
+#ifndef TRUE
+#define TRUE  1
+#endif
+#ifndef FALSE
+#define FALSE 0
+#endif
 
 #endif

@@ -180,6 +180,7 @@ static int zznet_parse_ip_tcp(volatile const UBYTE *ip, ULONG len,
 
 SAVEDS void frame_proc();
 char *frame_proc_name = "ZZ9000NetFramer";
+#define ZZNET_MAX_DELIVER 8
 
 /* ZZ9000 interrupt server (INT6 default, optional INT2).
  * Reads the status once, masks+acks the ethernet bit, signals frame_proc.
@@ -377,14 +378,20 @@ SAVEDS LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
     BOOL first_open = (db->db_Lib.lib_OpenCnt == 1);
 
     if ((bm = (struct BufferManagement*)AllocVec(sizeof(struct BufferManagement), MEMF_CLEAR|MEMF_PUBLIC))) {
+      /* Negotiate the AmiNetXDuo extension tags from the opener's tag
+       * list BEFORE ios2_BufferManagement is repointed at our record
+       * (zznet_ext.h writes pointer-returns back per anxs2ext.h, and a
+       * partial pair disables the extensions exactly as offering no
+       * tags). The standard copy hooks keep their GetTagData reads. */
+      if (ioreq->ios2_BufferManagement) {
+        zznet_ext_negotiate((const struct zznet_tag *)ioreq->ios2_BufferManagement,
+                            &bm->bm_Ext);
+      }
       bm->bm_CopyToBuffer = (BMFunc)GetTagData(S2_CopyToBuff, 0, (struct TagItem *)ioreq->ios2_BufferManagement);
       bm->bm_CopyFromBuffer = (BMFunc)GetTagData(S2_CopyFromBuff, 0, (struct TagItem *)ioreq->ios2_BufferManagement);
+      NEWLIST(&bm->bm_ReadList);
 
       ioreq->ios2_BufferManagement = (VOID *)bm;
-      ioreq->ios2_Req.io_Error = 0;
-      ioreq->ios2_Req.io_Unit = (struct Unit *)unit; // not a real pointer, but id integer
-      ioreq->ios2_Req.io_Device = (struct Device *)db;
-
       if (!first_open) {
         /* Secondary opener — hardware and worker process are already up.
          * Defensive: explicitly verify first-open init actually completed
@@ -405,6 +412,8 @@ SAVEDS LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
       } else {
 
       memset(&global_stats, 0, sizeof(global_stats));
+      NEWLIST((struct List*)&db->db_Openers);
+      InitSemaphore(&db->db_ReadListSem);
       /* Reset the file-scope diagnostic counters alongside global_stats so a
        * close/reopen presents a consistent baseline: S2_GETGLOBALSTATS starts
        * from zero here, and S2_GETSPECIALSTATS (RxEmptySlot) must too, else it
@@ -412,9 +421,6 @@ SAVEDS LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
       rxv_empty_slot = 0;
       rxv_srv_ack = rxv_srv_ack_upd = rxv_p445_in = 0;
       rxv_tx_seq = rxv_tx_seq_max = rxv_p445_out = 0;
-
-      NEWLIST(&db->db_ReadList);
-      InitSemaphore(&db->db_ReadListSem);
 
       struct ProcInit init;
       struct MsgPort *port;
@@ -512,6 +518,12 @@ SAVEDS LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
 	if (ok) {
 		ret = 0;
     db->db_Lib.lib_Flags &= ~LIBF_DELEXP;
+    /* Register the opener now that open fully succeeded (the first-open
+     * path NEWLISTed db_Openers above; a failed open never registers, so
+     * its BM is simply freed by the caller-side error handling below). */
+    ObtainSemaphore(&db->db_ReadListSem);
+    AddTail((struct List*)&db->db_Openers, (struct Node*)&bm->bm_Node);
+    ReleaseSemaphore(&db->db_ReadListSem);
 	}
 
 	if (ret == IOERR_OPENFAIL) {
@@ -539,11 +551,36 @@ SAVEDS BPTR DevClose(   ASMR(a1) struct IORequest *ioreq        ASMREG(a1),
 		return ret;
 
 	/* Free this opener's BufferManagement. Each OpenDevice allocates one;
-	 * previously this was leaked on every close. */
+	 * previously this was leaked on every close.
+	 *
+	 * KTD11 pin rule: a request frame_proc detached for delivery pins the
+	 * record (bm_InUse). Close aborts this opener's still-queued reads,
+	 * marks the record closing, and frees it immediately only when no
+	 * drain holds a pin — otherwise frame_proc's last unpin frees it, so
+	 * the drainer never calls hooks from freed memory. */
 	{
 		struct IOSana2Req *s2 = (struct IOSana2Req *)ioreq;
-		if (s2->ios2_BufferManagement) {
-			FreeVec(s2->ios2_BufferManagement);
+		struct BufferManagement *bm =
+			(struct BufferManagement *)s2->ios2_BufferManagement;
+		if (bm) {
+			struct Node *n, *next;
+			int pending;
+
+			ObtainSemaphore(&db->db_ReadListSem);
+			Remove((struct Node *)&bm->bm_Node);
+			for (n = bm->bm_ReadList.lh_Head; n->ln_Succ; n = next) {
+				next = n->ln_Succ;
+				Remove(n);
+				((struct IORequest *)n)->io_Error = IOERR_ABORTED;
+				ReplyMsg((struct Message *)n);
+			}
+			pending     = bm->bm_InUse;
+			bm->bm_Closing = 1;
+			ReleaseSemaphore(&db->db_ReadListSem);
+
+			if (!pending) {
+				FreeVec(bm);
+			}
 			s2->ios2_BufferManagement = NULL;
 		}
 	}
@@ -628,7 +665,7 @@ static void set_last_start()
   }
 }
 
-ULONG read_frame(DEVBASETYPE *db, struct IOSana2Req *req, volatile UBYTE *frame, USHORT sz, USHORT tp);
+ULONG read_frame(DEVBASETYPE *db, struct IOSana2Req *req, volatile UBYTE *frame, USHORT sz, USHORT tp, UBYTE *pre_staged);
 ULONG write_frame(struct IOSana2Req *req, UBYTE *frame);
 
 SAVEDS VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
@@ -650,11 +687,14 @@ SAVEDS VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
       ioreq->ios2_WireError = S2WERR_BUFF_ERROR;
     }
     else {
-      // not quick, add request to reader list
-      // will be handled on interrupts by frame_proc
+      /* Queue on THIS opener's list (KTD2): each opener gets its own
+       * delivery of frames for the packet types it tracks; frame_proc
+       * walks every opener's list. */
+      struct BufferManagement *bm =
+          (struct BufferManagement *)ioreq->ios2_BufferManagement;
       ioreq->ios2_Req.io_Flags &= ~SANA2IOF_QUICK;
       ObtainSemaphore(&db->db_ReadListSem);
-      AddHead((struct List*)&db->db_ReadList, (struct Node*)ioreq);
+      AddHead((struct List*)&bm->bm_ReadList, (struct Node*)ioreq);
       ReleaseSemaphore(&db->db_ReadListSem);
       ioreq = NULL;
     }
@@ -771,21 +811,30 @@ SAVEDS LONG DevAbortIO( ASMR(a1) struct IORequest *ioreq        ASMREG(a1),
 {
 	struct IOSana2Req* ios2 = (struct IOSana2Req*)ioreq;
 	struct Node* n;
+	struct Node* next;
+	struct BufferManagement* bm;
 	LONG ret = -1;
 
 	D(("ZZ9000Net: AbortIO on %lx\n",(ULONG)ioreq));
 
-	/* Walk the read list under the semaphore to make sure the IO is still
-	 * pending (and not already being serviced by frame_proc). Only then is
-	 * it safe to Remove()/Reply it; otherwise the caller gets -1 meaning
-	 * "IO was not abortable". */
+	/* Walk every opener's read list under the semaphore to make sure the
+	 * IO is still pending (and not already being serviced by frame_proc,
+	 * which detaches requests before draining them). Only then is it safe
+	 * to Remove()/Reply it; otherwise the caller gets -1 meaning "IO was
+	 * not abortable". */
 	ObtainSemaphore(&db->db_ReadListSem);
-	for (n = db->db_ReadList.lh_Head; n->ln_Succ; n = n->ln_Succ) {
-		if (n == (struct Node*)ioreq) {
-			Remove(n);
-			ret = 0;
-			break;
+	for (bm = (struct BufferManagement*)db->db_Openers.lh_Head;
+	     bm->bm_Node.mln_Succ;
+	     bm = (struct BufferManagement*)bm->bm_Node.mln_Succ) {
+		for (n = bm->bm_ReadList.lh_Head; n->ln_Succ; n = next) {
+			next = n->ln_Succ;
+			if (n == (struct Node*)ioreq) {
+				Remove(n);
+				ret = 0;
+				break;
+			}
 		}
+		if (ret == 0) break;
 	}
 	ReleaseSemaphore(&db->db_ReadListSem);
 
@@ -893,7 +942,7 @@ static inline UBYTE* zznet_mmio_read_block(volatile UBYTE *src, UBYTE *base, ULO
 	return dst_start;
 }
 
-ULONG read_frame(DEVBASETYPE *db, struct IOSana2Req *req, volatile UBYTE *frame, USHORT sz, USHORT tp)
+ULONG read_frame(DEVBASETYPE *db, struct IOSana2Req *req, volatile UBYTE *frame, USHORT sz, USHORT tp, UBYTE *pre_staged)
 {
 	struct BufferManagement *bm;
 	volatile UBYTE *frame_ptr;
@@ -950,26 +999,28 @@ ULONG read_frame(DEVBASETYPE *db, struct IOSana2Req *req, volatile UBYTE *frame,
 		/* SANA-II contract: bm_CopyToBuffer is a synchronous copy — it
 		 * reads `datasize` bytes from `source` into the client-owned
 		 * destination and returns success/failure of a completed copy.
-		 * It is not a descriptor submission. This routine (and the
-		 * pre-rev-20 direct-MMIO path before it) already depended on
-		 * that contract: on return we write `rx_accept`, which hands
-		 * the backlog slot back to the firmware for reuse by the next
-		 * inbound frame. If the callback deferred consumption, the
-		 * hardware slot would be overwritten by incoming traffic long
-		 * before the client finished copying — so reusing db_RxStage
-		 * across successive frames adds no new lifetime assumption
-		 * beyond what the SANA-II spec already requires.
+		 * It is not a descriptor submission: on return we write
+		 * `rx_accept`, which hands the backlog slot back to the firmware;
+		 * if the callback deferred consumption, the hardware slot would
+		 * be overwritten long before the client finished copying.
 		 *
-		 * Fast path: stage the payload through Fast RAM so Roadshow's
-		 * generic memcpy sees a longword-aligned RAM source and can copy
-		 * at memory speed instead of stalling the Zorro bus word by
-		 * word. Fallback: if no staging buffer is available (Fast RAM
-		 * allocation failed at open time), hand Roadshow the MMIO
-		 * source directly — slower, but functionally identical to the
-		 * pre-rev-20 behavior. */
-		void *copy_src = db->db_RxStage
-			? (void *)zznet_mmio_read_block(frame_ptr, db->db_RxStage, datasize)
-			: (void *)frame_ptr;
+		 * Source selection (KTD2): when the caller staged this cooked
+		 * payload once for all recipients (frame_proc multi-opener
+		 * delivery), reuse it instead of paying the MMIO reads per
+		 * recipient. Otherwise stage through Fast RAM so the stack's
+		 * generic memcpy sees a longword-aligned RAM source; with no
+		 * staging buffer available, hand the MMIO source directly —
+		 * slower, but functionally identical to the pre-rev-20
+		 * behavior. */
+		void *copy_src;
+
+		if (pre_staged && !(req->ios2_Req.io_Flags & SANA2IOF_RAW)) {
+			copy_src = pre_staged;
+		} else if (db->db_RxStage) {
+			copy_src = (void *)zznet_mmio_read_block(frame_ptr, db->db_RxStage, datasize);
+		} else {
+			copy_src = (void *)frame_ptr;
+		}
 
 		if (!(*bm->bm_CopyToBuffer)((void*)req->ios2_Data, copy_src, datasize)) {
 			req->ios2_Req.io_Error = S2ERR_SOFTWARE;
@@ -1189,7 +1240,7 @@ SAVEDS void frame_proc() {
       }
 
       USHORT packet_type = *(volatile USHORT*)(frm + 16);
-      struct IOSana2Req *match = NULL;
+
 
       /* Gap detection: the firmware increments 'serial' once per
        * received frame; when the Amiga falls behind and the firmware
@@ -1224,38 +1275,84 @@ SAVEDS void frame_proc() {
       have_baseline = TRUE;
       old_serial    = serial;
 
-      /* Walk the read list only long enough to find a matching listener
-       * and detach it. Doing the payload copy (read_frame) and ReplyMsg
-       * outside the semaphore keeps DevAbortIO / CMD_READ unblocked for
-       * the duration of the Zorro bus copy. */
-      ObtainSemaphore(&db->db_ReadListSem);
-      for (ior = (struct IOSana2Req *)db->db_ReadList.lh_Head;
-           ior->ios2_Req.io_Message.mn_Node.ln_Succ;
-           ior = (struct IOSana2Req *)ior->ios2_Req.io_Message.mn_Node.ln_Succ) {
-        if (ior->ios2_PacketType == packet_type) {
-          Remove((struct Node*)ior);
-          match = ior;
-          break;
-        }
-      }
-      ReleaseSemaphore(&db->db_ReadListSem);
+      /* KTD2 delivery: every opener tracking this packet type gets the
+       * frame. Detach one matching read per opener under the semaphore
+       * (pinning each record, KTD11), then copy and reply outside it so
+       * DevAbortIO / CMD_READ stay unblocked for the duration of the
+       * Zorro bus copy. The cooked payload is staged from MMIO ONCE and
+       * reused by every cooked recipient. */
+      {
+        struct BufferManagement *bm;
+        struct BufferManagement *mbs[ZZNET_MAX_DELIVER];
+        struct IOSana2Req      *reqs[ZZNET_MAX_DELIVER];
+        int nmatch = 0, i;
 
-      if (match) {
-        ULONG res = read_frame(db, match, frm, sz, packet_type);
-        if (res == 0) {
-          global_stats.PacketsReceived++;
-        } else {
-          /* read_frame already set io_Error/ios2_WireError; reply so the
-           * caller learns the request failed instead of leaving it on
-           * a now-dangling list entry. */
-          D(("RERR %ld\n", res));
-          global_stats.UnknownTypesReceived++;
+        ObtainSemaphore(&db->db_ReadListSem);
+        for (bm = (struct BufferManagement *)db->db_Openers.lh_Head;
+             bm->bm_Node.mln_Succ && nmatch < ZZNET_MAX_DELIVER;
+             bm = (struct BufferManagement *)bm->bm_Node.mln_Succ) {
+          for (ior = (struct IOSana2Req *)bm->bm_ReadList.lh_Head;
+               ior->ios2_Req.io_Message.mn_Node.ln_Succ;
+               ior = (struct IOSana2Req *)ior->ios2_Req.io_Message.mn_Node.ln_Succ) {
+            if (ior->ios2_PacketType == packet_type) {
+              Remove((struct Node *)ior);
+              mbs[nmatch]  = bm;
+              reqs[nmatch] = ior;
+              nmatch++;
+              bm->bm_InUse++;
+              break; /* one delivery per opener per frame */
+            }
+          }
         }
-        ReplyMsg((struct Message *)match);
-      } else {
-        /* No listener matched — frame dropped. A future change could
-         * route these to S2_READORPHAN requests. */
-        global_stats.UnknownTypesReceived++;
+        ReleaseSemaphore(&db->db_ReadListSem);
+
+        if (nmatch == 0) {
+          /* No listener matched — frame dropped. A future change could
+           * route these to S2_READORPHAN requests. */
+          global_stats.UnknownTypesReceived++;
+        } else {
+          /* Stage the cooked payload once for all cooked recipients
+           * (KTD2). RAW requests below fall back to their own direct
+           * MMIO source inside read_frame. */
+          UBYTE *staged = NULL;
+          int any_ok = 0;
+
+          if (db->db_RxStage && sz > HW_ETH_HDR_SIZE) {
+            staged = zznet_mmio_read_block(
+                frm + 4 + HW_ETH_HDR_SIZE, db->db_RxStage,
+                (ULONG)sz - HW_ETH_HDR_SIZE);
+          }
+
+          for (i = 0; i < nmatch; i++) {
+            ULONG res = read_frame(db, reqs[i], frm, sz, packet_type, staged);
+            if (res == 0) {
+              any_ok = 1;
+            } else {
+              /* read_frame already set io_Error/ios2_WireError; reply so
+               * the caller learns the request failed instead of leaving
+               * it on a now-dangling list entry. */
+              D(("RERR %ld\n", res));
+              global_stats.UnknownTypesReceived++;
+            }
+            ReplyMsg((struct Message *)reqs[i]);
+
+            /* Unpin (KTD11): a closing opener's record is freed when the
+             * last pinned request is replied. */
+            ObtainSemaphore(&db->db_ReadListSem);
+            if (mbs[i]->bm_Closing && --mbs[i]->bm_InUse == 0) {
+              ReleaseSemaphore(&db->db_ReadListSem);
+              FreeVec(mbs[i]);
+            } else {
+              ReleaseSemaphore(&db->db_ReadListSem);
+            }
+          }
+
+          /* Wire-level counter: once per wire frame, not per delivery
+           * (KTD2), so ZZNetStats attribution stays frames. */
+          if (any_ok) {
+            global_stats.PacketsReceived++;
+          }
+        }
       }
 
       /* Release the FPGA RX slot so the next frame can land. We ack with the
