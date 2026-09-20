@@ -798,6 +798,18 @@ SAVEDS VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
   case S2_ONLINE:
     set_last_start();
     is_online = TRUE;
+    /* KTD5: an offline-online transition invalidates every opener's
+     * continuation record. */
+    {
+      struct BufferManagement *cbm;
+      ObtainSemaphore(&db->db_ReadListSem);
+      for (cbm = (struct BufferManagement *)db->db_Openers.lh_Head;
+           cbm->bm_Node.mln_Succ;
+           cbm = (struct BufferManagement *)cbm->bm_Node.mln_Succ) {
+        cbm->bm_Cont.c_valid = 0;
+      }
+      ReleaseSemaphore(&db->db_ReadListSem);
+    }
     break;
   case S2_OFFLINE:
     is_online = FALSE;
@@ -1541,6 +1553,20 @@ SAVEDS void frame_proc() {
           /* anomaly — don't pollute Overruns */
           global_stats.BadData++;
         }
+
+        /* KTD5: a serial gap or overrun invalidates every opener's
+         * continuation record — a later CONTINUES would chain segments
+         * across a loss boundary. */
+        if (delta > 1) {
+          struct BufferManagement *cbm;
+          ObtainSemaphore(&db->db_ReadListSem);
+          for (cbm = (struct BufferManagement *)db->db_Openers.lh_Head;
+               cbm->bm_Node.mln_Succ;
+               cbm = (struct BufferManagement *)cbm->bm_Node.mln_Succ) {
+            cbm->bm_Cont.c_valid = 0;
+          }
+          ReleaseSemaphore(&db->db_ReadListSem);
+        }
       }
       have_baseline = TRUE;
       old_serial    = serial;
@@ -1631,8 +1657,19 @@ SAVEDS void frame_proc() {
             req->ios2_DataLength = plen;
             req->ios2_Req.io_Error = req->ios2_WireError = 0;
 
-            ((AnxdS2RxFilled)xe->xe_RxFilled)(req->ios2_Data, plen, sum,
-                                              ANXD_S2_RXF_SUMMED);
+            /* VERIFIED/CONTINUES from the delivered bytes (now in Fast
+             * RAM at dst), gated by the negotiated intersection (KTD5);
+             * the previous-delivered record lives on the opener. */
+            {
+                UBYTE earned = zznet_rx_flags(dst, plen,
+                                               &mbs[0]->bm_Cont, 1);
+                UBYTE delivered = (UBYTE)(ANXD_S2_RXF_SUMMED |
+                    (earned & (xe->xe_RxFlags &
+                               (ANXD_S2_RXF_VERIFIED |
+                                ANXD_S2_RXF_CONTINUES))));
+                ((AnxdS2RxFilled)xe->xe_RxFilled)(req->ios2_Data, plen,
+                                                  sum, delivered);
+            }
             ReplyMsg((struct Message *)req);
 
             /* Unpin (KTD11). */

@@ -166,6 +166,7 @@ typedef struct BufferManagement
   BMFunc           bm_CopyToBuffer;
   /* AmiNetXDuo extension negotiation (anxs2ext.h via zznet_ext.h) */
   struct zznet_ext bm_Ext;             /* hooks, flags, filter                */
+  struct zznet_cont bm_Cont;           /* previous delivered TCP (KTD5)       */
   struct List      bm_ReadList;        /* this opener's posted CMD_READs      */
   /* Drain pinning (KTD11): a request detached for delivery pins this
    * record; a close that races the drain marks bm_Closing and defers the

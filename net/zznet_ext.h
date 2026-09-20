@@ -54,13 +54,28 @@ struct zznet_ext {
  * requires VERIFIED (published rule); SUMMED rides every drain. */
 #define ZZNET_EXT_RXF_SUPPORTED \
 	(ANXD_S2_RXF_SUMMED | ANXD_S2_RXF_VERIFIED | ANXD_S2_RXF_CONTINUES)
+/* Per-opener previous-delivered TCP record (KTD5): CONTINUES is decided
+ * against the previous frame delivered to that opener — one record, not
+ * a per-flow table. Cleared by any delivery that is not the
+ * continuation, by a serial gap or overrun, by a bad frame, or by an
+ * offline-online transition. */
+struct zznet_cont {
+    int   c_valid;
+    UBYTE c_src[4];
+    UBYTE c_dst[4];
+    UWORD c_sport;
+    UWORD c_dport;
+    ULONG c_seq_end;   /* previous seq + payload length */
+    ULONG c_ack;
+    UWORD c_win;
+    UBYTE c_flags;     /* ACK (0x10) or ACK|PSH (0x18) */
+};
 
 /*
  * Negotiate the extension tags from one opener's buffer-management tag
  * list. `tags` is the caller's list exactly as OpenDevice received it
- * (before the driver replaces ios2_BufferManagement with its own record).
- *
- * Write-back rules (anxs2ext.h):
+ * (before the driver replaces ios2_BufferManagement with its own
+ * record).
  *   - The direct pair is accepted only when BOTH hooks are present; a
  *     partial set disables the extensions exactly as offering no tags,
  *     and no tag pointer is written in that case.
@@ -156,6 +171,152 @@ static inline int zznet_ext_can_claim(int takers, int raw,
 	if (raw)                         return 0;
 	if (takers != 1)                 return 0;
 	return 1;
+}
+
+
+/* ---- VERIFIED and CONTINUES (KTD5) ------------------------------------
+ *
+ * zznet_rx_flags computes the flags the driver may set in RX_FILLED's
+ * last argument for a delivered cooked IPv4 payload. `p` points at the
+ * IP header in RAM (the direct-drain destination — the driver reads the
+ * header region back from Fast RAM, near-free next to the MMIO drain);
+ * `len` is the delivered payload length INCLUDING any Ethernet padding;
+ * `cont` is the opener's previous-delivered record; `update` replaces
+ * the record when this frame qualifies as a new predecessor.
+ *
+ * VERIFIED requires: IPv4, no options (ihl == 5), not a fragment, no
+ * Ethernet padding past the IP total length, a correct IP header
+ * checksum, and a correct TCP or UDP checksum (UDP zero checksum
+ * excluded). CONTINUES additionally requires the previous delivered
+ * frame to be the same stream at exactly the previous end sequence,
+ * with the same ACK, window, and ACK-or-ACK+PSH flags, no TCP options,
+ * both VERIFIED.
+ *
+ * Returns SUMMED plus whatever was earned. `cont` is replaced only
+ * when this frame qualifies (update never partially merges). */
+
+static UWORD zznet_cksum_fold(ULONG sum)
+{
+	while (sum >> 16)
+		sum = (sum & 0xFFFF) + (sum >> 16);
+	return (UWORD)sum;
+}
+
+static ULONG zznet_cksum_add_bytes(const UBYTE *p, ULONG n)
+{
+	ULONG sum = 0;
+	while (n >= 2) {
+		sum += ((ULONG)p[0] << 8) | p[1];
+		p += 2; n -= 2;
+	}
+	if (n)
+		sum += (ULONG)p[0] << 8;
+	return sum;
+}
+
+static UBYTE zznet_rx_flags(const UBYTE *p, ULONG len,
+                            struct zznet_cont *cont, int update)
+{
+	ULONG ip_hl, ip_total, trans_off, trans_len;
+	ULONG ph_sum;
+	UWORD frag, udpck, udp_len, doff;
+	int is_tcp = 0;
+	UBYTE out = ANXD_S2_RXF_SUMMED;
+
+	if (len < 20)                        return out;
+	if ((p[0] >> 4) != 4)                return out;
+	ip_hl = (ULONG)(p[0] & 0x0f) * 4;
+	if (ip_hl != 20)                     return out; /* options excluded */
+	ip_total = ((ULONG)p[2] << 8) | p[3];
+	if (ip_total != len)                 return out; /* torn or padded */
+	if (ip_total < 20)                   return out;
+	frag = ((UWORD)p[6] << 8) | p[7];
+	if (frag & 0x3fff)                   return out; /* fragment (MF|offset) */
+	if (p[9] != 6 && p[9] != 17)         return out;
+
+	/* IP header checksum: sum of the 20 header bytes (checksum field
+	 * included) must fold to 0xFFFF. */
+	if (zznet_cksum_fold(zznet_cksum_add_bytes(p, 20)) != 0xFFFF)
+		return out;
+
+	trans_off = ip_hl;
+	trans_len = ip_total - ip_hl;
+	if (p[9] == 17) {
+		if (trans_len < 8)               return out;
+		udpck  = ((UWORD)p[trans_off + 6] << 8) | p[trans_off + 7];
+		udp_len = ((UWORD)p[trans_off + 4] << 8) | p[trans_off + 5];
+		if (udpck == 0)                  return out; /* UDP zero csum */
+		if (udp_len < 8 || udp_len > trans_len)
+			return out;                   /* UDP length beyond frame */
+		trans_len = udp_len;              /* checksum covers UDP length */
+	} else {
+		if (trans_len < 20)              return out;
+		doff = (UWORD)(p[trans_off + 12] >> 4) * 4;
+		if (doff < 20 || doff > trans_len) return out;
+		is_tcp = 1;
+	}
+
+	/* Transport checksum: ones-complement sum of pseudo-header plus the
+	 * whole transport segment (its checksum field included) folds to
+	 * 0xFFFF — same property as the IP header. */
+	ph_sum = zznet_cksum_add_bytes(p + 12, 8);          /* src + dst IP */
+	ph_sum += (ULONG)p[9];                              /* zero byte + protocol */
+	ph_sum += trans_len;
+	{
+		ULONG seg = zznet_cksum_fold(zznet_cksum_add_bytes(p + trans_off, trans_len));
+		if (zznet_cksum_fold(ph_sum + seg) != 0xFFFF)
+			return out;
+	}
+
+	out |= ANXD_S2_RXF_VERIFIED;
+
+	if (is_tcp && cont && cont->c_valid) {
+		UWORD sport = ((UWORD)p[20] << 8) | p[21];
+		UWORD dport = ((UWORD)p[22] << 8) | p[23];
+		ULONG seq   = ((ULONG)p[24] << 24) | ((ULONG)p[25] << 16) |
+		              ((ULONG)p[26] << 8)  | (ULONG)p[27];
+		ULONG ack   = ((ULONG)p[28] << 24) | ((ULONG)p[29] << 16) |
+		              ((ULONG)p[30] << 8)  | (ULONG)p[31];
+		UWORD win   = ((UWORD)p[34] << 8) | p[35];
+		UWORD doff2 = (UWORD)(p[32] >> 4) * 4;
+		UBYTE tfl   = p[33];
+
+		if ((tfl == 0x10 || tfl == 0x18) && /* ACK or ACK+PSH only */
+		    doff2 == 20 &&                   /* no TCP options */
+		    cont->c_seq_end == seq &&
+		    cont->c_ack == ack &&
+		    cont->c_win == win &&
+		    cont->c_sport == sport && cont->c_dport == dport &&
+		    cont->c_src[0] == p[12] && cont->c_src[1] == p[13] &&
+		    cont->c_src[2] == p[14] && cont->c_src[3] == p[15] &&
+		    cont->c_dst[0] == p[16] && cont->c_dst[1] == p[17] &&
+		    cont->c_dst[2] == p[18] && cont->c_dst[3] == p[19]) {
+			out |= ANXD_S2_RXF_CONTINUES;
+		}
+	}
+
+	if (update && cont && (p[9] == 6)) {
+		/* Only a verified TCP frame is a useful predecessor; any
+		 * delivery replaces the record (KTD5), so interleaved flows
+		 * break the chain by construction. */
+		UWORD doff2 = (UWORD)(p[32] >> 4) * 4;
+		ULONG seq   = ((ULONG)p[24] << 24) | ((ULONG)p[25] << 16) |
+		              ((ULONG)p[26] << 8)  | (ULONG)p[27];
+		cont->c_valid = 1;
+		cont->c_src[0] = p[12]; cont->c_src[1] = p[13];
+		cont->c_src[2] = p[14]; cont->c_src[3] = p[15];
+		cont->c_dst[0] = p[16]; cont->c_dst[1] = p[17];
+		cont->c_dst[2] = p[18]; cont->c_dst[3] = p[19];
+		cont->c_sport = ((UWORD)p[20] << 8) | p[21];
+		cont->c_dport = ((UWORD)p[22] << 8) | p[23];
+		cont->c_seq_end = seq + (trans_len - doff2);
+		cont->c_ack = ((ULONG)p[28] << 24) | ((ULONG)p[29] << 16) |
+		              ((ULONG)p[30] << 8)  | (ULONG)p[31];
+		cont->c_win = ((UWORD)p[34] << 8) | p[35];
+		cont->c_flags = p[33];
+	}
+
+	return out;
 }
 
 #endif /* _INC_ZZNET_EXT_H */

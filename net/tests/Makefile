@@ -10,12 +10,13 @@ BUILD_DIR ?= build
 
 STUBS := ../../common/tests/stubs
 
-TARGETS := $(BUILD_DIR)/claim_test
+TARGETS := $(BUILD_DIR)/claim_test $(BUILD_DIR)/verify_test
 
 .PHONY: test clean
 
 test: $(TARGETS)
 	$(BUILD_DIR)/claim_test
+	$(BUILD_DIR)/verify_test
 
 $(BUILD_DIR)/claim_test: claim_test.c ../zznet_ext.h ../anxs2ext.h $(STUBS)/exec/types.h
 	@mkdir -p $(BUILD_DIR)
@@ -23,3 +24,7 @@ $(BUILD_DIR)/claim_test: claim_test.c ../zznet_ext.h ../anxs2ext.h $(STUBS)/exec
 
 clean:
 	rm -rf $(BUILD_DIR)
+
+$(BUILD_DIR)/verify_test: verify_test.c ../zznet_ext.h ../anxs2ext.h $(STUBS)/exec/types.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) -Wall -Wextra $(CFLAGS) -DZZNET_HOST_TEST -I$(STUBS) -I.. -o $@ verify_test.c
