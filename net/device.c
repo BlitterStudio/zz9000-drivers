@@ -182,6 +182,9 @@ SAVEDS void frame_proc();
 char *frame_proc_name = "ZZ9000NetFramer";
 #define ZZNET_MAX_DELIVER 8
 
+/* One TX staging slot: worst frame (1518) plus phase margin. */
+#define ZZNET_TX_STAGE_SIZE 1538
+
 /* ZZ9000 interrupt server (INT6 default, optional INT2).
  * Reads the status once, masks+acks the ethernet bit, signals frame_proc.
  * Returns non-zero when this interrupt was ours so Exec short-circuits
@@ -430,7 +433,6 @@ SAVEDS LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
         if ((db->db_Proc = CreateNewProcTags(NP_Entry, (ULONG)frame_proc, NP_Name,
                                              (ULONG)frame_proc_name, NP_Priority, 0, TAG_DONE))) {
           InitSemaphore(&db->db_ProcExitSem);
-
           init.error = 1;
           init.db = db;
           init.msg.mn_Length = sizeof(init);
@@ -484,7 +486,20 @@ SAVEDS LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
 
               // enable HW interrupt
               *(volatile USHORT*)(ZZ9K_REGS+0x04) = 1;
-
+              /* TX staging slots (KTD3): non-fatal like the RX stage —
+               * without them zznet_tx_write sends inline only (still
+               * correct, just no parking under bursts). */
+              if (!db->db_TxSlots) {
+                db->db_TxSlots = AllocVec(ZZNET_TX_SLOTS * ZZNET_TX_STAGE_SIZE,
+                                          MEMF_FAST);
+                if (db->db_TxSlots && ((ULONG)db->db_TxSlots & 3)) {
+                  FreeVec(db->db_TxSlots);
+                  db->db_TxSlots = NULL;
+                }
+                if (!db->db_TxSlots) {
+                  D(("ZZ9000Net: TX slots unavailable; inline TX only\n"));
+                }
+              }
               D(("ZZ9000Net: ZZ interrupt enabled\n"));
             } else {
               D(("ZZ9000Net: failed to alloc struct Interrupt\n"));
@@ -558,6 +573,37 @@ SAVEDS BPTR DevClose(   ASMR(a1) struct IORequest *ioreq        ASMREG(a1),
 	 * marks the record closing, and frees it immediately only when no
 	 * drain holds a pin — otherwise frame_proc's last unpin frees it, so
 	 * the drainer never calls hooks from freed memory. */
+	/* KTD11: abort this opener's parked writes before its record goes.
+	 * The drainer never dereferences the opener record (the copy hook
+	 * runs only in the request's own BeginIO, at stage time), so a
+	 * parked write only needs its list entry and slot released. */
+	{
+		struct IOSana2Req *s2 = (struct IOSana2Req *)ioreq;
+		struct BufferManagement *bm =
+			(struct BufferManagement *)s2->ios2_BufferManagement;
+		if (bm) {
+			struct IOSana2Req *txr, *txnext;
+			int i;
+			ObtainSemaphore(&db->db_TXSem);
+			for (txr = (struct IOSana2Req *)db->db_TXList.lh_Head;
+			     txr->ios2_Req.io_Message.mn_Node.ln_Succ;
+			     txr = txnext) {
+				txnext = (struct IOSana2Req *)txr->ios2_Req.io_Message.mn_Node.ln_Succ;
+				if ((struct BufferManagement *)txr->ios2_BufferManagement != bm)
+					continue;
+				Remove((struct Node *)txr);
+				for (i = 0; i < ZZNET_TX_SLOTS; i++) {
+					if (db->db_TxSlotReq[i] == txr)
+						db->db_TxSlotReq[i] = NULL;
+				}
+				txr->ios2_Req.io_Error = IOERR_ABORTED;
+				txr->ios2_WireError = 0;
+				ReplyMsg((struct Message *)txr);
+			}
+			ReleaseSemaphore(&db->db_TXSem);
+		}
+	}
+
 	{
 		struct IOSana2Req *s2 = (struct IOSana2Req *)ioreq;
 		struct BufferManagement *bm =
@@ -584,13 +630,23 @@ SAVEDS BPTR DevClose(   ASMR(a1) struct IORequest *ioreq        ASMREG(a1),
 			s2->ios2_BufferManagement = NULL;
 		}
 	}
-
-	db->db_Lib.lib_OpenCnt--;
-
   if (db->db_Lib.lib_OpenCnt == 0) {
-    /* Last opener gone — disable HW IRQ, tear down worker process.
-     * Previously the IRQ was disabled on every close, which killed
-     * Roadshow's RX if a diagnostic tool opened+closed the device. */
+    /* Last opener gone: reply-abort every parked write before the
+     * worker exits (KTD11) — frame_proc's exit must not strand them. */
+    {
+      struct IOSana2Req *txr, *txnext;
+      ObtainSemaphore(&db->db_TXSem);
+      for (txr = (struct IOSana2Req *)db->db_TXList.lh_Head;
+           txr->ios2_Req.io_Message.mn_Node.ln_Succ;
+           txr = txnext) {
+        txnext = (struct IOSana2Req *)txr->ios2_Req.io_Message.mn_Node.ln_Succ;
+        Remove((struct Node *)txr);
+        txr->ios2_Req.io_Error = S2ERR_NO_RESOURCES;
+        txr->ios2_WireError = S2WERR_GENERIC_ERROR;
+        ReplyMsg((struct Message *)txr);
+      }
+      ReleaseSemaphore(&db->db_TXSem);
+    }
     *(volatile USHORT*)(ZZ9K_REGS+0x04) = 0;
     D(("ZZ9000Net: ZZ interrupt disabled\n"));
 
@@ -610,13 +666,16 @@ SAVEDS BPTR DevClose(   ASMR(a1) struct IORequest *ioreq        ASMREG(a1),
       ReleaseSemaphore(&db->db_ProcExitSem);
     }
 
-    /* Staging buffer is freed only after the worker process has
+    /* Staging buffers are freed only after the worker process has
      * exited above (ObtainSemaphore/ReleaseSemaphore pair). That
-     * guarantees no read_frame can still be in flight referencing
-     * db_RxStage, because all RX paths run inside frame_proc. */
+     * frame_proc or under db_TXSem against these allocations. */
     if (db->db_RxStage) {
       FreeVec(db->db_RxStage);
       db->db_RxStage = NULL;
+    }
+    if (db->db_TxSlots) {
+      FreeVec(db->db_TxSlots);
+      db->db_TxSlots = NULL;
     }
   }
 
@@ -664,9 +723,9 @@ static void set_last_start()
     CloseDevice(&req);
   }
 }
+static int zznet_tx_write(DEVBASETYPE *db, struct IOSana2Req *req);
 
 ULONG read_frame(DEVBASETYPE *db, struct IOSana2Req *req, volatile UBYTE *frame, USHORT sz, USHORT tp, UBYTE *pre_staged);
-ULONG write_frame(struct IOSana2Req *req, UBYTE *frame);
 
 SAVEDS VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
                             ASMR(a6) DEVBASEP                       ASMREG(a6) )
@@ -708,14 +767,12 @@ SAVEDS VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
     }
     /* fall through */
   case CMD_WRITE: {
-    ULONG res = write_frame(ioreq, (UBYTE*)(ZZ9K_REGS+ZZ9K_TX));
-    if (res!=0) {
-      ioreq->ios2_Req.io_Error = S2ERR_NO_RESOURCES;
-      ioreq->ios2_WireError = S2WERR_GENERIC_ERROR;
-    } else {
-      ioreq->ios2_Req.io_Error = 0;
-      global_stats.PacketsSent++;
-    }
+    /* KTD3: drain first (BeginIO-entry trigger), then inline-send or
+     * park. zznet_tx_write replies the request itself on every path —
+     * inline completion, empty write, parked completion by the drainer,
+     * and immediate failure — so BeginIO must not DevTermIO it. */
+    (void)zznet_tx_write(db, ioreq);
+    ioreq = NULL;
     break;
   }
 
@@ -782,7 +839,6 @@ SAVEDS VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
         ULONG max = s2ssh->RecordCountMax;
         ULONG n = 0;
         if (n < max) { rec[n].Type = ZZSS_RX_EMPTY_SLOT; rec[n].Count = rxv_empty_slot;   rec[n].String = (char*)"RxEmptySlot"; n++; }
-        /* issue #29 ACK probe (send-wedge diagnostic) */
         if (n < max) { rec[n].Type = ZZSS_RX_P445_IN;    rec[n].Count = rxv_p445_in;      rec[n].String = (char*)"P445In";     n++; }
         if (n < max) { rec[n].Type = ZZSS_RX_SRV_ACK;    rec[n].Count = rxv_srv_ack;      rec[n].String = (char*)"SrvAck";     n++; }
         if (n < max) { rec[n].Type = ZZSS_RX_SRV_ACK_UPD;rec[n].Count = rxv_srv_ack_upd;  rec[n].String = (char*)"SrvAckUpd";  n++; }
@@ -837,6 +893,26 @@ SAVEDS LONG DevAbortIO( ASMR(a1) struct IORequest *ioreq        ASMREG(a1),
 		if (ret == 0) break;
 	}
 	ReleaseSemaphore(&db->db_ReadListSem);
+
+	/* Parked writes abort too (KTD11); a write inside the TX critical
+	 * section (staging or kicking) is off-list and not abortable. */
+	if (ret != 0) {
+		ObtainSemaphore(&db->db_TXSem);
+		for (n = db->db_TXList.lh_Head; n->ln_Succ; n = next) {
+			next = n->ln_Succ;
+			if (n == (struct Node*)ioreq) {
+				int i;
+				Remove(n);
+				for (i = 0; i < ZZNET_TX_SLOTS; i++) {
+					if (db->db_TxSlotReq[i] == (struct IOSana2Req *)ioreq)
+						db->db_TxSlotReq[i] = NULL;
+				}
+				ret = 0;
+				break;
+			}
+		}
+		ReleaseSemaphore(&db->db_TXSem);
+	}
 
 	if (ret == 0) {
 		ioreq->io_Error = IOERR_ABORTED;
@@ -1079,26 +1155,27 @@ ULONG read_frame(DEVBASETYPE *db, struct IOSana2Req *req, volatile UBYTE *frame,
 	return err;
 }
 
-ULONG write_frame(struct IOSana2Req *req, UBYTE *frame)
+/* Stage a write's bytes into a TX slot (KTD3). Same shape as the old
+ * synchronous path — header build for cooked frames, then the opener's
+ * copy hook moves the payload — but the destination is Fast RAM, so
+ * the caller's task pays a RAM-speed copy instead of Zorro-cycle MMIO
+ * writes; the drainer feeds the window later. Returns the total frame
+ * size (0 = nothing to send), or (USHORT)-1 on copy failure. */
+static USHORT zznet_tx_stage(struct IOSana2Req *req, UBYTE *slot)
 {
 	struct BufferManagement *bm;
-	USHORT sz = 0;
-	ULONG  rc = 0;
+	USHORT sz;
 
 	if (req->ios2_Req.io_Flags & SANA2IOF_RAW) {
 		sz = req->ios2_DataLength;
 	} else {
 		sz = req->ios2_DataLength + HW_ETH_HDR_SIZE;
-
-		/* Build the 14-byte Ethernet header. Using memcpy (non-volatile
-		 * frame pointer) lets libc / the compiler emit move.l where the
-		 * alignment permits; forcing word stores here costs Zorro III
-		 * bandwidth versus the baseline. The reg write below is volatile
-		 * and serves as the commit barrier before we kick TX. */
-		*((USHORT*)(frame + 12)) = (USHORT)req->ios2_PacketType;
-		memcpy(frame,     req->ios2_DstAddr, HW_ADDRFIELDSIZE);
-		memcpy(frame + 6, HW_MAC,            HW_ADDRFIELDSIZE);
-		frame += HW_ETH_HDR_SIZE;
+		/* Build the 14-byte Ethernet header (memcpy lets the compiler
+		 * emit move.l where alignment permits). */
+		*((USHORT*)(slot + 12)) = (USHORT)req->ios2_PacketType;
+		memcpy(slot,     req->ios2_DstAddr, HW_ADDRFIELDSIZE);
+		memcpy(slot + 6, HW_MAC,            HW_ADDRFIELDSIZE);
+		slot += HW_ETH_HDR_SIZE;
 	}
 
 	if (sz == 0) {
@@ -1106,39 +1183,155 @@ ULONG write_frame(struct IOSana2Req *req, UBYTE *frame)
 	}
 
 	bm = (struct BufferManagement *)req->ios2_BufferManagement;
-	if (!(*bm->bm_CopyFromBuffer)(frame, req->ios2_Data, req->ios2_DataLength)) {
-		return 1;
+	if (!(*bm->bm_CopyFromBuffer)(slot, req->ios2_Data, req->ios2_DataLength)) {
+		return (USHORT)-1;
+	}
+	return sz;
+}
+
+/* Copy a staged frame into the FPGA TX window, kick, and read the
+ * status back — the one MMIO cycle pair the caller no longer waits
+ * on. Caller holds db_TXSem (KTD3's single critical section). Returns
+ * the hardware status (0 = accepted). */
+static ULONG zznet_tx_kick(DEVBASETYPE *db, const UBYTE *slot, USHORT sz)
+{
+	volatile USHORT *reg;
+	const volatile UBYTE *src = (const volatile UBYTE *)slot;
+	volatile UBYTE *dst = (volatile UBYTE *)(ZZ9K_REGS + ZZ9K_TX);
+	ULONG n = sz;
+	ULONG rc;
+
+	/* RAM → MMIO copy: longword body, byte tail. Phase is matched by
+	 * construction — slot and window are both longword-aligned at frame
+	 * start — so the bulk of the copy is one bus cycle per 4 bytes. */
+	while (n >= 4) {
+		*(volatile ULONG *)dst = *(const volatile ULONG *)src;
+		dst += 4; src += 4; n -= 4;
+	}
+	while (n--) {
+		*dst++ = *src++;
 	}
 
-	/* issue #29 ACK probe: for the SMB (445) connection, record the Amiga's
-	 * outbound send seq from the staged TX-window frame (non-RAW: `frame` now
-	 * points at the IP packet). dst port 445 = Amiga -> server. Parsed before
-	 * the kick so it never races the FPGA DMA. Compared against rxv_srv_ack at
-	 * the stall: rxv_tx_seq < rxv_srv_ack ⇒ resending already-acked data. */
-	if (!(req->ios2_Req.io_Flags & SANA2IOF_RAW) &&
-	    (USHORT)req->ios2_PacketType == 0x0800) {
-		USHORT sp = 0, dp = 0;
-		ULONG  seq = 0, paylen = 0;
-		if (zznet_parse_ip_tcp((volatile const UBYTE *)frame,
-		                       req->ios2_DataLength, &sp, &dp,
-		                       &seq, NULL, &paylen) &&
-		    dp == 445) {
-			ULONG end = seq + paylen;
-			rxv_p445_out++;
-			rxv_tx_seq = seq;
-			if ((LONG)(end - rxv_tx_seq_max) > 0)
-				rxv_tx_seq_max = end;
-		}
+	reg = (volatile USHORT *)(ZZ9K_REGS + 0x80);
+	*reg = sz;      /* kick the TX engine */
+	rc  = *reg;     /* read back hardware status */
+	if (rc) {
+		D(("tx err: %ld\n", (LONG)rc));
 	}
+	return rc;
+}
 
-	{
-		volatile USHORT *reg = (volatile USHORT*)(ZZ9K_REGS+0x80);
-		*reg = sz;      /* kick the TX engine */
-		rc   = *reg;    /* read back hardware status */
-		if (rc) {
-			D(("tx err: %d\n",rc));
+/* Complete a sent write: status into the request's error fields (AE3),
+ * wire counter, reply. Caller holds db_TXSem. */
+static void zznet_tx_complete(DEVBASETYPE *db, struct IOSana2Req *req,
+                              ULONG rc)
+{
+	if (rc != 0) {
+		req->ios2_Req.io_Error = S2ERR_NO_RESOURCES;
+		req->ios2_WireError    = S2WERR_GENERIC_ERROR;
+	} else {
+		req->ios2_Req.io_Error = 0;
+		req->ios2_WireError    = 0;
+		global_stats.PacketsSent++;
+	}
+	ReplyMsg((struct Message *)req);
+}
+
+/* Drain parked writes: feed the window from TX slots while the list is
+ * non-empty (KTD3). Runs under db_TXSem from the posting task, from
+ * frame_proc's RX wake, and from the timer liveness trigger. */
+static void zznet_tx_drain(DEVBASETYPE *db)
+{
+	struct IOSana2Req *req;
+	int i;
+
+	ObtainSemaphore(&db->db_TXSem);
+	while ((req = (struct IOSana2Req *)db->db_TXList.lh_Head)->ios2_Req.io_Message.mn_Node.ln_Succ) {
+		/* Find (and free) this request's staging slot. */
+		UBYTE *slot = NULL;
+		for (i = 0; i < ZZNET_TX_SLOTS; i++) {
+			if (db->db_TxSlotReq[i] == req) {
+				slot = db->db_TxSlots + (ULONG)i * ZZNET_TX_STAGE_SIZE;
+				db->db_TxSlotReq[i] = NULL;
+				break;
+			}
+		}
+		if (!slot) {
+			/* Slotless park (should not happen): complete with an
+			 * error rather than spin forever. */
+			Remove((struct Node *)req);
+			zznet_tx_complete(db, req, 1);
+			continue;
+		}
+		{
+			USHORT sz = (req->ios2_Req.io_Flags & SANA2IOF_RAW)
+				? req->ios2_DataLength
+				: req->ios2_DataLength + HW_ETH_HDR_SIZE;
+			ULONG rc = zznet_tx_kick(db, slot, sz);
+			Remove((struct Node *)req);
+			zznet_tx_complete(db, req, rc);
 		}
 	}
+	ReleaseSemaphore(&db->db_TXSem);
+}
+
+/* CMD_WRITE entry (KTD3). Drain first (the BeginIO-entry trigger), then
+ * either send inline when the pipe is empty — identical cost and
+ * semantics to the old synchronous path — or stage into a free slot and
+ * park. Returns 0 when the request was sent or parked (completion is
+ * asynchronous), nonzero on immediate failure (the request is already
+ * completed with an error). */
+static int zznet_tx_write(DEVBASETYPE *db, struct IOSana2Req *req)
+{
+	int rc = 0;
+	int empty;
+
+	zznet_tx_drain(db);
+
+	ObtainSemaphore(&db->db_TXSem);
+	empty = !db->db_TXList.lh_Head->ln_Succ ? 1 : 0;
+	if (empty) {
+		/* Fast path: stage through slot 0 as scratch, kick, complete —
+		 * one RAM copy plus the MMIO cycle pair, under the sem. */
+		USHORT sz = zznet_tx_stage(req, db->db_TxSlots);
+		if (sz == (USHORT)-1) {
+			rc = 1;
+		} else if (sz == 0) {
+			rc = 0; /* nothing to send: complete below, no error */
+			req->ios2_Req.io_Error = 0;
+			req->ios2_WireError = 0;
+			ReplyMsg((struct Message *)req);
+		} else {
+			ULONG st = zznet_tx_kick(db, db->db_TxSlots, sz);
+			zznet_tx_complete(db, req, st);
+		}
+	} else {
+		/* Pipe busy: park. No free slot means the burst outran four
+		 * slots — fail this write rather than block BeginIO (the same
+		 * visible error as the old NO_RESOURCES path). */
+		int i;
+		for (i = 0; i < ZZNET_TX_SLOTS; i++) {
+			if (!db->db_TxSlotReq[i]) break;
+		}
+		if (i == ZZNET_TX_SLOTS) {
+			rc = 1;
+		} else {
+			USHORT sz = zznet_tx_stage(req, db->db_TxSlots + (ULONG)i * ZZNET_TX_STAGE_SIZE);
+			if (sz == (USHORT)-1) {
+				rc = 1;
+			} else if (sz == 0) {
+				req->ios2_Req.io_Error = 0;
+				req->ios2_WireError = 0;
+				ReplyMsg((struct Message *)req);
+			} else {
+				db->db_TxSlotReq[i] = req;
+				req->ios2_Req.io_Flags &= ~SANA2IOF_QUICK;
+				AddTail((struct List *)&db->db_TXList, (struct Node *)req);
+				rc = 0; /* parked: completion is asynchronous */
+			}
+		}
+	}
+	ReleaseSemaphore(&db->db_TXSem);
 
 	return rc;
 }
@@ -1167,6 +1360,31 @@ SAVEDS void frame_proc() {
   ReplyMsg((struct Message*)init);
 
   wmask = SIGBREAKF_CTRL_F | SIGBREAKF_CTRL_C;
+
+  /* TX liveness timer (KTD3): with no TX-done interrupt, a one-shot
+   * timer wake re-checks the window whenever parked writes wait, so a
+   * reply-pacing stack or a silent peer cannot deadlock on the final
+   * parked request. */
+  struct MsgPort   *tport = NULL;
+  struct timerequest *treq = NULL;
+  ULONG             tmask = 0;
+  BOOL              tarmed = FALSE;
+
+  if ((tport = CreateMsgPort())) {
+    tmask = 1UL << tport->mp_SigBit;
+    if ((treq = (struct timerequest *)CreateIORequest(
+             tport, sizeof(struct timerequest)))) {
+      if (OpenDevice(TIMERNAME, UNIT_MICROHZ, treq, 0)) {
+        DeleteIORequest(treq);
+        treq = NULL;
+      }
+    }
+    if (!treq) {
+      DeleteMsgPort(tport);
+      tport = NULL;
+      tmask = 0;
+    }
+  }
 
   USHORT old_serial    = 0;
   BOOL   have_baseline = FALSE;
@@ -1364,16 +1582,39 @@ SAVEDS void frame_proc() {
        * ignore anyway. */
       *rx_accept = serial;
     } else {
-      /* Nothing new. Re-enable the ethernet IRQ so the ISR can wake us,
-       * then sleep. Enable-before-wait is correct: if a frame raced in
-       * between our serial read and the enable, the ISR will signal
-       * and Wait returns immediately. */
+      /* Nothing new. Re-enable the ethernet IRQ, arm the TX liveness
+       * timer when parked writes wait (KTD3), then sleep. */
       *irq_ctrl = 1;
-      recv = Wait(wmask);
+      if (treq && !tarmed && db->db_TXList.lh_Head->ln_Succ) {
+        treq->tr_node.io_Command = TR_ADDREQUEST;
+        treq->tr_time.tv_secs  = 0;
+        treq->tr_time.tv_micro = 1000; /* 1 ms: well under a wire time */
+        SendIO(treq);
+        tarmed = TRUE;
+      }
+      recv = Wait(wmask | tmask);
+      if (recv & tmask) {
+        if (tarmed && treq) {
+          GetMsg(tport);
+          tarmed = FALSE;
+        }
+        zznet_tx_drain(db);
+      }
     }
   }
   // disable interrupt
   *(volatile USHORT*)(ZZ9K_REGS+0x04) = 0;
+
+  /* Timer teardown: abort an outstanding request so the port drains. */
+  if (treq) {
+    if (tarmed) {
+      AbortIO(treq);
+      WaitIO(treq);
+    }
+    CloseDevice(treq);
+    DeleteIORequest(treq);
+  }
+  if (tport) DeleteMsgPort(tport);
 
   Forbid();
   ReleaseSemaphore(&db->db_ProcExitSem);

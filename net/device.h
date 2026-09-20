@@ -30,6 +30,11 @@
 /* defaults */
 #define MAX_UNITS 4
 
+/* TX staging slots (KTD3): parked writes wait here until the drainer
+ * feeds the single FPGA TX window. Four covers a TCP burst with the
+ * stack's typical write-ahead. */
+#define ZZNET_TX_SLOTS 4
+
 /* includes */
 #include "compiler.h"
 #include <dos/dos.h>
@@ -78,6 +83,16 @@ struct devbase {
 	struct SignalSemaphore db_ReadListSem;
 	struct Process* db_Proc;
 	struct SignalSemaphore db_ProcExitSem;
+
+	/* Asynchronous TX (KTD3). One critical section (db_TXSem) covers
+	 * window-check → payload copy → kick → status read in every
+	 * context. db_TXList holds parked CMD_WRITEs whose payloads wait
+	 * in db_TxSlots; db_TxSlotReq[i] names the request occupying slot
+	 * i (NULL = free). The one-shot timer wake lives in frame_proc. */
+	struct List db_TXList;
+	struct SignalSemaphore db_TXSem;
+	UBYTE *db_TxSlots;
+	struct IOSana2Req *db_TxSlotReq[ZZNET_TX_SLOTS];
 
 	/* RX payload staging buffer (see RX_STAGE_SIZE in device.c). Lifetime
 	 * is tied to this device base: allocated on first open before the HW
