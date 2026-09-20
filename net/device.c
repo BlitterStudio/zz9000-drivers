@@ -1662,7 +1662,17 @@ SAVEDS void frame_proc() {
         struct BufferManagement *mbs[ZZNET_MAX_DELIVER];
         struct IOSana2Req      *reqs[ZZNET_MAX_DELIVER];
         int nmatch = 0, i;
+        int first_batch = 1;
+        int wire_ok = 0;
 
+        /* Batches of ZZNET_MAX_DELIVER — a fixed stack, but NO ceiling:
+         * a full batch means more openers may match behind it, so the
+         * do/while keeps collecting (and delivering) until a partial
+         * batch ends the pass. Every matching opener is served; the
+         * single-taker direct claim only applies when the FIRST batch
+         * collected exactly one (that is the total). */
+        do {
+        nmatch = 0;
         ObtainSemaphore(&db->db_ReadListSem);
         for (bm = (struct BufferManagement *)db->db_Openers.lh_Head;
              bm->bm_Node.mln_Succ && nmatch < ZZNET_MAX_DELIVER;
@@ -1685,8 +1695,7 @@ SAVEDS void frame_proc() {
         if (nmatch == 0) {
           /* No listener matched — frame dropped. A future change could
            * route these to S2_READORPHAN requests. */
-          global_stats.UnknownTypesReceived++;
-        } else if (nmatch == 1 &&
+        } else if (first_batch && nmatch == 1 &&
                    !(reqs[0]->ios2_Req.io_Flags & SANA2IOF_RAW) &&
                    sz >= HW_ETH_HDR_SIZE && sz <= HW_ETH_MAX_STD &&
                    zznet_ext_can_claim(1, 0, &mbs[0]->bm_Ext)) {
@@ -1764,7 +1773,7 @@ SAVEDS void frame_proc() {
 
             zznet_rx_unpin(db, mbs[0]);
 
-            global_stats.PacketsReceived++;
+            wire_ok = 1;
           } else {
             /* Claim declined: fall through to staging with the request
              * already collected — read_frame delivers it (KTD4). */
@@ -1825,12 +1834,19 @@ SAVEDS void frame_proc() {
             zznet_rx_unpin(db, mbs[idx]);
           }
 
-          /* Wire-level counter: once per wire frame, not per delivery
-           * (KTD2), so ZZNetStats attribution stays frames. */
           if (any_ok) {
-            global_stats.PacketsReceived++;
+            wire_ok = 1;
           }
         }
+        }
+
+        first_batch = 0;
+        } while (nmatch == ZZNET_MAX_DELIVER);
+
+        /* Wire-level counter: once per wire frame, not per delivery
+         * (KTD2), so ZZNetStats attribution stays frames. */
+        if (wire_ok) {
+          global_stats.PacketsReceived++;
         }
       }
 

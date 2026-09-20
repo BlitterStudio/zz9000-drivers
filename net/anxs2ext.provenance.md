@@ -33,3 +33,13 @@ and are recorded here rather than edited into the vendored header:
 3. **`ANXD_CMD_RX_CAPACITY` answers 0** unless the firmware's backlog
    depth has been measured and the firmware does not pause the wire
    (KTD6; see OQ2 in the plan).
+4. **Offline state is not enforced on read paths.** The header's
+   `ANXD_CMD_READ_BATCH` says "an offline unit answers each request in
+   the list `S2ERR_OUTOFSERVICE` the way it answers a CMD_READ" — this
+   driver answers a CMD_READ while offline by queueing it (the
+   `is_online` flag is advisory here, as it has always been), so
+   READ_BATCH parks its requests the same way instead of replying
+   `S2ERR_OUTOFSERVICE`. The plan's stage one deliberately left online
+   enforcement unimplemented everywhere (its Assumptions section);
+   enforcing it on the batch command alone would make the two read
+   paths inconsistent.

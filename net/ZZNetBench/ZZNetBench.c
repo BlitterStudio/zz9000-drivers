@@ -84,16 +84,19 @@ static struct timerequest *g_timer;
 struct Device *TimerBase;
 
 /* SANA-II requires copy hooks in the buffer-management tag list; a
- * benchmark supplies trivial memcpy variants. Declared before
- * open_device, which hangs them (and, in hook mode, the extension
- * pair) on the tag list. */
-static BOOL bench_memcpy_to(void *dst, const void *src, LONG len)
+ * benchmark supplies trivial memcpy variants. The driver invokes them
+ * through BMFunc, whose parameters arrive in a0/a1/d0 (net/device.h) —
+ * the definitions must use the same register annotations or memcpy
+ * receives garbage under the m68k compiler's stack ABI. */
+static BOOL bench_memcpy_to(void *dst __asm("a0"), void *src __asm("a1"),
+                            LONG len __asm("d0"))
 {
     memcpy(dst, src, len);
     return 1;
 }
 
-static BOOL bench_memcpy_from(void *dst, const void *src, LONG len)
+static BOOL bench_memcpy_from(void *dst __asm("a0"), void *src __asm("a1"),
+                             LONG len __asm("d0"))
 {
     memcpy(dst, src, len);
     return 1;

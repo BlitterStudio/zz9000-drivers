@@ -222,7 +222,7 @@ static ULONG zznet_cksum_add_bytes(const UBYTE *p, ULONG n)
 	return sum;
 }
 
-static UBYTE zznet_rx_flags(const UBYTE *p, ULONG len,
+static inline UBYTE zznet_rx_flags(const UBYTE *p, ULONG len,
                             struct zznet_cont *cont, int update)
 {
 	ULONG ip_hl, ip_total, trans_off, trans_len;
@@ -231,36 +231,48 @@ static UBYTE zznet_rx_flags(const UBYTE *p, ULONG len,
 	int is_tcp = 0;
 	UBYTE out = ANXD_S2_RXF_SUMMED;
 
-	if (len < 20)                        return out;
-	if ((p[0] >> 4) != 4)                return out;
+	/* KTD5 + the published contract: the record describes the frame
+	 * delivered IMMEDIATELY before this one, so every delivery of this
+	 * frame ends its validity — the update block below re-establishes
+	 * it only when this frame qualifies as a verified options-free TCP
+	 * segment. Early returns must clear it too (the frame was still
+	 * delivered to the opener), hence the macro instead of plain
+	 * returns. */
+#define ZZNET_RXF_RETURN() \
+	do { if (update && cont) cont->c_valid = 0; return out; } while (0)
+
+	if (len < 20)                        ZZNET_RXF_RETURN();
+
+
+	if ((p[0] >> 4) != 4)                ZZNET_RXF_RETURN();
 	ip_hl = (ULONG)(p[0] & 0x0f) * 4;
-	if (ip_hl != 20)                     return out; /* options excluded */
+	if (ip_hl != 20)                     ZZNET_RXF_RETURN(); /* options excluded */
 	ip_total = ((ULONG)p[2] << 8) | p[3];
-	if (ip_total != len)                 return out; /* torn or padded */
-	if (ip_total < 20)                   return out;
+	if (ip_total != len)                 ZZNET_RXF_RETURN(); /* torn or padded */
+	if (ip_total < 20)                   ZZNET_RXF_RETURN();
 	frag = ((UWORD)p[6] << 8) | p[7];
-	if (frag & 0x3fff)                   return out; /* fragment (MF|offset) */
-	if (p[9] != 6 && p[9] != 17)         return out;
+	if (frag & 0x3fff)                   ZZNET_RXF_RETURN(); /* fragment (MF|offset) */
+	if (p[9] != 6 && p[9] != 17)         ZZNET_RXF_RETURN();
 
 	/* IP header checksum: sum of the 20 header bytes (checksum field
 	 * included) must fold to 0xFFFF. */
 	if (zznet_cksum_fold(zznet_cksum_add_bytes(p, 20)) != 0xFFFF)
-		return out;
+		ZZNET_RXF_RETURN();
 
 	trans_off = ip_hl;
 	trans_len = ip_total - ip_hl;
 	if (p[9] == 17) {
-		if (trans_len < 8)               return out;
+		if (trans_len < 8)               ZZNET_RXF_RETURN();
 		udpck  = ((UWORD)p[trans_off + 6] << 8) | p[trans_off + 7];
 		udp_len = ((UWORD)p[trans_off + 4] << 8) | p[trans_off + 5];
-		if (udpck == 0)                  return out; /* UDP zero csum */
+		if (udpck == 0)                  ZZNET_RXF_RETURN(); /* UDP zero csum */
 		if (udp_len < 8 || udp_len > trans_len)
-			return out;                   /* UDP length beyond frame */
+			ZZNET_RXF_RETURN();                   /* UDP length beyond frame */
 		trans_len = udp_len;              /* checksum covers UDP length */
 	} else {
-		if (trans_len < 20)              return out;
+		if (trans_len < 20)              ZZNET_RXF_RETURN();
 		doff = (UWORD)(p[trans_off + 12] >> 4) * 4;
-		if (doff < 20 || doff > trans_len) return out;
+		if (doff < 20 || doff > trans_len) ZZNET_RXF_RETURN();
 		is_tcp = 1;
 	}
 
@@ -273,7 +285,7 @@ static UBYTE zznet_rx_flags(const UBYTE *p, ULONG len,
 	{
 		ULONG seg = zznet_cksum_fold(zznet_cksum_add_bytes(p + trans_off, trans_len));
 		if (zznet_cksum_fold(ph_sum + seg) != 0xFFFF)
-			return out;
+			ZZNET_RXF_RETURN();
 	}
 
 	out |= ANXD_S2_RXF_VERIFIED;
@@ -307,11 +319,9 @@ static UBYTE zznet_rx_flags(const UBYTE *p, ULONG len,
 	}
 
 	if (update && cont) {
-		/* KTD5 + the published contract: the record describes the
-		 * frame delivered IMMEDIATELY before the next one. Every
-		 * delivery replaces it: a non-qualifying frame (non-TCP,
-		 * unverified, options-bearing) clears it, so a later segment
-		 * can never chain across an intervening delivery. */
+		/* The entry-clear above already invalidated the record; only a
+		 * qualifying verified TCP frame (no options) re-establishes
+		 * it as the next frame's predecessor. */
 		if (p[9] == 6) {
 			UWORD doff2 = (UWORD)(p[32] >> 4) * 4;
 			ULONG seq   = ((ULONG)p[24] << 24) | ((ULONG)p[25] << 16) |
@@ -329,12 +339,11 @@ static UBYTE zznet_rx_flags(const UBYTE *p, ULONG len,
 			              ((ULONG)p[30] << 8)  | (ULONG)p[31];
 			cont->c_win = ((UWORD)p[34] << 8) | p[35];
 			cont->c_flags = p[33];
-		} else {
-			cont->c_valid = 0;
 		}
 	}
 
 	return out;
+#undef ZZNET_RXF_RETURN
 }
 
 #endif /* _INC_ZZNET_EXT_H */

@@ -534,7 +534,7 @@
 ; --------------------------------------------------------------------
 
 (if (askbool (prompt "Install the ZZ9000 command-line utilities and ZZTop configuration GUI?")
-             (help "Installs ZZTop (configuration GUI) into the ZZ9000 drawer alongside ZZPlay, and the ZZScanlines, ZZFwUpdate, ZZNetStats and ZZDiag CLI tools to C:."))
+             (help "Installs ZZTop (configuration GUI) into the ZZ9000 drawer alongside ZZPlay, and the ZZScanlines, ZZFwUpdate, ZZNetStats, ZZNetBench and ZZDiag CLI tools to C:."))
    (
       ; Repeated from the ZZPlay section: either can be chosen on its own.
       (makedir #zz-drawer (infos))
@@ -575,6 +575,13 @@
          (prompt "Install ZZNetStats into C:")
          (help "Dumps SANA-II global statistics for ZZ9000Net.device - useful for debugging link / throughput issues.")
          (source "Tools/ZZNetStats")
+         (dest "C:")
+         (confirm))
+
+      (copyfiles
+         (prompt "Install ZZNetBench into C:")
+         (help "Raw SANA-II throughput benchmark for ZZ9000Net.device (RX / RXD / TX / BUS modes) with counter-delta attribution - run it with the environment rules in the README's Network Performance section.")
+         (source "Tools/ZZNetBench")
          (dest "C:")
          (confirm))
 
