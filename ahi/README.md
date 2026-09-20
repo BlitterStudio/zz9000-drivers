@@ -32,6 +32,36 @@ paths.
 
 Build and install locations are covered in the [main README](../README.md).
 
+## Mixing channels
+
+`zz9000ax.audio` 4.29 advertises up to **8 mixing channels** per mode
+(`AHIDB_MaxChannels` was 1 before, which is why the channel selector in
+AHI Prefs was greyed out). The driver is an `AHISF_MIXING` subdriver:
+AHI mixes all allocated channels in software on the Amiga's CPU — linear
+interpolation, 32-bit accumulation — and the card still receives a
+single stereo PCM stream, exactly as before. Nothing in the hardware
+transport, the fabric lease, the legacy register path, or MHI coexistence
+changes with the channel count; the ceiling is a host CPU budget, not a
+hardware limit.
+
+Practical guidance:
+
+- The actual count is chosen per mode in AHI Prefs; CPU cost accrues only
+  for channels that are actively playing (silent channels take AHI's
+  cheap silence path).
+- 68030: 2–4 channels at 44.1/48 kHz. 68040: 4–8. 68060 / Apollo core:
+  8. (The community two-channel variant of the stock 4.19 driver —
+  Xanxi/Fitzsteve, same one-line change — was validated with ZZQuake on
+  a 68030/25.)
+- Overcommitting shows up as AHI CPU-limiter period skips — audible
+  stutter — not as a driver failure. If 8 proves comfortable on your
+  hardware, raising the ceiling further is a one-line change
+  (`ZZ_AX_AHI_MAX_CHANNELS` in `driver/zz9000ax-ahi.c`).
+
+UAE's AHI is not a yardstick here: its m68k-side driver advertises 8
+channels while the actual mixing runs on the host CPU, so emulated
+channel counts are effectively free.
+
 ## AHI timer pairing
 
 Version 4.28 calls `PostTimer` after every executed `PreTimer`, including
