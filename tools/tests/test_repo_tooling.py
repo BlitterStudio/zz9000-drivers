@@ -25,6 +25,7 @@ GENERATED_ARTIFACT_PATHS = (
     "ZZScanlines/ZZScanlines",
     "ZZTop/ZZTop",
     "net/ZZNetStats/ZZNetStats",
+    "net/ZZNetBench/ZZNetBench",
     "ZZDiag/ZZDiag",
     "ahi/axtest/axtest",
     "ahi/duplextest/ZZAXDuplexTest",
