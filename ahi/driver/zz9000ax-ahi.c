@@ -60,9 +60,9 @@
 #define XSTR(s) STR(s)
 
 #define DEVICE_NAME "zz9000ax.audio"
-#define DEVICE_DATE "(09.09.2026)"
+#define DEVICE_DATE "(20.09.2026)"
 #define DEVICE_VERSION 4
-#define DEVICE_REVISION 28
+#define DEVICE_REVISION 29
 #define DEVICE_ID_STRING "ZZ9000AX " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
 #define DEVICE_PRIORITY 0
 
@@ -76,6 +76,18 @@
 // keep this in sync with the mixer byte math (bytes = BuffSamples << 2)
 // and with the bounce-buffer capacity check in WorkerProcess().
 #define BOUNCE_MAX_FRAMES ZZ_AX_BOUNCE_MAX_FRAMES
+// AHI software-mixing channel ceiling advertised via AHIDB_MaxChannels.
+// This is an AHISF_MIXING subdriver: ahi.device mixes every allocated
+// channel on the m68k (linear interpolation, 32-bit accumulation) and the
+// card only ever receives the final stereo S16 stream, so this number is
+// a host CPU budget, not a hardware limit -- the ZZ9000AX transport is
+// channel-count-invariant. Cost accrues per playing channel at the
+// selected mix rate (silent channels take AHI's cheap AddSilence path),
+// and users pick the actual count per mode in AHI Prefs. 8 keeps
+// 44.1 kHz mixing deliverable on 68040-class hosts and matches the
+// comparable m68k mixing driver baseline (WinUAE's AHI driver: 8);
+// recommend 2-4 on 68030. Bumping the ceiling is this define alone.
+#define ZZ_AX_AHI_MAX_CHANNELS 8
 // Lease-mode startup headroom: two periods = 40 ms. Absolute deadline
 // pacing keeps production locked to the compositor after playback begins.
 #define LEASE_RUNWAY_PERIODS 2U
@@ -1951,7 +1963,10 @@ static int32_t __attribute__((used)) intAHIsub_GetAttr(uint32_t attr_ asm("d0"),
     case AHIDB_Realtime:
       return TRUE;
     case AHIDB_MaxChannels:
-      return 1;
+      // Ceiling of the AHI Prefs channel selector; see
+      // ZZ_AX_AHI_MAX_CHANNELS for why this is a CPU budget, not a
+      // hardware channel count (the card always gets one stereo stream).
+      return ZZ_AX_AHI_MAX_CHANNELS;
     case AHIDB_MaxPlaySamples:
       // AHI contract: this is sample frames, NOT bytes. At the highest mix
       // rate we advertise (48 kHz) the driver sets ahiac_BuffSamples to
