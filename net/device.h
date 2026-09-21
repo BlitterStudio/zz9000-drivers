@@ -45,6 +45,7 @@
 #include "debug.h"
 #include "sana2.h"
 #include "zznet_ext.h"
+#include "zznet_mmio.h"
 
 /* reassign Library bases from global definitions to own struct */
 #define SysBase       db->db_SysBase

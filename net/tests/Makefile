@@ -10,13 +10,14 @@ BUILD_DIR ?= build
 
 STUBS := ../../common/tests/stubs
 
-TARGETS := $(BUILD_DIR)/claim_test $(BUILD_DIR)/verify_test
+TARGETS := $(BUILD_DIR)/claim_test $(BUILD_DIR)/verify_test $(BUILD_DIR)/drain_test
 
 .PHONY: test clean
 
 test: $(TARGETS)
 	$(BUILD_DIR)/claim_test
 	$(BUILD_DIR)/verify_test
+	$(BUILD_DIR)/drain_test
 
 $(BUILD_DIR)/claim_test: claim_test.c ../zznet_ext.h ../anxs2ext.h $(STUBS)/exec/types.h
 	@mkdir -p $(BUILD_DIR)
@@ -28,3 +29,7 @@ clean:
 $(BUILD_DIR)/verify_test: verify_test.c ../zznet_ext.h ../anxs2ext.h $(STUBS)/exec/types.h
 	@mkdir -p $(BUILD_DIR)
 	$(CC) -Wall -Wextra $(CFLAGS) -DZZNET_HOST_TEST -I$(STUBS) -I.. -o $@ verify_test.c
+
+$(BUILD_DIR)/drain_test: drain_test.c ../zznet_mmio.h $(STUBS)/exec/types.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) -Wall -Wextra $(CFLAGS) -DZZNET_HOST_TEST -I$(STUBS) -I.. -o $@ drain_test.c

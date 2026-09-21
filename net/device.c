@@ -990,63 +990,6 @@ void DevTermIO( DEVBASEP, struct IORequest *ioreq )
   }
 }
 
-/* Single-copy direct drain (KTD4): MMIO → the opener's answered buffer,
- * accumulating the published ones-complement sum. Source is the FPGA
- * window (volatile, word-aligned reads); dst is opener RAM where
- * unaligned longs are legal on 68020+.
- *
- * Sum positions are relative to the PAYLOAD start, never to the MMIO
- * address: the published contract sums consecutive big-endian
- * longwords of the delivered bytes (bytes 0-3, 4-7, ...), so for
- * 01 02 03 04 05 06 the sum is 0x01020304 + 0x05060000. The payload
- * begins 2 mod 4 in the window, so a longword covering bytes 0-3 can
- * never be one aligned MMIO read; each published longword is assembled
- * from two word reads (each a single Zorro cycle) with end-around
- * carry per longword — exactly n68k_port_in_l_sum's per-longword
- * accumulation, at twice the word-cycle count of an address-aligned
- * walk. That is the price of a sum the opener can trust. */
-static ULONG zznet_mmio_read_sum(volatile UBYTE *src, UBYTE *dst, ULONG n)
-{
-	ULONG sum = 0;
-
-	while (n >= 4) {
-		USHORT whi = *(volatile USHORT *)src;
-		USHORT wlo = *(volatile USHORT *)(src + 2);
-		ULONG v;
-		*(USHORT *)dst = whi;
-		*(USHORT *)(dst + 2) = wlo;
-		v = ((ULONG)whi << 16) | wlo;
-		sum += v;
-		if (sum < v) sum++;
-		src += 4; dst += 4; n -= 4;
-	}
-
-	if (n) {
-		/* Zero-padded BE tail: the remaining 1-3 bytes occupy the
-		 * high bytes of a final longword — a 3-byte tail is
-		 * word<<16 | byte<<8, a 2-byte tail word<<16, a lone byte
-		 * (1 mod 4 payload) sits at the very top: byte<<24. */
-		ULONG v = 0;
-		int had_word = 0;
-		if (n >= 2) {
-			USHORT w = *(volatile USHORT *)src;
-			*(USHORT *)dst = w;
-			src += 2; dst += 2; n -= 2;
-			v |= (ULONG)w << 16;
-			had_word = 1;
-		}
-		if (n) {
-			UBYTE b = *src;
-			*dst = b;
-			v |= (ULONG)b << (had_word ? 8 : 24);
-		}
-		sum += v;
-		if (sum < v) sum++;
-	}
-
-	return sum;
-}
-
 /* Frame header layout in the ZZ9000 RX window (MMIO-backed):
  *   +0..+1   USHORT  total size
  *   +2..+3   USHORT  serial (increments each new frame)
@@ -1500,6 +1443,22 @@ static void zznet_cont_reset_all(DEVBASETYPE *db)
 	ReleaseSemaphore(&db->db_ReadListSem);
 }
 
+/* Arm the one-shot TX liveness wake (KTD3): while parked writes wait,
+ * every sleep frame_proc takes must be able to wake us within a tick —
+ * whatever event, or none, arrives next. A reply-pacing stack and a
+ * silent peer must not deadlock on the final parked request. */
+static void zznet_tx_liveness_arm(struct timerequest *treq, BOOL *tarmed,
+                                  struct devbase *db)
+{
+  if (treq && !*tarmed && db->db_TXList.lh_Head->ln_Succ) {
+    treq->tr_node.io_Command = TR_ADDREQUEST;
+    treq->tr_time.tv_secs  = 0;
+    treq->tr_time.tv_micro = 1000; /* 1 ms: well under a wire time */
+    SendIO(treq);
+    *tarmed = TRUE;
+  }
+}
+
 SAVEDS void frame_proc() {
   ULONG wmask;
 
@@ -1566,6 +1525,17 @@ SAVEDS void frame_proc() {
       break;
     }
 
+    /* Liveness receipt: the one-shot wake fired — re-check the window
+     * before the header read so a parked drain never delays a frame
+     * that already landed. */
+    if (recv & tmask) {
+      if (tarmed && treq) {
+        GetMsg(tport);
+        tarmed = FALSE;
+      }
+      zznet_tx_drain(db);
+    }
+
     USHORT sz, serial;
     zznet_read_header(frm, &sz, &serial);
 
@@ -1587,7 +1557,8 @@ SAVEDS void frame_proc() {
     if (sz == 0 && serial == 0) {
       rxv_empty_slot++;
       *irq_ctrl = 1;
-      recv = Wait(wmask);
+      zznet_tx_liveness_arm(treq, &tarmed, db);
+      recv = Wait(wmask | tmask);
       continue;
     }
 
@@ -1880,25 +1851,20 @@ SAVEDS void frame_proc() {
        * recheck on the next loop iteration without paying for an IRQ we'd
        * ignore anyway. */
       *rx_accept = serial;
-    } else {
-      /* Nothing new. Re-enable the ethernet IRQ, arm the TX liveness
-       * timer when parked writes wait (KTD3), then sleep. */
-      *irq_ctrl = 1;
-      if (treq && !tarmed && db->db_TXList.lh_Head->ln_Succ) {
-        treq->tr_node.io_Command = TR_ADDREQUEST;
-        treq->tr_time.tv_secs  = 0;
-        treq->tr_time.tv_micro = 1000; /* 1 ms: well under a wire time */
-        SendIO(treq);
-        tarmed = TRUE;
-      }
-      recv = Wait(wmask | tmask);
-      if (recv & tmask) {
-        if (tarmed && treq) {
-          GetMsg(tport);
-          tarmed = FALSE;
-        }
+
+      /* RX-wake window poll (KTD3): parked writes complete on RX
+       * activity as well, so a continuous frame stream cannot starve
+       * the liveness timer's arm window. */
+      if (db->db_TXList.lh_Head->ln_Succ) {
         zznet_tx_drain(db);
       }
+    } else {
+      /* Nothing new. Re-enable the ethernet IRQ and arm the TX
+       * liveness wake when parked writes wait (KTD3), then sleep; the
+       * wake receipt is collected at the top of the loop. */
+      *irq_ctrl = 1;
+      zznet_tx_liveness_arm(treq, &tarmed, db);
+      recv = Wait(wmask | tmask);
     }
   }
   // disable interrupt
