@@ -991,38 +991,39 @@ void DevTermIO( DEVBASEP, struct IORequest *ioreq )
 }
 
 /* Single-copy direct drain (KTD4): MMIO → the opener's answered buffer,
- * accumulating the published ones-complement sum (end-around carry over
- * big-endian longwords, zero-padded tail — n68k_port_in_l_sum
- * semantics) at copy cost. Source is the FPGA window (volatile); dst is
- * opener RAM where unaligned longs are legal on 68020+. Returns the
- * sum of the transferred bytes. */
+ * accumulating the published ones-complement sum. Source is the FPGA
+ * window (volatile, word-aligned reads); dst is opener RAM where
+ * unaligned longs are legal on 68020+.
+ *
+ * Sum positions are relative to the PAYLOAD start, never to the MMIO
+ * address: the published contract sums consecutive big-endian
+ * longwords of the delivered bytes (bytes 0-3, 4-7, ...), so for
+ * 01 02 03 04 05 06 the sum is 0x01020304 + 0x05060000. The payload
+ * begins 2 mod 4 in the window, so a longword covering bytes 0-3 can
+ * never be one aligned MMIO read; each published longword is assembled
+ * from two word reads (each a single Zorro cycle) with end-around
+ * carry per longword — exactly n68k_port_in_l_sum's per-longword
+ * accumulation, at twice the word-cycle count of an address-aligned
+ * walk. That is the price of a sum the opener can trust. */
 static ULONG zznet_mmio_read_sum(volatile UBYTE *src, UBYTE *dst, ULONG n)
 {
 	ULONG sum = 0;
 
-	/* Reach 4-byte source alignment with one leading word. */
-	if (((ULONG)src & 2) && n >= 2) {
-		USHORT w0 = *(volatile USHORT *)src;
-		*(USHORT *)dst = w0;
-		src += 2; dst += 2; n -= 2;
-		{
-			ULONG v = (ULONG)w0 << 16;
-			sum += v;
-			if (sum < v) sum++;
-		}
-	}
-
 	while (n >= 4) {
-		ULONG v = *(volatile ULONG *)src;
-		*(ULONG *)dst = v;
-		src += 4; dst += 4; n -= 4;
+		USHORT whi = *(volatile USHORT *)src;
+		USHORT wlo = *(volatile USHORT *)(src + 2);
+		ULONG v;
+		*(USHORT *)dst = whi;
+		*(USHORT *)(dst + 2) = wlo;
+		v = ((ULONG)whi << 16) | wlo;
 		sum += v;
 		if (sum < v) sum++;
+		src += 4; dst += 4; n -= 4;
 	}
 
 	if (n) {
-		/* Zero-padded BE tail: assemble the remaining 1-3 bytes into
-		 * the low bytes of a longword value. */
+		/* Zero-padded BE tail: the remaining 1-3 bytes occupy the
+		 * high bytes of a final longword. */
 		ULONG v = 0;
 		if (n >= 2) {
 			USHORT w = *(volatile USHORT *)src;
@@ -1303,27 +1304,33 @@ static USHORT zznet_tx_stage(struct IOSana2Req *req, UBYTE *slot)
 	return sz;
 }
 
-/* Copy a staged frame into the FPGA TX window, kick, and read the
- * status back — the one MMIO cycle pair the caller no longer waits
- * on. Caller holds db_TXSem (KTD3's single critical section). Returns
- * the hardware status (0 = accepted). */
+/* Copy a staged frame into the FPGA TX window (when the frame waits in
+ * a Fast-RAM slot), kick, and read the status back — the one MMIO
+ * cycle pair the caller no longer waits on. `slot == NULL` means the
+ * frame is ALREADY in the window (the inline path staged it there
+ * directly): no self-copy pass, which would both waste a full-frame
+ * MMIO read/write round-trip and rely on TX-window readback the
+ * firmware does not promise. Caller holds db_TXSem (KTD3's single
+ * critical section). Returns the hardware status (0 = accepted). */
 static ULONG zznet_tx_kick(DEVBASETYPE *db, const UBYTE *slot, USHORT sz)
 {
 	volatile USHORT *reg;
-	const volatile UBYTE *src = (const volatile UBYTE *)slot;
-	volatile UBYTE *dst = (volatile UBYTE *)(ZZ9K_REGS + ZZ9K_TX);
 	ULONG n = sz;
 	ULONG rc;
 
-	/* RAM → MMIO copy: longword body, byte tail. Phase is matched by
-	 * construction — slot and window are both longword-aligned at frame
-	 * start — so the bulk of the copy is one bus cycle per 4 bytes. */
-	while (n >= 4) {
-		*(volatile ULONG *)dst = *(const volatile ULONG *)src;
-		dst += 4; src += 4; n -= 4;
-	}
-	while (n--) {
-		*dst++ = *src++;
+	if (slot) {
+		const volatile UBYTE *src = (const volatile UBYTE *)slot;
+		volatile UBYTE *dst = (volatile UBYTE *)(ZZ9K_REGS + ZZ9K_TX);
+		/* RAM → MMIO copy: longword body, byte tail. Phase is
+		 * matched by construction — slot and window are both
+		 * longword-aligned at frame start. */
+		while (n >= 4) {
+			*(volatile ULONG *)dst = *(const volatile ULONG *)src;
+			dst += 4; src += 4; n -= 4;
+		}
+		while (n--) {
+			*dst++ = *src++;
+		}
 	}
 
 	reg = (volatile USHORT *)(ZZ9K_REGS + 0x80);
@@ -1424,7 +1431,9 @@ static int zznet_tx_write(DEVBASETYPE *db, struct IOSana2Req *req)
 			DevTermIO(db, (struct IORequest *)req);
 			rc = 0;
 		} else {
-			ULONG st = zznet_tx_kick(db, window, sz);
+			/* Frame already in the window: kick-only (NULL src
+			 * skips the self-copy). */
+			ULONG st = zznet_tx_kick(db, NULL, sz);
 			zznet_tx_complete(db, req, st);
 		}
 	} else {
