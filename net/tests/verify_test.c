@@ -205,6 +205,38 @@ int main(void) {
     flags = zznet_rx_flags(pkt, (ULONG)len, &cont, 1);
     CHECK(!(flags & ANXD_S2_RXF_CONTINUES), "TCP options break chain");
 
+    /* Verified UDP delivered between two chain-adjacent TCP segments:
+     * the UDP frame IS the immediate predecessor when the second TCP
+     * segment arrives, so no CONTINUES may chain across it. */
+    memset(&cont, 0, sizeof(cont));
+    build_ip_tcp(pkt, 16, 0x10, 1000, 5, 8000, 5);
+    (void)zznet_rx_flags(pkt, (ULONG)len, &cont, 1);
+    {
+        UBYTE udp[1600];
+        int ulen, ip_hl = 20, udp_hl = 8, plen2 = 12, total = ip_hl + udp_hl + plen2;
+        memset(udp, 0, total);
+        udp[0] = 0x45; put16(udp, 2, (UWORD)total); udp[8] = 64; udp[9] = 17;
+        put32(udp, 12, 0x0a000001); put32(udp, 16, 0x0a000002);
+        put16(udp, 20, 5353); put16(udp, 22, 5353);
+        put16(udp, 24, (UWORD)(udp_hl + plen2));
+        {
+            UBYTE ph[12]; UWORD phc, segc; ULONG s2;
+            put32(ph, 0, 0x0a000001); put32(ph, 4, 0x0a000002);
+            ph[8] = 0; ph[9] = 17; put16(ph, 10, (UWORD)(udp_hl + plen2));
+            phc = csum(ph, 12); segc = csum(udp + ip_hl, udp_hl + plen2);
+            s2 = (ULONG)phc + (ULONG)segc;
+            while (s2 >> 16) s2 = (s2 & 0xffff) + (s2 >> 16);
+            put16(udp, ip_hl + 6, (UWORD)s2);
+        }
+        put16(udp, 10, csum(udp, ip_hl));
+        ulen = total;
+        flags = zznet_rx_flags(udp, (ULONG)ulen, &cont, 1);
+        CHECK(flags & ANXD_S2_RXF_VERIFIED, "interleave: UDP verifies");
+    }
+    build_ip_tcp(pkt, 16, 0x10, 1016, 5, 8000, 5);
+    flags = zznet_rx_flags(pkt, (ULONG)len, &cont, 1);
+    CHECK(!(flags & ANXD_S2_RXF_CONTINUES),
+          "verified UDP between segments breaks chain");
     /* Interleaved flow: same opener, different stream — replaces record,
      * no CONTINUES on the second. */
     memset(&cont, 0, sizeof(cont));

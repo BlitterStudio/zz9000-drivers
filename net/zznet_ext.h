@@ -164,6 +164,13 @@ static inline int zznet_ext_negotiate(const struct zznet_tag *tags,
 		xe->xe_RxFlags = flags_preload
 			? (UBYTE)(flags_preload & ZZNET_EXT_RXF_SUPPORTED)
 			: (UBYTE)ZZNET_EXT_RXF_SUPPORTED;
+		/* Published rule: "CONTINUES requires VERIFIED; an opener may
+		 * request VERIFIED alone." A preload of CONTINUES without
+		 * VERIFIED is normalized down to what the contract allows,
+		 * so RX_FILLED never reports an invalid combination. */
+		if (!(xe->xe_RxFlags & ANXD_S2_RXF_VERIFIED)) {
+			xe->xe_RxFlags &= (UBYTE)~ANXD_S2_RXF_CONTINUES;
+		}
 		*flags_ptr = xe->xe_RxFlags;
 	}
 
@@ -333,9 +340,13 @@ static inline UBYTE zznet_rx_flags(const UBYTE *p, ULONG len,
 	}
 
 	if (update && cont) {
-		/* The entry-clear above already invalidated the record; only a
-		 * qualifying verified TCP frame (no options) re-establishes
-		 * it as the next frame's predecessor. */
+		/* Every delivery ends the old record's validity (the entry
+		 * macro handles rejected frames); only this block decides
+		 * whether a NEW record is established. A verified UDP
+		 * delivery reaches here without re-establishing anything, so
+		 * the explicit else-clear is what invalidates the stale TCP
+		 * record — without it the next TCP segment would chain
+		 * across the intervening UDP frame. */
 		if (p[9] == 6) {
 			UWORD doff2 = (UWORD)(p[32] >> 4) * 4;
 			ULONG seq   = ((ULONG)p[24] << 24) | ((ULONG)p[25] << 16) |
@@ -353,6 +364,10 @@ static inline UBYTE zznet_rx_flags(const UBYTE *p, ULONG len,
 			              ((ULONG)p[30] << 8)  | (ULONG)p[31];
 			cont->c_win = ((UWORD)p[34] << 8) | p[35];
 			cont->c_flags = p[33];
+		} else {
+			/* Verified non-TCP (UDP): delivered, so it is the new
+			 * immediate predecessor — but never a valid one. */
+			cont->c_valid = 0;
 		}
 	}
 

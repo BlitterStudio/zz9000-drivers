@@ -1697,11 +1697,12 @@ SAVEDS void frame_proc() {
         }
         ReleaseSemaphore(&db->db_ReadListSem);
 
-        if (nmatch == 0) {
-          /* No listener matched — frame dropped. A future change could
-           * route these to S2_READORPHAN requests. Unreachable on
-           * continuation batches (the loop only runs them after a full
-           * batch), so this fires exactly once for an unhandled frame. */
+        if (nmatch == 0 && first_batch) {
+          /* No listener matched on the first (only) collection pass —
+           * frame dropped. A future change could route these to
+           * S2_READORPHAN requests. A FULL final batch (exact multiple
+           * of ZZNET_MAX_DELIVER) also produces a final empty
+           * iteration, which must NOT count: every opener was served. */
           global_stats.UnknownTypesReceived++;
         } else if (first_batch && nmatch == 1 &&
                    !(reqs[0]->ios2_Req.io_Flags & SANA2IOF_RAW) &&
