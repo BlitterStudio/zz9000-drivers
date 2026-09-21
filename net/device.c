@@ -1023,18 +1023,22 @@ static ULONG zznet_mmio_read_sum(volatile UBYTE *src, UBYTE *dst, ULONG n)
 
 	if (n) {
 		/* Zero-padded BE tail: the remaining 1-3 bytes occupy the
-		 * high bytes of a final longword. */
+		 * high bytes of a final longword — a 3-byte tail is
+		 * word<<16 | byte<<8, a 2-byte tail word<<16, a lone byte
+		 * (1 mod 4 payload) sits at the very top: byte<<24. */
 		ULONG v = 0;
+		int had_word = 0;
 		if (n >= 2) {
 			USHORT w = *(volatile USHORT *)src;
 			*(USHORT *)dst = w;
 			src += 2; dst += 2; n -= 2;
 			v |= (ULONG)w << 16;
+			had_word = 1;
 		}
 		if (n) {
 			UBYTE b = *src;
 			*dst = b;
-			v |= (ULONG)b << 8; /* zero low byte pads the tail */
+			v |= (ULONG)b << (had_word ? 8 : 24);
 		}
 		sum += v;
 		if (sum < v) sum++;

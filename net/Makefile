@@ -40,7 +40,7 @@ endif
 
 all: $(DEVICEID)
 
-$(DEVICEID): $(SOURCES) device.h compiler.h debug.h macros.h sana2.h version.h
+$(DEVICEID): $(SOURCES) device.h compiler.h debug.h macros.h sana2.h version.h anxs2ext.h zznet_ext.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(SOURCES) $(LDLIBS)
 
 clean:
