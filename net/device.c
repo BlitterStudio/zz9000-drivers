@@ -350,7 +350,7 @@ SAVEDS LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
                          ASMR(a6) DEVBASEP                           ASMREG(a6) )
 {
 	LONG ok = 0,ret = IOERR_OPENFAIL;
-  struct BufferManagement *bm;
+  struct BufferManagement *bm = NULL;
 
 	D(("ZZ9000Net: DevOpen for %ld\n",unit));
 
@@ -1671,12 +1671,16 @@ SAVEDS void frame_proc() {
          * batch ends the pass. Every matching opener is served; the
          * single-taker direct claim only applies when the FIRST batch
          * collected exactly one (that is the total). */
+        db->db_DeliverGen++; /* once per wire frame, before all batches */
         do {
         nmatch = 0;
         ObtainSemaphore(&db->db_ReadListSem);
         for (bm = (struct BufferManagement *)db->db_Openers.lh_Head;
              bm->bm_Node.mln_Succ && nmatch < ZZNET_MAX_DELIVER;
              bm = (struct BufferManagement *)bm->bm_Node.mln_Succ) {
+          if (bm->bm_ServedGen == db->db_DeliverGen) {
+            continue; /* already served this frame by an earlier batch */
+          }
           for (ior = (struct IOSana2Req *)bm->bm_ReadList.lh_Head;
                ior->ios2_Req.io_Message.mn_Node.ln_Succ;
                ior = (struct IOSana2Req *)ior->ios2_Req.io_Message.mn_Node.ln_Succ) {
@@ -1686,6 +1690,7 @@ SAVEDS void frame_proc() {
               reqs[nmatch] = ior;
               nmatch++;
               bm->bm_InUse++;
+              bm->bm_ServedGen = db->db_DeliverGen;
               break; /* one delivery per opener per frame */
             }
           }
@@ -1694,7 +1699,10 @@ SAVEDS void frame_proc() {
 
         if (nmatch == 0) {
           /* No listener matched — frame dropped. A future change could
-           * route these to S2_READORPHAN requests. */
+           * route these to S2_READORPHAN requests. Unreachable on
+           * continuation batches (the loop only runs them after a full
+           * batch), so this fires exactly once for an unhandled frame. */
+          global_stats.UnknownTypesReceived++;
         } else if (first_batch && nmatch == 1 &&
                    !(reqs[0]->ios2_Req.io_Flags & SANA2IOF_RAW) &&
                    sz >= HW_ETH_HDR_SIZE && sz <= HW_ETH_MAX_STD &&

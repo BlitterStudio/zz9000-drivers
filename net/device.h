@@ -74,13 +74,14 @@ struct devbase {
 	struct Library *db_UtilityBase;
 	struct Library *db_ExpansionBase;
 	struct Interrupt *db_interrupt;
-
-	/* Device-wide list of open BufferManagement records (one per opener,
-	 * struct MinNode bm_Node). Reads queue on the opener's own
-	 * bm_ReadList; the single semaphore below guards db_Openers and every
-	 * bm_ReadList. */
 	struct List db_Openers;
 	struct SignalSemaphore db_ReadListSem;
+	/* Per-wire-frame delivery generation (KTD2 batch resume): bumped
+	 * once per frame frame_proc delivers; an opener whose bm_ServedGen
+	 * matches is already served for THIS frame and skipped by the next
+	 * collection batch, so >8 matching openers never see the same
+	 * frame twice. */
+	ULONG db_DeliverGen;
 	struct Process* db_Proc;
 	struct SignalSemaphore db_ProcExitSem;
 
@@ -173,6 +174,9 @@ typedef struct BufferManagement
    * free to the last unpin, so the drainer never touches freed hooks. */
   UWORD            bm_InUse;
   UWORD            bm_Closing;
+  /* Delivery generation this opener was last served for (KTD2 batch
+   * resume; see devbase::db_DeliverGen). */
+  ULONG            bm_ServedGen;
 } BufferManagement;
 
 struct HWFrame {

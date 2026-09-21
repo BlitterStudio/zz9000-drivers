@@ -98,29 +98,43 @@ static inline int zznet_ext_negotiate(const struct zznet_tag *tags,
 	UBYTE *flags_ptr = 0;
 	UBYTE flags_preload = 0;
 	void *direct = 0, *filled = 0, *filter = 0;
-	const struct zznet_tag *t;
+	const struct zznet_tag *t = tags;
 
-	for (t = tags; t->tag != 0; t++) {
+	/* Standard TagItem traversal semantics (utility.library rules):
+	 * TAG_DONE ends the list, TAG_SKIP skips ti_Data further items,
+	 * TAG_IGNORE is a no-op, and TAG_MORE continues at the pointer in
+	 * ti_Data. A plain linear walk would read skipped items as live and
+	 * run past a chained list's end into unrelated memory. */
+	while (t && t->tag != 0 /* TAG_DONE */) {
 		switch (t->tag) {
+		case 2 /* TAG_SKIP */:
+			t += (zznet_tag_data)t->data + 1;
+			continue;
+		case 3 /* TAG_IGNORE */:
+			break;
+		case 4 /* TAG_MORE */:
+			t = (const struct zznet_tag *)(zznet_tag_data)t->data;
+			continue;
 		case ANXD_S2_RX_DIRECT:
-			direct = (void *)t->data;
+			direct = (void *)(zznet_tag_data)t->data;
 			break;
 		case ANXD_S2_RX_FILLED:
-			filled = (void *)t->data;
+			filled = (void *)(zznet_tag_data)t->data;
 			break;
 		case ANXD_S2_RX_LINK_HDR:
-			linkhdr_ptr = (BOOL *)t->data;
+			linkhdr_ptr = (BOOL *)(zznet_tag_data)t->data;
 			break;
 		case ANXD_S2_RX_FLAGS:
-			flags_ptr = (UBYTE *)t->data;
+			flags_ptr = (UBYTE *)(zznet_tag_data)t->data;
 			flags_preload = flags_ptr ? *flags_ptr : 0;
 			break;
 		case ZZNET_S2_PacketFilter:
-			filter = (void *)t->data;
+			filter = (void *)(zznet_tag_data)t->data;
 			break;
 		default:
 			break;
 		}
+		t++;
 	}
 
 	xe->xe_PacketFilter = filter;
