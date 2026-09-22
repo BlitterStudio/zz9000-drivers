@@ -36,6 +36,7 @@
 #include <exec/execbase.h>
 #include <hardware/intbits.h>
 #include <string.h>
+#include "sana2.h"
 
 #ifdef HAVE_VERSION_H
 #include "version.h"
@@ -50,6 +51,9 @@ const UWORD dev_supportedcmds[] = {
 	NSCMD_DEVICEQUERY,
 	CMD_READ,
 	CMD_WRITE,
+	S2_ADDMULTICASTADDRESS,
+	S2_DELMULTICASTADDRESS,
+	S2_MULTICAST,
 	/* ... add all cmds here that are supported by BeginIO */
 	0
 };
@@ -71,6 +75,11 @@ const struct NSDeviceQueryResult NSDQueryAnswer = {
 static ULONG ZZ9K_REGS = 0;
 #define ZZ9K_RX 0x2000
 #define ZZ9K_TX 0x8000
+#define ZZ9K_ETH_CONFIG 0x008a
+#define ZZ9K_ETH_CONFIG_CAP_MCAST_HASH 0x0001
+#define ZZ9K_ETH_CONFIG_HASH_SET       0x8000
+#define ZZ9K_ETH_CONFIG_HASH_CLEAR     0x4000
+#define ZZ9K_ETH_CONFIG_HASH_RESET     0x2000
 
 struct Sana2DeviceStats global_stats;
 BOOL is_online;
@@ -205,6 +214,145 @@ SAVEDS ULONG dev_isr(struct devbase* db __asm("a1")) {
 }
 
 static UBYTE HW_MAC[] = {0x00,0x00,0x00,0x00,0x00,0x00};
+
+static BOOL zznet_mcast_firmware_capable(void)
+{
+	return (*(volatile USHORT *)(ZZ9K_REGS + ZZ9K_ETH_CONFIG) &
+	        ZZ9K_ETH_CONFIG_CAP_MCAST_HASH) != 0;
+}
+
+static void zznet_mcast_firmware_command(UWORD command)
+{
+	*(volatile USHORT *)(ZZ9K_REGS + ZZ9K_ETH_CONFIG) = command;
+}
+
+/* GEM's 64-bit multicast hash is the XOR of the eight consecutive 6-bit
+ * pieces of the destination address (Xilinx UG585, GEM network config). */
+static UWORD zznet_mcast_hash(const UBYTE *a)
+{
+	return (UWORD)((a[0] & 0x3f) ^
+	               ((a[0] >> 6) | ((a[1] & 0x0f) << 2)) ^
+	               ((a[1] >> 4) | ((a[2] & 0x03) << 4)) ^
+	               (a[2] >> 2) ^
+	               (a[3] & 0x3f) ^
+	               ((a[3] >> 6) | ((a[4] & 0x0f) << 2)) ^
+	               ((a[4] >> 4) | ((a[5] & 0x03) << 4)) ^
+	               (a[5] >> 2));
+}
+
+static BOOL zznet_mcast_same(const UBYTE *a, const UBYTE *b)
+{
+	UWORD i;
+
+	for (i = 0; i < HW_ADDRFIELDSIZE; i++) {
+		if (a[i] != b[i])
+			return FALSE;
+	}
+	return TRUE;
+}
+
+/* Maintain exact SANA-II group membership in the driver. Firmware programs
+ * the GEM's 64-bucket hash, while exact filtering stays here because this is
+ * where the reference-counted subscription state from every opener lives. */
+static LONG zznet_mcast_change(DEVBASETYPE *db, const UBYTE *addr, BOOL add)
+{
+	struct McastEntry *free_entry = NULL;
+	struct McastEntry *entry = NULL;
+	UWORD i;
+	LONG result = 0;
+
+	ObtainSemaphore(&db->db_McastSem);
+	for (i = 0; i < MCAST_MAX; i++) {
+		if (db->db_Mcast[i].refs == 0) {
+			if (!free_entry)
+				free_entry = &db->db_Mcast[i];
+		} else if (zznet_mcast_same(db->db_Mcast[i].addr, addr)) {
+			entry = &db->db_Mcast[i];
+			break;
+		}
+	}
+
+	if (add) {
+		if (entry) {
+			if (entry->refs == 0xffffU)
+				result = S2ERR_NO_RESOURCES;
+			else
+				entry->refs++;
+		} else if (!free_entry) {
+			result = S2ERR_NO_RESOURCES;
+		} else if (db->db_McastCount == 0 &&
+		           !zznet_mcast_firmware_capable()) {
+			result = S2ERR_NOT_SUPPORTED;
+		} else {
+			UWORD bucket = zznet_mcast_hash(addr);
+			BOOL bucket_used = FALSE;
+
+			for (i = 0; i < MCAST_MAX; i++) {
+				if (db->db_Mcast[i].refs != 0 &&
+				    zznet_mcast_hash(db->db_Mcast[i].addr) == bucket) {
+					bucket_used = TRUE;
+					break;
+				}
+			}
+			memcpy(free_entry->addr, addr, HW_ADDRFIELDSIZE);
+			free_entry->refs = 1;
+			db->db_McastCount++;
+			if (!bucket_used)
+				zznet_mcast_firmware_command(
+				    ZZ9K_ETH_CONFIG_HASH_SET | bucket);
+		}
+	} else if (!entry) {
+		result = S2ERR_BAD_STATE;
+	} else if (--entry->refs == 0) {
+		UWORD bucket = zznet_mcast_hash(entry->addr);
+		BOOL bucket_used = FALSE;
+
+		memset(entry->addr, 0, HW_ADDRFIELDSIZE);
+		db->db_McastCount--;
+		for (i = 0; i < MCAST_MAX; i++) {
+			if (db->db_Mcast[i].refs != 0 &&
+			    zznet_mcast_hash(db->db_Mcast[i].addr) == bucket) {
+				bucket_used = TRUE;
+				break;
+			}
+		}
+		if (!bucket_used)
+			zznet_mcast_firmware_command(
+			    ZZ9K_ETH_CONFIG_HASH_CLEAR | bucket);
+	}
+	ReleaseSemaphore(&db->db_McastSem);
+
+	return result;
+}
+
+static BOOL zznet_mcast_member(DEVBASETYPE *db, volatile const UBYTE *addr)
+{
+	UBYTE local[HW_ADDRFIELDSIZE];
+	BOOL member = FALSE;
+	UWORD i;
+
+	/* Unicast and the all-ones broadcast address do not require a join. */
+	local[0] = addr[0];
+	if ((local[0] & 1) == 0)
+		return TRUE;
+	for (i = 1; i < HW_ADDRFIELDSIZE; i++)
+		local[i] = addr[i];
+	for (i = 0; i < HW_ADDRFIELDSIZE && local[i] == 0xff; i++)
+		;
+	if (i == HW_ADDRFIELDSIZE)
+		return TRUE;
+
+	ObtainSemaphore(&db->db_McastSem);
+	for (i = 0; i < MCAST_MAX; i++) {
+		if (db->db_Mcast[i].refs != 0 &&
+		    zznet_mcast_same(db->db_Mcast[i].addr, local)) {
+			member = TRUE;
+			break;
+		}
+	}
+	ReleaseSemaphore(&db->db_McastSem);
+	return member;
+}
 
 void set_mac_from_string(UBYTE* buf) {
   int k=0;
@@ -415,6 +563,11 @@ SAVEDS LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
 
       NEWLIST(&db->db_ReadList);
       InitSemaphore(&db->db_ReadListSem);
+      memset(db->db_Mcast, 0, sizeof(db->db_Mcast));
+      db->db_McastCount = 0;
+      InitSemaphore(&db->db_McastSem);
+      if (zznet_mcast_firmware_capable())
+        zznet_mcast_firmware_command(ZZ9K_ETH_CONFIG_HASH_RESET);
 
       struct ProcInit init;
       struct MsgPort *port;
@@ -573,6 +726,12 @@ SAVEDS BPTR DevClose(   ASMR(a1) struct IORequest *ioreq        ASMREG(a1),
       ReleaseSemaphore(&db->db_ProcExitSem);
     }
 
+    /* No RX worker can be consulting the group table past this point. */
+    if (zznet_mcast_firmware_capable())
+      zznet_mcast_firmware_command(ZZ9K_ETH_CONFIG_HASH_RESET);
+    memset(db->db_Mcast, 0, sizeof(db->db_Mcast));
+    db->db_McastCount = 0;
+
     /* Staging buffer is freed only after the worker process has
      * exited above (ObtainSemaphore/ReleaseSemaphore pair). That
      * guarantees no read_frame can still be in flight referencing
@@ -667,6 +826,13 @@ SAVEDS VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
       D(("bcast: invalid dst addr\n"));
     }
     /* fall through */
+  case S2_MULTICAST:
+    if ((ioreq->ios2_DstAddr[0] & 1) == 0) {
+      ioreq->ios2_Req.io_Error = S2ERR_BAD_ADDRESS;
+      ioreq->ios2_WireError = S2WERR_BAD_MULTICAST;
+      break;
+    }
+    /* fall through */
   case CMD_WRITE: {
     ULONG res = write_frame(ioreq, (UBYTE*)(ZZ9K_REGS+ZZ9K_TX));
     if (res!=0) {
@@ -678,6 +844,26 @@ SAVEDS VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
     }
     break;
   }
+
+  case S2_ADDMULTICASTADDRESS:
+  case S2_DELMULTICASTADDRESS:
+    if ((ioreq->ios2_SrcAddr[0] & 1) == 0) {
+      ioreq->ios2_Req.io_Error = S2ERR_BAD_ADDRESS;
+      ioreq->ios2_WireError = S2WERR_BAD_MULTICAST;
+    } else {
+      LONG result = zznet_mcast_change(db, ioreq->ios2_SrcAddr,
+          ioreq->ios2_Req.io_Command == S2_ADDMULTICASTADDRESS);
+      if (result != 0) {
+        ioreq->ios2_Req.io_Error = result;
+        ioreq->ios2_WireError =
+            (result == S2ERR_NO_RESOURCES) ? S2WERR_MULTICAST_FULL :
+            (result == S2ERR_BAD_STATE) ? S2WERR_BAD_MULTICAST :
+            S2WERR_GENERIC_ERROR;
+      } else {
+        ioreq->ios2_WireError = 0;
+      }
+    }
+    break;
 
   case S2_READORPHAN:
     if (!ioreq->ios2_BufferManagement)
@@ -1020,6 +1206,8 @@ ULONG read_frame(DEVBASETYPE *db, struct IOSana2Req *req, volatile UBYTE *frame,
 
 		if (m0 == 0xFFFFFFFFUL && (m1 & 0xFFFF0000UL) == 0xFFFF0000UL) {
 			req->ios2_Req.io_Flags |= SANA2IOF_BCAST;
+		} else if (m0 & 0x01000000UL) {
+			req->ios2_Req.io_Flags |= SANA2IOF_MCAST;
 		}
 	}
 
@@ -1223,6 +1411,14 @@ SAVEDS void frame_proc() {
       }
       have_baseline = TRUE;
       old_serial    = serial;
+
+      /* Hash collisions are expected from a 64-bucket hardware filter.
+       * Enforce exact SANA-II membership before consuming a reader. */
+      if (!zznet_mcast_member(db, frm + 4)) {
+        global_stats.UnknownTypesReceived++;
+        *rx_accept = serial;
+        continue;
+      }
 
       /* Walk the read list only long enough to find a matching listener
        * and detach it. Doing the payload copy (read_frame) and ReplyMsg
