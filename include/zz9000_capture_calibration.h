@@ -9,8 +9,10 @@
 #include <stdint.h>
 
 /* Exact protocol match is mandatory before ANY write to these registers.
- * This ABI belongs to the opt-in C28 capture build, not legacy E7M phase. */
+ * Snapshot/metadata capture is shared by E7M and C28 builds. Phase-control
+ * writes remain exclusive to the opt-in C28 protocol. */
 #define ZZ_CAPTURE_CAP_REG           0x1240UL
+#define ZZ_CAPTURE_CAP_E7M           0x56510106UL
 #define ZZ_CAPTURE_CAP_C28           0x56510206UL
 #define ZZ_CAPTURE_PHASE_TARGET_REG  0x1246UL
 #define ZZ_CAPTURE_PHASE_COMMIT_REG  0x1248UL
@@ -24,6 +26,17 @@
 #define ZZ_CAPTURE_ADDRESS_REG       0x126aUL
 #define ZZ_CAPTURE_DATA_REG          0x126cUL
 #define ZZ_CAPTURE_GEOMETRY_REG      0x1270UL
+#define ZZ_CAPTURE_METADATA_CAP_REG  0x1274UL
+#define ZZ_CAPTURE_METADATA_CAP      0x564d010cUL
+#define ZZ_CAPTURE_METADATA_ADDR_REG 0x1278UL
+#define ZZ_CAPTURE_METADATA_DATA_REG 0x127cUL
+
+/* Build provenance from the sampler's generic atomic field-diagnostic ABI.
+ * These registers are read-only and exist in C28, E7M and Denise variants. */
+#define ZZ_CAPTURE_FIELD_DIAG_CAP_REG      0x1200UL
+#define ZZ_CAPTURE_FIELD_DIAG_CAP          0x56440110UL
+#define ZZ_CAPTURE_FIELD_DIAG_BUILD_REG    0x1204UL
+#define ZZ_CAPTURE_FIELD_DIAG_VARIANT_REG  0x1208UL
 
 #define ZZ_CAPTURE_PHASE_BUSY        (1UL << 12)
 #define ZZ_CAPTURE_PHASE_DONE        (1UL << 13)
@@ -50,6 +63,40 @@
 #define ZZ_CAPTURE_COLUMNS    256U
 #define ZZ_CAPTURE_ROWS        4U
 #define ZZ_CAPTURE_SAMPLES    (ZZ_CAPTURE_COLUMNS * ZZ_CAPTURE_ROWS)
+#define ZZ_CAPTURE_METADATA_WORDS_PER_ROW 3U
+#define ZZ_CAPTURE_METADATA_WORDS \
+    (ZZ_CAPTURE_ROWS * ZZ_CAPTURE_METADATA_WORDS_PER_ROW)
+
+/* Frozen row word 0: decoded line identity and grid state. */
+#define ZZ_CAPTURE_ROW_HISTORY_VALID  (1UL << 31)
+#define ZZ_CAPTURE_ROW_GRID_SEEN      (1UL << 30)
+#define ZZ_CAPTURE_ROW_PAIR_PARITY    (1UL << 29)
+#define ZZ_CAPTURE_ROW_GRID_SHIFT     27U
+#define ZZ_CAPTURE_ROW_GRID_MASK      3UL
+#define ZZ_CAPTURE_ROW_RAW_Y_SHIFT    16U
+#define ZZ_CAPTURE_ROW_RAW_Y_MASK     0x7ffUL
+#define ZZ_CAPTURE_ROW_HSYNC_SHIFT    8U
+#define ZZ_CAPTURE_ROW_HSYNC_MASK     0xffUL
+#define ZZ_CAPTURE_ROW_SHORT_SHIFT    4U
+#define ZZ_CAPTURE_ROW_SHORT_MASK     0x0fUL
+
+/* Frozen row word 1: free-running edge timestamp and prior line interval. */
+#define ZZ_CAPTURE_ROW_TIME_SHIFT     16U
+#define ZZ_CAPTURE_ROW_TIME_MASK      0xffffUL
+#define ZZ_CAPTURE_ROW_INTERVAL_MASK  0xffffUL
+
+/* Frozen row word 2: counters immediately before HSYNC resets the origin. */
+#define ZZ_CAPTURE_ROW_SAMPLE_X_SHIFT 20U
+#define ZZ_CAPTURE_ROW_SAMPLE_X_MASK  0xfffUL
+#define ZZ_CAPTURE_ROW_PHASE_X_SHIFT  8U
+#define ZZ_CAPTURE_ROW_PHASE_X_MASK   0xfffUL
+#define ZZ_CAPTURE_ROW_PAIR_FIRST     (1UL << 7)
+#define ZZ_CAPTURE_ROW_FULL_WIDTH     (1UL << 6)
+#define ZZ_CAPTURE_ROW_MODE_SHIFT     4U
+#define ZZ_CAPTURE_ROW_MODE_MASK      3UL
+#define ZZ_CAPTURE_ROW_FULLRATE       (1UL << 3)
+#define ZZ_CAPTURE_ROW_CSYNC_VSYNC    (1UL << 2)
+#define ZZ_CAPTURE_ROW_RGB_MODE_MASK  3UL
 
 struct zz_capture_eye {
     unsigned start_bin;

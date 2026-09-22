@@ -1,5 +1,5 @@
 /*
- * Guided raw-pixel sampling calibration for the A4000 C28 diagnostic build.
+ * Native-video row observation and A4000 C28 sampling calibration.
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -32,9 +32,9 @@ struct GfxBase *GfxBase;
 struct IntuitionBase *IntuitionBase;
 struct Device *TimerBase;
 
-#define ZZ_CAPTURE_VERSION "0.7"
+#define ZZ_CAPTURE_VERSION "0.9"
 static const char version[] __attribute__((used)) =
-    "$VER: ZZCapture " ZZ_CAPTURE_VERSION " (19.09.2026)\r\n";
+    "$VER: ZZCapture " ZZ_CAPTURE_VERSION " (23.09.2026)\r\n";
 
 #define PHASE_WAIT_TICKS 250U
 #define FRAME_WAIT_TICKS 100U
@@ -47,6 +47,7 @@ static const char version[] __attribute__((used)) =
 
 struct snapshot {
     uint32_t pixels[ZZ_CAPTURE_SAMPLES];
+    uint32_t metadata[ZZ_CAPTURE_METADATA_WORDS];
     ULONG status;
     ULONG geometry;
 };
@@ -67,6 +68,9 @@ static struct {
     int enabled, valid, have_reference, phase;
     unsigned measurement, captured_measurement, sample, parity, wrong, changed;
     struct snapshot failed, reference;
+    ULONG metadata_capability;
+    ULONG field_diag_capability, field_diag_build, field_diag_variant;
+    ULONG clock_status, clock_counts, phase_status;
 } first_failure;
 static char failure[192];
 static int aborted;
@@ -103,9 +107,34 @@ static int stack_ready(void)
 
 static int capability(void)
 {
-    if (read32(ZZ_CAPTURE_CAP_REG) != ZZ_CAPTURE_CAP_C28)
-        return fail("This firmware does not support C28 capture calibration.");
+    if (read32(ZZ_CAPTURE_CAP_REG) != ZZ_CAPTURE_CAP_C28 ||
+        read32(ZZ_CAPTURE_METADATA_CAP_REG) != ZZ_CAPTURE_METADATA_CAP)
+        return fail("This firmware does not support matched C28 row-timing capture.");
     return 1;
+}
+
+static int observation_capability(void)
+{
+    ULONG capture = read32(ZZ_CAPTURE_CAP_REG);
+    if ((capture != ZZ_CAPTURE_CAP_E7M && capture != ZZ_CAPTURE_CAP_C28) ||
+        read32(ZZ_CAPTURE_METADATA_CAP_REG) != ZZ_CAPTURE_METADATA_CAP ||
+        read32(ZZ_CAPTURE_FIELD_DIAG_CAP_REG) != ZZ_CAPTURE_FIELD_DIAG_CAP)
+        return fail("This firmware does not support matched row-metadata observation.");
+    return 1;
+}
+
+/* Retain provenance and live controller state at the first scored failure.
+ * This performs no capture or arm operation. The field diagnostic identity
+ * describes the loaded bitstream; row words remain tied to each snapshot. */
+static void capture_failure_context(void)
+{
+    first_failure.metadata_capability = read32(ZZ_CAPTURE_METADATA_CAP_REG);
+    first_failure.field_diag_capability = read32(ZZ_CAPTURE_FIELD_DIAG_CAP_REG);
+    first_failure.field_diag_build = read32(ZZ_CAPTURE_FIELD_DIAG_BUILD_REG);
+    first_failure.field_diag_variant = read32(ZZ_CAPTURE_FIELD_DIAG_VARIANT_REG);
+    first_failure.clock_status = read32(ZZ_CAPTURE_CLOCK_STATUS_REG);
+    first_failure.clock_counts = read32(ZZ_CAPTURE_CLOCK_COUNTS_REG);
+    first_failure.phase_status = read32(ZZ_CAPTURE_PHASE_STATUS_REG);
 }
 
 static int continue_test(void)
@@ -202,17 +231,21 @@ static int snapshot_status(ULONG *result)
     return fail("Capture status would not remain stable for a read.");
 }
 
-static int take_snapshot(struct snapshot *sample, int target, int read_pixels)
+static int take_snapshot_options(struct snapshot *sample, int target,
+    int read_pixels, int read_metadata, int require_phase)
 {
     ULONG before, status, after;
     unsigned tick, i;
-    if (!continue_test() || !capability() || !phase_is(target) ||
+    if (!continue_test() ||
+        !(require_phase ? capability() : observation_capability()) ||
+        (require_phase && !phase_is(target)) ||
         !snapshot_status(&before)) return 0;
     if (before & ZZ_CAPTURE_SNAPSHOT_BUSY)
         return fail("Another capture is already running. Close other diagnostic tools.");
     zz9000_write_reg16(board.address, ZZ_CAPTURE_ARM_REG, ZZ_CAPTURE_ARM_TOKEN);
     for (tick = 0; tick < FRAME_WAIT_TICKS; ++tick) {
-        if (!continue_test() || !phase_is(target) || !snapshot_status(&status))
+        if (!continue_test() || (require_phase && !phase_is(target)) ||
+            !snapshot_status(&status))
             return 0;
         if ((status & (ZZ_CAPTURE_SNAPSHOT_VALID | ZZ_CAPTURE_SNAPSHOT_BUSY)) ==
                 ZZ_CAPTURE_SNAPSHOT_VALID &&
@@ -225,8 +258,9 @@ static int take_snapshot(struct snapshot *sample, int target, int read_pixels)
         return fail("No fresh native-video capture arrived in time.");
     sample->status = status;
     sample->geometry = read32(ZZ_CAPTURE_GEOMETRY_REG);
-    if (!!(status & ZZ_CAPTURE_SNAPSHOT_NTSC) != wanted_ntsc ||
-        !!(status & ZZ_CAPTURE_SNAPSHOT_LACE) != wanted_lace)
+    if (require_phase &&
+        (!!(status & ZZ_CAPTURE_SNAPSHOT_NTSC) != wanted_ntsc ||
+         !!(status & ZZ_CAPTURE_SNAPSHOT_LACE) != wanted_lace))
         return fail("The captured PAL/NTSC or interlace mode does not match the test screen.");
     if (have_geometry && sample->geometry != geometry)
         return fail("Capture framing changed during calibration. Close other video controls.");
@@ -236,7 +270,14 @@ static int take_snapshot(struct snapshot *sample, int target, int read_pixels)
             sample->pixels[i] = read32(ZZ_CAPTURE_DATA_REG);
         }
     }
-    if (!snapshot_status(&after) || !phase_is(target)) return 0;
+    if (read_metadata) {
+        for (i = 0; i < ZZ_CAPTURE_METADATA_WORDS; ++i) {
+            zz9000_write_reg16(board.address, ZZ_CAPTURE_METADATA_ADDR_REG,
+                (UWORD)i);
+            sample->metadata[i] = read32(ZZ_CAPTURE_METADATA_DATA_REG);
+        }
+    }
+    if (!snapshot_status(&after) || (require_phase && !phase_is(target))) return 0;
     if (after != status || sample->geometry != read32(ZZ_CAPTURE_GEOMETRY_REG))
         return fail("The capture changed while being read. Close other diagnostic tools.");
     if (!have_geometry) {
@@ -244,6 +285,11 @@ static int take_snapshot(struct snapshot *sample, int target, int read_pixels)
         have_geometry = 1;
     }
     return 1;
+}
+
+static int take_snapshot(struct snapshot *sample, int target, int read_pixels)
+{
+    return take_snapshot_options(sample, target, read_pixels, read_pixels, 1);
 }
 
 static int measure_phase(int target, unsigned count, struct score *score)
@@ -296,6 +342,7 @@ static int measure_phase(int target, unsigned count, struct score *score)
             first_failure.parity = parity;
             first_failure.wrong = wrong;
             first_failure.changed = changed;
+            capture_failure_context();
             first_failure.valid = 1;
         }
         previous[parity] = current;
@@ -334,6 +381,47 @@ static void print_coverage(void)
         coverage.min_step, coverage.max_step, coverage.cadence_waits);
 }
 
+static void print_row_timing(const char *name, const struct snapshot *sample,
+    unsigned y)
+{
+    uint32_t identity = sample->metadata[y * 3];
+    uint32_t timing = sample->metadata[y * 3 + 1];
+    uint32_t context = sample->metadata[y * 3 + 2];
+    printf("Timing %s y=%u raw_y=%lu history=%u grid_seen=%u pair=%u grid=%lu "
+           "hsync_low=%lu shortlines=%lu timestamp=%lu interval=%lu "
+           "sample_x=%lu phase_x=%lu grid_pair_first=%u full_width=%u "
+           "sample_mode=%lu fullrate=%u csync_vsync=%u rgb_mode=%lu "
+           "raw=%08lx/%08lx/%08lx\n",
+        name, y,
+        (unsigned long)((identity >> ZZ_CAPTURE_ROW_RAW_Y_SHIFT) &
+            ZZ_CAPTURE_ROW_RAW_Y_MASK),
+        !!(identity & ZZ_CAPTURE_ROW_HISTORY_VALID),
+        !!(identity & ZZ_CAPTURE_ROW_GRID_SEEN),
+        !!(identity & ZZ_CAPTURE_ROW_PAIR_PARITY),
+        (unsigned long)((identity >> ZZ_CAPTURE_ROW_GRID_SHIFT) &
+            ZZ_CAPTURE_ROW_GRID_MASK),
+        (unsigned long)((identity >> ZZ_CAPTURE_ROW_HSYNC_SHIFT) &
+            ZZ_CAPTURE_ROW_HSYNC_MASK),
+        (unsigned long)((identity >> ZZ_CAPTURE_ROW_SHORT_SHIFT) &
+            ZZ_CAPTURE_ROW_SHORT_MASK),
+        (unsigned long)((timing >> ZZ_CAPTURE_ROW_TIME_SHIFT) &
+            ZZ_CAPTURE_ROW_TIME_MASK),
+        (unsigned long)(timing & ZZ_CAPTURE_ROW_INTERVAL_MASK),
+        (unsigned long)((context >> ZZ_CAPTURE_ROW_SAMPLE_X_SHIFT) &
+            ZZ_CAPTURE_ROW_SAMPLE_X_MASK),
+        (unsigned long)((context >> ZZ_CAPTURE_ROW_PHASE_X_SHIFT) &
+            ZZ_CAPTURE_ROW_PHASE_X_MASK),
+        !!(context & ZZ_CAPTURE_ROW_PAIR_FIRST),
+        !!(context & ZZ_CAPTURE_ROW_FULL_WIDTH),
+        (unsigned long)((context >> ZZ_CAPTURE_ROW_MODE_SHIFT) &
+            ZZ_CAPTURE_ROW_MODE_MASK),
+        !!(context & ZZ_CAPTURE_ROW_FULLRATE),
+        !!(context & ZZ_CAPTURE_ROW_CSYNC_VSYNC),
+        (unsigned long)(context & ZZ_CAPTURE_ROW_RGB_MODE_MASK),
+        (unsigned long)identity, (unsigned long)timing,
+        (unsigned long)context);
+}
+
 static void print_snapshot_evidence(const char *name, const struct snapshot *sample)
 {
     struct zz_capture_row_analysis row;
@@ -349,6 +437,7 @@ static void print_snapshot_evidence(const char *name, const struct snapshot *sam
             printf("residual_bits=%u bit_mask=%06lx\n", row.residual_bits,
                 (unsigned long)row.bit_mask);
         else puts("residual_bits=unknown bit_mask=unknown");
+        print_row_timing(name, sample, y);
     }
     for (i = 0; i < ZZ_CAPTURE_SAMPLES; i += 8) {
         printf("RAW %s %04u:", name, i);
@@ -366,17 +455,27 @@ static void print_failure_evidence(void)
         puts("Failure evidence: none (no scored pixel failure retained).");
         return;
     }
-    printf("Failure evidence v1: measurement=%u sample=%u phase=%d parity=%u reference=%u wrong=%u changed=%u\n",
+    printf("Failure evidence v2: measurement=%u sample=%u phase=%d parity=%u reference=%u wrong=%u changed=%u\n",
         first_failure.captured_measurement, first_failure.sample, first_failure.phase,
         first_failure.parity, first_failure.have_reference,
         first_failure.wrong, first_failure.changed);
+    printf("Capture context metadata_cap=0x%08lx field_diag_cap=0x%08lx "
+           "build=0x%08lx variant=0x%08lx clock=0x%08lx counts=0x%08lx "
+           "phase_status=0x%08lx\n",
+        (unsigned long)first_failure.metadata_capability,
+        (unsigned long)first_failure.field_diag_capability,
+        (unsigned long)first_failure.field_diag_build,
+        (unsigned long)first_failure.field_diag_variant,
+        (unsigned long)first_failure.clock_status,
+        (unsigned long)first_failure.clock_counts,
+        (unsigned long)first_failure.phase_status);
     puts("Diagnostic row alignment only; strict scores above remain authoritative.\n"
          "Origins are modulo 256; -1 means ambiguous. Bit metrics use a unique best origin.\n"
-         "Raw words follow in capture order, four rows of 256 pixels.\n"
+         "Timing words are frozen with each row; raw words follow in capture order.\n"
          "Reference is the previous scored snapshot of this parity at the same phase, if present.");
     print_snapshot_evidence("failed", &first_failure.failed);
     if (first_failure.have_reference) print_snapshot_evidence("reference", &first_failure.reference);
-    puts("End failure evidence v1.");
+    puts("End failure evidence v2.");
 }
 
 static int valid_mode(ULONG id, int ntsc, int lace)
@@ -508,6 +607,13 @@ static void print_info(void)
         (unsigned)zz9000_read_reg16(board.address, ZZ_REG_FW_VERSION));
     printf("Capture capability: 0x%08lx; required 0x%08lx\n",
         (unsigned long)read32(ZZ_CAPTURE_CAP_REG), (unsigned long)ZZ_CAPTURE_CAP_C28);
+    printf("Row metadata capability: 0x%08lx; required 0x%08lx\n",
+        (unsigned long)read32(ZZ_CAPTURE_METADATA_CAP_REG),
+        (unsigned long)ZZ_CAPTURE_METADATA_CAP);
+    printf("Field diagnostic: capability=0x%08lx build=0x%08lx variant=0x%08lx\n",
+        (unsigned long)read32(ZZ_CAPTURE_FIELD_DIAG_CAP_REG),
+        (unsigned long)read32(ZZ_CAPTURE_FIELD_DIAG_BUILD_REG),
+        (unsigned long)read32(ZZ_CAPTURE_FIELD_DIAG_VARIANT_REG));
     printf("Clock: C28=%u, frequency valid=%u, locked=%u, ready=%u, fault=%u\n",
         !!(clocks & ZZ_CAPTURE_CLOCK_C28), !!(clocks & ZZ_CAPTURE_CLOCK_FREQUENCY),
         !!(clocks & ZZ_CAPTURE_CLOCK_LOCKED), !!(clocks & ZZ_CAPTURE_CLOCK_READY),
@@ -523,6 +629,40 @@ static void print_info(void)
             !!(status & ZZ_CAPTURE_SNAPSHOT_VALID), !!(status & ZZ_CAPTURE_SNAPSHOT_BUSY),
             (unsigned long)(status >> 16), !!(status & ZZ_CAPTURE_SNAPSHOT_PARITY),
             !!(status & ZZ_CAPTURE_SNAPSHOT_LACE), !!(status & ZZ_CAPTURE_SNAPSHOT_NTSC));
+}
+
+static int observe_rows(void)
+{
+    ULONG capture, metadata, diagnostic, build, variant, clocks, counts;
+    unsigned y;
+    memset(&current, 0, sizeof(current));
+    if (!take_snapshot_options(&current, 0, 0, 1, 0)) {
+        puts(failure);
+        return 20;
+    }
+    capture = read32(ZZ_CAPTURE_CAP_REG);
+    metadata = read32(ZZ_CAPTURE_METADATA_CAP_REG);
+    diagnostic = read32(ZZ_CAPTURE_FIELD_DIAG_CAP_REG);
+    build = read32(ZZ_CAPTURE_FIELD_DIAG_BUILD_REG);
+    variant = read32(ZZ_CAPTURE_FIELD_DIAG_VARIANT_REG);
+    clocks = read32(ZZ_CAPTURE_CLOCK_STATUS_REG);
+    counts = read32(ZZ_CAPTURE_CLOCK_COUNTS_REG);
+    printf("Board: Zorro %u at 0x%08lx; firmware 0x%04x\n",
+        (unsigned)board.zorro_version, (unsigned long)board.address,
+        (unsigned)zz9000_read_reg16(board.address, ZZ_REG_FW_VERSION));
+    printf("Observation context capture_cap=0x%08lx metadata_cap=0x%08lx "
+           "field_diag_cap=0x%08lx build=0x%08lx variant=0x%08lx "
+           "clock=0x%08lx counts=0x%08lx\n",
+        (unsigned long)capture, (unsigned long)metadata,
+        (unsigned long)diagnostic, (unsigned long)build,
+        (unsigned long)variant, (unsigned long)clocks,
+        (unsigned long)counts);
+    printf("Snapshot observe status=%08lx geometry=%08lx\n",
+        (unsigned long)current.status, (unsigned long)current.geometry);
+    for (y = 0; y < ZZ_CAPTURE_ROWS; ++y)
+        print_row_timing("observe", &current, y);
+    puts("End row metadata observation.");
+    return 0;
 }
 
 /* ReadEClock measures elapsed time independently of wall-clock adjustments.
@@ -811,12 +951,14 @@ finished:
 static void usage(void)
 {
     puts("ZZCapture info\n"
+         "ZZCapture observe\n"
          "ZZCapture phase -896..895\n"
          "ZZCapture check pal|ntsc [lace]\n"
          "ZZCapture startup pal|ntsc [reverse]\n"
          "ZZCapture calibrate pal|ntsc [lace]\n"
          "Run Stack 32768 in this Shell before phase, check, startup or calibrate.\n"
-         "A4000 C28 diagnostic build only. Calibration never saves settings.");
+         "Observe is read-only with respect to phase control and supports matched E7M or C28 builds.\n"
+         "Phase, check, startup and calibrate require the A4000 C28 diagnostic build.");
 }
 
 int main(int argc, char **argv)
@@ -828,6 +970,7 @@ int main(int argc, char **argv)
         return argc < 2 ? 10 : 0;
     }
     if ((strcmp(argv[1], "info") || argc != 2) &&
+        (strcmp(argv[1], "observe") || argc != 2) &&
         (strcmp(argv[1], "phase") || argc != 3) &&
         ((strcmp(argv[1], "calibrate") && strcmp(argv[1], "check")) || argc < 3 || argc > 4 ||
          (strcmp(argv[2], "pal") && strcmp(argv[2], "ntsc")) ||
@@ -844,6 +987,7 @@ int main(int argc, char **argv)
         return 20;
     }
     if (!strcmp(argv[1], "info")) { print_info(); return 0; }
+    if (!strcmp(argv[1], "observe")) return observe_rows();
     /* Check in the small entry frame before calling calibration or libraries
      * that need more stack, and before any register write or screen setup. */
     if (!stack_ready()) { puts(failure); return 20; }

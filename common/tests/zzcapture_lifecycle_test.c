@@ -18,7 +18,7 @@ static struct {
     int phase, target, busy, phase_ticks, ack_ticks, error, fail_commit;
     unsigned writes, commits, arms, data_reads, ticks, signals, replies;
     unsigned arms_at_commit, reads_at_commit;
-    UWORD wire, address;
+    UWORD wire, address, metadata_address;
     int clock_ok, snapshot_ticks, snapshot_wait, snapshot_never;
     int timed_fields, stuck_parity, delay_minimum;
     unsigned native_time, snapshot_due, field_time, delay_time, read_time;
@@ -27,7 +27,9 @@ static struct {
     unsigned delivery_count, delivered, delivery_sequence, delivery_stop_after;
     unsigned corrupt_at_read, cancel_after_reads, escape_after_reads;
     unsigned clock_fail_after_reads, geometry_change_after_reads, startup_bad_until_ticks;
-    unsigned diagnostic_snapshot;
+    unsigned diagnostic_snapshot, metadata_reads, field_diag_reads;
+    ULONG capture_capability, metadata_capability, field_diag_capability;
+    unsigned zorro_version;
     int diagnostic_shift;
     int evidence_while_live;
     uint32_t snapshot_status, snapshot_geometry;
@@ -83,6 +85,42 @@ static uint32_t screen_pixel(unsigned sample)
     return rgb;
 }
 
+static unsigned metadata_snapshot_number(void)
+{
+    return mock.data_reads ? (mock.data_reads - 1) / ZZ_CAPTURE_SAMPLES + 1 : 0;
+}
+
+static unsigned metadata_interval(unsigned row)
+{
+    if (mock.diagnostic_snapshot == metadata_snapshot_number() &&
+            mock.diagnostic_shift == 1)
+        return row & 1 ? 1821U : 1819U;
+    return 1820U;
+}
+
+static uint32_t row_metadata_word(unsigned word)
+{
+    unsigned row = word / ZZ_CAPTURE_METADATA_WORDS_PER_ROW;
+    unsigned kind = word % ZZ_CAPTURE_METADATA_WORDS_PER_ROW;
+    unsigned sequence = (unsigned)(mock.snapshot_status >> 16);
+    unsigned timestamp = (sequence * 8192U) & 0xffffU;
+    unsigned i, interval = metadata_interval(row);
+    for (i = 1; i <= row; ++i) timestamp += metadata_interval(i);
+    if (kind == 0)
+        return ZZ_CAPTURE_ROW_HISTORY_VALID | ZZ_CAPTURE_ROW_GRID_SEEN |
+            (uint32_t)((mock.diagnostic_snapshot == metadata_snapshot_number() &&
+                mock.diagnostic_shift == 1 ? row & 1U : 0U) <<
+                ZZ_CAPTURE_ROW_GRID_SHIFT) |
+            (uint32_t)(104U + row) << ZZ_CAPTURE_ROW_RAW_Y_SHIFT |
+            68UL << ZZ_CAPTURE_ROW_HSYNC_SHIFT;
+    if (kind == 1)
+        return (uint32_t)(timestamp & 0xffffU) << ZZ_CAPTURE_ROW_TIME_SHIFT |
+            interval;
+    return (uint32_t)(interval - 1U) << ZZ_CAPTURE_ROW_SAMPLE_X_SHIFT |
+        (uint32_t)(interval - 1U) << ZZ_CAPTURE_ROW_PHASE_X_SHIFT |
+        ZZ_CAPTURE_ROW_FULL_WIDTH | ZZ_CAPTURE_ROW_FULLRATE;
+}
+
 /* Fields run independently of requests. Delay's minimum duration stays at
  * 50 Hz while the source field period and snapshot read cost can vary.
  * Timer replies are serviced on field boundaries in this model; the ROI
@@ -116,7 +154,14 @@ ULONG zz9000_read_reg32(ULONG base, ULONG reg)
 {
     (void)base;
     switch (reg) {
-    case ZZ_CAPTURE_CAP_REG: return ZZ_CAPTURE_CAP_C28;
+    case ZZ_CAPTURE_CAP_REG: return mock.capture_capability;
+    case ZZ_CAPTURE_METADATA_CAP_REG: return mock.metadata_capability;
+    case ZZ_CAPTURE_FIELD_DIAG_CAP_REG:
+        ++mock.field_diag_reads; return mock.field_diag_capability;
+    case ZZ_CAPTURE_FIELD_DIAG_BUILD_REG:
+        ++mock.field_diag_reads; return 0xc28d0008UL;
+    case ZZ_CAPTURE_FIELD_DIAG_VARIANT_REG:
+        ++mock.field_diag_reads; return 0x0001008bUL;
     case ZZ_CAPTURE_PHASE_STATUS_REG: return applied_status();
     case ZZ_CAPTURE_CLOCK_STATUS_REG:
         return mock.clock_ok && (!mock.clock_fail_after_reads ||
@@ -126,6 +171,10 @@ ULONG zz9000_read_reg32(ULONG base, ULONG reg)
     case ZZ_CAPTURE_GEOMETRY_REG: return mock.snapshot_geometry +
         (mock.geometry_change_after_reads && mock.data_reads >= mock.geometry_change_after_reads);
     case ZZ_CAPTURE_CLOCK_COUNTS_REG: return 7100UL << 16 | 28400;
+    case ZZ_CAPTURE_METADATA_DATA_REG:
+        ++mock.metadata_reads;
+        assert(mock.metadata_address < ZZ_CAPTURE_METADATA_WORDS);
+        return row_metadata_word(mock.metadata_address);
     case ZZ_CAPTURE_DATA_REG: {
         uint32_t rgb;
         ++mock.data_reads;
@@ -176,11 +225,15 @@ void zz9000_write_reg16(ULONG base, ULONG reg, UWORD value)
         assert(value < ZZ_CAPTURE_SAMPLES);
         mock.address = value;
         break;
+    case ZZ_CAPTURE_METADATA_ADDR_REG:
+        assert(value < ZZ_CAPTURE_METADATA_WORDS);
+        mock.metadata_address = value;
+        break;
     default: assert(0);
     }
 }
 int zz9000_find_board(struct ZZ9000Board *found)
-{ found->address = 0x100000; found->zorro_version = 3; return 1; }
+{ found->address = 0x100000; found->zorro_version = mock.zorro_version; return 1; }
 struct Task *FindTask(CONST_STRPTR name) { (void)name; return &task; }
 ULONG SetSignal(ULONG signals, ULONG mask)
 {
@@ -362,7 +415,7 @@ int zzcapture_test_printf(const char *format, ...)
 {
     va_list ap;
     int result;
-    if (!strncmp(format, "Failure evidence v1:", 20) &&
+    if (!strncmp(format, "Failure evidence v2:", 20) &&
             (mock.live_screens || mock.live_windows || mock.live_devices))
         mock.evidence_while_live = 1;
     va_start(ap, format);
@@ -386,6 +439,10 @@ static void reset_fixture(void)
     memset(planes, 0, sizeof(planes));
     memset(loaded_colors, 0, sizeof(loaded_colors));
     mock.phase = mock.entry = -77;
+    mock.capture_capability = ZZ_CAPTURE_CAP_C28;
+    mock.metadata_capability = ZZ_CAPTURE_METADATA_CAP;
+    mock.field_diag_capability = ZZ_CAPTURE_FIELD_DIAG_CAP;
+    mock.zorro_version = 3;
     mock.timer_origin = UINT64_C(0xfffffff0); /* Cross the low-word wrap. */
     mock.clock_ok = 1;
     mock.delay_minimum = 1;
@@ -412,6 +469,51 @@ static void check_closed(void)
     CHECK(!screen && !window && !empty_pointer && !GfxBase && !IntuitionBase);
     CHECK(!mock.live_libraries && !mock.live_screens && !mock.live_windows && !mock.live_memory);
     CHECK(!TimerBase && !mock.live_ports && !mock.live_requests && !mock.live_devices);
+}
+
+static void test_observe_metadata_only(void)
+{
+    char *run[] = {"ZZCapture", "observe"};
+    char *invalid[] = {"ZZCapture", "observe", "extra"};
+    unsigned kind;
+    reset_fixture();
+    CHECK(zzcapture_main(3, invalid) == 10 && mock.writes == 0);
+    for (kind = 0; kind < 2; ++kind) {
+        reset_fixture();
+        mock.capture_capability = kind ? ZZ_CAPTURE_CAP_E7M : ZZ_CAPTURE_CAP_C28;
+        mock.zorro_version = kind ? 2 : 3;
+        task.tc_SPUpper = (void *)(uintptr_t)0x2000; /* Observe has no stack gate. */
+        CHECK(zzcapture_main(2, run) == 0);
+        CHECK(mock.arms == 1 && mock.commits == 0);
+        CHECK(mock.data_reads == 0 && mock.metadata_reads == ZZ_CAPTURE_METADATA_WORDS);
+        CHECK(mock.writes == 1 + ZZ_CAPTURE_METADATA_WORDS);
+        CHECK(mock.field_diag_reads == 4);
+        CHECK(strstr(mock.output, kind ? "capture_cap=0x56510106" :
+            "capture_cap=0x56510206") != NULL);
+        CHECK(strstr(mock.output, kind ? "Board: Zorro 2" : "Board: Zorro 3") != NULL);
+        CHECK(strstr(mock.output, "Timing observe y=0 raw_y=104") != NULL);
+        CHECK(strstr(mock.output, "Timing observe y=3 raw_y=107") != NULL);
+        CHECK(strstr(mock.output, "End row metadata observation.") != NULL);
+        CHECK(strstr(mock.output, "RAW observe") == NULL);
+        check_closed();
+    }
+    for (kind = 0; kind < 3; ++kind) {
+        reset_fixture();
+        if (kind == 0) mock.capture_capability = 0;
+        if (kind == 1) mock.metadata_capability = 0;
+        if (kind == 2) mock.field_diag_capability = 0;
+        CHECK(zzcapture_main(2, run) == 20);
+        CHECK(mock.arms == 0 && mock.commits == 0 && mock.writes == 0);
+        CHECK(strstr(mock.output, "does not support matched row-metadata") != NULL);
+        check_closed();
+    }
+    reset_fixture(); mock.capture_capability = ZZ_CAPTURE_CAP_E7M;
+    mock.snapshot_never = 1;
+    CHECK(zzcapture_main(2, run) == 20);
+    CHECK(mock.arms == 1 && mock.commits == 0 && mock.writes == 1);
+    CHECK(mock.ticks == FRAME_WAIT_TICKS);
+    CHECK(strstr(mock.output, "No fresh native-video capture") != NULL);
+    check_closed();
 }
 
 static void test_wire_and_phase_waits(void)
@@ -448,8 +550,11 @@ static void test_snapshot_and_cleanup(void)
     reset_fixture(); CHECK(open_screen());
     CHECK(take_snapshot(&current, -77, 1));
     CHECK(zz_capture_pattern_errors(current.pixels) == 0 && mock.data_reads == ZZ_CAPTURE_SAMPLES);
+    CHECK(mock.metadata_reads == ZZ_CAPTURE_METADATA_WORDS);
+    CHECK(current.metadata[1] != 0 && current.metadata[11] != 0);
     CHECK(take_snapshot(&current, -77, 0));
-    CHECK(mock.data_reads == ZZ_CAPTURE_SAMPLES); /* Discard reads metadata only. */
+    CHECK(mock.data_reads == ZZ_CAPTURE_SAMPLES); /* Discard reads no payload. */
+    CHECK(mock.metadata_reads == ZZ_CAPTURE_METADATA_WORDS);
     close_screen(); check_closed();
     reset_fixture(); CHECK(open_screen()); mock.snapshot_never = 1;
     CHECK(!take_snapshot(&current, -77, 1));
@@ -726,7 +831,7 @@ static void test_sparse_collection_cleanup_and_late_errors(void)
         if (kind == 0) {
             CHECK(coverage.comparisons[0] >= 50 && coverage.comparisons[1] >= 50);
             CHECK(strstr(mock.output, "Expected-pixel errors: 1;") != NULL);
-            CHECK(strstr(mock.output, "Failure evidence v1:") != NULL);
+            CHECK(strstr(mock.output, "Failure evidence v2:") != NULL);
             CHECK(strstr(mock.output, "Current phase passed") == NULL);
         } else {
             CHECK(mock.cancel_sent && aborted);
@@ -982,7 +1087,7 @@ static void test_failure_evidence(void)
         reset_fixture(); mock.require_restore = 1;
         mock.diagnostic_snapshot = 2; mock.diagnostic_shift = kind;
         CHECK(zzcapture_main(3, run) == 20);
-        packet = strstr(mock.output, "Failure evidence v1:");
+        packet = strstr(mock.output, "Failure evidence v2:");
         restored = strstr(mock.output, "Original phase -77 restored and acknowledged");
         CHECK(packet && restored && packet > restored);
         CHECK(strstr(mock.output, "measurement=1 sample=2 phase=-77 parity=0 reference=1") != NULL);
@@ -991,10 +1096,17 @@ static void test_failure_evidence(void)
             "Expected-pixel errors: 0; changed pixels: 2048.") != NULL);
         CHECK(strstr(mock.output, "Row failed y=1 origin=212 ties=1 residual_pixels=0 residual_bits=0 bit_mask=000000") != NULL);
         CHECK(strstr(mock.output, "Row reference y=1 origin=211 ties=1 residual_pixels=0") != NULL);
+        CHECK(strstr(mock.output, "Timing failed y=0 raw_y=104 history=1 grid_seen=1") != NULL);
+        CHECK(strstr(mock.output, kind == 1 ? "interval=1819 sample_x=1818 phase_x=1818" :
+            "interval=1820 sample_x=1819 phase_x=1819") != NULL);
+        CHECK(strstr(mock.output, "Timing reference y=0 raw_y=104 history=1 grid_seen=1") != NULL);
+        CHECK(strstr(mock.output, "Capture context metadata_cap=0x564d010c field_diag_cap=0x56440110 build=0xc28d0008 variant=0x0001008b") != NULL);
         CHECK(strstr(mock.output, "RAW failed 0000:") != NULL);
         CHECK(strstr(mock.output, "RAW reference 1016:") != NULL);
-        CHECK(packet && strstr(packet + 1, "Failure evidence v1:") == NULL);
+        CHECK(packet && strstr(packet + 1, "Failure evidence v2:") == NULL);
         CHECK(mock.data_reads == 51 * ZZ_CAPTURE_SAMPLES); /* No diagnostic reads. */
+        CHECK(mock.metadata_reads == 51 * ZZ_CAPTURE_METADATA_WORDS);
+        CHECK(mock.field_diag_reads == 3); /* One retained context, no report-time reads. */
         CHECK(mock.phase == mock.entry && !mock.closed_before_restore);
         CHECK(!mock.evidence_while_live);
         /* Parse every dumped word; subsequent good captures must not have
@@ -1037,14 +1149,14 @@ static void test_failure_evidence(void)
     mock.cancel_after_reads = 3 * ZZ_CAPTURE_SAMPLES;
     CHECK(zzcapture_main(3, startup) == 20);
     CHECK(strstr(mock.output, "Startup diagnostic stopped:") != NULL);
-    CHECK(strstr(mock.output, "Failure evidence v1:") != NULL);
+    CHECK(strstr(mock.output, "Failure evidence v2:") != NULL);
     CHECK(strstr(mock.output, "sample=2 phase=-77") != NULL);
     CHECK(!mock.evidence_while_live);
     check_closed();
 
     reset_fixture(); mock.corrupt_at_read = 18; mock.fail_commit = 2;
     CHECK(zzcapture_main(3, run) == 20);
-    packet = strstr(mock.output, "Failure evidence v1:");
+    packet = strstr(mock.output, "Failure evidence v2:");
     restored = strstr(mock.output, "RESTORE FAILED:");
     CHECK(packet && restored && packet > restored);
     CHECK(!mock.evidence_while_live);
@@ -1053,7 +1165,7 @@ static void test_failure_evidence(void)
     reset_fixture(); mock.corrupt_at_read = 18;
     mock.geometry_change_after_reads = 20;
     CHECK(zzcapture_main(3, run) == 20);
-    CHECK(strstr(mock.output, "Failure evidence v1:") == NULL); /* Incomplete read discarded. */
+    CHECK(strstr(mock.output, "Failure evidence v2:") == NULL); /* Incomplete read discarded. */
     check_closed();
 
     reset_fixture(); CHECK(zzcapture_main(3, run) == 0);
@@ -1064,6 +1176,7 @@ static void test_failure_evidence(void)
 
 int main(void)
 {
+    test_observe_metadata_only();
     test_wire_and_phase_waits();
     test_snapshot_and_cleanup();
     test_calibration_failures();
