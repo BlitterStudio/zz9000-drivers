@@ -38,6 +38,7 @@ installer/ZZ9000Installer/Tools/ZZScanlines
 installer/ZZ9000Installer/Tools/ZZFwUpdate
 installer/ZZ9000Installer/Tools/ZZNetStats
 installer/ZZ9000Installer/Tools/ZZDiag
+installer/ZZ9000Installer/Tools/ZZCapture
 installer/ZZ9000Installer/Tools/zz9k-info
 installer/ZZ9000Installer/Tools/zz9k-services
 installer/ZZ9000Installer/Tools/zz9k-view

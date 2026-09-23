@@ -25,6 +25,7 @@ mhi/build.sh
 "$amiga_docker" ahi/driver ./build.sh
 "$amiga_docker" ahi/duplextest ./build.sh
 "$amiga_docker" ZZDiag ./build.sh
+"$amiga_docker" ZZCapture ./build.sh
 
 # Runs its own Docker invocation (the SDK's build scripts wrap the same
 # image) — called directly, not through amiga-docker.sh.

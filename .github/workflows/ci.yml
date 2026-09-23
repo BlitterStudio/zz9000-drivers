@@ -260,6 +260,19 @@ jobs:
           path: ZZDiag/ZZDiag
           if-no-files-found: error
 
+  zzcapture:
+    name: ZZCapture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build ZZCapture
+        run: make ZZCapture
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ZZCapture
+          path: ZZCapture/ZZCapture
+          if-no-files-found: error
+
   mhi:
     name: mhi — mhizz9000.library
     runs-on: ubuntu-latest
@@ -369,7 +382,7 @@ jobs:
   release:
     name: Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [host-checks, rtg, zztop, zzscanlines, zzfwupdate, usb-poseidon, sd-boot, net, ZZNetStats, ZZDiag, mhi, ahi, sdk, amissl]
+    needs: [host-checks, rtg, zztop, zzscanlines, zzfwupdate, usb-poseidon, sd-boot, net, ZZNetStats, ZZDiag, zzcapture, mhi, ahi, sdk, amissl]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -401,9 +414,11 @@ jobs:
           install -Dm755 artifacts/ZZFwUpdate/ZZFwUpdate                "$INST/Tools/ZZFwUpdate"
           install -Dm755 artifacts/ZZNetStats/ZZNetStats               "$INST/Tools/ZZNetStats"
           install -Dm755 artifacts/ZZDiag/ZZDiag                       "$INST/Tools/ZZDiag"
+          install -Dm755 artifacts/ZZCapture/ZZCapture                 "$INST/Tools/ZZCapture"
           install -Dm644 ahi/README.md                                 "$INST/Docs/ahi-README.md"
           install -Dm644 usb-poseidon/README.md                        "$INST/Docs/usb-poseidon-README.md"
           install -Dm644 docs/usb-qualification-matrix.md               "$INST/Docs/usb-qualification-matrix.md"
+          install -Dm644 ZZCapture/README.md                            "$INST/Docs/ZZCapture-README.md"
           # Diagnostic-only MHI build; staged under Docs, never installed
           # as the production library.
           install -Dm644 artifacts/mhizz9000.library.decode-only/mhizz9000.library.decode-only \

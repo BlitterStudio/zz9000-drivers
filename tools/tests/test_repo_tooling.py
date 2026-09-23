@@ -26,6 +26,7 @@ GENERATED_ARTIFACT_PATHS = (
     "ZZTop/ZZTop",
     "net/ZZNetStats/ZZNetStats",
     "ZZDiag/ZZDiag",
+    "ZZCapture/ZZCapture",
     "ahi/axtest/axtest",
     "ahi/duplextest/ZZAXDuplexTest",
 )
@@ -45,6 +46,7 @@ class RepoToolingTests(unittest.TestCase):
             "rtg-tests:",
             "ZZNetStats:",
             "ZZDiag:",
+            "ZZCapture:",
         ):
             self.assertIn(target, text)
 
@@ -59,6 +61,7 @@ class RepoToolingTests(unittest.TestCase):
             "ZZScanlines/ZZScanlines.c",
             "net/ZZNetStats/ZZNetStats.c",
             "ZZDiag/ZZDiag.c",
+            "ZZCapture/ZZCapture.c",
         ):
             self.assertIn('#include "zz9000_hw.h"', self.read(relpath))
 
@@ -456,6 +459,7 @@ class RepoToolingTests(unittest.TestCase):
             "usb-poseidon/build.sh",
             "sd-boot/build.sh",
             "ZZDiag/build.sh",
+            "ZZCapture/build.sh",
         )
         for relpath in scripts:
             path = ROOT / relpath
@@ -465,12 +469,15 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("sacredbanana/amiga-compiler:m68k-amigaos",
                       self.read("tools/amiga-docker.sh"))
 
-    def test_ci_runs_host_checks_and_builds_zzdiag(self):
+    def test_ci_runs_host_checks_and_builds_diagnostics(self):
         ci = self.read(".github/workflows/ci.yml")
         self.assertIn("host-checks:", ci)
         self.assertIn("make rtg-tests", ci)
         self.assertIn("ZZDiag:", ci)
         self.assertIn("ZZDiag/ZZDiag", ci)
+        self.assertIn("zzcapture:", ci)
+        self.assertIn("make ZZCapture", ci)
+        self.assertIn("ZZCapture/ZZCapture", ci)
 
     def test_ci_checks_matching_firmware_branch_with_master_fallback(self):
         ci = self.read(".github/workflows/ci.yml")
@@ -509,6 +516,7 @@ class RepoToolingTests(unittest.TestCase):
             "ZZFwUpdate",
             "ZZNetStats",
             "ZZDiag",
+            "ZZCapture",
             "zz9k.library",
             "mpega.library",
             "zz9k-picture.datatype",
@@ -529,6 +537,7 @@ class RepoToolingTests(unittest.TestCase):
             "usb-poseidon/build.sh",
             "sd-boot/build.sh",
             "ZZDiag/build.sh",
+            "ZZCapture/build.sh",
             "ahi/duplextest/build.sh",
             "sdk/build.sh",
             "amissl/build.sh",
@@ -611,6 +620,7 @@ class RepoToolingTests(unittest.TestCase):
             "ZZFwUpdate",
             "ZZNetStats",
             "ZZDiag",
+            "ZZCapture",
             "zz9k-info",
             "zz9k-services",
             "zz9k-view",
@@ -642,6 +652,18 @@ class RepoToolingTests(unittest.TestCase):
                 cwd=ROOT,
                 check=True,
             )
+
+    def test_zzcapture_is_packaged_with_its_manual(self):
+        ci = self.read(".github/workflows/ci.yml")
+        package = self.read("tools/package-local.sh")
+        installer = self.read("installer/ZZ9000Installer/Install ZZ9000")
+
+        for source in (ci, package):
+            self.assertIn("Tools/ZZCapture", source)
+            self.assertIn("Docs/ZZCapture-README.md", source)
+
+        self.assertIn('(source "Tools/ZZCapture")', installer)
+        self.assertIn("Docs/ZZCapture-README.md", installer)
 
     def test_audio_stack_uses_shared_ax_header(self):
         header = self.read("include/zz9000_ax.h")

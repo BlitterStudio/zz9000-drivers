@@ -16,6 +16,35 @@ Install the PAL or NTSC monitor when testing a standard different from the
 native default. The tool checks the requested mode and its full 24-bit
 palette, and refuses an RTG replacement or a lower-depth screen.
 
+## When to use it
+
+`ZZCapture` is an advanced diagnostic for native Amiga video entering the
+ZZ9000. It is useful when reporting row movement, alternating horizontal
+origins, wrong pixels, capture-clock instability, or a C28 cold-start problem.
+It is not needed for normal RTG use or ordinary ZZ9000 configuration; use
+ZZTop for those tasks.
+
+Install the `ZZCapture` binary, firmware and bitstream from the same matched
+test or release package, then cold-boot so the new `BOOT.bin` is active. A
+message that the matched C28 firmware is unavailable normally means the
+running firmware does not expose the exact capture protocol this build needs.
+Do not work around that check: verify the complete package and cold-boot
+before using a phase-changing command.
+
+For a first, non-phase-changing report, save both outputs and send the complete
+files with the exact firmware/bitstream variant and a description of the
+visible fault:
+
+```text
+ZZCapture info >RAM:zzcapture-info.txt
+ZZCapture observe >RAM:zzcapture-observe.txt
+```
+
+`observe` arms and reads one diagnostic snapshot but does not change or save
+the capture phase. Use `phase`, `check`, `startup`, or `calibrate` only when a
+specific investigation asks for them. Those commands need `Stack 32768`, the
+matched A4000/C28 firmware, and the procedure below.
+
 ## Commands
 
 Run `Stack 32768` in the same Shell before `phase`, `check`, `startup` or `calibrate`. These
