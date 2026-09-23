@@ -51,6 +51,11 @@ jobs:
         run: |
           if [ "$CANDIDATE_REF" = "feat/zztop-videocap-sample" ]; then
             firmware_ref=refs/pull/66/head
+          elif [ "$CANDIDATE_REF" = "feat/zzcapture-line-timing" ] && \
+              git ls-remote --exit-code --heads \
+                https://github.com/BlitterStudio/zz9000-firmware.git \
+                refs/heads/fix/scandoubler-line-origin >/dev/null 2>&1; then
+            firmware_ref=fix/scandoubler-line-origin
           elif git ls-remote --exit-code --heads \
               https://github.com/BlitterStudio/zz9000-firmware.git \
               "refs/heads/$CANDIDATE_REF" >/dev/null 2>&1; then
