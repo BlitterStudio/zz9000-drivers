@@ -144,6 +144,22 @@ static int zzcfg_parse_u16(const char *s, UWORD *out)
     return 1;
 }
 
+/* Same signed decimal grammar as firmware: optional '-', no '+' or
+ * radix prefixes, bounded before accumulation can overflow. */
+static int zzcfg_parse_phase(const char *s, WORD min, WORD max, WORD *out)
+{
+    UWORD magnitude;
+    LONG value;
+    int negative = *s == '-';
+
+    if (negative) s++;
+    if (!zzcfg_parse_u16(s, &magnitude)) return 0;
+    value = negative ? -(LONG)magnitude : (LONG)magnitude;
+    if (value < min || value > max) return 0;
+    *out = (WORD)value;
+    return 1;
+}
+
 /* One audio_scene<N>_<field> key (firmware U5 layout): fields are
  * 0 = lpf, 1..5 = eq01..eq89 pairs, 6 = out, 7 = pan and
  * 8..15 = nm1..nm8 name chunks. The editor round-trips the packed
@@ -425,6 +441,18 @@ void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v)
             if (zzcfg_parse_u12(value, &crop)) {
                 v->videocap_crop_v = crop;
                 v->videocap_crop_v_present = 1;
+            }
+        } else if (zzcfg_str_eq_ci(key, "videocap_phase")) {
+            WORD phase;
+            if (zzcfg_parse_phase(value, -255, 255, &phase)) {
+                v->videocap_phase = phase;
+                v->videocap_phase_present = 1;
+            }
+        } else if (zzcfg_str_eq_ci(key, "videocap_c28_phase")) {
+            WORD phase;
+            if (zzcfg_parse_phase(value, -896, 895, &phase)) {
+                v->videocap_c28_phase = phase;
+                v->videocap_c28_phase_present = 1;
             }
         } else if (zzcfg_str_eq_ci(key, "nonstandard_vsync")) {
             if (zzcfg_str_eq_ci(value, "off")) legacy_vsync = 0;
@@ -863,6 +891,8 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
         "%svideocap_sample = %s\n"
         "%svideocap_crop_h = %u\n"
         "%svideocap_crop_v = %u\n"
+        "%svideocap_phase = %d\n"
+        "%svideocap_c28_phase = %d\n"
         "%sscanline_mode = %u\n"
         "%sscanline_parity = %u\n"
         "int2 = %s\n"
@@ -876,6 +906,8 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
         (unsigned)(v->videocap_crop_h & 4095),
         v->videocap_crop_v_present ? "" : "#",
         (unsigned)(v->videocap_crop_v & 4095),
+        v->videocap_phase_present ? "" : "#", (int)v->videocap_phase,
+        v->videocap_c28_phase_present ? "" : "#", (int)v->videocap_c28_phase,
         v->scanline_mode_present ? "" : "#",
         (unsigned)(v->scanline_mode & 3),
         v->scanline_parity_present ? "" : "#",

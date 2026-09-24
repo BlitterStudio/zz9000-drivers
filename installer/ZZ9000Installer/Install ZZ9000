@@ -534,7 +534,7 @@
 ; --------------------------------------------------------------------
 
 (if (askbool (prompt "Install the ZZ9000 command-line utilities and ZZTop configuration GUI?")
-             (help "Installs ZZTop (configuration GUI) into the ZZ9000 drawer alongside ZZPlay, and the ZZScanlines, ZZFwUpdate, ZZNetStats and ZZDiag CLI tools to C:."))
+             (help "Installs ZZTop (configuration GUI) into the ZZ9000 drawer alongside ZZPlay, and the ZZScanlines, ZZFwUpdate, ZZNetStats and ZZDiag CLI tools to C:. The advanced ZZCapture diagnostic is offered separately."))
    (
       ; Repeated from the ZZPlay section: either can be chosen on its own.
       (makedir #zz-drawer (infos))
@@ -586,6 +586,22 @@
          (confirm))
    )
 )
+
+
+; --------------------------------------------------------------------
+; Advanced native-video capture diagnostic
+; --------------------------------------------------------------------
+
+(if (askbool
+       (prompt "Install ZZCapture (advanced native-video timing diagnostic) into C:?")
+       (help "Use info and observe to collect native-video timing evidence without changing capture phase. The phase, check, startup and calibrate commands are experimental A4000/C28 diagnostics: use only with the matching firmware/bitstream, run Stack 32768 first, and read Docs/ZZCapture-README.md. The tool never saves ZZ9000.CFG.")
+       (default 0))
+    (copyfiles
+       (prompt "Install ZZCapture into C:")
+       (help "Installs the optional native-video timing and C28 calibration diagnostic. Its complete manual is Docs/ZZCapture-README.md in this installer drawer.")
+       (source "Tools/ZZCapture")
+       (dest "C:")
+       (confirm)))
 
 ; --------------------------------------------------------------------
 ; Command path for the ZZ9000 drawer
