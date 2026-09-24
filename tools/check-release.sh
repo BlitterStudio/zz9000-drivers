@@ -31,6 +31,7 @@ check_file installer/ZZ9000Installer/Devs/NetInterfaces/ZZ9000Net
 check_file ahi/README.md
 check_file usb-poseidon/README.md
 check_file docs/usb-qualification-matrix.md
+check_file ZZCapture/README.md
 check_file sdk/README.md
 check_file sdk/SDK_REF
 check_file amissl/README.md
@@ -48,6 +49,7 @@ if [ "$quick" -eq 0 ]; then
     check_exec ZZFwUpdate/ZZFwUpdate
     check_exec net/ZZNetStats/ZZNetStats
     check_exec ZZDiag/ZZDiag
+    check_exec ZZCapture/ZZCapture
 
     # SDK runtime payloads (sdk/build.sh).
     check_file sdk/out/Libs/zz9k.library
@@ -102,6 +104,7 @@ tracked_artifacts=$(
         ZZTop/ZZTop \
         net/ZZNetStats/ZZNetStats \
         ZZDiag/ZZDiag \
+        ZZCapture/ZZCapture \
         ahi/axtest/axtest \
         ahi/duplextest/ZZAXDuplexTest
     do
