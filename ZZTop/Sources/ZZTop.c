@@ -4652,9 +4652,10 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 	}
 
 	if (!audio_ui_seeded) {
-		if (!audio_seed_editor_state())
+		if (audio_seed_editor_state())
+			audio_ui_seeded = TRUE;
+		else
 			audio_editor_defaults();
-		audio_ui_seeded = TRUE;
 	}
 	/* CFG seeds scene definitions, but only live state can size the
 	 * baseline sliders and report the running boundary. */
@@ -4663,6 +4664,9 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 		errorMessage("Audio: control state unavailable - retry");
 		return;
 	}
+	/* If both CFG and live state failed, leave seeding retryable.
+	 * Once the window can open, keep its unsaved scene edits in RAM. */
+	audio_ui_seeded = TRUE;
 	if (state.active_scene < ZZCFG_AUDIO_SCENES)
 		scene = state.active_scene;
 	audio_baseline_paula =
