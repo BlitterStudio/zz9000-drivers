@@ -30,6 +30,7 @@
 #include <devices/inputevent.h>
 #include <string.h>
 #include <stdint.h>
+#include <stddef.h>
 
 #include "mntgfx-gcc.h"
 #include "zz9000.h"
@@ -2068,6 +2069,10 @@ void DrawLine(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 	UWORD line_pat_off = (UWORD)((15 - (l->PatternShift & 15)) & 15);
 
 	if (b->CardFlags & CARDFLAG_ZORRO_3) {
+		_Static_assert(offsetof(struct GFXData, x) % 4 == 0 &&
+			offsetof(struct GFXData, y) % 4 == 0 &&
+			offsetof(struct GFXData, user) % 4 == 0,
+			"Z3 descriptor pairs must be longword-aligned");
 		dmy_cache
 		gfxdata->offset[GFXDATA_DST] = (uint32_t)r->Memory - (uint32_t)b->MemoryBase;
 		gfxdata->pitch[GFXDATA_DST] = (r->BytesPerRow >> 2);
@@ -2080,15 +2085,11 @@ void DrawLine(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 		gfxdata->rgb[0] = l->FgPen;
 		gfxdata->rgb[1] = l->BgPen;
 
-		gfxdata->x[0] = l->X;
-		gfxdata->x[1] = l->dX;
-		gfxdata->y[0] = l->Y;
-		gfxdata->y[1] = l->dY;
-
-		gfxdata->user[0] = l->Length;
-		gfxdata->user[1] = l->LinePtrn;
-		gfxdata->user[2] = ((line_pat_off << 8) | l->pad);
-		gfxdata->user[3] = err_seed;
+		blitter_write_descriptor_pair(gfxdata->x, l->X, l->dX);
+		blitter_write_descriptor_pair(gfxdata->y, l->Y, l->dY);
+		blitter_write_descriptor_pair(gfxdata->user, l->Length, l->LinePtrn);
+		blitter_write_descriptor_pair(gfxdata->user + 2,
+			(line_pat_off << 8) | l->pad, err_seed);
 
 		writeGfxDataMask(gfxdata, mask);
 
