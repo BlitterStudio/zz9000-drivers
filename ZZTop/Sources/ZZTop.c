@@ -3814,14 +3814,8 @@ static void audio_balanced_levels(UWORD *paula, UWORD *ax)
 }
 static BOOL audio_ui_seeded = FALSE;
 
-/* Enforced boundary (AX-equivalent units) as the firmware last
- * reported it. Zero only until the first non-zero control-state
- * word. A later zero must not discard a limiter boundary:
- * calibration used to clear this and fall back to ceiling_ax * 3/4
- * (192 at the uncalibrated 256 ceiling) even after the running
- * limiter had reported 512. The 3/4 estimate remains only for old
- * firmware that never fills the word. Do not invent a boundary
- * locally; the control-state word is authority. */
+/* Firmware's last reported AX-equivalent boundary. The Audio window
+ * does not accept edits until its first state read supplies one. */
 static uint32_t audio_boundary;
 
 /* Paula's per-leg weight in AX-equivalent units, the same
@@ -3832,15 +3826,6 @@ static ULONG audio_weighted_level(UWORD paula, UWORD ax)
 
 	return ((ULONG)paula * (ULONG)audio_ceiling_ax) / den +
 		(ULONG)ax;
-}
-
-/* Pre-report stand-in. Unused once a control-state read has
- * supplied a non-zero ceiling word. */
-static ULONG audio_boundary_now(void)
-{
-	if (audio_boundary != 0UL)
-		return audio_boundary;
-	return ((ULONG)audio_ceiling_ax * 3UL) / 4UL;
 }
 
 /* Savable slider maximum per leg: the clean ceiling, the 255 ABI leg
@@ -3855,7 +3840,7 @@ static UWORD audio_baseline_max_paula(void)
 
 	if (audio_ceiling_ax == 0UL)
 		return 0;
-	free_weighted = audio_boundary_now();
+	free_weighted = audio_boundary;
 	if (free_weighted > (ULONG)audio_baseline_ax)
 		free_weighted -= audio_baseline_ax;
 	else
@@ -3881,7 +3866,7 @@ static UWORD audio_baseline_max_ax(void)
 	if (audio_ceiling_ax == 0UL || audio_ceiling_paula == 0UL)
 		return 0;
 	paula_weighted = audio_weighted_level(audio_baseline_paula, 0);
-	free_weighted = audio_boundary_now();
+	free_weighted = audio_boundary;
 	if (free_weighted > paula_weighted)
 		free_weighted -= paula_weighted;
 	else
@@ -4109,7 +4094,7 @@ static const char *audio_level_text(void)
 	snprintf(audio_level_buf, sizeof(audio_level_buf), "Level %lu/%lu",
 		(unsigned long)audio_weighted_level(audio_baseline_paula,
 			audio_baseline_ax),
-		(unsigned long)audio_boundary_now());
+		(unsigned long)audio_boundary);
 	return audio_level_buf;
 }
 
@@ -4671,19 +4656,22 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 			audio_editor_defaults();
 		audio_ui_seeded = TRUE;
 	}
-	/* Live state wins where the ABI permits it: scene, baseline and
-	 * calibration may carry unsaved edits from an earlier run. */
-	if (audio_control_state_get(&state)) {
-		if (state.active_scene < ZZCFG_AUDIO_SCENES)
-			scene = state.active_scene;
-		audio_baseline_paula =
-			(UWORD)ZZ9K_AUDIO_BALANCE_CH1(state.baseline);
-		audio_baseline_ax =
-			(UWORD)ZZ9K_AUDIO_BALANCE_CH2(state.baseline);
-		audio_ceiling_paula = state.ceiling_paula;
-		audio_ceiling_ax = state.ceiling_ax;
-		audio_note_boundary(state.ceiling);
+	/* CFG seeds scene definitions, but only live state can size the
+	 * baseline sliders and report the running boundary. */
+	if (!audio_control_state_get(&state) || state.ceiling == 0UL ||
+			state.ceiling_paula == 0 || state.ceiling_ax == 0) {
+		errorMessage("Audio: control state unavailable - retry");
+		return;
 	}
+	if (state.active_scene < ZZCFG_AUDIO_SCENES)
+		scene = state.active_scene;
+	audio_baseline_paula =
+		(UWORD)ZZ9K_AUDIO_BALANCE_CH1(state.baseline);
+	audio_baseline_ax =
+		(UWORD)ZZ9K_AUDIO_BALANCE_CH2(state.baseline);
+	audio_ceiling_paula = state.ceiling_paula;
+	audio_ceiling_ax = state.ceiling_ax;
+	audio_note_boundary(state.ceiling);
 	audio_scene_labels_bind();
 
 	if (NULL == audio_create_gadgets(&glist, vi, mainlayout, scene,
