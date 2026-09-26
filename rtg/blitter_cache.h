@@ -1,5 +1,5 @@
 /*
- * Small helpers for suppressing redundant ZZ9000 blitter register writes.
+ * Small helpers for ZZ9000 blitter register and descriptor writes.
  *
  * The firmware keeps the latest register values, so a repeated write of the
  * same value to the same board can be skipped on slow Zorro II setup paths.
@@ -9,6 +9,26 @@
 #define ZZ9000_BLITTER_CACHE_H
 
 #include <stdint.h>
+
+/* Two adjacent, four-byte-aligned descriptor halves can share one Zorro III
+ * 32-bit transaction. Their byte layout must match two individual 16-bit
+ * stores: the ARM firmware swaps each half in place after consuming a command.
+ * may_alias permits writing the existing uint16_t fields through a word. */
+typedef uint32_t __attribute__((__may_alias__)) BlitterDescriptorWord;
+
+static inline void blitter_write_descriptor_pair(volatile uint16_t *fields,
+	uint16_t first, uint16_t second)
+{
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+	*(volatile BlitterDescriptorWord *)fields =
+		((uint32_t)first << 16) | second;
+#elif __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+	*(volatile BlitterDescriptorWord *)fields =
+		((uint32_t)second << 16) | first;
+#else
+#error Unknown byte order for descriptor writes
+#endif
+}
 
 struct BlitterRegisterCache {
 	const volatile void *registers;
