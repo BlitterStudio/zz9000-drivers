@@ -16,6 +16,24 @@ static void expect_write(const char *name, int actual, int expected)
 	printf("ok   %s\n", name);
 }
 
+static void expect_descriptor_pair(const char *name, uint16_t first, uint16_t second)
+{
+	struct {
+		uint32_t before;
+		volatile uint16_t fields[2];
+		uint32_t after;
+	} descriptor = { 0x12345678, { 0, 0 }, 0x87654321 };
+
+	blitter_write_descriptor_pair(descriptor.fields, first, second);
+	if (descriptor.fields[0] != first || descriptor.fields[1] != second ||
+		descriptor.before != 0x12345678 || descriptor.after != 0x87654321) {
+		printf("FAIL %s: descriptor pair changed fields or neighbours\n", name);
+		failures++;
+		return;
+	}
+	printf("ok   %s\n", name);
+}
+
 int main(void)
 {
 	struct BlitterRegisterCache cache;
@@ -74,6 +92,13 @@ int main(void)
 	expect_write("changed rgb2 writes",
 		blitter_cache_write32_needed(&cache, &regs_a, BLITTER_CACHE_RGB2,
 			&rgb2, 0x55667788), 1);
+
+	expect_descriptor_pair("clipped negative X/dX",
+		(uint16_t)(int16_t)-8, (uint16_t)(int16_t)-31);
+	expect_descriptor_pair("length and line pattern", 0xffff, 0x8001);
+	/* A negative signed pad sign-extends in the existing user[2] encoding. */
+	expect_descriptor_pair("signed pattern padding",
+		(uint16_t)((15 << 8) | -1), 0x1234);
 
 	if (failures) {
 		printf("%d register cache test(s) failed\n", failures);
