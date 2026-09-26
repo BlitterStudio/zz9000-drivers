@@ -2,8 +2,8 @@ AMIGA_IMAGE ?= sacredbanana/amiga-compiler:m68k-amigaos
 AMIGA_DOCKER = ./tools/amiga-docker.sh
 
 .PHONY: all build-all package-local check-release quality rtg-tests mhi-tests \
-	rtg zztop zzscanlines zzfwupdate usb-poseidon sd-boot net ZZNetStats \
-	mhi ahi ahi-duplextest ZZDiag ZZCapture sdk amissl
+	net-tests rtg zztop zzscanlines zzfwupdate usb-poseidon sd-boot net \
+	ZZNetStats mhi ahi ahi-duplextest ZZDiag ZZCapture sdk amissl
 
 all: build-all
 
@@ -21,6 +21,9 @@ quality:
 
 rtg-tests:
 	$(MAKE) -C rtg/tests test
+
+net-tests:
+	$(MAKE) -C net/tests test
 
 mhi-tests:
 	$(CC) -std=c99 -O2 -Wall -Wextra -Werror \

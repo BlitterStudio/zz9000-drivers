@@ -29,9 +29,11 @@
 
 /* defaults */
 #define MAX_UNITS 4
+#define HW_ADDRFIELDSIZE 6
 
 /* includes */
 #include "compiler.h"
+#include "mcast.h"
 #include <dos/dos.h>
 #include <exec/lists.h>
 #include <exec/libraries.h>
@@ -56,6 +58,7 @@ struct DevUnit {
 	APTR	du_hwp2;
 };
 
+
 #define DEVF_INT2MODE		(1L << 0)
 
 struct devbase {
@@ -71,6 +74,8 @@ struct devbase {
 
 	struct List db_ReadList;
 	struct SignalSemaphore db_ReadListSem;
+	struct zznet_mcast db_Mcast; /* exact groups; lock is db_McastSem */
+	struct SignalSemaphore db_McastSem;
 	struct Process* db_Proc;
 	struct SignalSemaphore db_ProcExitSem;
 
@@ -125,7 +130,6 @@ void DevTermIO( DEVBASETYPE*, struct IORequest * );
 
 #endif /* DEVICE_MAIN */
 
-#define HW_ADDRFIELDSIZE 6
 #define HW_ETH_HDR_SIZE          14       /* ethernet header: dst, src, type */
 #define HW_ETH_MTU               1500
 #define HW_ETH_VLAN_TAG          4        /* 802.1Q tag adds 4 bytes */
