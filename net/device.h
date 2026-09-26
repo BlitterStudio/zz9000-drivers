@@ -30,10 +30,10 @@
 /* defaults */
 #define MAX_UNITS 4
 #define HW_ADDRFIELDSIZE 6
-#define MCAST_MAX 32
 
 /* includes */
 #include "compiler.h"
+#include "mcast.h"
 #include <dos/dos.h>
 #include <exec/lists.h>
 #include <exec/libraries.h>
@@ -58,10 +58,6 @@ struct DevUnit {
 	APTR	du_hwp2;
 };
 
-struct McastEntry {
-	UBYTE addr[HW_ADDRFIELDSIZE];
-	UWORD refs;
-};
 
 #define DEVF_INT2MODE		(1L << 0)
 
@@ -78,9 +74,8 @@ struct devbase {
 
 	struct List db_ReadList;
 	struct SignalSemaphore db_ReadListSem;
-	struct McastEntry db_Mcast[MCAST_MAX];
+	struct zznet_mcast db_Mcast; /* exact groups; lock is db_McastSem */
 	struct SignalSemaphore db_McastSem;
-	UWORD db_McastCount;
 	struct Process* db_Proc;
 	struct SignalSemaphore db_ProcExitSem;
 
