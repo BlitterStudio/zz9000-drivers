@@ -42,6 +42,7 @@ struct z9ax {
    * blocking Start/recovery acquire cannot undo the completed Stop. */
   uint8_t fabric_mode;
   uint8_t lease_held;
+  uint8_t lease_source_be; /* firmware accepted m68k S16BE source */
   uint8_t lease_acquire_in_progress; /* serializes Start/recovery install */
   uint8_t lease_acquire_uncertain; /* timed-out acquire may have applied */
   uint8_t lease_release_pending; /* blocks acquire until confirmed */
