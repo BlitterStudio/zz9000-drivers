@@ -126,21 +126,24 @@ noticeably quieter than the same Amiga's chip-audio through the
 ZZ9000AX. MNT resolved this in subsequent revisions by **removing
 U4**.
 
-If you're on a new-revision board (U4 already absent), everything
-balances correctly at the default mixer setting and you don't need
-to touch anything.
+Newer revisions omit U4, but that alone does not qualify every card's
+default gain as distortion-free. With no saved audio settings, current
+firmware uses the one-card-informed Paula/AX ceiling fallback 48/80
+and parity baseline 36/72 (Level 132/160). Saved settings take
+precedence, including older louder pairs; check ZZTop before testing.
 
-If you have an unfixed R1, you have two choices:
+If you have an unfixed R1:
 
-1. **Desolder U4** — MNT's own fix, produces the cleanest result and
-   matches current hardware. Recommended if you're comfortable with
-   SMD rework.
-2. **Set baseline and measured ceilings** — matched firmware exposes
-   both in ZZTop's Audio window. Baseline sets the listening balance;
-   Paula/AX Ceiling stores the card's clean single-leg measurements
-   and weights gain staging before applying 3/4 headroom. The qualified
-   R1 card measured 48/80 (Paula weight 1.667, boundary 60). Save only
-   after calibration and the chosen baseline/scenes pass validation.
+1. **Desolder U4** — MNT's analog-path fix, if you're comfortable with
+   SMD rework. A digital mixer or limiter cannot undo analog distortion
+   already produced before its input.
+2. **Measure and set each clean ceiling and baseline** — matched
+   firmware exposes these controls in ZZTop's Audio window. The
+   qualified R1 card measured Paula 48 / AX 80. With the permanent
+   post-mix limiter the boundary for that calibrated pair is 160;
+   firmware caps each leg at its own ceiling first. The older
+   three-quarter-of-AX boundary (60 for 48/80) is pre-limiter history.
+   Save the card's own measurements, not the example pair.
 
 The former `ENV:ZZ9K_MIX_LEVELS` register override was removed; see
 [Runtime tunables](#runtime-tunables-env-variables) below.
