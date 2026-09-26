@@ -227,7 +227,9 @@ static const char version[] __attribute__((used)) =
 #define LABEL_AUD_PREF     "Prefactor"
 #define LABEL_AUD_VOL      "Volume"
 #define LABEL_AUD_PAN      "Pan"
-#define LABEL_AUD_LPF      "AX Lowpass"
+/* Shared master-chain output filter. It is not AX-only; Paula
+ * hears it too. */
+#define LABEL_AUD_LPF      "Output Lowpass"
 
 /* Firmware scene-name cap: 8 staged chunks of two chars each. */
 #define ZZTOP_AUDIO_NAME_CHARS   16
@@ -3812,8 +3814,8 @@ static void audio_balanced_levels(UWORD *paula, UWORD *ax)
 }
 static BOOL audio_ui_seeded = FALSE;
 
-/* Enforced boundary (AX-equivalent units) as the firmware last
- * reported it in control state; zero until the first read. */
+/* Firmware's last reported AX-equivalent boundary. The Audio window
+ * does not accept edits until its first state read supplies one. */
 static uint32_t audio_boundary;
 
 /* Paula's per-leg weight in AX-equivalent units, the same
@@ -3824,16 +3826,6 @@ static ULONG audio_weighted_level(UWORD paula, UWORD ax)
 
 	return ((ULONG)paula * (ULONG)audio_ceiling_ax) / den +
 		(ULONG)ax;
-}
-
-/* Boundary before the firmware has reported one: the stricter
- * production formula, so slider caps start conservative and widen
- * with the state read on the limiter build. */
-static ULONG audio_boundary_now(void)
-{
-	if (audio_boundary != 0UL)
-		return audio_boundary;
-	return ((ULONG)audio_ceiling_ax * 3UL) / 4UL;
 }
 
 /* Savable slider maximum per leg: the clean ceiling, the 255 ABI leg
@@ -3848,7 +3840,7 @@ static UWORD audio_baseline_max_paula(void)
 
 	if (audio_ceiling_ax == 0UL)
 		return 0;
-	free_weighted = audio_boundary_now();
+	free_weighted = audio_boundary;
 	if (free_weighted > (ULONG)audio_baseline_ax)
 		free_weighted -= audio_baseline_ax;
 	else
@@ -3874,7 +3866,7 @@ static UWORD audio_baseline_max_ax(void)
 	if (audio_ceiling_ax == 0UL || audio_ceiling_paula == 0UL)
 		return 0;
 	paula_weighted = audio_weighted_level(audio_baseline_paula, 0);
-	free_weighted = audio_boundary_now();
+	free_weighted = audio_boundary;
 	if (free_weighted > paula_weighted)
 		free_weighted -= paula_weighted;
 	else
@@ -3899,6 +3891,12 @@ static BOOL audio_dirty = FALSE;
 static BOOL audio_save_pending = FALSE;
 static ULONG audio_edit_generation;
 static ULONG audio_save_generation;
+/* One calibration write may still be in flight after a mailbox timeout.
+ * Keep the reported boundary and the editable controls together until
+ * a complete state read confirms the requested ceiling pair. */
+static BOOL audio_calibration_pending = FALSE;
+static UWORD audio_calibration_target_paula;
+static UWORD audio_calibration_target_ax;
 
 static void audio_mark_dirty(void)
 {
@@ -3969,10 +3967,10 @@ static void audio_editor_defaults(void)
 
 	memcpy(audio_scenes, zztop_audio_scene_defaults,
 		sizeof(audio_scenes));
-	audio_baseline_paula = 128;
-	audio_baseline_ax = 64;
-	audio_ceiling_paula = 256;
-	audio_ceiling_ax = 256;
+	audio_baseline_paula = 36;
+	audio_baseline_ax = 72;
+	audio_ceiling_paula = 48;
+	audio_ceiling_ax = 80;
 	for (i = 0; i < ZZCFG_AUDIO_SCENES; i++)
 		audio_scene_default_name(audio_scenes[i].name,
 			sizeof(audio_scenes[i].name), (UWORD)i);
@@ -4050,10 +4048,12 @@ static BOOL audio_seed_editor_state(void)
 	}
 	if (audio_ceiling_paula < ZZTOP_AUDIO_CEILING_MIN ||
 			audio_ceiling_paula > ZZTOP_AUDIO_CEILING_MAX)
-		audio_ceiling_paula = 256;
+		audio_ceiling_paula = 48;
 	if (audio_ceiling_ax < ZZTOP_AUDIO_CEILING_MIN ||
 			audio_ceiling_ax > ZZTOP_AUDIO_CEILING_MAX)
-		audio_ceiling_ax = 256;
+		audio_ceiling_ax = 80;
+	if (!sv.audio_baseline_present)
+		audio_balanced_levels(&audio_baseline_paula, &audio_baseline_ax);
 
 	/* Clamp to the ranges the firmware enforces on write, so a hand
 	 * edited file seeds usable slider positions. */
@@ -4100,38 +4100,61 @@ static const char *audio_level_text(void)
 	snprintf(audio_level_buf, sizeof(audio_level_buf), "Level %lu/%lu",
 		(unsigned long)audio_weighted_level(audio_baseline_paula,
 			audio_baseline_ax),
-		(unsigned long)audio_boundary_now());
+		(unsigned long)audio_boundary);
 	return audio_level_buf;
 }
 
-/* Keep the baseline sliders' maxima at what can actually be saved
- * (each leg: its clean ceiling, the ABI leg max, and the boundary
- * share the other leg leaves free) and refresh the level readout. */
-static void audio_update_baseline_bounds(struct Window *win)
+/* Adopt a firmware-reported boundary. Zero is "not reported", not a
+ * command to forget the last limiter boundary. */
+static void audio_note_boundary(uint32_t reported)
+{
+	if (reported != 0UL)
+		audio_boundary = reported;
+}
+
+
+/* Max and Level in one call, Max first, and never below the requested
+ * level. A Max-only update lets gadtools clamp the knob and post a
+ * new level, which then writes that clamp back as the baseline. */
+static void audio_set_baseline_slider(struct Window *win, UWORD id,
+	UWORD level, UWORD max)
+{
+	if (max < level)
+		max = level;
+	GT_SetGadgetAttrs(audgads[id], win, NULL,
+		GTSL_Max, (ULONG)max,
+		GTSL_Level, (ULONG)level,
+		TAG_END);
+}
+
+/* skip_id is the baseline slider whose input handler is active, or
+ * AUDGAD_COUNT when neither is. Setting Max or Level on the active
+ * slider reenters gadtools and collapses the knob. */
+static void audio_update_baseline_bounds(struct Window *win,
+	UWORD skip_id)
 {
 	if (win == NULL)
 		return;
-	GT_SetGadgetAttrs(audgads[AUDGAD_BASE_PAULA], win, NULL,
-		GTSL_Max, (ULONG)audio_baseline_max_paula(), TAG_END);
-	GT_SetGadgetAttrs(audgads[AUDGAD_BASE_AX], win, NULL,
-		GTSL_Max, (ULONG)audio_baseline_max_ax(), TAG_END);
-	GT_SetGadgetAttrs(audgads[AUDGAD_LEVEL], win, NULL,
-		GTTX_Text, (STRPTR)audio_level_text(), TAG_END);
+	if (skip_id != AUDGAD_BASE_PAULA)
+		audio_set_baseline_slider(win, AUDGAD_BASE_PAULA,
+			audio_baseline_paula, audio_baseline_max_paula());
+	if (skip_id != AUDGAD_BASE_AX)
+		audio_set_baseline_slider(win, AUDGAD_BASE_AX,
+			audio_baseline_ax, audio_baseline_max_ax());
+	if (audgads[AUDGAD_LEVEL])
+		GT_SetGadgetAttrs(audgads[AUDGAD_LEVEL], win, NULL,
+			GTTX_Text, (STRPTR)audio_level_text(), TAG_END);
 }
 
 static void audio_reload_saved_state(struct Window *win, UWORD scene)
 {
 	if (audio_seed_editor_state()) {
 		audio_scene_cycle_refresh(win, scene);
-		GT_SetGadgetAttrs(audgads[AUDGAD_BASE_PAULA], win, NULL,
-			GTSL_Level, audio_baseline_paula, TAG_END);
-		GT_SetGadgetAttrs(audgads[AUDGAD_BASE_AX], win, NULL,
-			GTSL_Level, audio_baseline_ax, TAG_END);
 		GT_SetGadgetAttrs(audgads[AUDGAD_CEIL_PAULA], win, NULL,
 			GTIN_Number, audio_ceiling_paula, TAG_END);
 		GT_SetGadgetAttrs(audgads[AUDGAD_CEIL_AX], win, NULL,
 			GTIN_Number, audio_ceiling_ax, TAG_END);
-		audio_update_baseline_bounds(win);
+		audio_update_baseline_bounds(win, AUDGAD_COUNT);
 		audio_set_status(win,
 			"Saved - survives power-cycle; controls show saved values");
 	} else {
@@ -4143,7 +4166,56 @@ static void audio_reload_saved_state(struct Window *win, UWORD scene)
 static void audio_update_save_gate(struct Window *win)
 {
 	GT_SetGadgetAttrs(audgads[AUDGAD_BTN_SAVE], win, NULL,
-		GA_Disabled, !audio_dirty || audio_save_pending, TAG_END);
+		GA_Disabled, !audio_dirty || audio_save_pending ||
+			audio_calibration_pending, TAG_END);
+}
+
+static void audio_set_controls_enabled(struct Window *win, BOOL enabled)
+{
+	static const UWORD ids[] = {
+		AUDGAD_SCENE, AUDGAD_BTN_EDIT, AUDGAD_BTN_RENAME,
+		AUDGAD_BASE_PAULA, AUDGAD_BASE_AX,
+		AUDGAD_CEIL_PAULA, AUDGAD_CEIL_AX, AUDGAD_BTN_BALANCE
+	};
+	unsigned i;
+
+	for (i = 0; i < sizeof(ids) / sizeof(ids[0]); i++)
+		GT_SetGadgetAttrs(audgads[ids[i]], win, NULL,
+			GA_Disabled, !enabled, TAG_END);
+	if (!enabled)
+		GT_SetGadgetAttrs(audgads[AUDGAD_LEVEL], win, NULL,
+			GTTX_Text, (STRPTR)"Level awaiting firmware", TAG_END);
+	audio_update_save_gate(win);
+}
+
+static void audio_calibration_settle(struct Window *win)
+{
+	struct zztop_audio_state st;
+
+	if (!audio_calibration_pending || !audio_control_state_get(&st) ||
+			!st.ceiling ||
+			st.ceiling_paula != audio_calibration_target_paula ||
+			st.ceiling_ax != audio_calibration_target_ax)
+		return;
+	/* One firmware snapshot owns the baseline, calibration and
+	 * boundary; never combine a local edit with a previous boundary. */
+	audio_baseline_paula = (UWORD)ZZ9K_AUDIO_BALANCE_CH1(st.baseline);
+	audio_baseline_ax = (UWORD)ZZ9K_AUDIO_BALANCE_CH2(st.baseline);
+	audio_ceiling_paula = st.ceiling_paula;
+	audio_ceiling_ax = st.ceiling_ax;
+	audio_note_boundary(st.ceiling);
+	GT_SetGadgetAttrs(audgads[AUDGAD_CEIL_PAULA], win, NULL,
+		GTIN_Number, audio_ceiling_paula, TAG_END);
+	GT_SetGadgetAttrs(audgads[AUDGAD_CEIL_AX], win, NULL,
+		GTIN_Number, audio_ceiling_ax, TAG_END);
+	audio_calibration_pending = FALSE;
+	audio_update_baseline_bounds(win, AUDGAD_COUNT);
+	audio_set_controls_enabled(win, TRUE);
+	audio_set_status(win,
+		(audio_baseline_paula > audio_ceiling_paula ||
+		 audio_baseline_ax > audio_ceiling_ax)
+		? "Baseline exceeds new ceiling; adjust levels before Save"
+		: "Calibration committed - Save to persist");
 }
 
 /* Settle a pending non-blocking save: the firmware machine steps in
@@ -4160,8 +4232,7 @@ static void audio_save_settle(struct Window *win)
 		return;
 	if (!audio_control_state_get(&st))
 		return;
-	if (st.ceiling != 0UL)
-		audio_boundary = st.ceiling;
+	audio_note_boundary(st.ceiling);
 	save_status = st.save_status;
 	if (save_status == ZZ9K_AUDIO_SCENE_SAVE_QUEUED)
 		return; /* the machine is still running */
@@ -4494,6 +4565,7 @@ static struct Gadget *audio_create_gadgets(struct Gadget **glistptr,
 	audgads[AUDGAD_BASE_PAULA] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
 		GTSL_Min, 0, GTSL_Max, (ULONG)audio_baseline_max_paula(),
 		GTSL_Level, audio_baseline_paula,
+		GA_RelVerify, TRUE,
 		GTSL_LevelFormat, (STRPTR)"%ld", GTSL_MaxLevelLen, 4,
 		GTSL_LevelPlace, PLACETEXT_RIGHT,
 		TAG_END);
@@ -4505,6 +4577,7 @@ static struct Gadget *audio_create_gadgets(struct Gadget **glistptr,
 	audgads[AUDGAD_BASE_AX] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
 		GTSL_Min, 0, GTSL_Max, (ULONG)audio_baseline_max_ax(),
 		GTSL_Level, audio_baseline_ax,
+		GA_RelVerify, TRUE,
 		GTSL_LevelFormat, (STRPTR)"%ld", GTSL_MaxLevelLen, 4,
 		GTSL_LevelPlace, PLACETEXT_RIGHT,
 		TAG_END);
@@ -4556,7 +4629,7 @@ static struct Gadget *audio_create_gadgets(struct Gadget **glistptr,
 	 * by the AX clean ceiling and the leg max (36/72 at the 48/80
 	 * calibration). The ceilings are hardware measurements, not
 	 * preferences -- deliberately not touched here. */
-	ng.ng_LeftEdge = l.margin_x + button_width + l.label_gap;
+	ng.ng_LeftEdge = l.margin_x + button_width + l.label_gap - 6;
 	ng.ng_TopEdge = y;
 	ng.ng_Width = button_width;
 	ng.ng_GadgetID = AUDGAD_BTN_BALANCE;
@@ -4617,6 +4690,7 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 	UWORD imsgCode;
 	struct zztop_audio_state state;
 	UWORD scene = 0;
+	UWORD baseline_drag = AUDGAD_COUNT;
 	WORD w = 0, h = 0;
 
 	if (!zztop_audio_surface_available()) {
@@ -4625,23 +4699,30 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 	}
 
 	if (!audio_ui_seeded) {
-		if (!audio_seed_editor_state())
+		if (audio_seed_editor_state())
+			audio_ui_seeded = TRUE;
+		else
 			audio_editor_defaults();
-		audio_ui_seeded = TRUE;
 	}
-	/* Live state wins where the ABI permits it: scene, baseline and
-	 * calibration may carry unsaved edits from an earlier run. */
-	if (audio_control_state_get(&state)) {
-		if (state.active_scene < ZZCFG_AUDIO_SCENES)
-			scene = state.active_scene;
-		audio_baseline_paula =
-			(UWORD)ZZ9K_AUDIO_BALANCE_CH1(state.baseline);
-		audio_baseline_ax =
-			(UWORD)ZZ9K_AUDIO_BALANCE_CH2(state.baseline);
-		audio_ceiling_paula = state.ceiling_paula;
-		audio_ceiling_ax = state.ceiling_ax;
-		audio_boundary = state.ceiling;
+	/* CFG seeds scene definitions, but only live state can size the
+	 * baseline sliders and report the running boundary. */
+	if (!audio_control_state_get(&state) || state.ceiling == 0UL ||
+			state.ceiling_paula == 0 || state.ceiling_ax == 0) {
+		errorMessage("Audio: control state unavailable - retry");
+		return;
 	}
+	/* If both CFG and live state failed, leave seeding retryable.
+	 * Once the window can open, keep its unsaved scene edits in RAM. */
+	audio_ui_seeded = TRUE;
+	if (state.active_scene < ZZCFG_AUDIO_SCENES)
+		scene = state.active_scene;
+	audio_baseline_paula =
+		(UWORD)ZZ9K_AUDIO_BALANCE_CH1(state.baseline);
+	audio_baseline_ax =
+		(UWORD)ZZ9K_AUDIO_BALANCE_CH2(state.baseline);
+	audio_ceiling_paula = state.ceiling_paula;
+	audio_ceiling_ax = state.ceiling_ax;
+	audio_note_boundary(state.ceiling);
 	audio_scene_labels_bind();
 
 	if (NULL == audio_create_gadgets(&glist, vi, mainlayout, scene,
@@ -4673,7 +4754,7 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 	audio_set_status(win, audio_dirty
 		? "Unsaved changes - Save to persist"
 		: "Edits apply live; reboot reverts to the last Save");
-	audio_update_baseline_bounds(win);
+	audio_update_baseline_bounds(win, AUDGAD_COUNT);
 
 	/* Own timer request, not the shared timerio: the main window may
 	 * have a refresh pending on it, and a timerequest cannot be shared
@@ -4718,7 +4799,9 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 			meter_pending = FALSE;
 			if (audio_metering_capped)
 				audio_refresh_meters(win);
-			audio_save_settle(win);
+			audio_calibration_settle(win);
+			if (!audio_calibration_pending)
+				audio_save_settle(win);
 			audio_arm_meter_timer(meter_io);
 			meter_pending = TRUE;
 		}
@@ -4732,19 +4815,24 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 				(unsigned long)imsgClass,
 				gad ? (long)gad->GadgetID : -1L,
 				(long)imsgCode);
+			if (imsgClass == IDCMP_GADGETUP && gad &&
+					baseline_drag == gad->GadgetID)
+				baseline_drag = AUDGAD_COUNT;
 
 			switch (imsgClass) {
 				case IDCMP_MOUSEMOVE:
-					/* Baseline sliders never emit GADGETUP; treat moves
-					 * as live commits and let firmware coalesce them. */
+					/* Apply live changes without rewriting the active
+					 * slider. GA_RelVerify supplies GADGETUP to
+					 * refresh its Max/Level after release. */
 					if (gad && (gad->GadgetID == AUDGAD_BASE_PAULA ||
-							gad->GadgetID == AUDGAD_BASE_AX))
+							gad->GadgetID == AUDGAD_BASE_AX)) {
+						baseline_drag = gad->GadgetID;
 						imsgClass = IDCMP_GADGETUP;
-					else
+					} else
 						break;
-					/* FALLTHRU to the GADGETUP dispatch */
+					/* FALLTHRU */
 				case IDCMP_GADGETUP:
-					if (!gad) break;
+					if (!gad || audio_calibration_pending) break;
 					switch (gad->GadgetID) {
 						case AUDGAD_SCENE:
 							if (imsgCode < ZZCFG_AUDIO_SCENES &&
@@ -4826,7 +4914,8 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 										(bst == ZZ9K_STATUS_OK)
 										?	"Baseline committed - Save to persist"
 										:	"Baseline committing - Save to persist");
-								audio_update_baseline_bounds(win);
+								audio_update_baseline_bounds(win,
+									baseline_drag);
 								} else {
 									/* Hard error: restore. */
 									GT_SetGadgetAttrs(gad, win, NULL,
@@ -4874,15 +4963,15 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 									new_paula, new_ax));
 							if (cst == ZZ9K_STATUS_OK ||
 									cst == ZZ9K_STATUS_TIMEOUT) {
-								audio_ceiling_paula = new_paula;
-								audio_ceiling_ax = new_ax;
+								audio_calibration_target_paula = new_paula;
+								audio_calibration_target_ax = new_ax;
+								audio_calibration_pending = TRUE;
 								audio_mark_dirty();
-								audio_set_status(win,
-									(cst == ZZ9K_STATUS_OK)
-									? "Calibration committed - Save to persist"
-									: "Calibration committing - Save to persist");
-								audio_boundary = 0;
-								audio_update_baseline_bounds(win);
+								audio_set_controls_enabled(win, FALSE);
+								audio_set_status(win, meter_dev_open
+									? "Calibration awaiting firmware state..."
+									: "Calibration pending - reopen Audio to refresh");
+								audio_calibration_settle(win);
 							} else {
 								GT_SetGadgetAttrs(gad, win, NULL,
 									GTIN_Number, (gad->GadgetID ==
@@ -4915,19 +5004,12 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 								audio_baseline_paula = bal_paula;
 								audio_baseline_ax = bal_ax;
 								audio_mark_dirty();
-								GT_SetGadgetAttrs(
-									audgads[AUDGAD_BASE_PAULA],
-									win, NULL,
-									GTSL_Level, bal_paula, TAG_END);
-								GT_SetGadgetAttrs(
-									audgads[AUDGAD_BASE_AX],
-									win, NULL,
-									GTSL_Level, bal_ax, TAG_END);
 								audio_set_status(win,
 									(bst == ZZ9K_STATUS_OK)
 									?	"Balance committed - Save to persist"
 									:	"Balance committing...");
-								audio_update_baseline_bounds(win);
+								audio_update_baseline_bounds(win,
+									AUDGAD_COUNT);
 							} else {
 								audio_set_status(win,
 									"Balance failed - retry");
@@ -5004,14 +5086,93 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 	if (meter_port)
 		DeleteMsgPort(meter_port);
 
+	audio_calibration_pending = FALSE;
 	CloseWindow(win);
 	FreeGadgets(glist);
 }
 
-/* Scene editor (sub-window, the scandoubler_capture_window
- * precedent): every master-chain parameter of one scene as a slider.
- * Edits commit on gadget release through the staged scene-write path
- * (F3/KTD7) -- there is deliberately no per-mousemove writing. */
+/* Scene editor: one scene's master-chain sliders. Coalesce intermediate
+ * MOUSEMOVE values; GA_RelVerify commits the final level on release,
+ * with a short timer for live preview and a close-window flush. */
+#define ZZTOP_AUDIO_DRAG_COALESCE_USECS 100000
+
+static BOOL audio_editor_lookup(struct zztop_audio_scene_ui *sc,
+	UWORD id, UWORD **field, uint32_t *param, const char **name)
+{
+	*field = NULL;
+	*name = NULL;
+	*param = 0;
+	if (id == SEGAD_LPF) {
+		*field = &sc->lpf;
+		*param = ZZ9K_AUDIO_SCENE_PARAM_LPF;
+		*name = "Output lowpass";
+	} else if (id == SEGAD_PREFACTOR) {
+		*field = &sc->prefactor;
+		*param = ZZ9K_AUDIO_SCENE_PARAM_PREFACTOR;
+		*name = "Prefactor";
+	} else if (id == SEGAD_VOLUME) {
+		*field = &sc->volume;
+		*param = ZZ9K_AUDIO_SCENE_PARAM_VOLUME;
+		*name = "Volume";
+	} else if (id == SEGAD_PAN) {
+		*field = &sc->pan;
+		*param = ZZ9K_AUDIO_SCENE_PARAM_PAN;
+		*name = "Pan";
+	} else if (id >= SEGAD_EQ_BASE && id < SEGAD_EQ_BASE + 10) {
+		*field = &sc->eq[id - SEGAD_EQ_BASE];
+		*param = ZZ9K_AUDIO_SCENE_PARAM_EQ_BAND_1 + (id - SEGAD_EQ_BASE);
+		*name = "EQ band";
+	}
+	return *field != NULL;
+}
+
+/* One staged commit. The editor seed comes from saved CFG, not live
+ * LPF/EQ state, so even a value equal to the displayed one may need
+ * writing. Hard errors restore the last accepted display value;
+ * timeouts keep the request pending as in the baseline path. */
+static void audio_editor_commit_value(struct Window *win,
+	struct Gadget **segads, struct zztop_audio_scene_ui *sc,
+	UWORD scene, UWORD id, UWORD value, BOOL *edited, char *status,
+	size_t status_sz)
+{
+	UWORD *field;
+	uint32_t param;
+	const char *name;
+	UWORD old;
+	int cst;
+
+	if (!audio_editor_lookup(sc, id, &field, &param, &name))
+		return;
+	old = *field;
+	cst = audio_scene_write_commit(scene, param, value);
+	if (cst == ZZ9K_STATUS_OK) {
+		*field = value;
+		audio_mark_dirty();
+		*edited = TRUE;
+		snprintf(status, status_sz,
+			"%s committed to %s - Save to persist", name, sc->name);
+	} else if (cst == ZZ9K_STATUS_TIMEOUT) {
+		*field = value;
+		audio_mark_dirty();
+		*edited = TRUE;
+		snprintf(status, status_sz,
+			"%s committing - Save to persist", name);
+	} else if (audio_scene_write_commit(scene, param, old) ==
+			ZZ9K_STATUS_OK) {
+		GT_SetGadgetAttrs(segads[id], win, NULL,
+			GTSL_Level, old, TAG_END);
+		snprintf(status, status_sz, "%s commit failed - retry", name);
+	} else {
+		GT_SetGadgetAttrs(segads[id], win, NULL,
+			GTSL_Level, old, TAG_END);
+		audio_mark_dirty();
+		snprintf(status, status_sz,
+			"%s commit failed; firmware may hold the attempted value - Save",
+			name);
+	}
+	GT_SetGadgetAttrs(segads[SEGAD_STATUS], win, NULL,
+		GTTX_Text, status, TAG_END);
+}
 static BOOL audio_scene_editor_window(struct Screen *mysc, void *vi,
 	const struct ZZTopLayout *mainlayout, UWORD scene)
 {
@@ -5047,13 +5208,20 @@ static BOOL audio_scene_editor_window(struct Screen *mysc, void *vi,
 	WORD content_right, button_width, y, w, h, i;
 	BOOL done = FALSE;
 	BOOL edited = FALSE;
+	struct MsgPort *drag_port = NULL;
+	struct timerequest *drag_io = NULL;
+	BOOL drag_dev = FALSE;
+	BOOL drag_timer = FALSE;
+	BOOL drag_pending = FALSE;
+	UWORD drag_id = 0;
+	UWORD drag_value = 0;
 	char title[32];
 
 	/* The window carries the operator-assigned name (or the default
 	 * label) so the operator always sees which scene is edited. */
 	snprintf(title, sizeof(title), "Editing %s", sc->name);
 	snprintf(status, sizeof(status),
-		"Editing %s - each control commits on release", sc->name);
+		"Editing %s - changes apply live; Save to persist", sc->name);
 
 	label_width = zztop_max_text_width(
 		zztop_screen ? &zztop_screen->RastPort : NULL, label_samples, 8);
@@ -5090,6 +5258,7 @@ static BOOL audio_scene_editor_window(struct Screen *mysc, void *vi,
 	segads[SEGAD_LPF] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
 		GTSL_Min, ZZTOP_AUDIO_LPF_MIN, GTSL_Max, ZZTOP_AUDIO_LPF_MAX,
 		GTSL_Level, sc->lpf,
+		GA_RelVerify, TRUE,
 		GTSL_LevelFormat, (STRPTR)"%ld Hz", GTSL_MaxLevelLen, 8,
 		GTSL_LevelPlace, PLACETEXT_RIGHT,
 		TAG_END);
@@ -5100,6 +5269,7 @@ static BOOL audio_scene_editor_window(struct Screen *mysc, void *vi,
 	segads[SEGAD_PREFACTOR] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
 		GTSL_Min, 0, GTSL_Max, ZZTOP_AUDIO_RANGE_MAX,
 		GTSL_Level, sc->prefactor,
+		GA_RelVerify, TRUE,
 		GTSL_LevelFormat, (STRPTR)"%ld", GTSL_MaxLevelLen, 4,
 		GTSL_LevelPlace, PLACETEXT_RIGHT,
 		TAG_END);
@@ -5110,6 +5280,7 @@ static BOOL audio_scene_editor_window(struct Screen *mysc, void *vi,
 	segads[SEGAD_VOLUME] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
 		GTSL_Min, 0, GTSL_Max, ZZTOP_AUDIO_RANGE_MAX,
 		GTSL_Level, sc->volume,
+		GA_RelVerify, TRUE,
 		GTSL_LevelFormat, (STRPTR)"%ld", GTSL_MaxLevelLen, 4,
 		GTSL_LevelPlace, PLACETEXT_RIGHT,
 		TAG_END);
@@ -5120,6 +5291,7 @@ static BOOL audio_scene_editor_window(struct Screen *mysc, void *vi,
 	segads[SEGAD_PAN] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
 		GTSL_Min, 0, GTSL_Max, ZZTOP_AUDIO_RANGE_MAX,
 		GTSL_Level, sc->pan,
+		GA_RelVerify, TRUE,
 		GTSL_LevelFormat, (STRPTR)"%ld", GTSL_MaxLevelLen, 4,
 		GTSL_LevelPlace, PLACETEXT_RIGHT,
 		TAG_END);
@@ -5136,6 +5308,7 @@ static BOOL audio_scene_editor_window(struct Screen *mysc, void *vi,
 			&ng,
 			GTSL_Min, 0, GTSL_Max, ZZTOP_AUDIO_RANGE_MAX,
 			GTSL_Level, sc->eq[i],
+			GA_RelVerify, TRUE,
 			GTSL_LevelFormat, (STRPTR)"%ld", GTSL_MaxLevelLen, 4,
 			GTSL_LevelPlace, PLACETEXT_RIGHT,
 			TAG_END);
@@ -5188,9 +5361,20 @@ static BOOL audio_scene_editor_window(struct Screen *mysc, void *vi,
 		return FALSE;
 	}
 
+	drag_port = CreateMsgPort();
+	if (drag_port) {
+		drag_io = (struct timerequest *)CreateIORequest(drag_port,
+			sizeof(struct timerequest));
+		if (drag_io && OpenDevice((STRPTR)TIMERNAME, UNIT_MICROHZ,
+				(struct IORequest *)drag_io, 0) == 0)
+			drag_dev = TRUE;
+	}
+
 	GT_RefreshWindow(win, NULL);
 	while (!done) {
-		Wait(1UL << win->UserPort->mp_SigBit);
+		ULONG win_sig = 1UL << win->UserPort->mp_SigBit;
+		ULONG drag_sig = drag_port ? (1UL << drag_port->mp_SigBit) : 0;
+		ULONG signals = Wait(win_sig | drag_sig);
 
 		while ((!done) && (imsg = GT_GetIMsg(win->UserPort))) {
 			gad = (struct Gadget *)imsg->IAddress;
@@ -5210,89 +5394,84 @@ static BOOL audio_scene_editor_window(struct Screen *mysc, void *vi,
 				GT_EndRefresh(win, TRUE);
 			} else if ((imsg_class == IDCMP_GADGETUP ||
 					imsg_class == IDCMP_MOUSEMOVE) && gad) {
-				/* GadTools sliders here report live drags as MOUSEMOVE
-				 * and never emit GADGETUP on release (the original LPF
-				 * slider committed on MOUSEMOVE for this reason). Commit
-				 * every move; the firmware's coalescing commit machine
-				 * collapses a drag into a couple of machine runs. */
-				int is_move = (imsg_class == IDCMP_MOUSEMOVE);
 				UWORD id = gad->GadgetID;
 				UWORD *field;
 				uint32_t param;
 				const char *name;
-				UWORD old;
 
-				field = NULL;
-				name = NULL;
-				param = 0;
-				if (id == SEGAD_LPF) {
-					field = &sc->lpf;
-					param = ZZ9K_AUDIO_SCENE_PARAM_LPF;
-					name = "LPF";
-				} else if (id == SEGAD_PREFACTOR) {
-					field = &sc->prefactor;
-					param = ZZ9K_AUDIO_SCENE_PARAM_PREFACTOR;
-					name = "Prefactor";
-				} else if (id == SEGAD_VOLUME) {
-					field = &sc->volume;
-					param = ZZ9K_AUDIO_SCENE_PARAM_VOLUME;
-					name = "Volume";
-				} else if (id == SEGAD_PAN) {
-					field = &sc->pan;
-					param = ZZ9K_AUDIO_SCENE_PARAM_PAN;
-					name = "Pan";
-				} else if (id >= SEGAD_EQ_BASE &&
-						id < SEGAD_EQ_BASE + 10) {
-					field = &sc->eq[id - SEGAD_EQ_BASE];
-					param = ZZ9K_AUDIO_SCENE_PARAM_EQ_BAND_1 +
-						(id - SEGAD_EQ_BASE);
-					name = "EQ band";
+				if (!audio_editor_lookup(sc, id, &field, &param,
+						&name))
+					continue;
+				if (imsg_class == IDCMP_GADGETUP) {
+					if (drag_pending && drag_id != id)
+						audio_editor_commit_value(win, segads, sc,
+							scene, drag_id, drag_value, &edited,
+							status, sizeof(status));
+					drag_pending = FALSE;
+					audio_editor_commit_value(win, segads, sc, scene,
+						id, imsg_code, &edited, status,
+						sizeof(status));
+					continue;
 				}
-				if (field) {
-					int cst;
-					old = *field;
-					cst = audio_scene_write_commit(scene, param,
-						imsg_code);
-					if (cst == ZZ9K_STATUS_OK) {
-						*field = (UWORD)imsg_code;
-						audio_mark_dirty();
-						edited = TRUE;
-						snprintf(status, sizeof(status),
-								"%s committed to %s - Save to persist",
-								name, sc->name);
-					} else if (cst == ZZ9K_STATUS_TIMEOUT) {
-						/* Timeout is not rejection: the commit machine
-						 * was mid-step and the reply was slow; the
-						 * firmware applied or coalesced the write.
-						 * Keep the user's value; never fight the
-						 * drag with a restore. */
-						*field = (UWORD)imsg_code;
-						audio_mark_dirty();
-						edited = TRUE;
-						snprintf(status, sizeof(status),
-								"%s committing - Save to persist", name);
-					} else if (audio_scene_write_commit(scene, param,
-							old) == ZZ9K_STATUS_OK) {
-						/* Hard error (bad value): restore. */
-						GT_SetGadgetAttrs(segads[id], win, NULL,
-							GTSL_Level, old, TAG_END);
-						snprintf(status, sizeof(status),
-								"%s commit failed - retry", name);
-					} else {
-						GT_SetGadgetAttrs(segads[id], win, NULL,
-							GTSL_Level, old, TAG_END);
-						audio_mark_dirty();
-						snprintf(status, sizeof(status),
-								"%s commit failed; firmware may hold the attempted value - Save",
-								name);
+				/* MOUSEMOVE: stash. LPF applies only on release:
+				 * safeload makes one coefficient change atomic but
+				 * cannot smooth its filter-state discontinuity.
+				 * Other controls retain the bounded live preview. */
+				if (drag_pending && drag_id != id) {
+					audio_editor_commit_value(win, segads, sc,
+						scene, drag_id, drag_value, &edited,
+						status, sizeof(status));
+				}
+				drag_id = id;
+				drag_value = imsg_code;
+				drag_pending = TRUE;
+				if (!drag_dev) {
+					if (id != SEGAD_LPF) {
+						audio_editor_commit_value(win, segads, sc,
+							scene, drag_id, drag_value, &edited,
+							status, sizeof(status));
+						drag_pending = FALSE;
 					}
-
-					GT_SetGadgetAttrs(segads[SEGAD_STATUS], win, NULL,
-						GTTX_Text, status, TAG_END);
+				} else if (id != SEGAD_LPF && !drag_timer) {
+					drag_io->tr_node.io_Command = TR_ADDREQUEST;
+					drag_io->tr_time.tv_secs = 0;
+					drag_io->tr_time.tv_micro =
+						ZZTOP_AUDIO_DRAG_COALESCE_USECS;
+					SendIO((struct IORequest *)drag_io);
+					drag_timer = TRUE;
 				}
 			}
 		}
+
+		if (drag_sig && (signals & drag_sig) && drag_timer &&
+				CheckIO((struct IORequest *)drag_io)) {
+			WaitIO((struct IORequest *)drag_io);
+			drag_timer = FALSE;
+			/* An older slider may have armed this timer before an
+			 * LPF drag began. Only release/close may commit LPF. */
+			if (drag_pending && drag_id != SEGAD_LPF) {
+				audio_editor_commit_value(win, segads, sc, scene,
+					drag_id, drag_value, &edited, status,
+					sizeof(status));
+				drag_pending = FALSE;
+			}
+		}
 	}
+
+	if (drag_pending)
+		audio_editor_commit_value(win, segads, sc, scene,
+			drag_id, drag_value, &edited, status, sizeof(status));
+	if (drag_timer) {
+		if (!CheckIO((struct IORequest *)drag_io))
+			AbortIO((struct IORequest *)drag_io);
+		WaitIO((struct IORequest *)drag_io);
+	}
+	if (drag_dev)
+		CloseDevice((struct IORequest *)drag_io);
+	if (drag_io)
+		DeleteIORequest((struct IORequest *)drag_io);
+	if (drag_port)
+		DeleteMsgPort(drag_port);
 
 	CloseWindow(win);
 	FreeGadgets(glist);
