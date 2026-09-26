@@ -62,7 +62,7 @@
 #define DEVICE_NAME "zz9000ax.audio"
 #define DEVICE_DATE "(26.09.2026)"
 #define DEVICE_VERSION 4
-#define DEVICE_REVISION 30
+#define DEVICE_REVISION 31
 #define DEVICE_ID_STRING "ZZ9000AX " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
 #define DEVICE_PRIORITY 0
 
@@ -1221,14 +1221,22 @@ static int fabric_lease_acquire(struct z9ax *ahi_data, uint32_t mix_freq)
     session->grant.flags = zz9k_get_be32(result.flags);
     session->grant.source_rate = zz9k_get_be32(result.source_rate);
 
+    /* The pinned SDK validator knows contracts 1 and 2 only. Contract 4
+     * is the same source-rate geometry with m68k sample order. Remember
+     * that, then validate it as contract 2. Rejecting it here releases
+     * the grant and Start produces no audio. */
+    ahi_data->lease_source_be =
+        session->grant.sample_contract ==
+        ZZ_AX_CONTRACT_SOURCE_RATE_STEREO_S16BE;
+    if (ahi_data->lease_source_be)
+      session->grant.sample_contract =
+          ZZ9K_AUDIO_RING_CONTRACT_SOURCE_RATE_STEREO_S16LE;
     /* Board-window bounds + contract sanity (R2/R3): both granted
      * ranges must fit the board window, the contract must be the
      * requested source-rate lease, and the echoed rate must be the
      * mix frequency asked for. */
-    if ((session->grant.sample_contract !=
-             ZZ9K_AUDIO_RING_CONTRACT_SOURCE_RATE_STEREO_S16LE &&
-         session->grant.sample_contract !=
-             ZZ_AX_CONTRACT_SOURCE_RATE_STEREO_S16BE) ||
+    if (session->grant.sample_contract !=
+            ZZ9K_AUDIO_RING_CONTRACT_SOURCE_RATE_STEREO_S16LE ||
         session->grant.source_rate != mix_freq ||
         !zz9k_audio_ring_grant_valid(&session->grant) ||
         !fabric_grant_range_valid(ahi_data,
@@ -1273,9 +1281,6 @@ static int fabric_lease_acquire(struct z9ax *ahi_data, uint32_t mix_freq)
     ahi_data->lease_retry_deadline.tv_secs = 0;
     ahi_data->lease_retry_deadline.tv_micro = 0;
     ahi_data->lease_held = 1;
-    ahi_data->lease_source_be =
-        session->grant.sample_contract ==
-        ZZ_AX_CONTRACT_SOURCE_RATE_STEREO_S16BE;
     return 1;
   }
   return 0;
