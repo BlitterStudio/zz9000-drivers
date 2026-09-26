@@ -60,9 +60,9 @@
 #define XSTR(s) STR(s)
 
 #define DEVICE_NAME "zz9000ax.audio"
-#define DEVICE_DATE "(20.09.2026)"
+#define DEVICE_DATE "(26.09.2026)"
 #define DEVICE_VERSION 4
-#define DEVICE_REVISION 29
+#define DEVICE_REVISION 30
 #define DEVICE_ID_STRING "ZZ9000AX " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
 #define DEVICE_PRIORITY 0
 
@@ -441,6 +441,11 @@ static BOOL playback_period_ready(struct z9ax *ahi_data,
   return TRUE;
 }
 
+/* AHI's mixer writes m68k-native big-endian S16. New firmware accepts
+ * that order on the lease (flag bit 1, contract 4) and swaps before
+ * the FIR. Older firmware rejects the flag; the driver then swaps. */
+#define ZZ_AX_ACQUIRE_FLAG_SOURCE_S16BE (1U << 1)
+#define ZZ_AX_CONTRACT_SOURCE_RATE_STEREO_S16BE 4U
 /* AHI's mixer writes m68k-native big-endian S16; the lease contract
  * is S16LE (the legacy register path let firmware do this swap -- the
  * SWAB register / audio_swab). The pump owns the conversion here: one
@@ -554,6 +559,7 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
     KPrintF((CONST_STRPTR)"ZZ9000AX: fabric lease REVOKED; recovery "
             "scheduled (heartbeat/cursor/generation).\n");
     ahi_data->lease_held = 0;
+    ahi_data->lease_source_be = 0;
     ahi_data->lease_retry_deadline.tv_secs = 0;
     ahi_data->lease_retry_deadline.tv_micro = 0;
     ahi_data->lease_accum_fill = 0U;
@@ -594,9 +600,10 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
            * room, the complete newly mixed period is discarded; AHI's
            * timing pair is still completed. */
           if (mix_bytes == lease_period && mix_bytes <= room) {
-            fabric_swap_period_le(
-                (void *)(uintptr_t)ahi_data->audio_buf_addr,
-                mix_bytes);
+            if (!ahi_data->lease_source_be)
+              fabric_swap_period_le(
+                  (void *)(uintptr_t)ahi_data->audio_buf_addr,
+                  mix_bytes);
             memcpy(ahi_data->lease_accum +
                        ahi_data->lease_accum_fill,
                    (const void *)(uintptr_t)
@@ -1173,10 +1180,16 @@ static int fabric_lease_acquire(struct z9ax *ahi_data, uint32_t mix_freq)
     zz9k_put_be32(payload->identity, ZZ9K_AUDIO_METER_IDENTITY_AHI);
     zz9k_put_be32(payload->gain, 128U);
     zz9k_put_be32(payload->flags,
-                  ZZ9K_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE);
+                  ZZ9K_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE |
+                  ZZ_AX_ACQUIRE_FLAG_SOURCE_S16BE);
     zz9k_put_be32(payload->source_rate_hz, mix_freq);
 
     status = ZZ9KCall(&request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+    if (status == ZZ9K_STATUS_BAD_REQUEST) {
+      zz9k_put_be32(payload->flags,
+                    ZZ9K_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE);
+      status = ZZ9KCall(&request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+    }
     if (status != ZZ9K_STATUS_OK) {
       KPrintF((CONST_STRPTR)"ZZ9000AX: lease acquire slot %lu refused: "
               "status %ld.\n", (unsigned long)slot, (long)status);
@@ -1212,8 +1225,10 @@ static int fabric_lease_acquire(struct z9ax *ahi_data, uint32_t mix_freq)
      * ranges must fit the board window, the contract must be the
      * requested source-rate lease, and the echoed rate must be the
      * mix frequency asked for. */
-    if (session->grant.sample_contract !=
-            ZZ9K_AUDIO_RING_CONTRACT_SOURCE_RATE_STEREO_S16LE ||
+    if ((session->grant.sample_contract !=
+             ZZ9K_AUDIO_RING_CONTRACT_SOURCE_RATE_STEREO_S16LE &&
+         session->grant.sample_contract !=
+             ZZ_AX_CONTRACT_SOURCE_RATE_STEREO_S16BE) ||
         session->grant.source_rate != mix_freq ||
         !zz9k_audio_ring_grant_valid(&session->grant) ||
         !fabric_grant_range_valid(ahi_data,
@@ -1258,6 +1273,9 @@ static int fabric_lease_acquire(struct z9ax *ahi_data, uint32_t mix_freq)
     ahi_data->lease_retry_deadline.tv_secs = 0;
     ahi_data->lease_retry_deadline.tv_micro = 0;
     ahi_data->lease_held = 1;
+    ahi_data->lease_source_be =
+        session->grant.sample_contract ==
+        ZZ_AX_CONTRACT_SOURCE_RATE_STEREO_S16BE;
     return 1;
   }
   return 0;
@@ -1287,6 +1305,7 @@ static void fabric_lease_release(struct z9ax *ahi_data)
         ahi_data->lease_session.grant.generation;
     ahi_data->lease_release_pending = 1U;
     ahi_data->lease_held = 0;
+    ahi_data->lease_source_be = 0;
     memset(&ahi_data->lease_session, 0,
            sizeof(ahi_data->lease_session));
   }
