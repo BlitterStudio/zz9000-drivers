@@ -239,6 +239,7 @@ so remove the ENV variable when migrating.
 | Muffled / dull AHI output at low sample rates         | On control-plane firmware the LPF is scene-owned: raise the scene LPF cutoff in ZZTop's Audio window (the old `ENV:ZZ9000AX-NOLPF` bypass was removed; on pre-control-plane firmware the legacy half-rate LPF stamp applies as before). |
 | ZZTop's Audio button is greyed out                    | The firmware does not advertise the audio-control capability (pre-verification builds), or the AX daughterboard is absent. Update to the matched firmware release that advertises it; playback itself is unaffected. |
 | ZZTop says "Audio: control state unavailable - retry" | The firmware did not return a valid audio boundary. Reopen Audio once the control service responds; no audio settings were changed. |
+| ZZTop says "Calibration awaiting firmware state..." | Audio edits and Save pause while the firmware confirms the new ceiling pair; the one-second Audio-window timer retries the read. If it remains pending, close and reopen Audio to read the live state. |
 | "Can't allocate! Hardware already used by MHI/AHI."   | The other driver owns the card. Close whatever MHI/AHI app is running first. |
 | Audio device fails to open on specific accelerators   | INT6 conflict. `setenv ZZ9K_INT2 1` to move both drivers to INT2. |
 | Short random burst before playback on first app open  | Fixed in recent commits (driver now silences the DAC at allocate time). Update to the latest `zz9000ax.audio`. |

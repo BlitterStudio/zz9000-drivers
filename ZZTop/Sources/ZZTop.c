@@ -3891,6 +3891,12 @@ static BOOL audio_dirty = FALSE;
 static BOOL audio_save_pending = FALSE;
 static ULONG audio_edit_generation;
 static ULONG audio_save_generation;
+/* One calibration write may still be in flight after a mailbox timeout.
+ * Keep the reported boundary and the editable controls together until
+ * a complete state read confirms the requested ceiling pair. */
+static BOOL audio_calibration_pending = FALSE;
+static UWORD audio_calibration_target_paula;
+static UWORD audio_calibration_target_ax;
 
 static void audio_mark_dirty(void)
 {
@@ -4106,14 +4112,6 @@ static void audio_note_boundary(uint32_t reported)
 		audio_boundary = reported;
 }
 
-static void audio_refresh_boundary(void)
-{
-	struct zztop_audio_state st;
-
-	if (!audio_control_state_get(&st))
-		return;
-	audio_note_boundary(st.ceiling);
-}
 
 /* Max and Level in one call, Max first, and never below the requested
  * level. A Max-only update lets gadtools clamp the knob and post a
@@ -4168,7 +4166,56 @@ static void audio_reload_saved_state(struct Window *win, UWORD scene)
 static void audio_update_save_gate(struct Window *win)
 {
 	GT_SetGadgetAttrs(audgads[AUDGAD_BTN_SAVE], win, NULL,
-		GA_Disabled, !audio_dirty || audio_save_pending, TAG_END);
+		GA_Disabled, !audio_dirty || audio_save_pending ||
+			audio_calibration_pending, TAG_END);
+}
+
+static void audio_set_controls_enabled(struct Window *win, BOOL enabled)
+{
+	static const UWORD ids[] = {
+		AUDGAD_SCENE, AUDGAD_BTN_EDIT, AUDGAD_BTN_RENAME,
+		AUDGAD_BASE_PAULA, AUDGAD_BASE_AX,
+		AUDGAD_CEIL_PAULA, AUDGAD_CEIL_AX, AUDGAD_BTN_BALANCE
+	};
+	unsigned i;
+
+	for (i = 0; i < sizeof(ids) / sizeof(ids[0]); i++)
+		GT_SetGadgetAttrs(audgads[ids[i]], win, NULL,
+			GA_Disabled, !enabled, TAG_END);
+	if (!enabled)
+		GT_SetGadgetAttrs(audgads[AUDGAD_LEVEL], win, NULL,
+			GTTX_Text, (STRPTR)"Level awaiting firmware", TAG_END);
+	audio_update_save_gate(win);
+}
+
+static void audio_calibration_settle(struct Window *win)
+{
+	struct zztop_audio_state st;
+
+	if (!audio_calibration_pending || !audio_control_state_get(&st) ||
+			!st.ceiling ||
+			st.ceiling_paula != audio_calibration_target_paula ||
+			st.ceiling_ax != audio_calibration_target_ax)
+		return;
+	/* One firmware snapshot owns the baseline, calibration and
+	 * boundary; never combine a local edit with a previous boundary. */
+	audio_baseline_paula = (UWORD)ZZ9K_AUDIO_BALANCE_CH1(st.baseline);
+	audio_baseline_ax = (UWORD)ZZ9K_AUDIO_BALANCE_CH2(st.baseline);
+	audio_ceiling_paula = st.ceiling_paula;
+	audio_ceiling_ax = st.ceiling_ax;
+	audio_note_boundary(st.ceiling);
+	GT_SetGadgetAttrs(audgads[AUDGAD_CEIL_PAULA], win, NULL,
+		GTIN_Number, audio_ceiling_paula, TAG_END);
+	GT_SetGadgetAttrs(audgads[AUDGAD_CEIL_AX], win, NULL,
+		GTIN_Number, audio_ceiling_ax, TAG_END);
+	audio_calibration_pending = FALSE;
+	audio_update_baseline_bounds(win, AUDGAD_COUNT);
+	audio_set_controls_enabled(win, TRUE);
+	audio_set_status(win,
+		(audio_baseline_paula > audio_ceiling_paula ||
+		 audio_baseline_ax > audio_ceiling_ax)
+		? "Baseline exceeds new ceiling; adjust levels before Save"
+		: "Calibration committed - Save to persist");
 }
 
 /* Settle a pending non-blocking save: the firmware machine steps in
@@ -4752,7 +4799,9 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 			meter_pending = FALSE;
 			if (audio_metering_capped)
 				audio_refresh_meters(win);
-			audio_save_settle(win);
+			audio_calibration_settle(win);
+			if (!audio_calibration_pending)
+				audio_save_settle(win);
 			audio_arm_meter_timer(meter_io);
 			meter_pending = TRUE;
 		}
@@ -4783,7 +4832,7 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 						break;
 					/* FALLTHRU */
 				case IDCMP_GADGETUP:
-					if (!gad) break;
+					if (!gad || audio_calibration_pending) break;
 					switch (gad->GadgetID) {
 						case AUDGAD_SCENE:
 							if (imsgCode < ZZCFG_AUDIO_SCENES &&
@@ -4914,20 +4963,15 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 									new_paula, new_ax));
 							if (cst == ZZ9K_STATUS_OK ||
 									cst == ZZ9K_STATUS_TIMEOUT) {
-								audio_ceiling_paula = new_paula;
-								audio_ceiling_ax = new_ax;
+								audio_calibration_target_paula = new_paula;
+								audio_calibration_target_ax = new_ax;
+								audio_calibration_pending = TRUE;
 								audio_mark_dirty();
-								audio_set_status(win,
-									(cst == ZZ9K_STATUS_OK)
-									? "Calibration committed - Save to persist"
-									: "Calibration committing - Save to persist");
-								audio_refresh_boundary();
-								audio_update_baseline_bounds(win,
-									AUDGAD_COUNT);
-								if (audio_baseline_paula > new_paula ||
-										audio_baseline_ax > new_ax)
-									audio_set_status(win,
-										"Baseline exceeds new ceiling; adjust levels before Save");
+								audio_set_controls_enabled(win, FALSE);
+								audio_set_status(win, meter_dev_open
+									? "Calibration awaiting firmware state..."
+									: "Calibration pending - reopen Audio to refresh");
+								audio_calibration_settle(win);
 							} else {
 								GT_SetGadgetAttrs(gad, win, NULL,
 									GTIN_Number, (gad->GadgetID ==
@@ -5042,6 +5086,7 @@ static VOID audio_window(struct Screen *mysc, void *vi,
 	if (meter_port)
 		DeleteMsgPort(meter_port);
 
+	audio_calibration_pending = FALSE;
 	CloseWindow(win);
 	FreeGadgets(glist);
 }
