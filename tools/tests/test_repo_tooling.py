@@ -44,6 +44,7 @@ class RepoToolingTests(unittest.TestCase):
             "check-release:",
             "quality:",
             "rtg-tests:",
+            "net-tests:",
             "ZZNetStats:",
             "ZZDiag:",
             "ZZCapture:",
@@ -473,6 +474,7 @@ class RepoToolingTests(unittest.TestCase):
         ci = self.read(".github/workflows/ci.yml")
         self.assertIn("host-checks:", ci)
         self.assertIn("make rtg-tests", ci)
+        self.assertIn("make -C net/tests test", ci)
         self.assertIn("ZZDiag:", ci)
         self.assertIn("ZZDiag/ZZDiag", ci)
         self.assertIn("zzcapture:", ci)

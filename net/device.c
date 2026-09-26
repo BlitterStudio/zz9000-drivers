@@ -36,6 +36,7 @@
 #include <exec/execbase.h>
 #include <hardware/intbits.h>
 #include <string.h>
+#include "sana2.h"
 
 #ifdef HAVE_VERSION_H
 #include "version.h"
@@ -50,6 +51,9 @@ const UWORD dev_supportedcmds[] = {
 	NSCMD_DEVICEQUERY,
 	CMD_READ,
 	CMD_WRITE,
+	S2_ADDMULTICASTADDRESS,
+	S2_DELMULTICASTADDRESS,
+	S2_MULTICAST,
 	/* ... add all cmds here that are supported by BeginIO */
 	0
 };
@@ -66,6 +70,16 @@ const struct NSDeviceQueryResult NSDQueryAnswer = {
 #include "device.h"
 #include "zzcfg_query.h"
 #include "macros.h"
+
+#if ZZNET_S2ERR_NO_RESOURCES != S2ERR_NO_RESOURCES || \
+    ZZNET_S2ERR_BAD_STATE != S2ERR_BAD_STATE || \
+    ZZNET_S2ERR_BAD_ADDRESS != S2ERR_BAD_ADDRESS || \
+    ZZNET_S2ERR_NOT_SUPPORTED != S2ERR_NOT_SUPPORTED || \
+    ZZNET_RXF_MCAST != SANA2IOF_MCAST || \
+    ZZNET_RXF_BCAST != SANA2IOF_BCAST || \
+    ZZNET_MCAST_ADDR_LEN != HW_ADDRFIELDSIZE
+#error multicast model drifted from the SANA-II driver contract
+#endif
 
 // FIXME get rid of global var!
 static ULONG ZZ9K_REGS = 0;
@@ -205,6 +219,55 @@ SAVEDS ULONG dev_isr(struct devbase* db __asm("a1")) {
 }
 
 static UBYTE HW_MAC[] = {0x00,0x00,0x00,0x00,0x00,0x00};
+
+static int zznet_mcast_hw_capable(void *ctx)
+{
+	(void)ctx;
+	return (*(volatile USHORT *)(ZZ9K_REGS + ZZNET_ETH_CONFIG) &
+	        ZZNET_ETH_CONFIG_CAP_MCAST_HASH) != 0;
+}
+
+static void zznet_mcast_hw_command(void *ctx, uint16_t command)
+{
+	(void)ctx;
+	*(volatile USHORT *)(ZZ9K_REGS + ZZNET_ETH_CONFIG) = (USHORT)command;
+}
+
+static const struct zznet_mcast_io zznet_mcast_hw = {
+	zznet_mcast_hw_capable,
+	zznet_mcast_hw_command,
+	0
+};
+
+static LONG zznet_mcast_change(DEVBASETYPE *db, const UBYTE *addr, BOOL add)
+{
+	LONG result;
+
+	ObtainSemaphore(&db->db_McastSem);
+	result = zznet_mcast_update(&db->db_Mcast, &zznet_mcast_hw,
+	                            (const uint8_t *)addr, add ? 1 : 0);
+	ReleaseSemaphore(&db->db_McastSem);
+	return result;
+}
+
+/* Unicast and broadcast do not consult the group table, so they do not
+ * take db_McastSem. Group frames do: exact membership is the collision filter. */
+static struct zznet_rx_plan zznet_frame_plan(DEVBASETYPE *db,
+                                             volatile const UBYTE *addr)
+{
+	uint8_t local[ZZNET_MCAST_ADDR_LEN];
+	unsigned i;
+	struct zznet_rx_plan plan;
+
+	for (i = 0; i < ZZNET_MCAST_ADDR_LEN; i++)
+		local[i] = addr[i];
+	if (!zznet_mcast_membership_required(local))
+		return zznet_mcast_rx_plan(0, local);
+	ObtainSemaphore(&db->db_McastSem);
+	plan = zznet_mcast_rx_plan(&db->db_Mcast, local);
+	ReleaseSemaphore(&db->db_McastSem);
+	return plan;
+}
 
 void set_mac_from_string(UBYTE* buf) {
   int k=0;
@@ -415,6 +478,8 @@ SAVEDS LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
 
       NEWLIST(&db->db_ReadList);
       InitSemaphore(&db->db_ReadListSem);
+      InitSemaphore(&db->db_McastSem);
+      zznet_mcast_reset(&db->db_Mcast, &zznet_mcast_hw);
 
       struct ProcInit init;
       struct MsgPort *port;
@@ -573,6 +638,9 @@ SAVEDS BPTR DevClose(   ASMR(a1) struct IORequest *ioreq        ASMREG(a1),
       ReleaseSemaphore(&db->db_ProcExitSem);
     }
 
+    /* No RX worker can be consulting the group table past this point. */
+    zznet_mcast_reset(&db->db_Mcast, &zznet_mcast_hw);
+
     /* Staging buffer is freed only after the worker process has
      * exited above (ObtainSemaphore/ReleaseSemaphore pair). That
      * guarantees no read_frame can still be in flight referencing
@@ -667,6 +735,13 @@ SAVEDS VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
       D(("bcast: invalid dst addr\n"));
     }
     /* fall through */
+  case S2_MULTICAST:
+    if (!zznet_mcast_send_ok(ioreq->ios2_DstAddr)) {
+      ioreq->ios2_Req.io_Error = S2ERR_BAD_ADDRESS;
+      ioreq->ios2_WireError = S2WERR_BAD_MULTICAST;
+      break;
+    }
+    /* fall through */
   case CMD_WRITE: {
     ULONG res = write_frame(ioreq, (UBYTE*)(ZZ9K_REGS+ZZ9K_TX));
     if (res!=0) {
@@ -678,6 +753,26 @@ SAVEDS VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
     }
     break;
   }
+
+  case S2_ADDMULTICASTADDRESS:
+  case S2_DELMULTICASTADDRESS:
+    if ((ioreq->ios2_SrcAddr[0] & 1) == 0) {
+      ioreq->ios2_Req.io_Error = S2ERR_BAD_ADDRESS;
+      ioreq->ios2_WireError = S2WERR_BAD_MULTICAST;
+    } else {
+      LONG result = zznet_mcast_change(db, ioreq->ios2_SrcAddr,
+          ioreq->ios2_Req.io_Command == S2_ADDMULTICASTADDRESS);
+      if (result != 0) {
+        ioreq->ios2_Req.io_Error = result;
+        ioreq->ios2_WireError =
+            (result == S2ERR_NO_RESOURCES) ? S2WERR_MULTICAST_FULL :
+            (result == S2ERR_BAD_STATE) ? S2WERR_BAD_MULTICAST :
+            S2WERR_GENERIC_ERROR;
+      } else {
+        ioreq->ios2_WireError = 0;
+      }
+    }
+    break;
 
   case S2_READORPHAN:
     if (!ioreq->ios2_BufferManagement)
@@ -1018,9 +1113,7 @@ ULONG read_frame(DEVBASETYPE *db, struct IOSana2Req *req, volatile UBYTE *frame,
 		ws[1] = (USHORT)(m2 >> 16);
 		ws[2] = (USHORT)(m2 & 0xFFFF);
 
-		if (m0 == 0xFFFFFFFFUL && (m1 & 0xFFFF0000UL) == 0xFFFF0000UL) {
-			req->ios2_Req.io_Flags |= SANA2IOF_BCAST;
-		}
+		req->ios2_Req.io_Flags |= zznet_mcast_rx_flags(req->ios2_DstAddr);
 	}
 
 	req->ios2_PacketType = tp;
@@ -1223,6 +1316,21 @@ SAVEDS void frame_proc() {
       }
       have_baseline = TRUE;
       old_serial    = serial;
+
+      /* GEM hash collisions are not unknown packet types. Ack and drop
+       * the exact miss before reader selection; UnknownTypesReceived
+       * stays reserved for an accepted frame with no reader or a failed
+       * read. */
+      {
+        struct zznet_rx_plan plan = zznet_frame_plan(db, frm + 4);
+
+        if (!plan.select_reader) {
+          if (plan.count_unknown)
+            global_stats.UnknownTypesReceived++;
+          *rx_accept = serial;
+          continue;
+        }
+      }
 
       /* Walk the read list only long enough to find a matching listener
        * and detach it. Doing the payload copy (read_frame) and ReplyMsg

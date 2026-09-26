@@ -78,6 +78,7 @@ jobs:
           make rtg-tests
           make -C common/tests test
           make -C usb-poseidon/tests test
+          make -C net/tests test
           python3 -m unittest tools/tests/test_repo_tooling.py
           python3 -m unittest tools/tests/test_usb_proxy_contract.py
           tools/check-cfg-keys.sh "$ZZ9K_FIRMWARE_DIR"
