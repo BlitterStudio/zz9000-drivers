@@ -1974,6 +1974,12 @@ void DrawLine(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 			b->DrawLineDefault(b, r, l, mask, format);
 		return;
 	}
+	/* Diagnostic only: compare P96's software line path against the
+	 * Z3 descriptor/firmware path on the same hardware and firmware. */
+	if ((b->CardFlags & CARDFLAG_ZORRO_3) && b->DrawLineDefault) {
+		b->DrawLineDefault(b, r, l, mask, format);
+		return;
+	}
 
 	uint16_t colormode = mnt_colormode(format);
 	if (colormode == MNTVA_COLOR_NO_USE) {
