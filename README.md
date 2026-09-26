@@ -360,6 +360,54 @@ A rejected mode does not replace the accepted `BoardInfo.ModeInfo`.
 Subsequent panning is blocked until a mode is successfully applied, so a
 failed mode switch cannot independently replace the scanout's layout.
 
+## Picasso96 Board Settings
+
+The P96 Preferences Editor (or the tooltypes on `Devs:Monitors/ZZ9000`)
+controls per-board options. The installer already writes the required
+ones: `BOARDTYPE=ZZ9000`, `FAKENATIVEMODES=No`, and `DISPLAYCHAIN=Yes`.
+Keep `DISPLAYCHAIN` on because the ZZ9000 switches the Amiga signal as a
+flicker fixer, and `FAKENATIVEMODES` off because the card has a real
+scandoubler. All other defaults are correct: `ZZ9000.card` advertises its
+capabilities to rtg.library at init, so P96 needs no compatibility
+overrides.
+
+Two items are worth changing from `<default>` for best performance:
+
+- `MASKEDBLITS=On` — the firmware blitter honors blit masks; the driver
+  forwards the mask on both Zorro II and Zorro III in `BlitRect`,
+  `FillRect`, and `InvertRect`. With this off, masked blits fall back to
+  an rtg.library software path. If an application ever shows mask
+  artifacts, this is the switch to revert.
+- `PLANAR2CHUNKY=On` — the driver installs accelerated
+  `BlitPlanar2Chunky`/`BlitPlanar2Direct` with card-resident template
+  scratch even on Zorro II. This is the main win for planar-rendering
+  applications (datatypes, older tools) targeting an RTG screen.
+
+Leave the rest alone:
+
+- `BLITTER` stays on; the driver sets the blitter capability itself and
+  turning it off disables all acceleration.
+- `SOFTSPRITE` stays off; the card has a hardware sprite, so a software
+  sprite only costs CPU and memory bandwidth.
+- `BIGSPRITE` is optional. It doubles the pointer size, which some prefer
+  at 1920x1080; the driver supports it.
+- `OVERCLOCK` has no effect; the driver never reads that flag.
+- `QUIET` is not implemented by P96 itself.
+- `BORDERBLANK` is cosmetic. Native-output behavior is configured from
+  ZZTop and `ZZ9000.CFG`, not P96.
+- `BELOW`, `LEFT-OF`, `RIGHT-OF`, `MONITORWIDTH`, and `MONITORHEIGHT`
+  position a second graphics board; they do nothing with a single ZZ9000.
+- `SYSTEM2SCREENBLITS` may be worth trying on Zorro III (the driver
+  already grants direct access); leave it default on Zorro II, where CPU
+  writes to video RAM are the bottleneck.
+
+The global "Overall settings" and "Native Amiga graphics" groups should
+stay at `<default>`. They exist for problem boards and applications, and
+none of them map to a ZZ9000 driver or firmware feature. The one
+exception: an application that insists on opening a planar RTG screen
+needs `EmulatePlanar=On`, because the card exposes only 8-bit CLUT,
+15/16-bit, and 32-bit BGRA formats.
+
 ## Command-Line Tools
 
 ### Firmware Updates
