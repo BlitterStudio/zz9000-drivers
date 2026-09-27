@@ -660,12 +660,14 @@ class RepoToolingTests(unittest.TestCase):
         package = self.read("tools/package-local.sh")
         installer = self.read("installer/ZZ9000Installer/Install ZZ9000")
 
+        # The manual ships as an AmiGuide database generated from the
+        # Markdown source at release-assembly time (SDK md2guide tool).
         for source in (ci, package):
             self.assertIn("Tools/ZZCapture", source)
-            self.assertIn("Docs/ZZCapture-README.md", source)
+            self.assertIn("make_guide ZZCapture/README.md ZZCapture", source)
 
         self.assertIn('(source "Tools/ZZCapture")', installer)
-        self.assertIn("Docs/ZZCapture-README.md", installer)
+        self.assertIn("Docs/ZZCapture.guide", installer)
 
     def test_audio_stack_uses_shared_ax_header(self):
         header = self.read("include/zz9000_ax.h")
