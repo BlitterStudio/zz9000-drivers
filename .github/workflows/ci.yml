@@ -390,6 +390,14 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
+      - name: Check out pinned SDK (AmigaGuide converter)
+        # The installer drawer's manuals are generated from the canonical
+        # Markdown sources with the SDK's md2guide tool, taken from the
+        # exact commit pinned in sdk/SDK_REF so the drivers release and
+        # the SDK package share one converter.
+        run: |
+          git clone --quiet https://github.com/BlitterStudio/zz9000-sdk.git sdk-src
+          git -C sdk-src checkout --quiet "$(cat sdk/SDK_REF)"
       - name: Assemble release bundle
         # The installer drawer's binary slots are .gitignored / unpopulated
         # in the repo; CI fills them during release assembly so nothing
@@ -416,10 +424,19 @@ jobs:
           install -Dm755 artifacts/ZZNetStats/ZZNetStats               "$INST/Tools/ZZNetStats"
           install -Dm755 artifacts/ZZDiag/ZZDiag                       "$INST/Tools/ZZDiag"
           install -Dm755 artifacts/ZZCapture/ZZCapture                 "$INST/Tools/ZZCapture"
-          install -Dm644 ahi/README.md                                 "$INST/Docs/ahi-README.md"
-          install -Dm644 usb-poseidon/README.md                        "$INST/Docs/usb-poseidon-README.md"
-          install -Dm644 docs/usb-qualification-matrix.md               "$INST/Docs/usb-qualification-matrix.md"
-          install -Dm644 ZZCapture/README.md                            "$INST/Docs/ZZCapture-README.md"
+          # Amiga-side manuals ship as AmiGuide databases generated from
+          # the canonical Markdown sources — raw .md has no Amiga reader.
+          # Sibling names must cover the full drawer doc set so
+          # cross-document links resolve inside the drawer.
+          MD2GUIDE="sdk-src/scripts/md2guide.py"
+          SIBLINGS="--sibling ahi.guide --sibling usb-poseidon.guide --sibling ZZCapture.guide --sibling sdk.guide --sibling amissl.guide --sibling ZZPlay.guide"
+          make_guide() {
+            # shellcheck disable=SC2086
+            python3 "$MD2GUIDE" --name "$2" $SIBLINGS "$1" "$INST/Docs/$2.guide"
+          }
+          make_guide ahi/README.md ahi
+          make_guide usb-poseidon/README.md usb-poseidon
+          make_guide ZZCapture/README.md ZZCapture
           # Diagnostic-only MHI build; staged under Docs, never installed
           # as the production library.
           install -Dm644 artifacts/mhizz9000.library.decode-only/mhizz9000.library.decode-only \
@@ -440,11 +457,11 @@ jobs:
           # installed to SYS:Utilities rather than C:.
           install -Dm755 artifacts/sdk-payloads/C/ZZPlay      "$INST/Tools/ZZPlay"
           install -Dm644 artifacts/sdk-payloads/C/ZZPlay.info "$INST/Tools/ZZPlay.info"
-          install -Dm644 sdk/README.md                                 "$INST/Docs/sdk-README.md"
+          make_guide sdk/README.md sdk
           # ZZPlay is the one SDK payload with an end-user manual, and the
           # manual tells people to copy the project icon out of Docs/ - so
           # both have to be here, not just in the SDK's own package.
-          install -Dm644 artifacts/sdk-payloads/Docs/zzplay.md          "$INST/Docs/zzplay.md"
+          install -Dm644 artifacts/sdk-payloads/Docs/ZZPlay.guide      "$INST/Docs/ZZPlay.guide"
           install -Dm644 artifacts/sdk-payloads/Docs/ZZPlay-project.info "$INST/Docs/ZZPlay-project.info"
           # Accelerated amissl.library, per CPU (Libs/AmiSSL/<cpu>/) — laid out
           # like AmiSSL's own release so the installer installs the CPU-matched
@@ -453,9 +470,9 @@ jobs:
             install -Dm644 "artifacts/amissl-libs/$cpu/amissl_v362.library" \
               "$INST/Libs/AmiSSL/$cpu/amissl_v362.library"
           done
-          install -Dm644 amissl/README.md                              "$INST/Docs/amissl-README.md"
+          make_guide amissl/README.md amissl
 
-          cp installer/README.md "$STAGING/README.md"
+          python3 "$MD2GUIDE" --name ZZ9000-Drivers installer/README.md "$STAGING/ZZ9000-Drivers.guide"
           cp installer/ZZ9000Installer.info "$STAGING/ZZ9000Installer.info"
           cp -r installer/ZZ9000Installer "$STAGING/ZZ9000Installer"
           python3 tools/encode-amiga-docs.py "$STAGING"

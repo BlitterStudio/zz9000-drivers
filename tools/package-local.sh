@@ -11,6 +11,27 @@ inst="$repo_root/installer/ZZ9000Installer"
 cd "$repo_root"
 tools/check-release.sh
 
+# Amiga-side manuals ship as AmiGuide databases generated from the
+# canonical Markdown sources (raw .md has no Amiga reader). Locate the
+# pinned zz9000-sdk checkout exactly like sdk/build.sh: explicit
+# ZZ9000_SDK, a sibling checkout, or the sdk/work clone.
+if [ -n "${ZZ9000_SDK:-}" ]; then
+    sdk_src=$ZZ9000_SDK
+elif [ -d "$repo_root/../zz9000-sdk/.git" ]; then
+    sdk_src=$(CDPATH='' cd -- "$repo_root/../zz9000-sdk" && pwd)
+elif [ -d "$repo_root/sdk/work/.git" ]; then
+    sdk_src=$repo_root/sdk/work
+else
+    echo "ERROR: no zz9000-sdk checkout for md2guide; set ZZ9000_SDK or run sdk/build.sh first" >&2
+    exit 1
+fi
+md2guide=$sdk_src/scripts/md2guide.py
+SIBLINGS="--sibling ahi.guide --sibling usb-poseidon.guide --sibling ZZCapture.guide --sibling sdk.guide --sibling amissl.guide --sibling ZZPlay.guide"
+make_guide() {
+    # shellcheck disable=SC2086
+    python3 "$md2guide" --name "$2" $SIBLINGS "$repo_root/$1" "$inst/Docs/$2.guide"
+}
+
 rm -rf "$staging" "$zipfile"
 
 install -Dm644 rtg/ZZ9000.card                  "$inst/Libs/Picasso96/ZZ9000.card"
@@ -25,11 +46,9 @@ install -Dm755 ZZFwUpdate/ZZFwUpdate            "$inst/Tools/ZZFwUpdate"
 install -Dm755 net/ZZNetStats/ZZNetStats        "$inst/Tools/ZZNetStats"
 install -Dm755 ZZDiag/ZZDiag                    "$inst/Tools/ZZDiag"
 install -Dm755 ZZCapture/ZZCapture              "$inst/Tools/ZZCapture"
-install -Dm644 ahi/README.md                    "$inst/Docs/ahi-README.md"
-install -Dm644 usb-poseidon/README.md           "$inst/Docs/usb-poseidon-README.md"
-install -Dm644 docs/usb-qualification-matrix.md \
-                                               "$inst/Docs/usb-qualification-matrix.md"
-install -Dm644 ZZCapture/README.md              "$inst/Docs/ZZCapture-README.md"
+make_guide ahi/README.md ahi
+make_guide usb-poseidon/README.md usb-poseidon
+make_guide ZZCapture/README.md ZZCapture
 # Diagnostic-only MHI build (feeder-vs-pump hardware isolation); staged
 # under Docs, deliberately never installed as the production library.
 if [ -f mhi/mhizz9000.library.decode-only ]; then
@@ -51,10 +70,10 @@ done
 # ZZPlay ships with its icon; the installer puts both in SYS:Utilities.
 install -Dm755 sdk/out/C/ZZPlay      "$inst/Tools/ZZPlay"
 install -Dm644 sdk/out/C/ZZPlay.info "$inst/Tools/ZZPlay.info"
-install -Dm644 sdk/README.md                    "$inst/Docs/sdk-README.md"
+make_guide sdk/README.md sdk
 # ZZPlay ships an end-user manual; the manual also tells people to copy
 # the project icon out of Docs/.
-install -Dm644 sdk/out/Docs/zzplay.md           "$inst/Docs/zzplay.md"
+install -Dm644 sdk/out/Docs/ZZPlay.guide        "$inst/Docs/ZZPlay.guide"
 install -Dm644 sdk/out/Docs/ZZPlay-project.info "$inst/Docs/ZZPlay-project.info"
 
 # Accelerated amissl.library, per CPU (optional: built by amissl/build.sh,
@@ -74,13 +93,13 @@ for cpu in 68020-40 68060; do
     fi
 done
 if [ "$staged_amissl" = 1 ]; then
-    install -Dm644 amissl/README.md "$inst/Docs/amissl-README.md"
+    make_guide amissl/README.md amissl
 else
     echo "NOTE: amissl/out/<cpu>/amissl_v362.library not built; packaging without it" >&2
 fi
 
 mkdir -p "$staging"
-cp installer/README.md "$staging/README.md"
+python3 "$md2guide" --name ZZ9000-Drivers installer/README.md "$staging/ZZ9000-Drivers.guide"
 cp installer/ZZ9000Installer.info "$staging/ZZ9000Installer.info"
 cp -R installer/ZZ9000Installer "$staging/ZZ9000Installer"
 python3 tools/encode-amiga-docs.py "$staging"

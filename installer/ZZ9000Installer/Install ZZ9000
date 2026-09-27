@@ -191,7 +191,7 @@
                         (infos)
                         (dest "Devs:USBHardware"))))
 
-             (message "Poseidon USB driver installed.\n\nIf Poseidon does not bind it automatically, open Trident, go to Hardware, add driver zzusbhw.device with unit 0, save, then reboot or restart Poseidon.\n\nFull setup notes are in Docs/usb-poseidon-README.md inside this installer drawer.")
+             (message "Poseidon USB driver installed.\n\nIf Poseidon does not bind it automatically, open Trident, go to Hardware, add driver zzusbhw.device with unit 0, save, then reboot or restart Poseidon.\n\nFull setup notes are in Docs/usb-poseidon.guide inside this installer drawer.")
           ))
    )
 )
@@ -355,7 +355,7 @@
           ))
 
       (message "ZZ9000AX audio installed.\n\nUse ZZTop's Audio window to adjust balance and sound settings with matched firmware.\n\nThe old ZZ9K_MIX_LEVELS and ZZ9000AX-NOLPF environment variables are no longer used. No environment settings are needed for normal use."
-         (help "ENV:ZZ9K_INT2 is still supported for interrupt-conflict troubleshooting and affects both audio drivers. See Docs/ahi-README.md in this installer drawer for details."))
+         (help "ENV:ZZ9K_INT2 is still supported for interrupt-conflict troubleshooting and affects both audio drivers. See Docs/ahi.guide in this installer drawer for details."))
    )
 )
 
@@ -465,8 +465,8 @@
          ; the installer drawer people unpack and then delete.
          (copyfiles
             (prompt ("Install the ZZPlay manual into %s/" #zz-drawer))
-            (help "zzplay.md documents the controls, the audio backends, fullscreen behaviour, ToolTypes and the command-line arguments. Docs/ZZPlay-project.info in this installer drawer is a project icon you can copy next to a media file so double-clicking it plays through ZZPlay.")
-            (source "Docs/zzplay.md")
+            (help "ZZPlay.guide documents the controls, the audio backends, fullscreen behaviour, ToolTypes and the command-line arguments — open it with MultiView. Docs/ZZPlay-project.info in this installer drawer is a project icon you can copy next to a media file so double-clicking it plays through ZZPlay.")
+            (source "Docs/ZZPlay.guide")
             (dest #zz-drawer)
             (confirm))
       )
@@ -594,11 +594,11 @@
 
 (if (askbool
        (prompt "Install ZZCapture (advanced native-video timing diagnostic) into C:?")
-       (help "Use info and observe to collect native-video timing evidence without changing capture phase. The phase, check, startup and calibrate commands are experimental A4000/C28 diagnostics: use only with the matching firmware/bitstream, run Stack 32768 first, and read Docs/ZZCapture-README.md. The tool never saves ZZ9000.CFG.")
+       (help "Use info and observe to collect native-video timing evidence without changing capture phase. The phase, check, startup and calibrate commands are experimental A4000/C28 diagnostics: use only with the matching firmware/bitstream, run Stack 32768 first, and read Docs/ZZCapture.guide. The tool never saves ZZ9000.CFG.")
        (default 0))
     (copyfiles
        (prompt "Install ZZCapture into C:")
-       (help "Installs the optional native-video timing and C28 calibration diagnostic. Its complete manual is Docs/ZZCapture-README.md in this installer drawer.")
+       (help "Installs the optional native-video timing and C28 calibration diagnostic. Its complete manual is Docs/ZZCapture.guide in this installer drawer.")
        (source "Tools/ZZCapture")
        (dest "C:")
        (confirm)))

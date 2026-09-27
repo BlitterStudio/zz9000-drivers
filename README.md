@@ -114,7 +114,7 @@ exists for future work, but no 8 MiB bitstream variant is shipped.
 |------|----------|--------------|-------|
 | RTG graphics | `ZZ9000.card` | `Libs:Picasso96/` | Picasso96 RTG driver using the native `BT_MNT_ZZ9000` board identity, accelerated VRAM/PIP paths, and firmware-gated DPMS monitor power management. |
 | P96 settings | `Picasso96Settings` / `Picasso96Settings-Z3` | `Devs:Picasso96Settings` | Installer backs up an existing file to `Devs:Picasso96Settings.pre-ZZ9000-2.4`, advertises Standby/Suspend/Active Off DPMS support, and offers a Zorro III high-memory profile with 1920x1080x32 enabled. |
-| Networking | `ZZ9000Net.device` | `Devs:Networks/` | SANA-II Ethernet driver. |
+| Networking | `ZZ9000Net.device` | `Devs:Networks/` | SANA-II Ethernet driver with multicast group filtering (programs the firmware's multicast hash filter, so IPv6 and service-discovery stacks receive their groups). |
 | Network template | `ZZ9000Net` | `Devs:NetInterfaces/` | Optional Roadshow DHCP template installed by the installer. |
 | Network diagnostics | `ZZNetStats` | `C:` | Dumps SANA-II counters plus firmware RX backlog/drop registers. |
 | Board diagnostics | `ZZDiag` | `C:` | Dumps board identity, firmware, VideoCap, USB, SD, AX/audio, and Ethernet diagnostic registers. |

@@ -51,8 +51,8 @@
 #include <proto/zz9k.h>
 #include <math.h>
 
-#define ZZTOP_RELEASE "2.9"
-#define ZZTOP_DATE    "30.08.2026"
+#define ZZTOP_RELEASE "2.10"
+#define ZZTOP_DATE    "27.09.2026"
 
 static const char version[] __attribute__((used)) =
 	"$VER: ZZTop " ZZTOP_RELEASE " (" ZZTOP_DATE ")\r\n";
