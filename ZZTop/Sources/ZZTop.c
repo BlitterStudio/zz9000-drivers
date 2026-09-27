@@ -2902,7 +2902,7 @@ static BOOL scandoubler_stage_profile(struct Window *win,
 			*framing_reset = TRUE;
 		scandoubler_update_save_gate(win, live, FALSE);
 		sd_set_status(win,
-			"Output switch resets framing to Automatic - Save, power-cycle, recalibrate");
+			"Framing reset to Automatic - Save, reboot, recalibrate");
 		return TRUE;
 	}
 	if (scandoubler_update_save_gate(win, live, TRUE))
