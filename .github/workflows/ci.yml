@@ -474,7 +474,9 @@ jobs:
           done
           make_guide amissl/README.md amissl
 
-          python3 "$MD2GUIDE" --name ZZ9000-Drivers installer/README.md "$STAGING/ZZ9000-Drivers.guide"
+          python3 "$MD2GUIDE" --name ZZ9000-Drivers installer/README.md "$INST/Docs/ZZ9000-Drivers.guide"
+          cp "$INST/Docs/ZZ9000-Drivers.guide" "$STAGING/ZZ9000-Drivers.guide"
+          cp "$INST/Docs/ZZ9000-Drivers.guide.info" "$STAGING/ZZ9000-Drivers.guide.info"
           cp installer/ZZ9000Installer.info "$STAGING/ZZ9000Installer.info"
           cp -r installer/ZZ9000Installer "$STAGING/ZZ9000Installer"
           python3 tools/encode-amiga-docs.py "$STAGING"

@@ -383,6 +383,19 @@
 (set #zz-drawer (tackon #zz-drawer-parent "ZZ9000"))
 (set #zz-drawer-used 0)
 
+; The tool manuals (ZZTop, ZZPlay) install next to their programs. The
+; general manual set goes to one place of the user's choosing, which
+; defaults to the same ZZ9000 drawer so everything stays together.
+
+(set #docs-dest #zz-drawer)
+
+(if (>= @user-level 2)
+    (set #docs-dest
+       (askdir
+          (prompt "Where should the ZZ9000 manuals be installed?")
+          (help "The on-line manuals (audio, USB, command-line tools and the rest) are installed into the drawer you pick. The ZZTop and ZZPlay manuals always go next to the programs themselves.\n\nThe default is the ZZ9000 drawer, keeping everything in one place.")
+          (default #docs-dest))))
+
 
 ; --------------------------------------------------------------------
 ; SDK runtime (zz9k.library, accelerated mpega.library, picture datatype)
@@ -467,6 +480,7 @@
             (prompt ("Install the ZZPlay manual into %s/" #zz-drawer))
             (help "ZZPlay.guide documents the controls, the audio backends, fullscreen behaviour, ToolTypes and the command-line arguments — open it with MultiView. Docs/ZZPlay-project.info in this installer drawer is a project icon you can copy next to a media file so double-clicking it plays through ZZPlay.")
             (source "Docs/ZZPlay.guide")
+            (infos)
             (dest #zz-drawer)
             (confirm))
       )
@@ -548,6 +562,14 @@
          (confirm))
       (set #zz-drawer-used 1)
 
+      (copyfiles
+         (prompt ("Install the ZZTop manual into %s/" #zz-drawer))
+         (help "ZZTop.guide is the control-panel manual: the Scandoubler window with the output/refresh table and live calibration, the Audio window, Other Settings, firmware update and restore, and the save rules. Open it with MultiView.")
+         (source "Docs/ZZTop.guide")
+         (infos)
+         (dest #zz-drawer)
+         (confirm))
+
       ; Earlier releases put ZZTop in SYS:Tools/. Offer to remove that copy,
       ; otherwise an upgrade silently leaves two ZZTops on the system and the
       ; older one keeps working from the old location.
@@ -590,6 +612,57 @@
 
 ; --------------------------------------------------------------------
 ; Advanced native-video capture diagnostic
+; --------------------------------------------------------------------
+; Manuals (AmiGuide)
+; --------------------------------------------------------------------
+;
+; The tool manuals went out with their tools above. This is the general
+; reference set; one question installs them all, each file listed so the
+; procedure log shows what landed where.
+
+(if (askbool
+       (prompt ("Install the ZZ9000 manuals into %s?" #docs-dest))
+       (help "Installs the on-line manuals: the package overview, the audio stack, Poseidon USB, ZZCapture, the SDK runtime payloads, accelerated AmiSSL and the command-line tools. Open them with MultiView.\n\nThe ZZTop and ZZPlay manuals are installed next to the programs themselves and are not repeated here.")
+       (default 1))
+   (
+      (makedir #docs-dest (infos))
+      (copyfiles
+         (prompt "ZZ9000-Drivers.guide (package overview)")
+         (source "Docs/ZZ9000-Drivers.guide")
+         (infos)
+         (dest #docs-dest))
+      (copyfiles
+         (prompt "ahi.guide (ZZ9000AX audio stack)")
+         (source "Docs/ahi.guide")
+         (infos)
+         (dest #docs-dest))
+      (copyfiles
+         (prompt "usb-poseidon.guide (Poseidon USB setup)")
+         (source "Docs/usb-poseidon.guide")
+         (infos)
+         (dest #docs-dest))
+      (copyfiles
+         (prompt "tools.guide (command-line tools)")
+         (source "Docs/tools.guide")
+         (infos)
+         (dest #docs-dest))
+      (copyfiles
+         (prompt "sdk.guide (SDK runtime payloads)")
+         (source "Docs/sdk.guide")
+         (infos)
+         (dest #docs-dest))
+      (copyfiles
+         (prompt "amissl.guide (accelerated AmiSSL)")
+         (source "Docs/amissl.guide")
+         (infos)
+         (dest #docs-dest))
+      (copyfiles
+         (prompt "ZZCapture.guide (native capture diagnostic)")
+         (source "Docs/ZZCapture.guide")
+         (infos)
+         (dest #docs-dest))
+   ))
+
 ; --------------------------------------------------------------------
 
 (if (askbool

@@ -101,7 +101,9 @@ else
 fi
 
 mkdir -p "$staging"
-python3 "$md2guide" --name ZZ9000-Drivers installer/README.md "$staging/ZZ9000-Drivers.guide"
+python3 "$md2guide" --name ZZ9000-Drivers installer/README.md "$inst/Docs/ZZ9000-Drivers.guide"
+cp "$inst/Docs/ZZ9000-Drivers.guide" "$staging/ZZ9000-Drivers.guide"
+cp "$inst/Docs/ZZ9000-Drivers.guide.info" "$staging/ZZ9000-Drivers.guide.info"
 cp installer/ZZ9000Installer.info "$staging/ZZ9000Installer.info"
 cp -R installer/ZZ9000Installer "$staging/ZZ9000Installer"
 python3 tools/encode-amiga-docs.py "$staging"
