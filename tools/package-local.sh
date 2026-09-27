@@ -116,5 +116,19 @@ cp "$inst/Docs/ZZ9000-Drivers.guide.info" "$staging/ZZ9000-Drivers.guide.info"
 cp installer/ZZ9000Installer.info "$staging/ZZ9000Installer.info"
 cp -R installer/ZZ9000Installer "$staging/ZZ9000Installer"
 "$PY" tools/encode-amiga-docs.py "$staging"
-zip -r "$zipfile" "$(basename "$staging")"
+if command -v zip >/dev/null 2>&1; then
+    zip -r "$zipfile" "$(basename "$staging")"
+else
+    # Git Bash ships no zip; Python's zipfile produces the same layout
+    # (deflated, forward-slash names, staging dir as the zip root).
+    "$PY" - "$zipfile" "$(basename "$staging")" <<'PYEOF'
+import os, sys, zipfile
+zipfile_path, root = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(zipfile_path, "w", zipfile.ZIP_DEFLATED) as zf:
+    for dirpath, dirnames, files in os.walk(root):
+        for name in sorted(files):
+            path = os.path.join(dirpath, name)
+            zf.write(path, path.replace(os.sep, "/"))
+PYEOF
+fi
 printf '%s\n' "$zipfile"
