@@ -2856,6 +2856,8 @@ static BOOL scandoubler_stage_profile(struct Window *win,
 	struct zztop_cfg_ctx *ctx, UWORD profile, BOOL *framing_reset)
 {
 	struct settings_live_session *live = &ctx->live;
+	struct zz_vcap_path old_path, new_path;
+	UWORD old_profile;
 
 	if (framing_reset)
 		*framing_reset = FALSE;
@@ -2871,23 +2873,27 @@ static BOOL scandoubler_stage_profile(struct Window *win,
 		}
 		live->preview_valid = FALSE;
 	}
+	old_profile = settings_vals.videocap_profile;
 	settings_vals.videocap_profile = profile;
 
 	/* Switching output family (full-rate <-> filtered) changes the
 	 * capture grid, and a Custom framing pair is only valid on the
-	 * grid it was measured on. Demote framing to Automatic for the
-	 * switch instead of dead-ending the Save button: the crop keys
-	 * drop out of the next ZZ9000.CFG write and framing returns to
-	 * the path defaults after the power-cycle. Recalibrate then.
-	 * Without live control there was never a path gate, so keep the
-	 * saved pair untouched there - and demote only on a CONFIRMED
-	 * mismatch: an unreadable live snapshot (busy status) leaves the
-	 * old save gate in charge instead of destroying a calibration. */
+	 * grid it was measured on. Demote framing to Automatic when THIS
+	 * switch crosses capture paths - not when the staged path merely
+	 * differs from the applied one (a pending sampling change staged
+	 * in Capture would otherwise let a plain Refresh change erase a
+	 * calibration). The staged switch itself is the fact; no live
+	 * snapshot is needed to confirm it. The crop keys drop out of
+	 * the next ZZ9000.CFG write and framing returns to the path
+	 * defaults after the power-cycle - recalibrate then. Without
+	 * live control there was never a path gate, so keep the saved
+	 * pair untouched there. */
+	settings_path_for(&old_path, old_profile,
+		settings_vals.videocap_sample);
+	settings_path_for(&new_path, profile,
+		settings_vals.videocap_sample);
 	if (live->supported && settings_custom_framing() &&
-		settings_live_refresh(live) &&
-		!settings_current_path_matches(live,
-			settings_vals.videocap_profile,
-			settings_vals.videocap_sample)) {
+		!zz_vcap_path_equal(&old_path, &new_path)) {
 		settings_vals.videocap_crop_h_present = 0;
 		settings_vals.videocap_crop_v_present = 0;
 		settings_vals.videocap_crop_h = 0;
