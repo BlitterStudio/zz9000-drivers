@@ -140,6 +140,41 @@
 
 
 ; --------------------------------------------------------------------
+; Where the ZZ9000 Workbench tools live
+; --------------------------------------------------------------------
+;
+; ZZTop and ZZPlay are the two ZZ9000 tools with a Workbench interface, so
+; they share one drawer instead of being scattered between SYS:Tools and
+; SYS:Utilities. Asked once here because either of the two sections below
+; can be chosen on its own, and both need the answer.
+
+(set #zz-drawer-parent "SYS:Utilities")
+
+(if (>= @user-level 2)
+    (set #zz-drawer-parent
+       (askdir
+          (prompt "Where should the ZZ9000 drawer be created?")
+          (help "A new drawer named ZZ9000 will be created inside the location you pick, and ZZTop and ZZPlay installed into it. Choose the parent, not the drawer itself: picking SYS:Utilities creates SYS:Utilities/ZZ9000/.\n\nThe default is SYS:Utilities, where Workbench applications normally live.")
+          (default #zz-drawer-parent))))
+
+(set #zz-drawer (tackon #zz-drawer-parent "ZZ9000"))
+(set #zz-drawer-used 0)
+
+; The tool manuals (ZZTop, ZZPlay) install next to their programs. The
+; general manual set goes to one place of the user's choosing, which
+; defaults to the same ZZ9000 drawer so everything stays together.
+
+(set #docs-dest #zz-drawer)
+
+(if (>= @user-level 2)
+    (set #docs-dest
+       (askdir
+          (prompt "Where should the ZZ9000 manuals be installed?")
+          (help "Each manual is installed together with the part it documents, into this drawer. The ZZTop and ZZPlay manuals always go next to the programs themselves.\n\nThe default is the ZZ9000 drawer, keeping everything in one place.")
+          (default #docs-dest))))
+
+
+; --------------------------------------------------------------------
 ; USB Poseidon hardware driver (zzusbhw.device)
 ; --------------------------------------------------------------------
 
@@ -270,40 +305,6 @@
 
 (complete 75)
 
-
-; --------------------------------------------------------------------
-; Where the ZZ9000 Workbench tools live
-; --------------------------------------------------------------------
-;
-; ZZTop and ZZPlay are the two ZZ9000 tools with a Workbench interface, so
-; they share one drawer instead of being scattered between SYS:Tools and
-; SYS:Utilities. Asked once here because either of the two sections below
-; can be chosen on its own, and both need the answer.
-
-(set #zz-drawer-parent "SYS:Utilities")
-
-(if (>= @user-level 2)
-    (set #zz-drawer-parent
-       (askdir
-          (prompt "Where should the ZZ9000 drawer be created?")
-          (help "A new drawer named ZZ9000 will be created inside the location you pick, and ZZTop and ZZPlay installed into it. Choose the parent, not the drawer itself: picking SYS:Utilities creates SYS:Utilities/ZZ9000/.\n\nThe default is SYS:Utilities, where Workbench applications normally live.")
-          (default #zz-drawer-parent))))
-
-(set #zz-drawer (tackon #zz-drawer-parent "ZZ9000"))
-(set #zz-drawer-used 0)
-
-; The tool manuals (ZZTop, ZZPlay) install next to their programs. The
-; general manual set goes to one place of the user's choosing, which
-; defaults to the same ZZ9000 drawer so everything stays together.
-
-(set #docs-dest #zz-drawer)
-
-(if (>= @user-level 2)
-    (set #docs-dest
-       (askdir
-          (prompt "Where should the ZZ9000 manuals be installed?")
-          (help "Each manual is installed together with the part it documents, into this drawer. The ZZTop and ZZPlay manuals always go next to the programs themselves.\n\nThe default is the ZZ9000 drawer, keeping everything in one place.")
-          (default #docs-dest))))
 
 ; --------------------------------------------------------------------
 ; ZZ9000AX audio (AHI subdriver + AHI AudioMode + MHI library)
