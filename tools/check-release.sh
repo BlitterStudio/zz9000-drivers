@@ -55,6 +55,7 @@ if [ "$quick" -eq 0 ]; then
     check_exec ZZFwUpdate/ZZFwUpdate
     check_exec net/ZZNetStats/ZZNetStats
     check_exec ZZDiag/ZZDiag
+    check_exec zz9kcheck/zz9kcheck
     check_exec ZZCapture/ZZCapture
 
     # SDK runtime payloads (sdk/build.sh).
