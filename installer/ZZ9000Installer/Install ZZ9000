@@ -497,8 +497,8 @@
 (if (OR (exists "Libs/AmiSSL/68020-40/amissl_v362.library")
         (exists "Libs/AmiSSL/68060/amissl_v362.library"))
    (if (exists "LIBS:AmiSSL/amissl_v362.library")
-       (if (askbool (prompt "Install the ZZ9000-accelerated amissl.library?\n\nReplaces LIBS:AmiSSL/amissl_v362.library with a build that offloads supported TLS crypto. Without compatible hardware or firmware it uses stock AmiSSL software paths.\n\nMatched 2 MiB and 4 MiB Zorro 2 stacks can offload through the shared 64 KiB host window. If an allocation cannot be made, that operation falls back to software.\n\nThe original library is backed up as amissl_v362.library.bak.")
-                    (help "Drop-in AmiSSL 5.27 core with ZZ9000 crypto offload for existing applications. Zorro 2 requires a matched stack and shares its small host heap with other SDK clients. The combined binary is GPLv3; sources are in the BlitterStudio zz9000-sdk repository."))
+       (if (askbool (prompt "Install the ZZ9000-accelerated amissl.library?\n\nReplaces LIBS:AmiSSL/amissl_v362.library with a build that offloads supported TLS crypto to the card; without compatible hardware or firmware it runs the stock AmiSSL software paths.\n\nThe original library is backed up as amissl_v362.library.bak.")
+                    (help "Drop-in AmiSSL 5.27 core with ZZ9000 crypto offload for existing applications. Zorro 2 requires a matched stack and shares its small host heap with other SDK clients; matched 2 MiB and 4 MiB stacks offload through the shared 64 KiB host window, and any allocation that cannot be made falls back to software. The combined binary is GPLv3; sources are in the BlitterStudio zz9000-sdk repository."))
            (
               ; Pick the CPU build exactly as AmiSSL's own installer does: default
               ; to the 68060 build when the OS reports a 68060, or 68060.library /
