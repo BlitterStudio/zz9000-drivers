@@ -59,12 +59,12 @@ For normal installation, use the latest GitHub Release zip:
 
 The installer handles driver placement, tool installation, icons,
 Picasso96 settings, the optional Roadshow NetInterface template, and
-network setup prompts. It also installs the on-line manuals as
-double-clickable AmiGuide files with MultiView-associated icons: the
-ZZTop and ZZPlay manuals land next to their programs, and the general
-set (audio, USB, command-line tools, SDK payloads, AmiSSL, ZZCapture,
-and the package overview) goes to a drawer of your choice, defaulting
-to the ZZ9000 drawer. Current releases also install `ZZTop`, which can
+network setup prompts. Manuals follow the components they document,
+installed as double-clickable AmiGuide files with MultiView-associated
+icons: the ZZTop and ZZPlay manuals land next to their programs, and
+every other manual goes to one drawer of your choice (defaulting to
+the ZZ9000 drawer) together with the package overview. Current
+releases also install `ZZTop`, which can
 edit the SD-card `ZZ9000.CFG` file for MAC, INT2, native-video,
 scanline, and boot-HDF settings. The installer also installs the SDK
 runtime (`zz9k.library`, `mpega.library`, and the picture datatype) and

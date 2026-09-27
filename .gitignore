@@ -59,3 +59,15 @@ __pycache__/
 mhi/zz9k-headers/
 ahi/driver/zz9k-headers/
 ZZTop/zz9k-headers/
+
+# packaging-generated installer drawer slots (release job / package-local)
+installer/ZZ9000Installer/Docs/*.guide
+installer/ZZ9000Installer/Docs/ZZPlay-project.info
+installer/ZZ9000Installer/Docs/mhizz9000.library.decode-only
+installer/ZZ9000Installer/Devs/AudioModes/
+installer/ZZ9000Installer/Devs/USBHardware/
+installer/ZZ9000Installer/Devs/Networks/
+installer/ZZ9000Installer/Classes/
+installer/ZZ9000Installer/Libs/
+mhi/mhizz9000.library.decode-only
+mhi/mhizz9000.library.decode-only.debug

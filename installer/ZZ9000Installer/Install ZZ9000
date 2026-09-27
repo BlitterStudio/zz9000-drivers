@@ -13,9 +13,8 @@
 ; Picasso96 RTG driver (ZZ9000.card)
 ; --------------------------------------------------------------------
 
-(if (askbool (prompt "Install the Picasso96 RTG driver (ZZ9000.card) for the ZZ9000?")
-             (help "Installs the unified ZZ9000.card into Libs:Picasso96/. The same driver works on both Zorro II and Zorro III hosts."))
-   (
+(
+
       (set #rtgver   (getversion "Libs:Picasso96/rtg.library"))
       (set #rtgmajor (/ #rtgver 65536))
       (set #rtgminor (- #rtgver (* #rtgmajor 65536)))
@@ -26,8 +25,6 @@
       (if (or (not (or #monexists #zzmonexists)) (< #rtgmajor 40))
           (abort "Please install Picasso96 first and select *Altais* as the graphics card.\n\nYou can use either the old shareware Picasso96 on Aminet, or the new P96 by Individual Computers (recommended). To purchase it, register at https://icomp.de/shop-icomp/en/register.html and log in to their shop. P96 then appears as a product.")
       )
-
-      (message "P96 rtg.library version " #rtgmajor "." #rtgminor " detected - OK.")
 
       (set #newver   (getversion "Libs/Picasso96/ZZ9000.card"))
       (set #newmajor (/ #newver 65536))
@@ -64,8 +61,7 @@
              (source "Devs:Monitors/Altais")
              (infos)
              (dest "Devs:Monitors")
-             (newname "ZZ9000")
-             (confirm)))
+             (newname "ZZ9000")))
 
       (if #monexists
           (delete "Devs:Monitors/Altais"
@@ -80,7 +76,6 @@
          (prompt "Configure the ZZ9000 Monitor file for ZZ9000.card")
          (help "Registers ZZ9000.card as the P96 card driver in the monitor file.")
          (dest "Devs:Monitors/ZZ9000")
-         (confirm)
          (settooltype "BOARDTYPE"       "ZZ9000")
          (settooltype "FAKENATIVEMODES" "No")
          (settooltype "DISPLAYCHAIN"    "Yes"))
@@ -107,7 +102,7 @@
                    (dest "Devs:")
                    (newname "Picasso96Settings.bak")))
          )
-         (message "Installing the ZZ9000 Picasso96Settings file for the native BT_MNT_ZZ9000 board identity used by ZZ9000.card 2.4 and newer."))
+         )
 
       (complete 40)
 
@@ -125,18 +120,13 @@
          (help "Installs the Picasso96 configuration containing ZZ9000-specific screenmodes and monitor DPMS capabilities. ZZ9000.card 2.4 and newer use the native BT_MNT_ZZ9000 board type, so this matching settings file is required when upgrading from older releases.")
          (source (tackon "Devs" #zz-p96-settings))
          (dest "Devs:")
-         (newname "Picasso96Settings")
-         (confirm))
-   )
+         (newname "Picasso96Settings"))
 )
 
 
 ; --------------------------------------------------------------------
 ; Native-video output and refresh
 ; --------------------------------------------------------------------
-
-(message "Native video normally defaults to filtered_60: PAL 800x600 or NTSC 720x480, at nominal 60 Hz.\n\nIn ZZTop, open Settings > Scandoubler..., select Output and Refresh, then Save and power-cycle. Capture... in that window controls sampling, framing and calibration. The Other Settings window no longer contains native-video controls.\n\nNative video settings are separate from Picasso96 RTG screenmodes."
-   (help "The Settings menu opens Scandoubler, Audio and Other Settings even when the main buttons are off-screen. Centered 1080p at nominal 60 or 50 Hz needs matching firmware, bitstream, ZZ9000.card and ZZTop; unsupported choices are hidden.\n\nThe nonstandard-sync firmware variant defaults to PAL timing. Legacy ENVARC:ZZ9000-VCAP-800x600, ENVARC:ZZ9000-NS-VSYNC, and ENVARC:ZZ9000-NS-VSYNC-NTSC settings override the saved profile; remove those overrides when using ZZTop."))
 
 (complete 50)
 
@@ -182,16 +172,21 @@
                            (infos)
                            (dest "Devs:USBHardware")))
                  )
-                 (if (askbool (prompt "Install zzusbhw.device into DEVS:USBHardware/?\n\nNew version: " #newmajor "." #newminor)
-                              (help "The Poseidon hardware driver that exposes the ZZ9000 USB controller to Poseidon's class drivers."))
-                     (copyfiles
-                        (prompt "Install zzusbhw.device into DEVS:USBHardware/")
-                        (help "The Poseidon hardware driver that exposes the ZZ9000 USB controller to Poseidon's class drivers.")
-                        (source "Devs/USBHardware/zzusbhw.device")
-                        (infos)
-                        (dest "Devs:USBHardware"))))
+                 (copyfiles
+             (prompt "Install zzusbhw.device (version " #newmajor "." #newminor ") into DEVS:USBHardware/")
+             (help "The Poseidon hardware driver that exposes the ZZ9000 USB controller to Poseidon's class drivers.")
+             (source "Devs/USBHardware/zzusbhw.device")
+             (infos)
+             (dest "Devs:USBHardware")))
 
-             (message "Poseidon USB driver installed.\n\nIf Poseidon does not bind it automatically, open Trident, go to Hardware, add driver zzusbhw.device with unit 0, save, then reboot or restart Poseidon.\n\nFull setup notes are in Docs/usb-poseidon.guide inside this installer drawer.")
+             (makedir #docs-dest (infos))
+          (copyfiles
+             (prompt "usb-poseidon.guide (Poseidon USB setup)")
+             (source "Docs/usb-poseidon.guide")
+             (infos)
+             (dest #docs-dest))
+
+          (message "Poseidon USB driver installed.\n\nIf Poseidon does not bind it automatically, open Trident, go to Hardware, add driver zzusbhw.device with unit 0, save, then reboot or restart Poseidon.\n\nFull setup notes are in usb-poseidon.guide, installed with the driver.")
           ))
    )
 )
@@ -216,9 +211,8 @@
 ; SANA-II network driver (ZZ9000Net.device)
 ; --------------------------------------------------------------------
 
-(if (askbool (prompt "Install the SANA-II Ethernet driver (ZZ9000Net.device)? Requires an existing Roadshow, Miami DX, or AmiTCP setup.")
-             (help ""))
-   (
+(
+
       (set #mac (askstring
          (prompt "Enter your unique Ethernet MAC address (printed in your ZZ9000 manual). Only the last six hex digits need to change.")
          (help "To change the MAC later, edit ENVARC:ZZ9K_MAC. With firmware 2.3+ it can also live as mac in ZZ9000.CFG on the SD card (ZZTop's Settings window); the ENV variable overrides the config file when both exist.")
@@ -249,117 +243,24 @@
                     (infos)
                     (dest "Devs:Networks")))
           )
-          (if (askbool (prompt "Install ZZ9000Net.device into Devs:Networks/?\n\nNew version: " #newmajor "." #newminor)
-                       (help "The SANA-II driver that Roadshow / Miami DX talks to."))
-              (copyfiles
-                 (prompt "Install ZZ9000Net.device into Devs:Networks/")
-                 (help "The SANA-II driver that Roadshow / Miami DX talks to.")
-                 (source "Devs/Networks/ZZ9000Net.device")
-                 (infos)
-                 (dest "Devs:Networks"))))
-
-      (if (askbool (prompt "Install an example NetInterface for Roadshow? It defaults to DHCP; edit Devs:NetInterfaces/ZZ9000Net to customise.")
-                   (help ""))
           (copyfiles
-             (prompt "Install example NetInterface into Devs:NetInterfaces/")
-             (help "")
-             (source "Devs/NetInterfaces/ZZ9000Net")
+             (prompt "Install ZZ9000Net.device (version " #newmajor "." #newminor ") into Devs:Networks/")
+             (help "The SANA-II driver that Roadshow / Miami DX talks to.")
+             (source "Devs/Networks/ZZ9000Net.device")
              (infos)
-             (dest "Devs:NetInterfaces")
-             (confirm)))
+             (dest "Devs:Networks")))
+
+      ; The example Roadshow NetInterface (DHCP defaults) comes along with
+      ; the driver; edit Devs:NetInterfaces/ZZ9000Net to customise.
+      (copyfiles
+         (prompt "Install example NetInterface into Devs:NetInterfaces/")
+         (help "A Roadshow NetInterface template defaulting to DHCP; edit it to customise.")
+         (source "Devs/NetInterfaces/ZZ9000Net")
+         (infos)
+         (dest "Devs:NetInterfaces"))
    )
-)
 
 (complete 75)
-
-
-; --------------------------------------------------------------------
-; ZZ9000AX audio (AHI subdriver + AHI AudioMode + MHI library)
-; --------------------------------------------------------------------
-
-(if (askbool (prompt "Install the ZZ9000AX audio drivers (AHI + MHI)? Requires an existing AHI installation.")
-             (help "Installs zz9000ax.audio (AHI subdriver), the ZZ9000AX AHI AudioMode descriptor, and mhizz9000.library (MHI hardware MP3 decoder)."))
-   (
-      (set #newver   (getversion "Devs/AHI/zz9000ax.audio"))
-      (set #newmajor (/ #newver 65536))
-      (set #newminor (- #newver (* #newmajor 65536)))
-
-      (if (exists "Devs:AHI/zz9000ax.audio")
-          (
-             (set #oldver   (getversion "Devs:AHI/zz9000ax.audio"))
-             (set #oldmajor (/ #oldver 65536))
-             (set #oldminor (- #oldver (* #oldmajor 65536)))
-
-             (if (askbool (prompt "Replace existing zz9000ax.audio?\n\nInstalled version: " #oldmajor "." #oldminor "\nNew version: " #newmajor "." #newminor "\n\nProceed with overwrite?")
-                          (help "The AHI subdriver that exposes the ZZ9000AX DAC to AHI-aware applications."))
-                 (copyfiles
-                    (prompt "Install zz9000ax.audio into Devs:AHI/")
-                    (help "The AHI subdriver that exposes the ZZ9000AX DAC to AHI-aware applications.")
-                    (source "Devs/AHI/zz9000ax.audio")
-                    (infos)
-                    (dest "Devs:AHI")))
-          )
-          (if (askbool (prompt "Install zz9000ax.audio into Devs:AHI/?\n\nNew version: " #newmajor "." #newminor)
-                       (help "The AHI subdriver that exposes the ZZ9000AX DAC to AHI-aware applications."))
-              (copyfiles
-                 (prompt "Install zz9000ax.audio into Devs:AHI/")
-                 (help "The AHI subdriver that exposes the ZZ9000AX DAC to AHI-aware applications.")
-                 (source "Devs/AHI/zz9000ax.audio")
-                 (infos)
-                 (dest "Devs:AHI"))))
-
-      (copyfiles
-         (prompt "Install the ZZ9000AX AHI AudioMode")
-         (help "The AudioMode descriptor telling AHI which mode selects the ZZ9000AX DAC.")
-         (source "Devs/AudioModes/ZZ9000AX")
-         (infos)
-         (dest "Devs:AudioModes")
-         (confirm))
-
-      (set #newver   (getversion "Libs/MHI/mhizz9000.library"))
-      (set #newmajor (/ #newver 65536))
-      (set #newminor (- #newver (* #newmajor 65536)))
-
-      (if (exists "LIBS:MHI/mhizz9000.library")
-          (
-             (set #oldver   (getversion "LIBS:MHI/mhizz9000.library"))
-             (set #oldmajor (/ #oldver 65536))
-             (set #oldminor (- #oldver (* #oldmajor 65536)))
-
-             (if (askbool (prompt "Replace existing mhizz9000.library?\n\nInstalled version: " #oldmajor "." #oldminor "\nNew version: " #newmajor "." #newminor "\n\nProceed with overwrite?")
-                          (help "Lets MHI-aware players (AmigaAmp and friends) use the ZZ9000AX hardware MP3 decoder."))
-                 (copyfiles
-                    (prompt "Install mhizz9000.library into LIBS:MHI/ (MHI hardware MP3 decoder)")
-                    (help "Lets MHI-aware players (AmigaAmp and friends) use the ZZ9000AX hardware MP3 decoder.")
-                    (source "Libs/MHI/mhizz9000.library")
-                    (dest "LIBS:MHI")))
-          )
-          (if (askbool (prompt "Install mhizz9000.library into LIBS:MHI/?\n\nNew version: " #newmajor "." #newminor)
-                       (help "Lets MHI-aware players (AmigaAmp and friends) use the ZZ9000AX hardware MP3 decoder."))
-              (copyfiles
-                 (prompt "Install mhizz9000.library into LIBS:MHI/ (MHI hardware MP3 decoder)")
-                 (help "Lets MHI-aware players (AmigaAmp and friends) use the ZZ9000AX hardware MP3 decoder.")
-                 (source "Libs/MHI/mhizz9000.library")
-                 (dest "LIBS:MHI"))))
-
-      (if (exists "LIBS:mhizz9000.library")
-          (
-             (set #oldver   (getversion "LIBS:mhizz9000.library"))
-             (set #oldmajor (/ #oldver 65536))
-             (set #oldminor (- #oldver (* #oldmajor 65536)))
-
-             (delete "LIBS:mhizz9000.library"
-                (prompt "Remove obsolete LIBS:mhizz9000.library?\n\nInstalled version at old path: " #oldmajor "." #oldminor "\n\nThe MHI library belongs in LIBS:MHI/.")
-                (help "Older installer versions placed mhizz9000.library directly in LIBS:. The corrected destination is LIBS:MHI/.")
-                (confirm))
-          ))
-
-      (message "ZZ9000AX audio installed.\n\nUse ZZTop's Audio window to adjust balance and sound settings with matched firmware.\n\nThe old ZZ9K_MIX_LEVELS and ZZ9000AX-NOLPF environment variables are no longer used. No environment settings are needed for normal use."
-         (help "ENV:ZZ9K_INT2 is still supported for interrupt-conflict troubleshooting and affects both audio drivers. See Docs/ahi.guide in this installer drawer for details."))
-   )
-)
-
-(complete 85)
 
 
 ; --------------------------------------------------------------------
@@ -393,8 +294,99 @@
     (set #docs-dest
        (askdir
           (prompt "Where should the ZZ9000 manuals be installed?")
-          (help "The on-line manuals (audio, USB, command-line tools and the rest) are installed into the drawer you pick. The ZZTop and ZZPlay manuals always go next to the programs themselves.\n\nThe default is the ZZ9000 drawer, keeping everything in one place.")
+          (help "Each manual is installed together with the part it documents, into this drawer. The ZZTop and ZZPlay manuals always go next to the programs themselves.\n\nThe default is the ZZ9000 drawer, keeping everything in one place.")
           (default #docs-dest))))
+
+; --------------------------------------------------------------------
+; ZZ9000AX audio (AHI subdriver + AHI AudioMode + MHI library)
+; --------------------------------------------------------------------
+
+(
+
+      (set #newver   (getversion "Devs/AHI/zz9000ax.audio"))
+      (set #newmajor (/ #newver 65536))
+      (set #newminor (- #newver (* #newmajor 65536)))
+
+      (if (exists "Devs:AHI/zz9000ax.audio")
+          (
+             (set #oldver   (getversion "Devs:AHI/zz9000ax.audio"))
+             (set #oldmajor (/ #oldver 65536))
+             (set #oldminor (- #oldver (* #oldmajor 65536)))
+
+             (if (askbool (prompt "Replace existing zz9000ax.audio?\n\nInstalled version: " #oldmajor "." #oldminor "\nNew version: " #newmajor "." #newminor "\n\nProceed with overwrite?")
+                          (help "The AHI subdriver that exposes the ZZ9000AX DAC to AHI-aware applications."))
+                 (copyfiles
+                    (prompt "Install zz9000ax.audio into Devs:AHI/")
+                    (help "The AHI subdriver that exposes the ZZ9000AX DAC to AHI-aware applications.")
+                    (source "Devs/AHI/zz9000ax.audio")
+                    (infos)
+                    (dest "Devs:AHI")))
+          )
+          (copyfiles
+             (prompt "Install zz9000ax.audio (version " #newmajor "." #newminor ") into Devs:AHI/")
+             (help "The AHI subdriver that exposes the ZZ9000AX DAC to AHI-aware applications.")
+             (source "Devs/AHI/zz9000ax.audio")
+             (infos)
+             (dest "Devs:AHI")))
+
+      (copyfiles
+         (prompt "Install the ZZ9000AX AHI AudioMode")
+         (help "The AudioMode descriptor telling AHI which mode selects the ZZ9000AX DAC.")
+         (source "Devs/AudioModes/ZZ9000AX")
+         (infos)
+         (dest "Devs:AudioModes"))
+
+      (set #newver   (getversion "Libs/MHI/mhizz9000.library"))
+      (set #newmajor (/ #newver 65536))
+      (set #newminor (- #newver (* #newmajor 65536)))
+
+      (if (exists "LIBS:MHI/mhizz9000.library")
+          (
+             (set #oldver   (getversion "LIBS:MHI/mhizz9000.library"))
+             (set #oldmajor (/ #oldver 65536))
+             (set #oldminor (- #oldver (* #oldmajor 65536)))
+
+             (if (askbool (prompt "Replace existing mhizz9000.library?\n\nInstalled version: " #oldmajor "." #oldminor "\nNew version: " #newmajor "." #newminor "\n\nProceed with overwrite?")
+                          (help "Lets MHI-aware players (AmigaAmp and friends) use the ZZ9000AX hardware MP3 decoder."))
+                 (copyfiles
+                    (prompt "Install mhizz9000.library into LIBS:MHI/ (MHI hardware MP3 decoder)")
+                    (help "Lets MHI-aware players (AmigaAmp and friends) use the ZZ9000AX hardware MP3 decoder.")
+                    (source "Libs/MHI/mhizz9000.library")
+                    (dest "LIBS:MHI")))
+          )
+          (copyfiles
+              (prompt "Install mhizz9000.library (version " #newmajor "." #newminor ") into LIBS:MHI/")
+              (help "Lets MHI-aware players (AmigaAmp and friends) use the ZZ9000AX hardware MP3 decoder.")
+              (source "Libs/MHI/mhizz9000.library")
+              (dest "LIBS:MHI")))
+
+      (if (exists "LIBS:mhizz9000.library")
+          (
+             (set #oldver   (getversion "LIBS:mhizz9000.library"))
+             (set #oldmajor (/ #oldver 65536))
+             (set #oldminor (- #oldver (* #oldmajor 65536)))
+
+             (delete "LIBS:mhizz9000.library"
+                (prompt "Remove obsolete LIBS:mhizz9000.library?\n\nInstalled version at old path: " #oldmajor "." #oldminor "\n\nThe MHI library belongs in LIBS:MHI/.")
+                (help "Older installer versions placed mhizz9000.library directly in LIBS:. The corrected destination is LIBS:MHI/.")
+                (confirm))
+          ))
+
+      ; The audio manual follows the drivers it documents.
+      (makedir #docs-dest (infos))
+      (copyfiles
+         (prompt "ahi.guide (ZZ9000AX audio stack)")
+         (source "Docs/ahi.guide")
+         (infos)
+         (dest #docs-dest))
+
+      (message "ZZ9000AX audio installed.\n\nUse ZZTop's Audio window to adjust balance and sound settings with matched firmware.\n\nThe old ZZ9K_MIX_LEVELS and ZZ9000AX-NOLPF environment variables are no longer used. No environment settings are needed for normal use."
+         (help "ENV:ZZ9K_INT2 is still supported for interrupt-conflict troubleshooting and affects both audio drivers. See ahi.guide, installed with the audio drivers, for details."))
+)
+
+(complete 85)
+
+
 
 
 ; --------------------------------------------------------------------
@@ -441,16 +433,14 @@
             (prompt "Install zz9k-picture.datatype into SYS:Classes/DataTypes/")
             (help "Hardware-accelerated picture datatype class.")
             (source "Classes/DataTypes/zz9k-picture.datatype")
-            (dest "SYS:Classes/DataTypes")
-            (confirm))
+            (dest "SYS:Classes/DataTypes"))
 
          (copyfiles
             (prompt "Stage the JPEG/PNG datatype descriptors into SYS:Storage/DataTypes/ (inactive)")
             (help "The descriptors stay inactive in SYS:Storage/DataTypes until you move them to DEVS:DataTypes yourself - activating them routes JPEG/PNG decoding through the ZZ9000.")
             (source "Storage/DataTypes")
             (all)
-            (dest "SYS:Storage/DataTypes")
-            (confirm))
+            (dest "SYS:Storage/DataTypes"))
 
          (copyfiles
             (prompt "Install the ZZ9000 SDK command-line tools into C:")
@@ -470,8 +460,8 @@
             (help "ZZPlay is the ZZ9000 media player: MPEG-1 video through the P96 video window or a dedicated fullscreen screen, and MP3 audio through MHI or AHI. Unlike the zz9k-* command-line tools it has a Workbench interface and an icon, so it goes in the ZZ9000 drawer with ZZTop where you can double-click it. It still accepts the same CLI arguments if you prefer running it from a Shell. Requires zz9k.library and the SDK-service firmware.")
             (source "Tools")
             (pattern "ZZPlay#?")
-            (dest #zz-drawer)
-            (confirm))
+            (dest #zz-drawer))
+         (set #zz-drawer-used 1)
          (set #zz-drawer-used 1)
 
          ; The manual goes on the machine next to the player, not just in
@@ -481,8 +471,15 @@
             (help "ZZPlay.guide documents the controls, the audio backends, fullscreen behaviour, ToolTypes and the command-line arguments — open it with MultiView. Docs/ZZPlay-project.info in this installer drawer is a project icon you can copy next to a media file so double-clicking it plays through ZZPlay.")
             (source "Docs/ZZPlay.guide")
             (infos)
-            (dest #zz-drawer)
-            (confirm))
+            (dest #zz-drawer))
+
+         ; The SDK payload manual follows the runtime it documents.
+         (makedir #docs-dest (infos))
+         (copyfiles
+            (prompt "sdk.guide (SDK runtime payloads)")
+            (source "Docs/sdk.guide")
+            (infos)
+            (dest #docs-dest))
       )
    )
 )
@@ -534,6 +531,13 @@
                  (help "The ZZ9000-accelerated AmiSSL core library for the selected CPU.")
                  (source (tackon (tackon "Libs/AmiSSL" #zz-amissl-dir) "amissl_v362.library"))
                  (dest "LIBS:AmiSSL"))
+              ; The AmiSSL manual follows the library it documents.
+              (makedir #docs-dest (infos))
+              (copyfiles
+                 (prompt "amissl.guide (accelerated AmiSSL)")
+                 (source "Docs/amissl.guide")
+                 (infos)
+                 (dest #docs-dest))
            )
        )
        (message "The accelerated amissl.library was not installed:\n\nno existing AmiSSL 5.27 installation was found (LIBS:AmiSSL/amissl_v362.library).\n\nInstall AmiSSL 5.27 from Aminet first, then re-run this installer.")
@@ -547,9 +551,8 @@
 ; CLI tools and ZZTop
 ; --------------------------------------------------------------------
 
-(if (askbool (prompt "Install the ZZ9000 command-line utilities and ZZTop configuration GUI?")
-             (help "Installs ZZTop (configuration GUI) into the ZZ9000 drawer alongside ZZPlay, and the ZZScanlines, ZZFwUpdate, ZZNetStats and ZZDiag CLI tools to C:. The advanced ZZCapture diagnostic is offered separately."))
-   (
+(
+
       ; Repeated from the ZZPlay section: either can be chosen on its own.
       (makedir #zz-drawer (infos))
 
@@ -558,8 +561,8 @@
          (help "Configuration GUI with separate Scandoubler, Audio and Other Settings windows, plus hardware readback, firmware update/restore, and an About box. Open the windows from ZZTop's Settings menu; firmware update/restore and the audio debug log are in the Project menu. Native Output/Refresh, scanlines and Capture controls are in Scandoubler.")
          (source "Tools/ZZTop")
          (infos)
-         (dest #zz-drawer)
-         (confirm))
+         (dest #zz-drawer))
+      (set #zz-drawer-used 1)
       (set #zz-drawer-used 1)
 
       (copyfiles
@@ -567,8 +570,7 @@
          (help "ZZTop.guide is the control-panel manual: the Scandoubler window with the output/refresh table and live calibration, the Audio window, Other Settings, firmware update and restore, and the save rules. Open it with MultiView.")
          (source "Docs/ZZTop.guide")
          (infos)
-         (dest #zz-drawer)
-         (confirm))
+         (dest #zz-drawer))
 
       ; Earlier releases put ZZTop in SYS:Tools/. Offer to remove that copy,
       ; otherwise an upgrade silently leaves two ZZTops on the system and the
@@ -605,62 +607,29 @@
          (help "Dumps ZZ9000 board, firmware, VideoCap, USB, SD, AX and Ethernet diagnostic registers.")
          (source "Tools/ZZDiag")
          (dest "C:"))
-   )
-)
 
-
-; --------------------------------------------------------------------
-; Advanced native-video capture diagnostic
-; --------------------------------------------------------------------
-; Manuals (AmiGuide)
-; --------------------------------------------------------------------
-;
-; The tool manuals went out with their tools above. This is the general
-; reference set; one question installs them all, each file listed so the
-; procedure log shows what landed where.
-
-(if (askbool
-       (prompt ("Install the ZZ9000 manuals into %s?" #docs-dest))
-       (help "Installs the on-line manuals: the package overview, the audio stack, Poseidon USB, ZZCapture, the SDK runtime payloads, accelerated AmiSSL and the command-line tools. Open them with MultiView.\n\nThe ZZTop and ZZPlay manuals are installed next to the programs themselves and are not repeated here.")
-       (default 1))
-   (
-      (makedir #docs-dest (infos))
-      (copyfiles
-         (prompt "ZZ9000-Drivers.guide (package overview)")
-         (source "Docs/ZZ9000-Drivers.guide")
-         (infos)
-         (dest #docs-dest))
-      (copyfiles
-         (prompt "ahi.guide (ZZ9000AX audio stack)")
-         (source "Docs/ahi.guide")
-         (infos)
-         (dest #docs-dest))
-      (copyfiles
-         (prompt "usb-poseidon.guide (Poseidon USB setup)")
-         (source "Docs/usb-poseidon.guide")
-         (infos)
-         (dest #docs-dest))
+      ; The command-line tool manual follows the tools it documents.
       (copyfiles
          (prompt "tools.guide (command-line tools)")
          (source "Docs/tools.guide")
          (infos)
          (dest #docs-dest))
-      (copyfiles
-         (prompt "sdk.guide (SDK runtime payloads)")
-         (source "Docs/sdk.guide")
-         (infos)
-         (dest #docs-dest))
-      (copyfiles
-         (prompt "amissl.guide (accelerated AmiSSL)")
-         (source "Docs/amissl.guide")
-         (infos)
-         (dest #docs-dest))
-      (copyfiles
-         (prompt "ZZCapture.guide (native capture diagnostic)")
-         (source "Docs/ZZCapture.guide")
-         (infos)
-         (dest #docs-dest))
-   ))
+)
+
+
+; --------------------------------------------------------------------
+; Manuals (AmiGuide)
+; --------------------------------------------------------------------
+;
+; Every manual follows the component it documents, into #docs-dest.
+; The package overview is the one general manual.
+
+(makedir #docs-dest (infos))
+(copyfiles
+   (prompt "ZZ9000-Drivers.guide (package overview)")
+   (source "Docs/ZZ9000-Drivers.guide")
+   (infos)
+   (dest #docs-dest))
 
 ; --------------------------------------------------------------------
 
@@ -672,8 +641,14 @@
        (prompt "Install ZZCapture into C:")
        (help "Installs the optional native-video timing and C28 calibration diagnostic. Its complete manual is Docs/ZZCapture.guide in this installer drawer.")
        (source "Tools/ZZCapture")
-       (dest "C:")
-       (confirm)))
+       (dest "C:"))
+    ; The diagnostic manual follows the tool.
+    (makedir #docs-dest (infos))
+    (copyfiles
+       (prompt "ZZCapture.guide (native capture diagnostic)")
+       (source "Docs/ZZCapture.guide")
+       (infos)
+       (dest #docs-dest)))
 
 ; --------------------------------------------------------------------
 ; Command path for the ZZ9000 drawer
