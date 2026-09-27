@@ -16,6 +16,12 @@ check_file() {
 
 check_exec() {
     check_file "$1"
+    # MSYS/DrvFs mounts cannot store the POSIX exec bit for cross-built
+    # binaries (chmod is a no-op without metadata); presence and a
+    # non-empty file stand in for executability there. CI runs on Linux.
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*) [ -f "$1" ] && [ -s "$1" ] && return 0 ;;
+    esac
     if [ -f "$1" ] && [ ! -x "$1" ]; then
         echo "NOT EXECUTABLE: $1" >&2
         missing=1

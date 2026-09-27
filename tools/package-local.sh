@@ -8,6 +8,15 @@ staging="$repo_root/zz9000-drivers-$tag"
 zipfile="$repo_root/zz9000-drivers-$tag.zip"
 inst="$repo_root/installer/ZZ9000Installer"
 
+# Python interpreter: python3 on CI/Linux; Windows may expose a Store
+# alias stub that prints an install hint instead of running, so verify
+# it actually executes and fall back to python.
+if python3 -c "pass" >/dev/null 2>&1; then
+    PY=python3
+else
+    PY=python
+fi
+
 cd "$repo_root"
 tools/check-release.sh
 
@@ -29,7 +38,7 @@ md2guide=$sdk_src/scripts/md2guide.py
 SIBLINGS="--sibling ahi.guide --sibling usb-poseidon.guide --sibling ZZCapture.guide --sibling sdk.guide --sibling amissl.guide --sibling ZZPlay.guide --sibling ZZTop.guide --sibling tools.guide"
 make_guide() {
     # shellcheck disable=SC2086
-    python3 "$md2guide" --name "$2" $SIBLINGS "$repo_root/$1" "$inst/Docs/$2.guide"
+    "$PY" "$md2guide" --name "$2" $SIBLINGS "$repo_root/$1" "$inst/Docs/$2.guide"
 }
 
 rm -rf "$staging" "$zipfile"
@@ -101,11 +110,11 @@ else
 fi
 
 mkdir -p "$staging"
-python3 "$md2guide" --name ZZ9000-Drivers installer/README.md "$inst/Docs/ZZ9000-Drivers.guide"
+"$PY" "$md2guide" --name ZZ9000-Drivers installer/README.md "$inst/Docs/ZZ9000-Drivers.guide"
 cp "$inst/Docs/ZZ9000-Drivers.guide" "$staging/ZZ9000-Drivers.guide"
 cp "$inst/Docs/ZZ9000-Drivers.guide.info" "$staging/ZZ9000-Drivers.guide.info"
 cp installer/ZZ9000Installer.info "$staging/ZZ9000Installer.info"
 cp -R installer/ZZ9000Installer "$staging/ZZ9000Installer"
-python3 tools/encode-amiga-docs.py "$staging"
+"$PY" tools/encode-amiga-docs.py "$staging"
 zip -r "$zipfile" "$(basename "$staging")"
 printf '%s\n' "$zipfile"
