@@ -2866,6 +2866,26 @@ static BOOL scandoubler_stage_profile(struct Window *win,
 		live->preview_valid = FALSE;
 	}
 	settings_vals.videocap_profile = profile;
+
+	/* Switching output family (full-rate <-> filtered) changes the
+	 * capture grid, and a Custom framing pair is only valid on the
+	 * grid it was measured on. Demote framing to Automatic for the
+	 * switch instead of dead-ending the Save button: the crop keys
+	 * drop out of the next ZZ9000.CFG write and framing returns to
+	 * the path defaults after the power-cycle. Recalibrate then.
+	 * Without live control there was never a path gate, so keep the
+	 * saved pair untouched there. */
+	if (live->supported && settings_custom_framing() &&
+		!settings_path_matches(live, settings_vals.videocap_sample)) {
+		settings_vals.videocap_crop_h_present = 0;
+		settings_vals.videocap_crop_v_present = 0;
+		settings_vals.videocap_crop_h = 0;
+		settings_vals.videocap_crop_v = 0;
+		scandoubler_update_save_gate(win, live, FALSE);
+		sd_set_status(win,
+			"Output switch resets framing to Automatic - Save, power-cycle, recalibrate");
+		return TRUE;
+	}
 	if (scandoubler_update_save_gate(win, live, TRUE))
 		sd_set_status(win, "Output changed - Save, then power-cycle");
 	return TRUE;
