@@ -63,6 +63,7 @@ int main(void)
     LONG args[2] = { 0, 0 };        /* TIMEOUT/N, QUIET/S */
     struct RDArgs *rda;
     struct ConfigDev *cd = NULL;
+    UBYTE *board_addr = NULL;
     volatile UWORD *eth_config;
     LONG timeout = 5, waited = 0;
     BOOL quiet;
@@ -84,16 +85,22 @@ int main(void)
         cd = FindConfigDev(NULL, ZZ_MANUFACTURER, ZZ_PROD_Z3);
         if (cd == NULL)
             cd = FindConfigDev(NULL, ZZ_MANUFACTURER, ZZ_PROD_Z2);
+        /* Copy the board address before closing: the ConfigDev memory
+         * belongs to expansion.library, and an expunge after the final
+         * CloseLibrary would leave cd dangling (the mhi library keeps
+         * its own copy for the same reason). */
+        if (cd != NULL)
+            board_addr = (UBYTE *)cd->cd_BoardAddr;
         CloseLibrary((struct Library *)ExpansionBase);
     }
 
-    if (cd == NULL)
+    if (board_addr == NULL)
     {
         if (!quiet) PutStr((UBYTE *)"No ZZ9000 found\n");
         return RETURN_WARN;
     }
 
-    eth_config = (volatile UWORD *)((UBYTE *)cd->cd_BoardAddr + REG_ETH_CONFIG);
+    eth_config = (volatile UWORD *)(board_addr + REG_ETH_CONFIG);
     v = *eth_config;
 
     if (!(v & CAP_LINK_STATE))
