@@ -579,33 +579,32 @@
              (help "Previous ZZ9000 releases installed ZZTop into SYS:Tools. Leaving it there means you have two copies and the stale one will not match this release.")
              (infos)))
 
+      ; The four C: tools install without further confirmation: the section
+      ; question above already named them, and one page per tool just adds
+      ; clicks. Each copy still lists separately in the procedure log.
       (copyfiles
          (prompt "Install ZZScanlines into C:")
          (help "CLI front-end for the ZZ9000's scanline bitstream (classic / soft / gradient patterns with parity control). Requires firmware 2.0.0 or later.")
          (source "Tools/ZZScanlines")
-         (dest "C:")
-         (confirm))
+         (dest "C:"))
 
       (copyfiles
          (prompt "Install ZZFwUpdate into C:")
          (help "Pushes a file (e.g. a new BOOT.bin) onto the ZZ9000's FAT32 SD card via the Zorro bus, so firmware updates can be applied without removing the card. Requires firmware with FWUP protocol support.")
          (source "Tools/ZZFwUpdate")
-         (dest "C:")
-         (confirm))
+         (dest "C:"))
 
       (copyfiles
          (prompt "Install ZZNetStats into C:")
          (help "Dumps SANA-II global statistics for ZZ9000Net.device - useful for debugging link / throughput issues.")
          (source "Tools/ZZNetStats")
-         (dest "C:")
-         (confirm))
+         (dest "C:"))
 
       (copyfiles
          (prompt "Install ZZDiag into C:")
          (help "Dumps ZZ9000 board, firmware, VideoCap, USB, SD, AX and Ethernet diagnostic registers.")
          (source "Tools/ZZDiag")
-         (dest "C:")
-         (confirm))
+         (dest "C:"))
    )
 )
 
