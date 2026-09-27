@@ -2078,7 +2078,14 @@ void DrawLine(__REGA0(struct BoardInfo *b), __REGA1(struct RenderInfo *r), __REG
 		gfxdata->pitch[GFXDATA_DST] = (r->BytesPerRow >> 2);
 
 		writeGfxDataU8(gfxdata, GFXDATA_U8_COLORMODE, (uint8_t)colormode);
-		writeGfxDataU8(gfxdata, GFXDATA_U8_DRAWMODE, l->DrawMode);
+		/* With a full pattern and mask, JAM1 and JAM2 both write only
+		 * FgPen. Keep inversion and complement on the mode-aware path;
+		 * high DrawMode bits are ignored by the current line renderer. */
+		UBYTE submitted_mode = l->DrawMode;
+		if (l->LinePtrn == 0xFFFF && mask == 0xFF &&
+		    !(submitted_mode & (COMPLEMENT | INVERSVID)))
+			submitted_mode = 0;
+		writeGfxDataU8(gfxdata, GFXDATA_U8_DRAWMODE, submitted_mode);
 		gfxdata->u8_user[GFXDATA_U8_LINE_PATTERN_OFFSET] = line_pat_off;
 		gfxdata->u8_user[GFXDATA_U8_LINE_PADDING] = l->pad;
 
