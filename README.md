@@ -410,80 +410,23 @@ needs `EmulatePlanar=On`, because the card exposes only 8-bit CLUT,
 
 ## Command-Line Tools
 
-### Firmware Updates
+The command-line tools install to `C:`. The full manual — usage,
+arguments, the firmware backup/rollback flow, and what each tool
+reports — is [docs/cli-tools.md](docs/cli-tools.md), shipped as
+`tools.guide` in the installer drawer:
 
-`ZZFwUpdate` copies a file from AmigaOS to the ZZ9000 FAT32 microSD card
-without removing the card. The usual firmware update flow is:
+- `ZZFwUpdate` — copy firmware to the SD card without pulling it,
+  keep/restore `BOOT.bak` rollbacks.
+- `ZZNetStats` — SANA-II counters plus firmware RX queue/drop state,
+  for before/after throughput reading.
+- `ZZDiag` — board, firmware, VideoCap, USB, SD, audio and Ethernet
+  diagnostics in one dump; checks the matched set.
+- `ZZScanlines` — live scanline mode and parity control.
 
-```text
-ZZFwUpdate RAM:BOOT.bin
-```
-
-Power-cycle the Amiga after replacing `BOOT.bin` so the ZZ9000 boots
-the new firmware.
-
-By default, the destination filename on the SD card is the source
-basename. To write a different root-level filename, pass it as the
-optional second argument:
-
-```text
-ZZFwUpdate SYS:Storage/zz9000-fw.bin BOOT.bin
-```
-
-The destination name must be 1-64 characters and contain only `A-Z`,
-`a-z`, `0-9`, `.`, `_`, or `-`.
-
-When you replace `BOOT.bin`, the firmware automatically keeps the
-previous image as `BOOT.bak`. If a new firmware boots but misbehaves,
-you can roll back to that backup without removing the card:
-
-```text
-ZZFwUpdate RESTORE
-```
-
-This promotes `BOOT.bak` to the active `BOOT.bin` (discarding the
-replaced image, so no backup remains afterwards) after a confirmation
-prompt. Pass `-y` to skip the prompt, or a name to restore something
-other than `BOOT.bin`. Restore talks to the *running* firmware, so it
-recovers a booting-but-misbehaving update; a fully non-booting card
-still needs the microSD removed and restored on another computer.
-Requires firmware with RESTORE (FWUP cmd 5) support.
-
-### Network Diagnostics
-
-`ZZNetStats` opens `ZZ9000Net.device`, requests SANA-II global stats,
-and prints firmware RX queue/backpressure/drop counters:
-
-```text
-ZZNetStats
-ZZNetStats DEVICE=Networks/ZZ9000Net.device UNIT=0
-ZZNetStats Networks/ZZ9000Net.device 0
-```
-
-Run it before and after a throughput test to see whether drops are
-happening in the Amiga-side driver or firmware RX path.
-
-### Board Diagnostics
-
-`ZZDiag` dumps the most useful hardware-facing diagnostics in one
-place:
-
-```text
-ZZDiag
-ZZDiag 3 50
-```
-
-The optional arguments are sample count and AmigaDOS delay ticks
-between samples. The VideoCap section includes the detailed
-video-capture and genlock diagnostic registers when the running
-firmware exposes them.
-
-### Native Capture Diagnostics
-
-`ZZCapture` is an optional advanced diagnostic for native Amiga video entering
-the ZZ9000. For a first report, install the tool and firmware/bitstream from
-the same matched package, cold-boot, and collect the non-phase-changing
-commands:
+`ZZCapture` is an optional advanced diagnostic for native Amiga video
+entering the ZZ9000. For a first report, install the tool and
+firmware/bitstream from the same matched package, cold-boot, and collect
+the non-phase-changing commands:
 
 ```text
 ZZCapture info >RAM:zzcapture-info.txt
@@ -492,29 +435,10 @@ ZZCapture observe >RAM:zzcapture-observe.txt
 
 Send both complete files together with the exact hardware and firmware
 variant. The `phase`, `check`, `startup`, and `calibrate` commands are
-experimental A4000/C28 investigation tools; they require `Stack 32768` and
-the exact matched diagnostic firmware. Do not bypass the capability check or
-copy a phase value between machines. See the complete
+experimental A4000/C28 investigation tools; they require `Stack 32768`
+and the exact matched diagnostic firmware. Do not bypass the capability
+check or copy a phase value between machines. See the complete
 [ZZCapture manual](ZZCapture/README.md) before using them.
-
-### Scanlines
-
-`ZZScanlines` controls the scanline bitstream modes exposed by recent
-firmware/bitstream builds:
-
-```text
-ZZScanlines 0
-ZZScanlines 1 0
-ZZScanlines 2 1
-ZZScanlines 3 0
-```
-
-Modes are `0=off`, `1=classic`, `2=soft`, `3=gradient`; parity is
-`0=odd dark`, `1=even dark`.
-
-Like ZZTop's Scandoubler window, `ZZScanlines` changes the live FPGA
-state; to make scanlines survive a power cycle, save them to
-`ZZ9000.CFG` (firmware 2.3+, ZZTop Scandoubler window's Save button).
 
 ## Building
 

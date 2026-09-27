@@ -26,7 +26,7 @@ else
     exit 1
 fi
 md2guide=$sdk_src/scripts/md2guide.py
-SIBLINGS="--sibling ahi.guide --sibling usb-poseidon.guide --sibling ZZCapture.guide --sibling sdk.guide --sibling amissl.guide --sibling ZZPlay.guide --sibling ZZTop.guide"
+SIBLINGS="--sibling ahi.guide --sibling usb-poseidon.guide --sibling ZZCapture.guide --sibling sdk.guide --sibling amissl.guide --sibling ZZPlay.guide --sibling ZZTop.guide --sibling tools.guide"
 make_guide() {
     # shellcheck disable=SC2086
     python3 "$md2guide" --name "$2" $SIBLINGS "$repo_root/$1" "$inst/Docs/$2.guide"
@@ -50,6 +50,7 @@ make_guide ahi/README.md ahi
 make_guide usb-poseidon/README.md usb-poseidon
 make_guide ZZCapture/README.md ZZCapture
 make_guide ZZTop/README.md ZZTop
+make_guide docs/cli-tools.md tools
 # Diagnostic-only MHI build (feeder-vs-pump hardware isolation); staged
 # under Docs, deliberately never installed as the production library.
 if [ -f mhi/mhizz9000.library.decode-only ]; then
