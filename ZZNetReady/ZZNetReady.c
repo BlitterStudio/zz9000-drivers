@@ -12,8 +12,12 @@
  *   0  (OK)    Link ready - start the network
  *              (also returned if the firmware can't report link state,
  *               so older firmware keeps the old always-start behaviour)
- *   5  (WARN)  ZZ9000 present, no link within TIMEOUT
- *   20 (FAIL)  No ZZ9000 found (or bad arguments)
+ *   5  (WARN)  Not ready: no ZZ9000 found, no link within TIMEOUT,
+ *              or unreadable arguments
+ *
+ * Everything except OK returns WARN, never FAIL: AmigaDOS shells run
+ * User-Startup with FAILAT 10 by default, and a failure code of 20
+ * would abort the rest of the script before an If WARN can branch.
  *
  * User-Startup example:
  *   ZZNetReady QUIET
@@ -67,7 +71,7 @@ int main(void)
     if ((rda = ReadArgs((UBYTE *)"TIMEOUT/N,QUIET/S", args, NULL)) == NULL)
     {
         PrintFault(IoErr(), (UBYTE *)"ZZNetReady");
-        return RETURN_FAIL;
+        return RETURN_WARN;
     }
     if (args[0])
         timeout = *(LONG *)args[0];
@@ -86,7 +90,7 @@ int main(void)
     if (cd == NULL)
     {
         if (!quiet) PutStr((UBYTE *)"No ZZ9000 found\n");
-        return RETURN_FAIL;
+        return RETURN_WARN;
     }
 
     eth_config = (volatile UWORD *)((UBYTE *)cd->cd_BoardAddr + REG_ETH_CONFIG);

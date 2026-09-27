@@ -109,8 +109,11 @@ ZZNetReady TIMEOUT=10 QUIET
 
 Exit codes: `0` link ready (also returned on firmware that cannot
 report link state, so the old always-start behaviour is kept), `5`
-card found but no link within `TIMEOUT` seconds (default 5), `20` no
-ZZ9000 found. A typical `S:User-Startup` gating:
+not ready - no card, no link within `TIMEOUT` seconds (default 5),
+or unreadable arguments. Everything except OK returns WARN because
+AmigaDOS shells run `S:User-Startup` with FAILAT 10 by default: a
+failure code would abort the rest of the script before `If WARN`
+can branch. A typical `S:User-Startup` gating:
 
 ```text
 ZZNetReady QUIET
