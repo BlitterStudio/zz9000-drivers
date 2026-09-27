@@ -97,14 +97,14 @@ when the running firmware exposes them. It also checks whether the
 installed firmware, drivers and SDK payloads are a matched set; include
 its output when reporting a problem.
 
-### Boot-time link check — zz9kcheck
+### Boot-time link check — ZZNetReady
 
-`zz9kcheck` answers one question for `S:User-Startup`: is the ZZ9000
+`ZZNetReady` answers one question for `S:User-Startup`: is the ZZ9000
 present, and is its Ethernet port up? It needs no TCP/IP stack:
 
 ```text
-zz9kcheck
-zz9kcheck TIMEOUT=10 QUIET
+ZZNetReady
+ZZNetReady TIMEOUT=10 QUIET
 ```
 
 Exit codes: `0` link ready (also returned on firmware that cannot
@@ -113,7 +113,7 @@ card found but no link within `TIMEOUT` seconds (default 5), `20` no
 ZZ9000 found. A typical `S:User-Startup` gating:
 
 ```text
-zz9kcheck QUIET
+ZZNetReady QUIET
 If WARN
   ; no card or no link - skip the stack this boot
 Else

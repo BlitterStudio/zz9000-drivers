@@ -261,20 +261,20 @@ jobs:
           path: ZZDiag/ZZDiag
           if-no-files-found: error
 
-  zz9kcheck:
-    name: zz9kcheck — boot-time link check
+  ZZNetReady:
+    name: ZZNetReady — boot-time link check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - name: Build zz9kcheck
         run: |
-          docker run --rm -v "$PWD":/src -w /src/zz9kcheck "$AMIGA_IMAGE" \
-            m68k-amigaos-gcc zz9kcheck.c -m68020 -O2 -o zz9kcheck \
+          docker run --rm -v "$PWD":/src -w /src/ZZNetReady "$AMIGA_IMAGE" \
+            m68k-amigaos-gcc ZZNetReady.c -m68020 -O2 -o ZZNetReady \
               -Wall -Wextra -noixemul -lamiga
       - uses: actions/upload-artifact@v7
         with:
-          name: zz9kcheck
-          path: zz9kcheck/zz9kcheck
+          name: ZZNetReady
+          path: ZZNetReady/ZZNetReady
           if-no-files-found: error
 
   zzcapture:
@@ -399,7 +399,7 @@ jobs:
   release:
     name: Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [host-checks, rtg, zztop, zzscanlines, zzfwupdate, usb-poseidon, sd-boot, net, ZZNetStats, ZZDiag, zz9kcheck, zzcapture, mhi, ahi, sdk, amissl]
+    needs: [host-checks, rtg, zztop, zzscanlines, zzfwupdate, usb-poseidon, sd-boot, net, ZZNetStats, ZZDiag, ZZNetReady, zzcapture, mhi, ahi, sdk, amissl]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -439,7 +439,7 @@ jobs:
           install -Dm755 artifacts/ZZFwUpdate/ZZFwUpdate                "$INST/Tools/ZZFwUpdate"
           install -Dm755 artifacts/ZZNetStats/ZZNetStats               "$INST/Tools/ZZNetStats"
           install -Dm755 artifacts/ZZDiag/ZZDiag                       "$INST/Tools/ZZDiag"
-          install -Dm755 artifacts/zz9kcheck/zz9kcheck                 "$INST/Tools/zz9kcheck"
+          install -Dm755 artifacts/ZZNetReady/ZZNetReady               "$INST/Tools/ZZNetReady"
           install -Dm755 artifacts/ZZCapture/ZZCapture                 "$INST/Tools/ZZCapture"
           # Amiga-side manuals ship as AmiGuide databases generated from
           # the canonical Markdown sources — raw .md has no Amiga reader.

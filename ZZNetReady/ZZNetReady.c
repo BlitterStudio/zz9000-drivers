@@ -1,5 +1,5 @@
 /*
- * zz9kcheck - Boot-time check: ZZ9000 present and Ethernet link ready?
+ * ZZNetReady - Boot-time check: ZZ9000 present and Ethernet link ready?
  *
  * For S:User-Startup, to decide whether to start the network stack.
  * Needs no TCP/IP stack. Link readiness needs firmware with
@@ -16,7 +16,7 @@
  *   20 (FAIL)  No ZZ9000 found (or bad arguments)
  *
  * User-Startup example:
- *   zz9kcheck QUIET
+ *   ZZNetReady QUIET
  *   If WARN
  *     ; no card or no link - skip the stack this boot
  *   Else
@@ -66,7 +66,7 @@ int main(void)
 
     if ((rda = ReadArgs((UBYTE *)"TIMEOUT/N,QUIET/S", args, NULL)) == NULL)
     {
-        PrintFault(IoErr(), (UBYTE *)"zz9kcheck");
+        PrintFault(IoErr(), (UBYTE *)"ZZNetReady");
         return RETURN_FAIL;
     }
     if (args[0])

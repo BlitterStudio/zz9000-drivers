@@ -71,4 +71,5 @@ installer/ZZ9000Installer/Classes/
 installer/ZZ9000Installer/Libs/
 mhi/mhizz9000.library.decode-only
 mhi/mhizz9000.library.decode-only.debug
-zz9kcheck/zz9kcheck
+ZZNetReady/ZZNetReady
+ZZNetReady/ZZNetReady

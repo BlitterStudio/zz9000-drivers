@@ -618,9 +618,9 @@
          (dest "C:"))
 
       (copyfiles
-         (prompt "Install zz9kcheck into C:")
+         (prompt "Install ZZNetReady into C:")
          (help "Boot-time check for S:User-Startup: is the ZZ9000 present and its Ethernet link negotiated? Exit codes 0 (start the network), 5 (no link), 20 (no card). On firmware without link reporting it exits 0, keeping the old always-start behaviour.")
-         (source "Tools/zz9kcheck")
+         (source "Tools/ZZNetReady")
          (dest "C:"))
 
       ; The command-line tool manual follows the tools it documents.
