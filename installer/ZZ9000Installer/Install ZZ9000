@@ -683,4 +683,4 @@
 (complete 100)
 
 
-(message "Installation complete. Please reboot to pick up the changes.\n\n  Repo & docs:       https://github.com/BlitterStudio/zz9000-drivers\n  Firmware updates:  https://github.com/BlitterStudio/zz9000-firmware\n  Hardware:          https://mntre.com/zz9000\n  Community:         https://community.mnt.re - #mnt-amiga on irc.libera.chat - zz9000@mntre.com\n\nEnjoy your MNT ZZ9000!")
+(message "Installation complete. Please reboot to pick up the changes.\n\n  Repo & docs:       https://github.com/BlitterStudio/zz9000-drivers\n  Firmware updates:  https://github.com/BlitterStudio/zz9000-firmware\n\nEnjoy your ZZ9000!")
