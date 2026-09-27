@@ -8,7 +8,9 @@ amiga_docker="$script_dir/amiga-docker.sh"
 cd "$repo_root"
 
 "$amiga_docker" rtg ./build.sh
-"$amiga_docker" ZZTop ./build-gcc.sh
+# ZZTop/build-gcc.sh stages the zz9k headers on the host, then re-execs
+# itself through amiga-docker.sh — run it on the host like CI does.
+ZZTop/build-gcc.sh
 "$amiga_docker" ZZScanlines m68k-amigaos-gcc -O2 -noixemul -I../include \
     -o ZZScanlines ZZScanlines.c -lamiga
 "$amiga_docker" ZZFwUpdate m68k-amigaos-gcc -O2 -noixemul -Wall -Wextra \
@@ -22,7 +24,9 @@ cd "$repo_root"
 # mhi/build.sh stages zz9k headers from the sibling zz9000-sdk checkout on
 # the host, then re-execs itself through amiga-docker.sh.
 mhi/build.sh
-"$amiga_docker" ahi/driver ./build.sh
+# ahi/driver/build.sh stages the zz9k headers on the host, then re-execs
+# itself through amiga-docker.sh — run it on the host like CI does.
+ahi/driver/build.sh
 "$amiga_docker" ahi/duplextest ./build.sh
 "$amiga_docker" ZZDiag ./build.sh
 "$amiga_docker" ZZCapture ./build.sh
