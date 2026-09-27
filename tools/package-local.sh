@@ -115,6 +115,8 @@ cp "$inst/Docs/ZZ9000-Drivers.guide" "$staging/ZZ9000-Drivers.guide"
 cp "$inst/Docs/ZZ9000-Drivers.guide.info" "$staging/ZZ9000-Drivers.guide.info"
 cp installer/ZZ9000Installer.info "$staging/ZZ9000Installer.info"
 cp -R installer/ZZ9000Installer "$staging/ZZ9000Installer"
+# .keep files only exist to keep empty source dirs in git.
+find "$staging" -name '.keep' -type f -delete
 "$PY" tools/encode-amiga-docs.py "$staging"
 if command -v zip >/dev/null 2>&1; then
     zip -r "$zipfile" "$(basename "$staging")"

@@ -479,6 +479,8 @@ jobs:
           cp "$INST/Docs/ZZ9000-Drivers.guide.info" "$STAGING/ZZ9000-Drivers.guide.info"
           cp installer/ZZ9000Installer.info "$STAGING/ZZ9000Installer.info"
           cp -r installer/ZZ9000Installer "$STAGING/ZZ9000Installer"
+          # .keep files only exist to keep empty source dirs in git.
+          find "$STAGING" -name '.keep' -type f -delete
           python3 tools/encode-amiga-docs.py "$STAGING"
           zip -r "$STAGING.zip" "$STAGING"
           ls -lh "$STAGING.zip"
