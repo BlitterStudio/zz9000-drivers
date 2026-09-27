@@ -70,7 +70,7 @@ cp "$pkg/C/ZZPlay.info" "$out/C/"
 # ZZPlay's manual, and the project icon the manual tells people to copy next
 # to a media file. The SDK stages several developer references into Docs/ too;
 # only these two are end-user material and belong in the installer.
-cp "$pkg/Docs/zzplay.md"           "$out/Docs/"
+cp "$pkg/Docs/ZZPlay.guide"         "$out/Docs/"
 cp "$pkg/Docs/ZZPlay-project.info" "$out/Docs/"
 
 echo ">> SDK payloads collected:"
