@@ -82,7 +82,13 @@
 
       (complete 30)
 
-      (if (exists "Devs:Picasso96Settings")
+      ; The migration notice and backups appear only when the existing
+      ; settings file is not already ours: the marker in ENVARC is written
+      ; right after this installer places its settings file, so re-runs
+      ; stay silent. Upgrading from a release without the marker shows the
+      ; notice once more, then never again.
+      (if (and (exists "Devs:Picasso96Settings")
+               (not (exists "ENVARC:ZZ9000.P96Settings")))
          (
             (message "Picasso96Settings migration required\n\nZZ9000.card 2.4 and newer identifies the board as BT_MNT_ZZ9000 instead of the older uaegfx board type. Existing Picasso96Settings files saved for board type 14 may not attach their modes to the new driver identity.\n\nThe installer will back up your current Devs:Picasso96Settings before installing the ZZ9000 settings file bundled with this release.")
 
@@ -121,12 +127,14 @@
          (source (tackon "Devs" #zz-p96-settings))
          (dest "Devs:")
          (newname "Picasso96Settings"))
+
+      (textfile
+         (prompt "Mark Picasso96Settings as ZZ9000-installed in ENVARC:ZZ9000.P96Settings")
+         (help "Records that this installer placed the current Picasso96Settings, so later runs skip the migration notice and backups.")
+         (append "ZZ9000")
+         (dest "ENVARC:ZZ9000.P96Settings"))
 )
 
-
-; --------------------------------------------------------------------
-; Native-video output and refresh
-; --------------------------------------------------------------------
 
 (complete 50)
 
