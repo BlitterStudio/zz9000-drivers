@@ -429,7 +429,7 @@ jobs:
           # Sibling names must cover the full drawer doc set so
           # cross-document links resolve inside the drawer.
           MD2GUIDE="sdk-src/scripts/md2guide.py"
-          SIBLINGS="--sibling ahi.guide --sibling usb-poseidon.guide --sibling ZZCapture.guide --sibling sdk.guide --sibling amissl.guide --sibling ZZPlay.guide"
+          SIBLINGS="--sibling ahi.guide --sibling usb-poseidon.guide --sibling ZZCapture.guide --sibling sdk.guide --sibling amissl.guide --sibling ZZPlay.guide --sibling ZZTop.guide"
           make_guide() {
             # shellcheck disable=SC2086
             python3 "$MD2GUIDE" --name "$2" $SIBLINGS "$1" "$INST/Docs/$2.guide"
@@ -437,6 +437,7 @@ jobs:
           make_guide ahi/README.md ahi
           make_guide usb-poseidon/README.md usb-poseidon
           make_guide ZZCapture/README.md ZZCapture
+          make_guide ZZTop/README.md ZZTop
           # Diagnostic-only MHI build; staged under Docs, never installed
           # as the production library.
           install -Dm644 artifacts/mhizz9000.library.decode-only/mhizz9000.library.decode-only \
