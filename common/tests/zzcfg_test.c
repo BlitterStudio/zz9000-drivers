@@ -330,6 +330,37 @@ static void test_fast_ram_status(void)
     check(zzcfg_fast_ram_effective_state(0, &outcome) ==
           ZZCFG_FAST_RAM_UNAVAILABLE,
           "old firmware without Fast RAM outcome disables the setting");
+
+    {
+        struct zzcfg_values staged;
+
+        defaults(&staged);
+        staged.fast_ram = 1;
+        staged.fast_ram_present = 1;
+        zzcfg_fast_ram_invalidate_withheld(&staged,
+            ZZ_CFG_FAST_RAM_OUTCOME_INVALID);
+        check(staged.fast_ram_invalid && !staged.fast_ram_present &&
+              !staged.fast_ram,
+              "invalid Fast RAM outcome remains fail-closed on shared save");
+
+        defaults(&staged);
+        staged.fast_ram = 1;
+        staged.fast_ram_present = 1;
+        zzcfg_fast_ram_invalidate_withheld(&staged,
+            ZZ_CFG_FAST_RAM_OUTCOME_TRUNCATED);
+        check(staged.fast_ram_invalid && !staged.fast_ram_present &&
+              !staged.fast_ram,
+              "truncated Fast RAM outcome remains fail-closed on shared save");
+
+        defaults(&staged);
+        staged.fast_ram = 1;
+        staged.fast_ram_present = 1;
+        zzcfg_fast_ram_invalidate_withheld(&staged,
+            ZZ_CFG_FAST_RAM_OUTCOME_TIMEOUT);
+        check(!staged.fast_ram_invalid && staged.fast_ram_present &&
+              staged.fast_ram,
+              "non-corrupt Fast RAM outcome keeps staged preference");
+    }
 }
 
 int main(void)

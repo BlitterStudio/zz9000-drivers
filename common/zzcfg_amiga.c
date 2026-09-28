@@ -386,6 +386,13 @@ static void zzcfg_fast_ram_invalidate(struct zzcfg_values *v)
     v->fast_ram_invalid = 1;
 }
 
+void zzcfg_fast_ram_invalidate_withheld(struct zzcfg_values *v, UWORD outcome)
+{
+    if (outcome == ZZ_CFG_FAST_RAM_OUTCOME_INVALID ||
+            outcome == ZZ_CFG_FAST_RAM_OUTCOME_TRUNCATED)
+        zzcfg_fast_ram_invalidate(v);
+}
+
 void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v)
 {
     UWORD pos = 0;

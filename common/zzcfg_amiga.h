@@ -179,6 +179,10 @@ enum zzcfg_fast_ram_state {
 enum zzcfg_fast_ram_state zzcfg_fast_ram_effective_state(ULONG board,
     UWORD *outcome);
 
+/* A malformed or boot-truncated configuration must not be rewritten as a
+ * clean Fast RAM preference by an unrelated whole-file save. */
+void zzcfg_fast_ram_invalidate_withheld(struct zzcfg_values *v, UWORD outcome);
+
 /* Is `name` a valid `hdf = ...` value? Mirrors the firmware's
  * hdf_name_valid rules (zz_config.c): printable ASCII except '/',
  * '\' and ':', no leading '.', 1..ZZCFG_HDF_CHARS characters —

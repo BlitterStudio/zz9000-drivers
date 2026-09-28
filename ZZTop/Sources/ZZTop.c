@@ -1841,6 +1841,16 @@ static void settings_fast_ram_refresh_state(void)
 	}
 }
 
+/* The raw file seeds both editor windows, but the boot outcome can withhold
+ * Fast RAM for corruption that the readable snapshot does not reproduce. */
+static void settings_fast_ram_apply_boot_outcome(struct zzcfg_values *sv)
+{
+	UWORD outcome = ZZ_CFG_FAST_RAM_OUTCOME_PENDING;
+
+	zzcfg_fast_ram_effective_state((ULONG)zz_regs, &outcome);
+	zzcfg_fast_ram_invalidate_withheld(sv, outcome);
+}
+
 static int settings_parse_mac(const char *s)
 {
 	int i;
@@ -2040,6 +2050,7 @@ static UWORD settings_reload_from_card(struct zzcfg_values *sv,
 			sizeof(settings_cfg_text), rawlen);
 		if (st == ZZ_CFG_FILE_OK)
 			zzcfg_parse_text(settings_cfg_text, *rawlen, sv);
+		settings_fast_ram_apply_boot_outcome(sv);
 	}
 	return st;
 }
@@ -2079,15 +2090,7 @@ static void settings_populate(struct Window *win, UWORD fw_capabilities)
 			"Config read failed (SD error)");
 	}
 	settings_fast_ram_refresh_state();
-	if (settings_fast_ram_outcome == ZZ_CFG_FAST_RAM_OUTCOME_INVALID ||
-			settings_fast_ram_outcome == ZZ_CFG_FAST_RAM_OUTCOME_TRUNCATED) {
-		/* A malformed or boot-truncated file was withheld. Do not show its
-		 * raw preference as a clean staged-on value; a cycle selection
-		 * explicitly clears this poison before Save. */
-		sv->fast_ram = 0;
-		sv->fast_ram_present = 0;
-		sv->fast_ram_invalid = 1;
-	}
+	
 
 
 	if (!win) return;
