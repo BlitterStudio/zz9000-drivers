@@ -1,51 +1,52 @@
 #!/bin/sh
 set -eu
 
-# Stage the zz9k.library client headers from a zz9000-sdk checkout into a
-# build directory so the docker build (which mounts only this repo) can
-# include them. Shared by ahi/driver/build.sh, mhi/build.sh and
-# ZZTop/build-gcc.sh -- each keeps only its per-consumer grep gate.
+# Stage the zz9k.library client headers from the SDK subtree so the Docker
+# builds (which mount only this repo) can include them.
 #
-# Usage: tools/stage-zz9k-headers.sh <stage-dir> <repo-root>
+# Since the SDK consolidation the sources live at sdk/ inside the
+# zz9000-firmware repository; sdk/SDK_REF pins a firmware commit.
 #
-# Source conventions (mirrors sdk/build.sh): ZZ9000_SDK override, else a
-# sibling checkout as-is, else clone/reuse the SDK at the pinned
-# sdk/SDK_REF into sdk/work/zz9000-sdk (shared with sdk/build.sh, so
-# releases compile every consumer against exactly the zz9k.library they
-# package). Runs on the host before the docker re-exec; inside the
-# container the staged copy is already present, so callers skip this.
+# Resolution: ZZ9000_SDK override (path to the sdk/ subtree root), else a
+# sibling firmware checkout's sdk/, else clone the firmware repo into
+# sdk/work/ at the pinned ref and use its sdk/.
+#
+# Usage: stage-zz9k-headers.sh <stage_dir> <repo_root>
 stage_dir=$1
 repo_root=$2
 
 sdk_src=${ZZ9000_SDK:-}
-if [ -z "$sdk_src" ] && [ -d "$repo_root/../zz9000-sdk/include/zz9k" ]; then
-  sdk_src="$repo_root/../zz9000-sdk"
+
+if [ -z "$sdk_src" ] && [ -d "$repo_root/../zz9000-firmware/sdk/include/zz9k" ]; then
+  sdk_src="$repo_root/../zz9000-firmware/sdk"
 fi
+
 if [ -z "$sdk_src" ] && command -v git >/dev/null 2>&1; then
   SDK_REF=$(cat "$repo_root/sdk/SDK_REF")
-  SDK_REPO=${SDK_REPO:-https://github.com/BlitterStudio/zz9000-sdk.git}
-  sdk_src="$repo_root/sdk/work/zz9000-sdk"
-  if [ ! -d "$sdk_src/.git" ]; then
-    echo ">> Cloning zz9000-sdk into $sdk_src"
-    git clone "$SDK_REPO" "$sdk_src"
+  SDK_REPO=${SDK_REPO:-https://github.com/BlitterStudio/zz9000-firmware.git}
+  fw="$repo_root/sdk/work/zz9000-firmware"
+  if [ ! -d "$fw/.git" ]; then
+    echo ">> Cloning zz9000-firmware into $fw"
+    git clone "$SDK_REPO" "$fw"
   fi
-  echo ">> Checking out pinned ref $SDK_REF"
-  git -C "$sdk_src" fetch origin 2>/dev/null || true
-  git -C "$sdk_src" checkout -f "$SDK_REF"
+  echo ">> Checking out pinned firmware ref $SDK_REF"
+  git -C "$fw" fetch origin 2>/dev/null || true
+  git -C "$fw" checkout -f "$SDK_REF"
+  sdk_src="$fw/sdk"
 fi
+
 if [ -n "$sdk_src" ] && [ -d "$sdk_src/include/zz9k" ]; then
   rm -rf "$stage_dir"
-  mkdir -p "$stage_dir/zz9k" \
-           "$stage_dir/proto" \
-           "$stage_dir/clib"
+  mkdir -p "$stage_dir/zz9k" "$stage_dir/proto" "$stage_dir/clib"
   cp -r "$sdk_src/include/zz9k/." "$stage_dir/zz9k/"
   cp -r "$sdk_src/host/include/zz9k/." "$stage_dir/zz9k/"
   cp -r "$sdk_src/amiga/include/zz9k/." "$stage_dir/zz9k/"
   cp "$sdk_src/amiga/include/proto/zz9k.h" "$stage_dir/proto/"
   cp "$sdk_src/amiga/include/clib/zz9k_protos.h" "$stage_dir/clib/"
 fi
+
 if [ ! -d "$stage_dir/zz9k" ]; then
-  echo "ERROR: zz9k headers not staged. Provide a zz9000-sdk checkout as a" >&2
-  echo "       sibling directory or set ZZ9000_SDK=/path/to/zz9000-sdk." >&2
+  echo "ERROR: zz9k headers not staged. Provide a firmware checkout with the" >&2
+  echo "       SDK subtree (sibling directory, or ZZ9000_SDK=/path/to/sdk)." >&2
   exit 1
 fi
