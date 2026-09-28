@@ -389,9 +389,10 @@ static void print_aperture_layout(const struct ZZ9000Board *board)
         int descriptor_verified = 0;
         int resamples = 0;
         descriptor = zz9000_read_z2_aperture_verified(board->address,
-            board->board_size, fw_caps, &descriptor_verified,
+            board->board_size, &fw_caps, &descriptor_verified,
             &resamples);
-        printf("FirmwareCapabilities   = 0x%04x\n", (unsigned)fw_caps);
+        printf("FirmwareCapabilities   = 0x%04x (confirmed)\n",
+            (unsigned)fw_caps);
         printf("Z2ApertureDescriptor   = 0x%08lx\n",
             (unsigned long)descriptor);
         /* Report from every observation: the helper's resample count

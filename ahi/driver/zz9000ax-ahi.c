@@ -1448,7 +1448,7 @@ static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagLi
     uint16_t fw_caps = read_reg(hw_addr, ZZ_REG_FW_CAPABILITIES);
     int descriptor_verified = 0;
     uint32_t descriptor = zz9000_read_z2_aperture_verified(
-        hw_addr, Z9AXBase->hw_size, fw_caps, &descriptor_verified, NULL);
+        hw_addr, Z9AXBase->hw_size, &fw_caps, &descriptor_verified, NULL);
     enum ZZApertureNegotiation status = zz_z2_aperture_negotiate(
         descriptor, Z9AXBase->hw_size, fw_caps, &layout);
 

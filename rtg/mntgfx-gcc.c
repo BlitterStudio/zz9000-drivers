@@ -834,7 +834,11 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 			int aperture_verified = 0;
 			aperture_info = zz9000_read_z2_aperture_verified(
 				(ULONG)b->RegisterBase, (uint32_t)cd->cd_BoardSize,
-				fw_caps, &aperture_verified, NULL);
+				&fw_caps, &aperture_verified, NULL);
+			/* Store the capability view the verification actually
+			 * used, so downstream feature gates match the negotiated
+			 * layout decision. */
+			b->CardData[ZZ_CARD_DATA_FW_CAPABILITIES] = fw_caps;
 			aperture_status = zz_z2_aperture_negotiate(aperture_info,
 				(uint32_t)cd->cd_BoardSize, fw_caps, &aperture_layout);
 			if (!aperture_verified ||

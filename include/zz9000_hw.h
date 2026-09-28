@@ -229,8 +229,8 @@ static inline ULONG zz9000_read_reg32(ULONG board_addr, ULONG offset)
  * differing final sample after exhaustion -- diagnostics use it to
  * report observed instability even when the endpoints agree. */
 static inline uint32_t zz9000_read_z2_aperture_verified(
-    ULONG board_addr, uint32_t board_size, uint16_t fw_caps, int *verified,
-    int *resamples)
+    ULONG board_addr, uint32_t board_size, uint16_t *fw_caps_io,
+    int *verified, int *resamples)
 {
     uint32_t descriptor = zz9000_read_reg32(
         board_addr, ZZ_REG_Z2_APERTURE_INFO_HI);
@@ -243,13 +243,27 @@ static inline uint32_t zz9000_read_z2_aperture_verified(
     if (resamples) {
         *resamples = 0;
     }
-    if (!(fw_caps & ZZ_FW_CAP_Z2_APERTURE_LAYOUT)) {
-        /* No layout contract: there is no descriptor to recover and
-         * the single read is authoritative. */
-        if (verified) {
-            *verified = 1;
+    if (!(*fw_caps_io & ZZ_FW_CAP_Z2_APERTURE_LAYOUT)) {
+        /* A single glitched capability read must not disable
+         * verification (FindCard would silently go legacy while a
+         * later clean read elsewhere could still carve the gen-2
+         * direct ring). Re-read and require agreement before taking
+         * the pre-aperture early exit; disagreement means the passed
+         * value lost the bit and verification proceeds
+         * conservatively. The confirmed value is written back so every
+         * caller negotiates with the same view. */
+        uint16_t confirm_caps = zz9000_read_reg16(
+            board_addr, ZZ_REG_FW_CAPABILITIES);
+        if (confirm_caps & ZZ_FW_CAP_Z2_APERTURE_LAYOUT) {
+            *fw_caps_io |= ZZ_FW_CAP_Z2_APERTURE_LAYOUT;
+        } else {
+            /* No layout contract: there is no descriptor to recover
+             * and the single read is authoritative. */
+            if (verified) {
+                *verified = 1;
+            }
+            return descriptor;
         }
-        return descriptor;
     }
     /* Confirmation is value-agnostic: two consecutive agreeing samples
      * are trusted whether they negotiate as VALID or as LEGACY.
