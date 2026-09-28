@@ -229,15 +229,34 @@ static inline uint32_t zz9000_read_z2_aperture_verified(
 {
     uint32_t descriptor = zz9000_read_reg32(
         board_addr, ZZ_REG_Z2_APERTURE_INFO_HI);
-    int attempts = 4;
+    int attempts = 5;
 
     if (!(fw_caps & ZZ_FW_CAP_Z2_APERTURE_LAYOUT)) {
         return descriptor;
     }
-    while (attempts-- > 0 &&
-           zz_z2_aperture_negotiate(
-               descriptor, board_size, fw_caps, NULL) !=
-               ZZ_APERTURE_VALID) {
+    while (attempts-- > 0) {
+        if (zz_z2_aperture_negotiate(
+                descriptor, board_size, fw_caps, NULL) ==
+                ZZ_APERTURE_VALID) {
+            /* A glitch can land on ANOTHER valid profile: the
+             * generation byte is one bit apart between 0x5a01.... and
+             * 0x5a02....., and both profiles exist for the same board
+             * size. Accepting the wrong generation writes the wrong
+             * aperture acknowledgement (or carves a direct ring over
+             * the live host window in AHI), so require an independent
+             * re-read to agree before trusting a valid sample. */
+            uint32_t confirm = zz9000_read_reg16(
+                board_addr, ZZ_REG_Z2_APERTURE_INFO_HI);
+            (void)zz9000_read_reg16(board_addr, ZZ_REG_FW_CAPABILITIES);
+            confirm = (uint32_t)((confirm << 16) |
+                zz9000_read_reg16(board_addr,
+                    ZZ_REG_Z2_APERTURE_INFO_LO));
+            if (confirm == descriptor) {
+                return descriptor;
+            }
+            descriptor = confirm;   /* unstable: keep sampling */
+            continue;
+        }
         ULONG high = zz9000_read_reg16(
             board_addr, ZZ_REG_Z2_APERTURE_INFO_HI);
         (void)zz9000_read_reg16(board_addr, ZZ_REG_FW_CAPABILITIES);
