@@ -530,8 +530,8 @@ static inline void writeGfxDataByte(volatile struct GFXData *gfxdata,
 	}
 }
 
-/* u8_user[2] is firmware-owned by codec operations and u8_user[3] has no
- * repeated cross-command value worth caching. Keep those writes direct. */
+/* u8_user[2] is firmware-owned by codec operations and u8_user[3] doubles
+ * as DrawLine padding and the ALLOC clear flag. Keep those writes direct. */
 static inline void writeGfxDataU8(volatile struct GFXData *gfxdata,
 	uint8 index, uint8 value) {
 	writeGfxDataByte(gfxdata, &gfxdata->u8_user[index], index, value);
@@ -2276,8 +2276,13 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 		/* 1 = caller did not ask for ABMA_Clear: firmware skips the
 		 * zero-fill (AllocBitMap does not promise cleared memory, and
 		 * a re-allocated smart-refresh save buffer must not black out
-		 * the window it backs). 0 keeps the legacy cleared surface. */
-		writeGfxDataU8(gfxdata, 3, clear_requested ? 0 : 1);
+		 * the window it backs). 0 keeps the legacy cleared surface.
+		 * Direct write, NOT writeGfxDataU8: byte cache slot 3 is
+		 * MINTERM's, and DrawLine writes this same byte (line
+		 * padding) directly -- routing through the cache helper would
+		 * alias the minterm slot and let stale paddings suppress the
+		 * flag write. */
+		gfxdata->u8_user[3] = clear_requested ? 0 : 1;
 		gfxdata->offset[1] = size;
 		zzwrite16(&registers->blitter_acc_op, ACC_OP_ALLOC_SURFACE);
 		card_offset = gfxdata->offset[0];
