@@ -875,6 +875,14 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 			volatile struct GFXData *gd = (struct GFXData*)(((uint32_t)b->MemoryBase) + (uint32_t)Z3_GFXDATA_ADDR);
 			b->CardData[ZZ_CARD_DATA_GFXDATA] = (ULONG)gd;
 			memset((void *)gd, 0x00, sizeof(struct GFXData));
+			/* Announce the conditional-clear protocol: after this
+			 * token the firmware honors u8_user[3] as a per-allocation
+			 * no-clear flag (see ZZ_AllocBitMap). Older firmware
+			 * ignores the write; the write is Z3-only because only
+			 * Z3 issues ACC_OP_ALLOC_SURFACE. */
+			zzwrite16((uint16_t *)((uint8_t *)b->RegisterBase +
+				REG_ZZ_ALLOC_CLEAR_PROTOCOL),
+				ZZ_REG_ZZ_ALLOC_CLEAR_TOKEN);
 		}
 		b->MemorySpaceBase = b->MemoryBase;
 		b->MemorySpaceSize = b->MemorySize;
@@ -2214,9 +2222,11 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 				if (tag->ti_Data) return NULL;
 				break;
 			/* ABMA_Clear maps to the firmware's conditional surface
-			 * clear: u8_user[3]==1 tells the firmware NOT to zero-fill
-			 * (this caller did not ask). Legacy default stays 0 =
-			 * cleared, so older drivers keep BMF_CLEAR semantics. */
+			 * clear, active only after the init-time
+			 * REG_ZZ_ALLOC_CLEAR_PROTOCOL handshake: u8_user[3]==1
+			 * tells the firmware NOT to zero-fill (this caller did
+			 * not ask). Without the handshake the firmware always
+			 * clears, so older drivers keep BMF_CLEAR semantics. */
 			case ABMA_Clear: clear_requested = tag->ti_Data != 0; break;
 			default: break;
 		}
