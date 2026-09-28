@@ -213,11 +213,17 @@ static inline ULONG zz9000_read_reg32(ULONG board_addr, ULONG offset)
  * data-out setup window before DTACK (firmware Z2_REGREAD FIXME, fixed
  * alongside v2.8.1), so a marginal bus can corrupt one halfword of a
  * back-to-back pair: observed in the field as descriptor HI 0x5a02 with
- * a zero LO, intermittently, re-rolled per power-up. A genuinely
- * mismatched stack is stable across re-reads; a glitched cycle is not.
- * Retry before treating the descriptor as invalid, interleaving a benign
- * register access so a retry does not repeat the exact failing bus
- * pattern. Returns the last descriptor read (caller still validates). */
+ * a zero LO, intermittently, re-rolled per power-up. A glitched HIGH
+ * halfword instead breaks the magic and negotiates as LEGACY -- which
+ * must also be retried when the firmware advertises the layout
+ * capability, or FindCard would silently install the legacy layout on
+ * a matched modern stack and skip the aperture acknowledgement. A
+ * genuinely mismatched or pre-aperture stack is stable across
+ * re-reads; a glitched cycle is not. Retry any non-VALID result while
+ * the capability is present, interleaving a benign register access so
+ * a retry does not repeat the exact failing bus pattern. Without the
+ * capability there is no descriptor to recover: single read. Returns
+ * the last descriptor read (caller still validates). */
 static inline uint32_t zz9000_read_z2_aperture_verified(
     ULONG board_addr, uint32_t board_size, uint16_t fw_caps)
 {
@@ -225,10 +231,13 @@ static inline uint32_t zz9000_read_z2_aperture_verified(
         board_addr, ZZ_REG_Z2_APERTURE_INFO_HI);
     int attempts = 4;
 
+    if (!(fw_caps & ZZ_FW_CAP_Z2_APERTURE_LAYOUT)) {
+        return descriptor;
+    }
     while (attempts-- > 0 &&
            zz_z2_aperture_negotiate(
-               descriptor, board_size, fw_caps, NULL) ==
-               ZZ_APERTURE_INVALID) {
+               descriptor, board_size, fw_caps, NULL) !=
+               ZZ_APERTURE_VALID) {
         ULONG high = zz9000_read_reg16(
             board_addr, ZZ_REG_Z2_APERTURE_INFO_HI);
         (void)zz9000_read_reg16(board_addr, ZZ_REG_FW_CAPABILITIES);
