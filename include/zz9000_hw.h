@@ -269,7 +269,7 @@ static inline uint32_t zz9000_read_z2_aperture_verified(
         }
         if (*fw_caps_io != caps_confirm) {
             if (resamples) {
-                *resamples = caps_unstable;
+                *resamples = caps_unstable + 1;
             }
             return descriptor;   /* unstable: verified stays 0 */
         }
