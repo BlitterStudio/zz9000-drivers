@@ -335,10 +335,11 @@ the staged file, which is read at the next cold boot; valid runtime native-mode
 writes take effect at the next stable vblank. The centered profile does not
 add a monitor hot-plug or HDMI mode-switch guarantee.
 
-Fast RAM is an exception to the cold-boot wording: ZZTop **Save** applies its
-staged `fast_ram` choice at the next warm reboot, while a manually edited SD
-card needs a cold power cycle. Firmware reports an unavailable Fast RAM
-setting on older images rather than claiming the saved choice applied.
+Fast RAM is an exception to the cold-boot wording: every `fast_ram` change,
+whether ZZTop **Save** or a manually edited SD card, applies at the next
+reboot (the firmware re-reads the card on a warm reset). Firmware reports an
+unavailable Fast RAM setting on older images rather than claiming the saved
+choice applied.
 
 ## Custom Picasso96 Modelines
 

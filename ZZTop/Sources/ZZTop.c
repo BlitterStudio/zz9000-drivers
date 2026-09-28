@@ -1055,7 +1055,7 @@ static char settings_fast_ram_status_buf[64];
 static CONST_STRPTR settings_fast_ram_save_help =
 	(CONST_STRPTR)"Save: next reboot";
 static CONST_STRPTR settings_fast_ram_manual_help =
-	(CONST_STRPTR)"Manual SD edit: power cycle";
+	(CONST_STRPTR)"Any change: next reboot";
 static char settings_cfg_text[ZZCFG_MAX_SIZE];
 static BOOL settings_fast_ram_available;
 /* ZZ9000.CFG needs firmware ABI 2.3+. On older firmware the window
