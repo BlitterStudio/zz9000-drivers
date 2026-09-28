@@ -2848,11 +2848,19 @@ static void scandoubler_sync_choices(struct Window *win,
 /* Commit a new output/refresh selection to the model, restoring any
  * live calibration preview first (the flow the single Settings cycle
  * handler used). Returns FALSE while the restore is still pending;
- * the selectors are snapped back to the staged profile then. */
+ * the selectors are snapped back to the staged profile then.
+ * *framing_reset (may be NULL) reports that the switch demoted Custom
+ * framing to Automatic, so the caller keeps that status message
+ * instead of overwriting it. */
 static BOOL scandoubler_stage_profile(struct Window *win,
-	struct zztop_cfg_ctx *ctx, UWORD profile)
+	struct zztop_cfg_ctx *ctx, UWORD profile, BOOL *framing_reset)
 {
 	struct settings_live_session *live = &ctx->live;
+	struct zz_vcap_path old_path, new_path;
+	UWORD old_profile;
+
+	if (framing_reset)
+		*framing_reset = FALSE;
 
 	if (live->preview_valid &&
 		!settings_profile_matches(live, profile,
@@ -2865,7 +2873,38 @@ static BOOL scandoubler_stage_profile(struct Window *win,
 		}
 		live->preview_valid = FALSE;
 	}
+	old_profile = settings_vals.videocap_profile;
 	settings_vals.videocap_profile = profile;
+
+	/* Switching output family (full-rate <-> filtered) changes the
+	 * capture grid, and a Custom framing pair is only valid on the
+	 * grid it was measured on. Demote framing to Automatic when THIS
+	 * switch crosses capture paths - not when the staged path merely
+	 * differs from the applied one (a pending sampling change staged
+	 * in Capture would otherwise let a plain Refresh change erase a
+	 * calibration). The staged switch itself is the fact; no live
+	 * snapshot is needed to confirm it. The crop keys drop out of
+	 * the next ZZ9000.CFG write and framing returns to the path
+	 * defaults after the power-cycle - recalibrate then. Without
+	 * live control there was never a path gate, so keep the saved
+	 * pair untouched there. */
+	settings_path_for(&old_path, old_profile,
+		settings_vals.videocap_sample);
+	settings_path_for(&new_path, profile,
+		settings_vals.videocap_sample);
+	if (live->supported && settings_custom_framing() &&
+		!zz_vcap_path_equal(&old_path, &new_path)) {
+		settings_vals.videocap_crop_h_present = 0;
+		settings_vals.videocap_crop_v_present = 0;
+		settings_vals.videocap_crop_h = 0;
+		settings_vals.videocap_crop_v = 0;
+		if (framing_reset)
+			*framing_reset = TRUE;
+		scandoubler_update_save_gate(win, live, FALSE);
+		sd_set_status(win,
+			"Framing reset to Automatic - Save, reboot, recalibrate");
+		return TRUE;
+	}
 	if (scandoubler_update_save_gate(win, live, TRUE))
 		sd_set_status(win, "Output changed - Save, then power-cycle");
 	return TRUE;
@@ -3130,7 +3169,7 @@ static BOOL scandoubler_gadget_up(struct Window *win, struct Gadget *gad,
 	switch (gad->GadgetID) {
 	case SDGAD_OUTPUT: {
 		UWORD new_output, new_refresh, profile;
-		BOOL kept_refresh;
+		BOOL kept_refresh, framing_reset;
 
 		if (code >= sd_output_count) break;
 		new_output = sd_output_map[code];
@@ -3150,9 +3189,10 @@ static BOOL scandoubler_gadget_up(struct Window *win, struct Gadget *gad,
 				new_refresh, ctx->fw_capabilities);
 		}
 		if (profile == ZZCFG_VCAP_PROFILE_COUNT) break;
-		if (!scandoubler_stage_profile(win, ctx, profile)) break;
+		if (!scandoubler_stage_profile(win, ctx, profile,
+				&framing_reset)) break;
 		scandoubler_sync_choices(win, ctx->fw_capabilities);
-		if (!kept_refresh)
+		if (!kept_refresh && !framing_reset)
 			sd_set_status(win,
 				"Refresh follows the new output - Save, then power-cycle");
 		break;
@@ -3167,8 +3207,7 @@ static BOOL scandoubler_gadget_up(struct Window *win, struct Gadget *gad,
 		profile = zzcfg_profile_for_output_refresh(
 			zzcfg_profile_output(settings_vals.videocap_profile), new_refresh,
 			ctx->fw_capabilities);
-		if (profile == ZZCFG_VCAP_PROFILE_COUNT) break;
-		if (!scandoubler_stage_profile(win, ctx, profile)) break;
+		if (!scandoubler_stage_profile(win, ctx, profile, NULL)) break;
 		scandoubler_sync_choices(win, ctx->fw_capabilities);
 		break;
 	}
