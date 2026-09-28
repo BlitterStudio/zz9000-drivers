@@ -394,16 +394,17 @@ static void print_aperture_layout(const struct ZZ9000Board *board)
         printf("FirmwareCapabilities   = 0x%04x\n", (unsigned)fw_caps);
         printf("Z2ApertureDescriptor   = 0x%08lx\n",
             (unsigned long)descriptor);
-        /* Report from the observed samples, not the endpoints: an
-         * exhausted unverified value must not read as "recovered",
-         * and internal instability that stabilized back to the raw
-         * value must still count as a glitch. */
+        /* Report from every observation: the helper's resample count
+         * AND the separate raw read. A corrupted raw with a clean
+         * helper run still observed two different descriptors, so it
+         * counts; an exhausted unverified value never reads as
+         * recovered. */
         if (!descriptor_verified) {
             printf("Z2ApertureUnverified   = yes (no two agreeing samples "
                 "within the retry budget, %d resample(s))\n", resamples);
-        } else if (resamples > 0) {
-            printf("Z2ApertureReadGlitch   = yes (raw 0x%08lx, recovered "
-                "after %d resample(s))\n",
+        } else if (resamples > 0 || descriptor != raw_descriptor) {
+            printf("Z2ApertureReadGlitch   = yes (raw 0x%08lx, %d "
+                "resample(s))\n",
                 (unsigned long)raw_descriptor, resamples);
         }
     }
