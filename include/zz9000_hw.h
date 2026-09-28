@@ -224,16 +224,24 @@ static inline ULONG zz9000_read_reg32(ULONG board_addr, ULONG offset)
  * recover: the single read is authoritative. Sets *verified to 1 when
  * the returned descriptor was confirmed by two agreeing samples (or
  * no contract exists); 0 means the retry budget exhausted with
- * unstable samples and callers must fail closed. */
+ * unstable samples and callers must fail closed. *resamples (optional)
+ * counts samples that differed from their predecessor, including a
+ * differing final sample after exhaustion -- diagnostics use it to
+ * report observed instability even when the endpoints agree. */
 static inline uint32_t zz9000_read_z2_aperture_verified(
-    ULONG board_addr, uint32_t board_size, uint16_t fw_caps, int *verified)
+    ULONG board_addr, uint32_t board_size, uint16_t fw_caps, int *verified,
+    int *resamples)
 {
     uint32_t descriptor = zz9000_read_reg32(
         board_addr, ZZ_REG_Z2_APERTURE_INFO_HI);
     int attempts = 5;
+    int unstable = 0;
 
     if (verified) {
         *verified = 0;
+    }
+    if (resamples) {
+        *resamples = 0;
     }
     if (!(fw_caps & ZZ_FW_CAP_Z2_APERTURE_LAYOUT)) {
         /* No layout contract: there is no descriptor to recover and
@@ -263,14 +271,21 @@ static inline uint32_t zz9000_read_z2_aperture_verified(
             if (verified) {
                 *verified = 1;
             }
+            if (resamples) {
+                *resamples = unstable;
+            }
             return descriptor;
         }
         descriptor = confirm;   /* unstable: keep sampling */
+        unstable++;
     }
     /* Budget exhausted without two agreeing samples: the returned
      * descriptor is UNCONFIRMED. Callers must fail closed when
      * *verified is 0 -- a valid-looking but wrong generation must
      * never be acknowledged or used to reserve window regions. */
+    if (resamples) {
+        *resamples = unstable + 1;
+    }
     return descriptor;
 }
 

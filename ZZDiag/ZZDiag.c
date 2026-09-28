@@ -387,18 +387,24 @@ static void print_aperture_layout(const struct ZZ9000Board *board)
         uint32_t raw_descriptor = zz9000_read_reg32(board->address,
             ZZ_REG_Z2_APERTURE_INFO_HI);
         int descriptor_verified = 0;
+        int resamples = 0;
         descriptor = zz9000_read_z2_aperture_verified(board->address,
-            board->board_size, fw_caps, &descriptor_verified);
+            board->board_size, fw_caps, &descriptor_verified,
+            &resamples);
         printf("FirmwareCapabilities   = 0x%04x\n", (unsigned)fw_caps);
         printf("Z2ApertureDescriptor   = 0x%08lx\n",
             (unsigned long)descriptor);
-        if (descriptor != raw_descriptor) {
-            printf("Z2ApertureReadGlitch   = yes (raw 0x%08lx, recovered "
-                "after re-read)\n", (unsigned long)raw_descriptor);
-        }
+        /* Report from the observed samples, not the endpoints: an
+         * exhausted unverified value must not read as "recovered",
+         * and internal instability that stabilized back to the raw
+         * value must still count as a glitch. */
         if (!descriptor_verified) {
             printf("Z2ApertureUnverified   = yes (no two agreeing samples "
-                "within the retry budget)\n");
+                "within the retry budget, %d resample(s))\n", resamples);
+        } else if (resamples > 0) {
+            printf("Z2ApertureReadGlitch   = yes (raw 0x%08lx, recovered "
+                "after %d resample(s))\n",
+                (unsigned long)raw_descriptor, resamples);
         }
     }
     status = zz_z2_aperture_negotiate(descriptor, board->board_size,
