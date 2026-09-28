@@ -140,6 +140,14 @@ firmware presents to the Amiga at boot — booting Workbench straight from
 the SD card with no hard drive attached. Type the file name of an HDF
 placed in the card's root; clearing the entry disables SD boot.
 
+**Fast RAM** controls Zorro III Fast RAM where the running firmware supports
+the fail-closed boot gate. The status line reports the *effective* boot result,
+not only the saved choice: a configured-on value withheld for an invalid,
+truncated, unreadable, or slow configuration is distinct from enabled. Older
+firmware leaves the control disabled as unavailable. Every fast_ram change,
+ZZTop Save or manual SD edit, applies at the next reboot (warm reset re-reads
+the card).
+
 **Offscreen bitmaps** (default on) is the switch for Picasso96 off-screen
 bitmaps in card memory — the accelerated path that keeps intermediate
 bitmaps next to the display. Turn it off only as an escape hatch when an

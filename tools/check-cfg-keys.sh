@@ -101,6 +101,7 @@ sed -n '/static const struct zzcfg_profile_desc zzcfg_profiles\[\] = {/,/^};/ {
     s/^[[:space:]]*{ "\([a-z_0-9]*\)".*/\1/p
 }' "$editor" > "$work/profiles-editor"
 
+
 status=0
 report() {
     label=$1

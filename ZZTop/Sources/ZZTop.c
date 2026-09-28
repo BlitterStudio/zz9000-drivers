@@ -92,10 +92,14 @@ static const char version[] __attribute__((used)) =
 #define SGAD_HDF           (2)
 #define SGAD_OFFSCREEN     (3)
 #define SGAD_OVERLAY       (4)
-#define SGAD_CFG_STATUS    (5)
-#define SGAD_BTN_SAVE      (6)
-#define SGAD_BTN_RELOAD    (7)
-#define SGAD_COUNT         (8)
+#define SGAD_FAST_RAM      (5)
+#define SGAD_FAST_RAM_STATE (6)
+#define SGAD_FAST_RAM_SAVE_HELP (7)
+#define SGAD_FAST_RAM_MANUAL_HELP (8)
+#define SGAD_CFG_STATUS    (9)
+#define SGAD_BTN_SAVE      (10)
+#define SGAD_BTN_RELOAD    (11)
+#define SGAD_COUNT         (12)
 
 /* Scandoubler window gadgets (own id space, own window). */
 #define SDGAD_OUTPUT       (0)
@@ -198,6 +202,7 @@ static const char version[] __attribute__((used)) =
 #define LABEL_INT2         "Interrupt"
 #define LABEL_OFFSCREEN    "Offscreen BMs"
 #define LABEL_OVERLAY      "Video overlay"
+#define LABEL_FAST_RAM     "Fast RAM"
 #define LABEL_MAC          "MAC Address"
 #define LABEL_HDF          "SD HDF Image"
 #define LABEL_BTN_SAVE     "Save"
@@ -1046,7 +1051,12 @@ static STRPTR interrupt_labels[] = {
 static struct Gadget *sgads[SGAD_COUNT];
 static struct zzcfg_values settings_vals;
 static char settings_status_buf[64];
+static char settings_fast_ram_status_buf[64];
+#define FAST_RAM_SAVE_HELP    "Save: next reboot"
+#define FAST_RAM_MANUAL_HELP  "Any change: next reboot"
 static char settings_cfg_text[ZZCFG_MAX_SIZE];
+static BOOL settings_fast_ram_available;
+static UWORD settings_fast_ram_outcome;
 /* ZZ9000.CFG needs firmware ABI 2.3+. On older firmware the window
  * still opens for the live scanline controls; the config-file fields
  * and Save/Reload are disabled. */
@@ -1738,6 +1748,7 @@ static CONST_STRPTR settings_label_samples[] = {
 	(CONST_STRPTR)LABEL_HDF,
 	(CONST_STRPTR)LABEL_OFFSCREEN,
 	(CONST_STRPTR)LABEL_OVERLAY,
+	(CONST_STRPTR)LABEL_FAST_RAM,
 	NULL
 };
 
@@ -1774,6 +1785,70 @@ static void cfg_status_set(struct Window *win, struct Gadget *status_gad,
 static void settings_set_status(struct Window *win, const char *text)
 {
 	cfg_status_set(win, sgads[SGAD_CFG_STATUS], settings_status_buf, text);
+}
+
+static const char *settings_fast_ram_outcome_reason(UWORD outcome)
+{
+	switch (outcome) {
+		case ZZ_CFG_FAST_RAM_OUTCOME_OFF: return "off";
+		case ZZ_CFG_FAST_RAM_OUTCOME_ABSENT: return "not set";
+		case ZZ_CFG_FAST_RAM_OUTCOME_INVALID: return "invalid";
+		case ZZ_CFG_FAST_RAM_OUTCOME_TRUNCATED: return "truncated";
+		case ZZ_CFG_FAST_RAM_OUTCOME_MEDIA_ERR: return "SD error";
+		case ZZ_CFG_FAST_RAM_OUTCOME_TIMEOUT: return "timeout";
+		default: return "gate";
+	}
+}
+
+static void settings_fast_ram_refresh_state(void)
+{
+	UWORD outcome = ZZ_CFG_FAST_RAM_OUTCOME_PENDING;
+	enum zzcfg_fast_ram_state state;
+
+	settings_fast_ram_outcome = outcome;
+	settings_fast_ram_available = FALSE;
+	if (!settings_have_cfg) {
+		snprintf(settings_fast_ram_status_buf,
+			sizeof(settings_fast_ram_status_buf),
+			"Effective: unavailable (no config support)");
+		return;
+	}
+
+	state = zzcfg_fast_ram_effective_state((ULONG)zz_regs, &outcome);
+	settings_fast_ram_outcome = outcome;
+	if (state == ZZCFG_FAST_RAM_UNAVAILABLE) {
+		snprintf(settings_fast_ram_status_buf,
+			sizeof(settings_fast_ram_status_buf),
+			"Effective: unavailable on this firmware");
+		return;
+	}
+
+	settings_fast_ram_available = TRUE;
+	if (state == ZZCFG_FAST_RAM_ENABLED) {
+		snprintf(settings_fast_ram_status_buf,
+			sizeof(settings_fast_ram_status_buf), "Effective: enabled%s",
+			outcome == ZZ_CFG_FAST_RAM_OUTCOME_BAK_ON ? " (backup)" : "");
+	} else if (state == ZZCFG_FAST_RAM_WITHHELD) {
+		snprintf(settings_fast_ram_status_buf,
+			sizeof(settings_fast_ram_status_buf),
+			"Effective: on, withheld (%s)",
+			settings_fast_ram_outcome_reason(outcome));
+	} else {
+		snprintf(settings_fast_ram_status_buf,
+			sizeof(settings_fast_ram_status_buf),
+			"Effective: disabled (%s)",
+			settings_fast_ram_outcome_reason(outcome));
+	}
+}
+
+/* The raw file seeds both editor windows, but the boot outcome can withhold
+ * Fast RAM for corruption that the readable snapshot does not reproduce. */
+static void settings_fast_ram_apply_boot_outcome(struct zzcfg_values *sv)
+{
+	UWORD outcome = ZZ_CFG_FAST_RAM_OUTCOME_PENDING;
+
+	zzcfg_fast_ram_effective_state((ULONG)zz_regs, &outcome);
+	zzcfg_fast_ram_invalidate_withheld(sv, outcome);
 }
 
 static int settings_parse_mac(const char *s)
@@ -1975,6 +2050,7 @@ static UWORD settings_reload_from_card(struct zzcfg_values *sv,
 			sizeof(settings_cfg_text), rawlen);
 		if (st == ZZ_CFG_FILE_OK)
 			zzcfg_parse_text(settings_cfg_text, *rawlen, sv);
+		settings_fast_ram_apply_boot_outcome(sv);
 	}
 	return st;
 }
@@ -2013,6 +2089,9 @@ static void settings_populate(struct Window *win, UWORD fw_capabilities)
 		snprintf(settings_status_buf, sizeof(settings_status_buf),
 			"Config read failed (SD error)");
 	}
+	settings_fast_ram_refresh_state();
+	
+
 
 	if (!win) return;
 
@@ -2026,6 +2105,11 @@ static void settings_populate(struct Window *win, UWORD fw_capabilities)
 		GTCY_Active, sv->offscreen_bitmaps ? 1 : 0, TAG_END);
 	GT_SetGadgetAttrs(sgads[SGAD_OVERLAY], win, NULL,
 		GTCY_Active, sv->video_overlay ? 1 : 0, TAG_END);
+	GT_SetGadgetAttrs(sgads[SGAD_FAST_RAM], win, NULL,
+		GTCY_Active, sv->fast_ram ? 1 : 0,
+		GA_Disabled, settings_fast_ram_available ? FALSE : TRUE, TAG_END);
+	GT_SetGadgetAttrs(sgads[SGAD_FAST_RAM_STATE], win, NULL,
+		GTTX_Text, settings_fast_ram_status_buf, TAG_END);
 	settings_set_status(win, settings_status_buf);
 }
 
@@ -2168,13 +2252,41 @@ static struct Gadget *settings_create_gadgets(struct Gadget **glistptr,
 	ng.ng_GadgetText = (STRPTR)LABEL_OVERLAY;
 	sgads[SGAD_OVERLAY] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
 		GTCY_Labels, enable_labels, GTCY_Active, 1, TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge    = y;
+	ng.ng_GadgetID   = SGAD_FAST_RAM;
+	ng.ng_GadgetText = (STRPTR)LABEL_FAST_RAM;
+	sgads[SGAD_FAST_RAM] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+		GTCY_Labels, enable_labels, GTCY_Active, 0, TAG_END);
+	y += l.row_step;
+
+	/* Show the boot decision separately from the staged preference: a
+	 * configured-on value can be withheld by firmware's fail-closed gate. */
+	ng.ng_LeftEdge   = l.margin_x;
+	ng.ng_TopEdge    = y;
+	ng.ng_Width      = content_right - l.margin_x;
+	ng.ng_GadgetID   = SGAD_FAST_RAM_STATE;
+	ng.ng_GadgetText = NULL;
+	sgads[SGAD_FAST_RAM_STATE] = gad = CreateGadget(TEXT_KIND, gad, &ng,
+		GTTX_Text, settings_fast_ram_status_buf, GTTX_Border, TRUE, TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge    = y;
+	ng.ng_GadgetID   = SGAD_FAST_RAM_SAVE_HELP;
+	sgads[SGAD_FAST_RAM_SAVE_HELP] = gad = CreateGadget(TEXT_KIND, gad, &ng,
+		GTTX_Text, (CONST_STRPTR)FAST_RAM_SAVE_HELP, GTTX_Border, TRUE, TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge    = y;
+	ng.ng_GadgetID   = SGAD_FAST_RAM_MANUAL_HELP;
+	sgads[SGAD_FAST_RAM_MANUAL_HELP] = gad = CreateGadget(TEXT_KIND, gad, &ng,
+		GTTX_Text, (CONST_STRPTR)FAST_RAM_MANUAL_HELP, GTTX_Border, TRUE, TAG_END);
 	y += l.row_step + l.section_gap;
 
 	/* The status line spans the whole row (no side label) so messages
 	 * get the label column's width too instead of widening the window. */
-	ng.ng_LeftEdge   = l.margin_x;
 	ng.ng_TopEdge    = y;
-	ng.ng_Width      = content_right - l.margin_x;
 	ng.ng_GadgetID   = SGAD_CFG_STATUS;
 	ng.ng_GadgetText = NULL;
 	sgads[SGAD_CFG_STATUS] = gad = CreateGadget(TEXT_KIND, gad, &ng,
@@ -3392,6 +3504,11 @@ static BOOL settings_gadget_up(struct Window *win, struct Gadget *gad,
 			break;
 		case SGAD_OVERLAY:
 			settings_vals.video_overlay = code;
+			break;
+		case SGAD_FAST_RAM:
+			settings_vals.fast_ram = code;
+			settings_vals.fast_ram_present = 1;
+			settings_vals.fast_ram_invalid = 0;
 			break;
 		case SGAD_BTN_SAVE:
 			settings_save(win);

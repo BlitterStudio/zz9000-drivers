@@ -43,6 +43,19 @@
 #define ZZ_CFG_KEY_AUDIO_TRUNCATED   16
 #define ZZ_CFG_KEY_VIDEOCAP_PHASE    17 /* signed E7M phase, -255..255 */
 #define ZZ_CFG_KEY_VIDEOCAP_C28_PHASE 18 /* signed C28 phase, -896..895 */
+#define ZZ_CFG_KEY_FAST_RAM          19
+#define ZZ_CFG_KEY_FAST_RAM_OUTCOME  20
+
+/* ZZ_CFG_KEY_FAST_RAM_OUTCOME values (mirror firmware zz_fastram_outcome). */
+#define ZZ_CFG_FAST_RAM_OUTCOME_PENDING   0
+#define ZZ_CFG_FAST_RAM_OUTCOME_ENABLED   1
+#define ZZ_CFG_FAST_RAM_OUTCOME_OFF       2
+#define ZZ_CFG_FAST_RAM_OUTCOME_ABSENT    3
+#define ZZ_CFG_FAST_RAM_OUTCOME_INVALID   4
+#define ZZ_CFG_FAST_RAM_OUTCOME_TRUNCATED 5
+#define ZZ_CFG_FAST_RAM_OUTCOME_MEDIA_ERR 6
+#define ZZ_CFG_FAST_RAM_OUTCOME_TIMEOUT   7
+#define ZZ_CFG_FAST_RAM_OUTCOME_BAK_ON    8
 
 /* ZZ_REG_CONFIG_FILE statuses (mirror firmware zz_config_file_status). */
 #define ZZ_CFG_FILE_OK           0
@@ -64,17 +77,27 @@
 /* Query one parsed ZZ9000.CFG value. *present is set to 1 if the key
  * was given in the config file (for ZZ_CFG_KEY_LOADED: whether the
  * file was found at cold boot); the value reads as 0 when absent. */
+#ifdef ZZCFG_TEST_IO
+extern UWORD zzcfg_test_reg_read(ULONG board, ULONG offset);
+extern void zzcfg_test_reg_write(ULONG board, ULONG offset, UWORD value);
+#define ZZCFG_REG_READ(board, offset) \
+    zzcfg_test_reg_read((board), (offset))
+#define ZZCFG_REG_WRITE(board, offset, value) \
+    zzcfg_test_reg_write((board), (offset), (value))
+#else
+#define ZZCFG_REG_READ(board, offset) \
+    (*(volatile UWORD *)((board) + (offset)))
+#define ZZCFG_REG_WRITE(board, offset, value) \
+    (*(volatile UWORD *)((board) + (offset)) = (value))
+#endif
+
 static inline UWORD zzcfg_query(ULONG board, UWORD key, UWORD *present)
 {
-    volatile UWORD *key_reg =
-        (volatile UWORD *)(board + ZZ_REG_CONFIG_KEY);
-    volatile UWORD *present_reg =
-        (volatile UWORD *)(board + ZZ_REG_CONFIG_PRESENT);
     UWORD value, p;
 
-    *key_reg = key;
-    value = *key_reg;
-    p = *present_reg;
+    ZZCFG_REG_WRITE(board, ZZ_REG_CONFIG_KEY, key);
+    value = ZZCFG_REG_READ(board, ZZ_REG_CONFIG_KEY);
+    p = ZZCFG_REG_READ(board, ZZ_REG_CONFIG_PRESENT);
 
     if (present) *present = p;
     return value;

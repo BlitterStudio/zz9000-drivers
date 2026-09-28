@@ -19,20 +19,10 @@
 #endif
 
 #ifdef ZZCFG_TEST_IO
-extern UWORD zzcfg_test_reg_read(ULONG board, ULONG offset);
-extern void zzcfg_test_reg_write(ULONG board, ULONG offset, UWORD value);
 extern UBYTE zzcfg_test_buffer_read(ULONG board, UWORD offset);
-#define ZZCFG_REG_READ(board, offset) \
-    zzcfg_test_reg_read((board), (offset))
-#define ZZCFG_REG_WRITE(board, offset, value) \
-    zzcfg_test_reg_write((board), (offset), (value))
 #define ZZCFG_BUFFER_READ(board, offset) \
     zzcfg_test_buffer_read((board), (offset))
 #else
-#define ZZCFG_REG_READ(board, offset) \
-    (*(volatile UWORD *)((board) + (offset)))
-#define ZZCFG_REG_WRITE(board, offset, value) \
-    (*(volatile UWORD *)((board) + (offset)) = (value))
 #define ZZCFG_BUFFER_READ(board, offset) \
     (*(volatile UBYTE *)((board) + ZZ_BUFFER_OFFSET + (offset)))
 #endif
@@ -77,6 +67,31 @@ UWORD zzcfg_read_raw(ULONG board, char *out, UWORD maxlen, UWORD *outlen)
     return ZZ_CFG_FILE_OK;
 }
 
+int zzcfg_fast_ram_get(ULONG board, UWORD *enabled)
+{
+    UWORD present = 0;
+    UWORD value = zzcfg_query(board, ZZ_CFG_KEY_FAST_RAM, &present);
+
+    if (enabled) *enabled = value ? 1 : 0;
+    return present != 0;
+}
+
+enum zzcfg_fast_ram_state zzcfg_fast_ram_effective_state(ULONG board,
+    UWORD *outcome)
+{
+    UWORD present = 0, saved = 0;
+    UWORD value = zzcfg_query(board, ZZ_CFG_KEY_FAST_RAM_OUTCOME, &present);
+
+    if (outcome) *outcome = value;
+    if (!present) return ZZCFG_FAST_RAM_UNAVAILABLE;
+    if (value == ZZ_CFG_FAST_RAM_OUTCOME_ENABLED ||
+            value == ZZ_CFG_FAST_RAM_OUTCOME_BAK_ON)
+        return ZZCFG_FAST_RAM_ENABLED;
+    if (zzcfg_fast_ram_get(board, &saved) && saved)
+        return ZZCFG_FAST_RAM_WITHHELD;
+    return ZZCFG_FAST_RAM_DISABLED;
+}
+
 static char zzcfg_lower(char c)
 {
     return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
@@ -85,6 +100,30 @@ static char zzcfg_lower(char c)
 static int zzcfg_is_space(char c)
 {
     return c == ' ' || c == '\t' || c == '\r';
+}
+
+static int zzcfg_is_ident_char(char c)
+{
+    char lower = zzcfg_lower(c);
+
+    return (lower >= 'a' && lower <= 'z') ||
+        (c >= '0' && c <= '9') || c == '_';
+}
+
+/* Match the firmware's first_token_is boundary rule: an identifier prefix
+ * followed by any non-identifier byte still names this safety-critical key. */
+static int zzcfg_first_token_is(const char *line, UWORD len,
+    const char *keyword)
+{
+    UWORD pos = 0;
+
+    while (pos < len && zzcfg_is_space(line[pos])) pos++;
+    while (*keyword) {
+        if (pos >= len || zzcfg_lower(line[pos]) != *keyword) return 0;
+        pos++;
+        keyword++;
+    }
+    return pos == len || !zzcfg_is_ident_char(line[pos]);
 }
 
 int zzcfg_hdf_name_valid(const char *name)
@@ -340,6 +379,20 @@ static int zzcfg_parse_profile(const char *value, UWORD *profile)
     return 0;
 }
 
+static void zzcfg_fast_ram_invalidate(struct zzcfg_values *v)
+{
+    v->fast_ram = 0;
+    v->fast_ram_present = 0;
+    v->fast_ram_invalid = 1;
+}
+
+void zzcfg_fast_ram_invalidate_withheld(struct zzcfg_values *v, UWORD outcome)
+{
+    if (outcome == ZZ_CFG_FAST_RAM_OUTCOME_INVALID ||
+            outcome == ZZ_CFG_FAST_RAM_OUTCOME_TRUNCATED)
+        zzcfg_fast_ram_invalidate(v);
+}
+
 void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v)
 {
     UWORD pos = 0;
@@ -351,10 +404,22 @@ void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v)
     while (pos < len) {
         char key[24];
         char value[ZZCFG_HDF_CHARS + 2];
+        UWORD line_start = pos;
         UWORD line_end = pos;
+        UWORD content_end;
         UWORD n;
+        int extra_value = 0;
+        int fast_ram_line;
 
         while (line_end < len && text[line_end] != '\n') line_end++;
+        content_end = line_start;
+        while (content_end < line_end && text[content_end] != '#' &&
+                text[content_end] != ';')
+            content_end++;
+        fast_ram_line = zzcfg_first_token_is(text + line_start,
+            content_end - line_start, "fast_ram");
+        if (content_end - line_start > 127 && fast_ram_line)
+            zzcfg_fast_ram_invalidate(v);
 
         /* trim leading whitespace, copy the key up to '=' or space */
         while (pos < line_end && zzcfg_is_space(text[pos])) pos++;
@@ -369,6 +434,8 @@ void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v)
 
         while (pos < line_end && zzcfg_is_space(text[pos])) pos++;
         if (n == 0 || pos >= line_end || text[pos] != '=') {
+            if (fast_ram_line)
+                zzcfg_fast_ram_invalidate(v);
             pos = line_end + 1;
             continue;
         }
@@ -383,8 +450,20 @@ void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v)
             pos++;
         }
         value[n] = '\0';
+        while (pos < line_end && zzcfg_is_space(text[pos])) pos++;
+        if (pos < line_end && text[pos] != '#' && text[pos] != ';')
+            extra_value = 1;
         pos = line_end + 1;
-        if (n == 0) continue;
+        if (n == 0 || (extra_value && fast_ram_line)) {
+            if (fast_ram_line)
+                zzcfg_fast_ram_invalidate(v);
+            continue;
+        }
+
+        if (fast_ram_line && !zzcfg_str_eq_ci(key, "fast_ram")) {
+            zzcfg_fast_ram_invalidate(v);
+            continue;
+        }
 
         if (zzcfg_str_eq_ci(key, "videocap_profile")) {
             UWORD profile;
@@ -479,6 +558,23 @@ void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v)
             else if (zzcfg_str_eq_ci(value, "off") ||
                      zzcfg_str_eq_ci(value, "0"))
                 v->int2 = 0;
+        } else if (zzcfg_str_eq_ci(key, "fast_ram")) {
+            if (zzcfg_str_eq_ci(value, "on") || zzcfg_str_eq_ci(value, "1")) {
+                if (!v->fast_ram_invalid) {
+                    v->fast_ram = 1;
+                    v->fast_ram_present = 1;
+                }
+            } else if (zzcfg_str_eq_ci(value, "off") ||
+                     zzcfg_str_eq_ci(value, "0")) {
+                if (!v->fast_ram_invalid) {
+                    v->fast_ram = 0;
+                    v->fast_ram_present = 1;
+                }
+            } else {
+                /* Match firmware's poison: no later valid line may turn
+                 * malformed Fast RAM input into an enabled save. */
+                zzcfg_fast_ram_invalidate(v);
+            }
         } else if (zzcfg_str_eq_ci(key, "offscreen_bitmaps")) {
             if (zzcfg_str_eq_ci(value, "on") || zzcfg_str_eq_ci(value, "1"))
                 v->offscreen_bitmaps = 1;
@@ -865,6 +961,7 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
     UWORD legacy_pal, legacy_full, legacy_vsync;
     const char *profile_prefix = v->videocap_profile_present ? "" : "#";
     char video_config[128];
+    char fast_ram_config[24];
     int n;
 
     zzcfg_profile_to_legacy(profile, &legacy_pal, &legacy_full, &legacy_vsync);
@@ -882,6 +979,13 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
             profile_prefix, vsync_names[legacy_vsync]);
     }
 
+    if (v->fast_ram_present && !v->fast_ram_invalid) {
+        snprintf(fast_ram_config, sizeof(fast_ram_config),
+            "fast_ram = %s\n", v->fast_ram ? "on" : "off");
+    } else {
+        fast_ram_config[0] = '\0';
+    }
+
     /* Share the firmware's 4 KiB budget with all eight audio scenes.
      * Keep help in the manual rather than expanding a valid audio-save
      * file past the boot parser's limit with per-setting comments. */
@@ -896,6 +1000,7 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
         "%sscanline_mode = %u\n"
         "%sscanline_parity = %u\n"
         "int2 = %s\n"
+        "%s"
         "offscreen_bitmaps = %s\n"
         "video_overlay = %s\n"
         "%smac = %s\n"
@@ -913,6 +1018,7 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
         v->scanline_parity_present ? "" : "#",
         (unsigned)(v->scanline_parity & 1),
         v->int2 ? "on" : "off",
+        fast_ram_config,
         v->offscreen_bitmaps ? "on" : "off",
         v->video_overlay ? "on" : "off",
         v->mac[0] ? "" : "#", v->mac[0] ? v->mac : "68:82:F2:00:00:01",

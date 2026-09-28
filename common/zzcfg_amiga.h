@@ -100,6 +100,12 @@ struct zzcfg_values {
      * disable accelerated paths for anyone who opens Settings. */
     UWORD offscreen_bitmaps; /* 0-1, default 1 */
     UWORD video_overlay;     /* 0-1, default 1 */
+    /* Fast RAM is fail-closed in firmware, so it uses present-keys-only
+     * serialization: absent remains absent instead of becoming a default.
+     * Invalid input is sticky until a user explicitly stages a valid value. */
+    UWORD fast_ram;          /* 0=off, 1=on */
+    UWORD fast_ram_present;
+    UWORD fast_ram_invalid;
     char  mac[ZZCFG_MAC_CHARS + 3];
     char  hdf[ZZCFG_HDF_CHARS + 5];
 
@@ -155,6 +161,27 @@ UWORD zzcfg_profile_for_output_refresh(UWORD output, UWORD refresh,
  * >= 1). Returns a ZZ_CFG_FILE_* status; *outlen is the byte count.
  * ZZ_CFG_FILE_IDLE means the firmware never answered (no support). */
 UWORD zzcfg_read_raw(ULONG board, char *out, UWORD maxlen, UWORD *outlen);
+
+/* Read the boot-time saved Fast RAM preference. Returns nonzero only when
+ * key 19 is supported and the preference was present in ZZ9000.CFG. */
+int zzcfg_fast_ram_get(ULONG board, UWORD *enabled);
+
+enum zzcfg_fast_ram_state {
+    ZZCFG_FAST_RAM_UNAVAILABLE,
+    ZZCFG_FAST_RAM_ENABLED,
+    ZZCFG_FAST_RAM_WITHHELD,
+    ZZCFG_FAST_RAM_DISABLED
+};
+
+/* Classify the effective boot decision from key 20. An absent outcome means
+ * old firmware, so callers must disable the setting instead of implying it
+ * applied. `outcome` receives the raw firmware value when available. */
+enum zzcfg_fast_ram_state zzcfg_fast_ram_effective_state(ULONG board,
+    UWORD *outcome);
+
+/* A malformed or boot-truncated configuration must not be rewritten as a
+ * clean Fast RAM preference by an unrelated whole-file save. */
+void zzcfg_fast_ram_invalidate_withheld(struct zzcfg_values *v, UWORD outcome);
 
 /* Is `name` a valid `hdf = ...` value? Mirrors the firmware's
  * hdf_name_valid rules (zz_config.c): printable ASCII except '/',

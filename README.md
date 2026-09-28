@@ -186,11 +186,14 @@ stay within the firmware's 4 KiB configuration limit; explanatory
 per-setting comments are not retained. A generation failure leaves the
 existing SD file untouched.
 
-The **Other Settings…** window contains INT2, MAC, HDF, offscreen bitmaps
-and video overlay; native-video controls are only in **Scandoubler**. The
-main **Scandoubler…** button sits directly above **Audio…**, without an
-extra button row. Use the **Settings** menu on screens where those
-buttons are off-screen.
+The **Other Settings…** window contains INT2, MAC, HDF, Fast RAM,
+offscreen bitmaps and video overlay; native-video controls are only in
+**Scandoubler**. Fast RAM is off by default and fail-closed: its effective
+boot result is shown separately from the staged setting, so a configured-on
+value withheld by the boot gate is never presented as enabled. The main
+**Scandoubler…** button sits directly above **Audio…**, without an extra
+button row. Use the **Settings** menu on screens where those buttons are
+off-screen.
 
 The drivers in this repo consult it too:
 
@@ -331,6 +334,12 @@ Activation follows the existing configuration lifecycle. ZZTop **Save** writes
 the staged file, which is read at the next cold boot; valid runtime native-mode
 writes take effect at the next stable vblank. The centered profile does not
 add a monitor hot-plug or HDMI mode-switch guarantee.
+
+Fast RAM is an exception to the cold-boot wording: every `fast_ram` change,
+whether ZZTop **Save** or a manually edited SD card, applies at the next
+reboot (the firmware re-reads the card on a warm reset). Firmware reports an
+unavailable Fast RAM setting on older images rather than claiming the saved
+choice applied.
 
 ## Custom Picasso96 Modelines
 
