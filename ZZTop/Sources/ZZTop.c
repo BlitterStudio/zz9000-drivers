@@ -1052,10 +1052,8 @@ static struct Gadget *sgads[SGAD_COUNT];
 static struct zzcfg_values settings_vals;
 static char settings_status_buf[64];
 static char settings_fast_ram_status_buf[64];
-static CONST_STRPTR settings_fast_ram_save_help =
-	(CONST_STRPTR)"Save: next reboot";
-static CONST_STRPTR settings_fast_ram_manual_help =
-	(CONST_STRPTR)"Any change: next reboot";
+#define FAST_RAM_SAVE_HELP    "Save: next reboot"
+#define FAST_RAM_MANUAL_HELP  "Any change: next reboot"
 static char settings_cfg_text[ZZCFG_MAX_SIZE];
 static BOOL settings_fast_ram_available;
 /* ZZ9000.CFG needs firmware ABI 2.3+. On older firmware the window
@@ -2262,13 +2260,13 @@ static struct Gadget *settings_create_gadgets(struct Gadget **glistptr,
 	ng.ng_TopEdge    = y;
 	ng.ng_GadgetID   = SGAD_FAST_RAM_SAVE_HELP;
 	sgads[SGAD_FAST_RAM_SAVE_HELP] = gad = CreateGadget(TEXT_KIND, gad, &ng,
-		GTTX_Text, settings_fast_ram_save_help, GTTX_Border, TRUE, TAG_END);
+		GTTX_Text, (CONST_STRPTR)FAST_RAM_SAVE_HELP, GTTX_Border, TRUE, TAG_END);
 	y += l.row_step;
 
 	ng.ng_TopEdge    = y;
 	ng.ng_GadgetID   = SGAD_FAST_RAM_MANUAL_HELP;
 	sgads[SGAD_FAST_RAM_MANUAL_HELP] = gad = CreateGadget(TEXT_KIND, gad, &ng,
-		GTTX_Text, settings_fast_ram_manual_help, GTTX_Border, TRUE, TAG_END);
+		GTTX_Text, (CONST_STRPTR)FAST_RAM_MANUAL_HELP, GTTX_Border, TRUE, TAG_END);
 	y += l.row_step + l.section_gap;
 
 	/* The status line spans the whole row (no side label) so messages
