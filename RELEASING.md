@@ -1,16 +1,17 @@
 # Releasing the ZZ9000 stack
 
-A user-facing release is **coordinated across three repos** that are tagged with
+A user-facing release is **coordinated across two repos** that are tagged with
 the same version (`vX.Y.Z`):
 
-| Repo | Branch (dev) | Produces |
-|------|--------------|----------|
-| [`zz9000-sdk`](https://github.com/BlitterStudio/zz9000-sdk) | `sdk-v2-foundation` | `zz9k.library`, `mpega.library`, `zz9k-picture.datatype`, the OpenSSL crypto provider, CLI tools |
-| [`zz9000-firmware`](https://github.com/BlitterStudio/zz9000-firmware) | `sdk-v2-mailbox` | `BOOT.bin` per board variant (the SDK-service firmware) |
-| [`zz9000-drivers`](https://github.com/BlitterStudio/zz9000-drivers) | `sdk-payloads` | the Amiga **installer** that bundles the drivers + SDK payloads + accelerated `amissl.library` |
+| Repo | Produces |
+|------|----------|
+| [`zz9000-firmware`](https://github.com/BlitterStudio/zz9000-firmware) | `BOOT.bin` per board variant (the SDK-service firmware), the SDK subtree at `sdk/` (`zz9k.library`, `mpega.library`, `zz9k-picture.datatype`, the OpenSSL crypto provider, CLI tools) |
+| [`zz9000-drivers`](https://github.com/BlitterStudio/zz9000-drivers) | the Amiga **installer** that bundles the drivers + SDK payloads + accelerated `amissl.library` |
 
-The drivers installer pins the SDK by commit via [`sdk/SDK_REF`](sdk/SDK_REF) and
-builds the accelerated `amissl.library` from that pinned SDK in CI.
+The drivers installer pins the SDK by **firmware commit** via
+[`sdk/SDK_REF`](sdk/SDK_REF) — the SDK sources live at `sdk/` inside the
+firmware repository since the consolidation — and builds the accelerated
+`amissl.library` from that pinned firmware's SDK subtree in CI.
 
 ## Prerequisites
 
@@ -34,16 +35,17 @@ builds the accelerated `amissl.library` from that pinned SDK in CI.
 
 ## 2. Release order (dependency order)
 
-CI must be green on each dev branch before tagging. Cut the tags in this order:
+CI must be green on each master before tagging. Cut the tags in this order:
 
-1. **SDK** — merge `sdk-v2-foundation` → `master`; tag `vX.Y.Z`; push branch + tag.
-2. **Drivers `SDK_REF`** — set [`sdk/SDK_REF`](sdk/SDK_REF) to the SDK release
-   commit, commit, push `sdk-payloads`, and wait for green drivers CI (the `sdk`
+1. **Firmware** (carries the SDK at `sdk/`) — merge any remaining branches →
+   `master`; tag `vX.Y.Z`; push. The tag push runs CI (firmware + SDK host
+   tests + SDK m68k build + ABI mirror) and the `release` job publishes the
+   firmware ZIPs. A consolidated tag cannot publish with an unvalidated SDK.
+2. **Drivers `SDK_REF`** — set [`sdk/SDK_REF`](sdk/SDK_REF) to the firmware
+   release commit, commit, push, and wait for green drivers CI (the `sdk`
    and `amissl` jobs rebuild against the new pin).
-3. **Firmware** — merge `sdk-v2-mailbox` → `master`; tag `vX.Y.Z`; push. The
-   tag push runs CI and the `release` job publishes the firmware ZIPs.
-4. **Drivers** — merge `sdk-payloads` → `master`; tag `vX.Y.Z`; push. The tag
-   push runs CI and the `release` job assembles + publishes the installer.
+3. **Drivers** — tag `vX.Y.Z`; push. The tag push runs CI and the `release`
+   job assembles + publishes the installer.
 
 ### Version-skew note for release notes (Zorro 2)
 
