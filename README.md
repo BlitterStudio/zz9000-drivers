@@ -121,6 +121,7 @@ exists for future work, but no 8 MiB bitstream variant is shipped.
 | P96 settings | `Picasso96Settings` / `Picasso96Settings-Z3` | `Devs:Picasso96Settings` | Installer backs up an existing file to `Devs:Picasso96Settings.pre-ZZ9000-2.4`, advertises Standby/Suspend/Active Off DPMS support, and offers a Zorro III high-memory profile with 1920x1080x32 enabled. |
 | Networking | `ZZ9000Net.device` | `Devs:Networks/` | SANA-II Ethernet driver with multicast group filtering (programs the firmware's multicast hash filter, so IPv6 and service-discovery stacks receive their groups). |
 | Network template | `ZZ9000Net` | `Devs:NetInterfaces/` | Optional Roadshow DHCP template installed by the installer. |
+| Boot-time link check | `ZZNetReady` | `C:` | Exit-code check for `S:User-Startup`: ZZ9000 present and Ethernet negotiated. |
 | Network diagnostics | `ZZNetStats` | `C:` | Dumps SANA-II counters plus firmware RX backlog/drop registers. |
 | Board diagnostics | `ZZDiag` | `C:` | Dumps board identity, firmware, VideoCap, USB, SD, AX/audio, and Ethernet diagnostic registers. |
 | Native capture diagnostics | `ZZCapture` | `C:` (optional) | Captures native-video row timing and C28 calibration evidence. Install and use it only with the matching firmware/bitstream; see [ZZCapture/README.md](ZZCapture/README.md). |

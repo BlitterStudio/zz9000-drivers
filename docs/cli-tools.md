@@ -97,6 +97,37 @@ when the running firmware exposes them. It also checks whether the
 installed firmware, drivers and SDK payloads are a matched set; include
 its output when reporting a problem.
 
+### Boot-time link check — ZZNetReady
+
+`ZZNetReady` answers one question for `S:User-Startup`: is the ZZ9000
+present, and is its Ethernet port up? It needs no TCP/IP stack:
+
+```text
+ZZNetReady
+ZZNetReady TIMEOUT=10 QUIET
+```
+
+Exit codes: `0` link ready (also returned on firmware that cannot
+report link state, so the old always-start behaviour is kept), `5`
+not ready - no card, no link within `TIMEOUT` seconds (default 5),
+or unreadable arguments. Everything except OK returns WARN because
+AmigaDOS shells run `S:User-Startup` with FAILAT 10 by default: a
+failure code would abort the rest of the script before `If WARN`
+can branch. A typical `S:User-Startup` gating:
+
+```text
+ZZNetReady QUIET
+If WARN
+  ; no card or no link - skip the stack this boot
+Else
+  Run SYS:Network/... ; or your stack's start script
+EndIf
+```
+
+Requires firmware with `ETH_CONFIG_CAP_LINK_STATE` for real link
+reporting (v2.8.1); the bit means negotiation completed since
+power-on, not that the cable is in right now.
+
 `ZZCapture` extends native-video diagnosis with row timing and C28
 calibration evidence. Its phase-changing commands are experimental; see
 `ZZCapture.guide` before using them.

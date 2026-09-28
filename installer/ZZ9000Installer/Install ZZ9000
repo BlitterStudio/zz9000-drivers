@@ -617,6 +617,12 @@
          (source "Tools/ZZDiag")
          (dest "C:"))
 
+      (copyfiles
+         (prompt "Install ZZNetReady into C:")
+         (help "Boot-time check for S:User-Startup: is the ZZ9000 present and its Ethernet link negotiated? Exit codes 0 (start the network) and 5 (not ready: no card, no link, or bad arguments). On firmware without link reporting it exits 0, keeping the old always-start behaviour.")
+         (source "Tools/ZZNetReady")
+         (dest "C:"))
+
       ; The command-line tool manual follows the tools it documents.
       (copyfiles
          (prompt "tools.guide (command-line tools)")
