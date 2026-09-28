@@ -404,6 +404,9 @@ static void print_aperture_layout(const struct ZZ9000Board *board)
             printf("Z2ApertureUnverified   = yes (no two agreeing samples "
                 "within the retry budget -- capability or descriptor "
                 "reads unstable, %d resample(s))\n", resamples);
+            /* Both RTG and AHI reject this value; printing a
+             * negotiated layout for it would overstate it. */
+            return;
         } else if (resamples > 0 || descriptor != raw_descriptor) {
             printf("Z2ApertureReadGlitch   = yes (raw 0x%08lx, %d "
                 "resample(s))\n",
