@@ -213,19 +213,18 @@ static inline ULONG zz9000_read_reg32(ULONG board_addr, ULONG offset)
  * data-out setup window before DTACK (firmware Z2_REGREAD FIXME, fixed
  * alongside v2.8.1), so a marginal bus can corrupt one halfword of a
  * back-to-back pair: observed in the field as descriptor HI 0x5a02 with
- * a zero LO, intermittently, re-rolled per power-up. A glitched HIGH
- * halfword instead breaks the magic and negotiates as LEGACY -- which
- * must also be retried when the firmware advertises the layout
- * capability, or FindCard would silently install the legacy layout on
- * a matched modern stack and skip the aperture acknowledgement. A
- * genuinely mismatched or pre-aperture stack is stable across
- * re-reads; a glitched cycle is not. Retry any non-VALID result while
- * the capability is present, interleaving a benign register access so
- * a retry does not repeat the exact failing bus pattern. Without the
- * capability there is no descriptor to recover: single read. Sets
- * *verified to 1 only when the returned descriptor was confirmed by
- * two agreeing samples (or no contract exists); 0 means the retry
- * budget exhausted unconfirmed and callers must fail closed. */
+ * a zero LO, intermittently, re-rolled per power-up; a glitched HIGH
+ * halfword instead breaks the magic and reads as legacy. A descriptor
+ * is trusted only when two consecutive samples agree -- whether the
+ * stable value negotiates as VALID or as LEGACY (a layout-capable
+ * firmware on an older FPGA legitimately reads a stable non-magic
+ * value; that mixed stack is supported). Retries interleave a benign
+ * register access so they do not repeat the exact failing bus
+ * pattern. Without the layout capability there is no descriptor to
+ * recover: the single read is authoritative. Sets *verified to 1 when
+ * the returned descriptor was confirmed by two agreeing samples (or
+ * no contract exists); 0 means the retry budget exhausted with
+ * unstable samples and callers must fail closed. */
 static inline uint32_t zz9000_read_z2_aperture_verified(
     ULONG board_addr, uint32_t board_size, uint16_t fw_caps, int *verified)
 {
@@ -244,37 +243,29 @@ static inline uint32_t zz9000_read_z2_aperture_verified(
         }
         return descriptor;
     }
+    /* Confirmation is value-agnostic: two consecutive agreeing samples
+     * are trusted whether they negotiate as VALID or as LEGACY.
+     * A valid-looking glitch can land on the OTHER profile (the
+     * generation byte is one bit apart), so a valid sample needs an
+     * agreeing re-read before it may be acknowledged. Conversely, a
+     * layout-capable firmware paired with an older FPGA consistently
+     * reads a non-magic value -- that stable LEGACY outcome is a
+     * supported mixed stack and must be honored, not rejected. Only
+     * never-stable reads stay unverified. */
     while (attempts-- > 0) {
-        if (zz_z2_aperture_negotiate(
-                descriptor, board_size, fw_caps, NULL) ==
-                ZZ_APERTURE_VALID) {
-            /* A glitch can land on ANOTHER valid profile: the
-             * generation byte is one bit apart between 0x5a01.... and
-             * 0x5a02....., and both profiles exist for the same board
-             * size. Accepting the wrong generation writes the wrong
-             * aperture acknowledgement (or carves a direct ring over
-             * the live host window in AHI), so require an independent
-             * re-read to agree before trusting a valid sample. */
-            uint32_t confirm = zz9000_read_reg16(
-                board_addr, ZZ_REG_Z2_APERTURE_INFO_HI);
-            (void)zz9000_read_reg16(board_addr, ZZ_REG_FW_CAPABILITIES);
-            confirm = (uint32_t)((confirm << 16) |
-                zz9000_read_reg16(board_addr,
-                    ZZ_REG_Z2_APERTURE_INFO_LO));
-            if (confirm == descriptor) {
-                if (verified) {
-                    *verified = 1;
-                }
-                return descriptor;
-            }
-            descriptor = confirm;   /* unstable: keep sampling */
-            continue;
-        }
-        ULONG high = zz9000_read_reg16(
+        uint32_t confirm = zz9000_read_reg16(
             board_addr, ZZ_REG_Z2_APERTURE_INFO_HI);
         (void)zz9000_read_reg16(board_addr, ZZ_REG_FW_CAPABILITIES);
-        descriptor = (uint32_t)((high << 16) |
-            zz9000_read_reg16(board_addr, ZZ_REG_Z2_APERTURE_INFO_LO));
+        confirm = (uint32_t)((confirm << 16) |
+            zz9000_read_reg16(board_addr,
+                ZZ_REG_Z2_APERTURE_INFO_LO));
+        if (confirm == descriptor) {
+            if (verified) {
+                *verified = 1;
+            }
+            return descriptor;
+        }
+        descriptor = confirm;   /* unstable: keep sampling */
     }
     /* Budget exhausted without two agreeing samples: the returned
      * descriptor is UNCONFIRMED. Callers must fail closed when
