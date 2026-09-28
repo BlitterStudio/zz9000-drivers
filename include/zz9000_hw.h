@@ -243,22 +243,34 @@ static inline uint32_t zz9000_read_z2_aperture_verified(
     if (resamples) {
         *resamples = 0;
     }
-    if (!(*fw_caps_io & ZZ_FW_CAP_Z2_APERTURE_LAYOUT)) {
-        /* A single glitched capability read must not disable
-         * verification (FindCard would silently go legacy while a
-         * later clean read elsewhere could still carve the gen-2
-         * direct ring). Re-read and require agreement before taking
-         * the pre-aperture early exit; disagreement means the passed
-         * value lost the bit and verification proceeds
-         * conservatively. The confirmed value is written back so every
-         * caller negotiates with the same view. */
-        uint16_t confirm_caps = zz9000_read_reg16(
+    /* The capability gate needs the same evidence standard as the
+     * descriptor: two agreeing samples, in BOTH directions. A single
+     * corrupted read must neither disable verification (FindCard
+     * silently going legacy while another consumer carves the gen-2
+     * direct ring) nor enable it on a machine with no descriptor
+     * (stable valid-looking garbage could then be acknowledged as a
+     * layout the firmware does not support). Resample on disagreement
+     * and fail closed when the value never stabilizes; the agreed
+     * value is written back so every caller negotiates with the same
+     * view. */
+    {
+        uint16_t caps_confirm = zz9000_read_reg16(
             board_addr, ZZ_REG_FW_CAPABILITIES);
-        if (confirm_caps & ZZ_FW_CAP_Z2_APERTURE_LAYOUT) {
-            *fw_caps_io |= ZZ_FW_CAP_Z2_APERTURE_LAYOUT;
-        } else {
+        int caps_attempts = 4;
+
+        while (*fw_caps_io != caps_confirm && caps_attempts-- > 0) {
+            *fw_caps_io = caps_confirm;
+            (void)zz9000_read_reg16(board_addr,
+                ZZ_REG_Z2_APERTURE_INFO_HI);
+            caps_confirm = zz9000_read_reg16(board_addr,
+                ZZ_REG_FW_CAPABILITIES);
+        }
+        if (*fw_caps_io != caps_confirm) {
+            return descriptor;   /* unstable: verified stays 0 */
+        }
+        if (!(*fw_caps_io & ZZ_FW_CAP_Z2_APERTURE_LAYOUT)) {
             /* No layout contract: there is no descriptor to recover
-             * and the single read is authoritative. */
+             * and the agreed read is authoritative. */
             if (verified) {
                 *verified = 1;
             }
