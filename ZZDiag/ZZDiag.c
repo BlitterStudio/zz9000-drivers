@@ -386,14 +386,19 @@ static void print_aperture_layout(const struct ZZ9000Board *board)
     {
         uint32_t raw_descriptor = zz9000_read_reg32(board->address,
             ZZ_REG_Z2_APERTURE_INFO_HI);
+        int descriptor_verified = 0;
         descriptor = zz9000_read_z2_aperture_verified(board->address,
-            board->board_size, fw_caps);
+            board->board_size, fw_caps, &descriptor_verified);
         printf("FirmwareCapabilities   = 0x%04x\n", (unsigned)fw_caps);
         printf("Z2ApertureDescriptor   = 0x%08lx\n",
             (unsigned long)descriptor);
         if (descriptor != raw_descriptor) {
             printf("Z2ApertureReadGlitch   = yes (raw 0x%08lx, recovered "
                 "after re-read)\n", (unsigned long)raw_descriptor);
+        }
+        if (!descriptor_verified) {
+            printf("Z2ApertureUnverified   = yes (no two agreeing samples "
+                "within the retry budget)\n");
         }
     }
     status = zz_z2_aperture_negotiate(descriptor, board->board_size,

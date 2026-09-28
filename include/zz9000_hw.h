@@ -222,16 +222,26 @@ static inline ULONG zz9000_read_reg32(ULONG board_addr, ULONG offset)
  * re-reads; a glitched cycle is not. Retry any non-VALID result while
  * the capability is present, interleaving a benign register access so
  * a retry does not repeat the exact failing bus pattern. Without the
- * capability there is no descriptor to recover: single read. Returns
- * the last descriptor read (caller still validates). */
+ * capability there is no descriptor to recover: single read. Sets
+ * *verified to 1 only when the returned descriptor was confirmed by
+ * two agreeing samples (or no contract exists); 0 means the retry
+ * budget exhausted unconfirmed and callers must fail closed. */
 static inline uint32_t zz9000_read_z2_aperture_verified(
-    ULONG board_addr, uint32_t board_size, uint16_t fw_caps)
+    ULONG board_addr, uint32_t board_size, uint16_t fw_caps, int *verified)
 {
     uint32_t descriptor = zz9000_read_reg32(
         board_addr, ZZ_REG_Z2_APERTURE_INFO_HI);
     int attempts = 5;
 
+    if (verified) {
+        *verified = 0;
+    }
     if (!(fw_caps & ZZ_FW_CAP_Z2_APERTURE_LAYOUT)) {
+        /* No layout contract: there is no descriptor to recover and
+         * the single read is authoritative. */
+        if (verified) {
+            *verified = 1;
+        }
         return descriptor;
     }
     while (attempts-- > 0) {
@@ -252,6 +262,9 @@ static inline uint32_t zz9000_read_z2_aperture_verified(
                 zz9000_read_reg16(board_addr,
                     ZZ_REG_Z2_APERTURE_INFO_LO));
             if (confirm == descriptor) {
+                if (verified) {
+                    *verified = 1;
+                }
                 return descriptor;
             }
             descriptor = confirm;   /* unstable: keep sampling */
@@ -263,6 +276,10 @@ static inline uint32_t zz9000_read_z2_aperture_verified(
         descriptor = (uint32_t)((high << 16) |
             zz9000_read_reg16(board_addr, ZZ_REG_Z2_APERTURE_INFO_LO));
     }
+    /* Budget exhausted without two agreeing samples: the returned
+     * descriptor is UNCONFIRMED. Callers must fail closed when
+     * *verified is 0 -- a valid-looking but wrong generation must
+     * never be acknowledged or used to reserve window regions. */
     return descriptor;
 }
 

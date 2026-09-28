@@ -828,14 +828,19 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 			 * the direct-register bank at +0x1000. Re-read a descriptor
 			 * that fails validation before giving up: a marginal Z2 bus
 			 * can glitch one halfword of the back-to-back pair (fixed in
-			 * FPGA for v2.8.1; this also recovers deployed bitstreams). */
+			 * FPGA for v2.8.1; this also recovers deployed bitstreams).
+			 * Fail closed on an unconfirmed descriptor too: a valid-
+			 * looking but wrong generation must not be acknowledged. */
+			int aperture_verified = 0;
 			aperture_info = zz9000_read_z2_aperture_verified(
 				(ULONG)b->RegisterBase, (uint32_t)cd->cd_BoardSize,
-				fw_caps);
+				fw_caps, &aperture_verified);
 			aperture_status = zz_z2_aperture_negotiate(aperture_info,
 				(uint32_t)cd->cd_BoardSize, fw_caps, &aperture_layout);
-			if (aperture_status == ZZ_APERTURE_INVALID) {
-				KPrintF("ZZ9000.card: invalid Z2 aperture descriptor %08lx for %08lx-byte window\n",
+			if (!aperture_verified ||
+				aperture_status == ZZ_APERTURE_INVALID) {
+				KPrintF("ZZ9000.card: %s Z2 aperture descriptor %08lx for %08lx-byte window\n",
+					aperture_verified ? "invalid" : "unconfirmed",
 					(ULONG)aperture_info, (ULONG)cd->cd_BoardSize);
 				goto cleanup;
 			}
