@@ -236,6 +236,7 @@ static inline uint32_t zz9000_read_z2_aperture_verified(
         board_addr, ZZ_REG_Z2_APERTURE_INFO_HI);
     int attempts = 5;
     int unstable = 0;
+    int caps_unstable = 0;
 
     if (verified) {
         *verified = 0;
@@ -260,12 +261,16 @@ static inline uint32_t zz9000_read_z2_aperture_verified(
 
         while (*fw_caps_io != caps_confirm && caps_attempts-- > 0) {
             *fw_caps_io = caps_confirm;
+            caps_unstable++;
             (void)zz9000_read_reg16(board_addr,
                 ZZ_REG_Z2_APERTURE_INFO_HI);
             caps_confirm = zz9000_read_reg16(board_addr,
                 ZZ_REG_FW_CAPABILITIES);
         }
         if (*fw_caps_io != caps_confirm) {
+            if (resamples) {
+                *resamples = caps_unstable;
+            }
             return descriptor;   /* unstable: verified stays 0 */
         }
         if (!(*fw_caps_io & ZZ_FW_CAP_Z2_APERTURE_LAYOUT)) {
@@ -273,6 +278,9 @@ static inline uint32_t zz9000_read_z2_aperture_verified(
              * and the agreed read is authoritative. */
             if (verified) {
                 *verified = 1;
+            }
+            if (resamples) {
+                *resamples = caps_unstable;
             }
             return descriptor;
         }
@@ -298,7 +306,7 @@ static inline uint32_t zz9000_read_z2_aperture_verified(
                 *verified = 1;
             }
             if (resamples) {
-                *resamples = unstable;
+                *resamples = caps_unstable + unstable;
             }
             return descriptor;
         }
@@ -310,7 +318,7 @@ static inline uint32_t zz9000_read_z2_aperture_verified(
      * *verified is 0 -- a valid-looking but wrong generation must
      * never be acknowledged or used to reserve window regions. */
     if (resamples) {
-        *resamples = unstable + 1;
+        *resamples = caps_unstable + unstable + 1;
     }
     return descriptor;
 }
