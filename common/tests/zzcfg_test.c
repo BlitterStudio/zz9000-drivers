@@ -36,6 +36,17 @@ static int raw_read_pending;
 static int raw_started_before_reset;
 static char raw_buffer[64];
 static const char *raw_next_text;
+static UWORD query_key;
+static UWORD query_values[ZZ_CFG_KEY_FAST_RAM_OUTCOME + 1];
+static UWORD query_present[ZZ_CFG_KEY_FAST_RAM_OUTCOME + 1];
+
+static void query_reset(void)
+{
+    memset(query_values, 0, sizeof(query_values));
+    memset(query_present, 0, sizeof(query_present));
+    query_key = 0;
+}
+
 
 static void raw_io_reset(const char *old_text, const char *next_text)
 {
@@ -54,6 +65,12 @@ static void raw_io_reset(const char *old_text, const char *next_text)
 UWORD zzcfg_test_reg_read(ULONG board, ULONG offset)
 {
     (void)board;
+    if (offset == ZZ_REG_CONFIG_KEY)
+        return query_key <= ZZ_CFG_KEY_FAST_RAM_OUTCOME ?
+            query_values[query_key] : 0;
+    if (offset == ZZ_REG_CONFIG_PRESENT)
+        return query_key <= ZZ_CFG_KEY_FAST_RAM_OUTCOME ?
+            query_present[query_key] : 0;
     if (offset == ZZ_REG_CONFIG_FILE) {
         if (raw_reset_pending) {
             raw_reset_pending = 0;
@@ -77,6 +94,10 @@ UWORD zzcfg_test_reg_read(ULONG board, ULONG offset)
 void zzcfg_test_reg_write(ULONG board, ULONG offset, UWORD value)
 {
     (void)board;
+    if (offset == ZZ_REG_CONFIG_KEY) {
+        query_key = value;
+        return;
+    }
     if (offset != ZZ_REG_CONFIG_FILE)
         return;
     if (value == 0) {
@@ -266,6 +287,38 @@ static void test_native_key_presence(void)
           "explicit legacy profile and zero values remain active");
 }
 
+static void test_fast_ram_status(void)
+{
+    UWORD value = 0, outcome = 0;
+
+    check(ZZ_CFG_KEY_FAST_RAM == 19 &&
+          ZZ_CFG_KEY_FAST_RAM_OUTCOME == 20,
+          "Fast RAM query ABI slots remain stable");
+
+    query_reset();
+    query_values[ZZ_CFG_KEY_FAST_RAM] = 1;
+    query_present[ZZ_CFG_KEY_FAST_RAM] = 1;
+    query_values[ZZ_CFG_KEY_FAST_RAM_OUTCOME] = ZZ_CFG_FAST_RAM_OUTCOME_ENABLED;
+    query_present[ZZ_CFG_KEY_FAST_RAM_OUTCOME] = 1;
+    check(zzcfg_fast_ram_get(0, &value) && value == 1,
+          "Fast RAM saved preference is queried from key 19");
+    check(zzcfg_fast_ram_effective_state(0, &outcome) ==
+          ZZCFG_FAST_RAM_ENABLED &&
+          outcome == ZZ_CFG_FAST_RAM_OUTCOME_ENABLED,
+          "Fast RAM enabled state is distinct");
+
+    query_values[ZZ_CFG_KEY_FAST_RAM_OUTCOME] = ZZ_CFG_FAST_RAM_OUTCOME_TIMEOUT;
+    check(zzcfg_fast_ram_effective_state(0, &outcome) ==
+          ZZCFG_FAST_RAM_WITHHELD &&
+          outcome == ZZ_CFG_FAST_RAM_OUTCOME_TIMEOUT,
+          "configured Fast RAM withheld by boot gate is distinct");
+
+    query_present[ZZ_CFG_KEY_FAST_RAM_OUTCOME] = 0;
+    check(zzcfg_fast_ram_effective_state(0, &outcome) ==
+          ZZCFG_FAST_RAM_UNAVAILABLE,
+          "old firmware without Fast RAM outcome disables the setting");
+}
+
 int main(void)
 {
     struct zzcfg_values a, b;
@@ -275,6 +328,7 @@ int main(void)
     int i;
 
     test_native_key_presence();
+    test_fast_ram_status();
     test_capture_phase_preservation();
 
     /* 1. every firmware key appears in generated output */
@@ -293,6 +347,40 @@ int main(void)
 
     /* 2. the removed key must NOT be written any more */
     check(strstr(text, "yuv_rect") == NULL, "yuv_rect is no longer emitted");
+
+    /* Fast RAM is intentionally present-only: opening Settings must not
+     * create a default-on key, because firmware fails closed when absent. */
+    check(strstr(text, "fast_ram = ") == NULL,
+          "unset Fast RAM is omitted from generated config");
+    for (i = 0; i <= 1; i++) {
+        defaults(&a);
+        a.fast_ram = (UWORD)i;
+        a.fast_ram_present = 1;
+        n = zzcfg_generate(&a, text, sizeof(text));
+        memset(&b, 0, sizeof(b));
+        zzcfg_parse_text(text, n, &b);
+        check(b.fast_ram_present && b.fast_ram == (UWORD)i,
+              i ? "fast_ram=on round-trips" : "fast_ram=off round-trips");
+    }
+
+    /* Firmware poisons Fast RAM permanently for the boot when any spelling
+     * is malformed. A Settings save must preserve that fail-closed result,
+     * not clean a hand-edited bad line into an enabled preference. */
+    defaults(&a);
+    zzcfg_parse_text("fast_ram = on\nfast_ram = maybe\nfast_ram = off\n",
+                     (UWORD)strlen("fast_ram = on\nfast_ram = maybe\n"
+                                   "fast_ram = off\n"), &a);
+    n = zzcfg_generate(&a, text, sizeof(text));
+    check(a.fast_ram_invalid && !a.fast_ram_present &&
+          strstr(text, "fast_ram = ") == NULL,
+          "malformed Fast RAM remains fail-closed on unrelated saves");
+
+    defaults(&a);
+    zzcfg_parse_text("fast_ram on\nfast_ram = on trailing\n",
+                     (UWORD)strlen("fast_ram on\nfast_ram = on trailing\n"),
+                     &a);
+    check(a.fast_ram_invalid && !a.fast_ram_present,
+          "missing equals and trailing Fast RAM text are fail-closed");
 
     /* 3. non-default values survive generate -> parse */
     defaults(&a);
