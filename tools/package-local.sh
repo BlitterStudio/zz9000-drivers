@@ -22,16 +22,17 @@ tools/check-release.sh
 
 # Amiga-side manuals ship as AmiGuide databases generated from the
 # canonical Markdown sources (raw .md has no Amiga reader). Locate the
-# pinned zz9000-sdk checkout exactly like sdk/build.sh: explicit
-# ZZ9000_SDK, a sibling checkout, or the sdk/work clone.
+# SDK subtree exactly like sdk/build.sh: explicit ZZ9000_SDK (pointing
+# at the sdk/ subtree root), a sibling firmware checkout's sdk/, or the
+# sdk/work/zz9000-firmware clone.
 if [ -n "${ZZ9000_SDK:-}" ]; then
     sdk_src=$ZZ9000_SDK
-elif [ -d "$repo_root/../zz9000-sdk/.git" ]; then
-    sdk_src=$(CDPATH='' cd -- "$repo_root/../zz9000-sdk" && pwd)
-elif [ -d "$repo_root/sdk/work/.git" ]; then
-    sdk_src=$repo_root/sdk/work
+elif [ -d "$repo_root/../zz9000-firmware/sdk/scripts/md2guide.py" ]; then
+    sdk_src="$repo_root/../zz9000-firmware/sdk"
+elif [ -d "$repo_root/sdk/work/zz9000-firmware/sdk/scripts/md2guide.py" ]; then
+    sdk_src="$repo_root/sdk/work/zz9000-firmware/sdk"
 else
-    echo "ERROR: no zz9000-sdk checkout for md2guide; set ZZ9000_SDK or run sdk/build.sh first" >&2
+    echo "ERROR: no SDK tree for md2guide; set ZZ9000_SDK=/path/to/sdk or run sdk/build.sh first" >&2
     exit 1
 fi
 md2guide=$sdk_src/scripts/md2guide.py

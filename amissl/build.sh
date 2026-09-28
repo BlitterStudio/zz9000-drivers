@@ -26,7 +26,9 @@ SDK_REPO=${SDK_REPO:-https://github.com/BlitterStudio/zz9000-firmware.git}
 TARGETS=${OS:-"os3-68020 os3-68060"}
 
 if [ -n "${ZZ9000_SDK:-}" ]; then
-    src="$ZZ9000_SDK"
+    # The override points at an SDK-subtree root (e.g.
+    # ../zz9000-firmware/sdk); derive the firmware repo root from it.
+    fw=$(CDPATH='' cd -- "$ZZ9000_SDK/.." && pwd)
 elif [ -d "$repo_root/../zz9000-firmware/sdk/include/zz9k" ]; then
     fw=$(CDPATH='' cd -- "$repo_root/../zz9000-firmware" && pwd)
 else
