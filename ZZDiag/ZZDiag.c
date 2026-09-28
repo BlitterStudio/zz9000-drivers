@@ -391,8 +391,8 @@ static void print_aperture_layout(const struct ZZ9000Board *board)
         descriptor = zz9000_read_z2_aperture_verified(board->address,
             board->board_size, &fw_caps, &descriptor_verified,
             &resamples);
-        printf("FirmwareCapabilities   = 0x%04x (confirmed)\n",
-            (unsigned)fw_caps);
+        printf("FirmwareCapabilities   = 0x%04x%s\n", (unsigned)fw_caps,
+            descriptor_verified ? " (confirmed)" : " (unstable)");
         printf("Z2ApertureDescriptor   = 0x%08lx\n",
             (unsigned long)descriptor);
         /* Report from every observation: the helper's resample count
@@ -402,7 +402,8 @@ static void print_aperture_layout(const struct ZZ9000Board *board)
          * recovered. */
         if (!descriptor_verified) {
             printf("Z2ApertureUnverified   = yes (no two agreeing samples "
-                "within the retry budget, %d resample(s))\n", resamples);
+                "within the retry budget -- capability or descriptor "
+                "reads unstable, %d resample(s))\n", resamples);
         } else if (resamples > 0 || descriptor != raw_descriptor) {
             printf("Z2ApertureReadGlitch   = yes (raw 0x%08lx, %d "
                 "resample(s))\n",
