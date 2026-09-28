@@ -307,11 +307,24 @@ static void test_fast_ram_status(void)
           outcome == ZZ_CFG_FAST_RAM_OUTCOME_ENABLED,
           "Fast RAM enabled state is distinct");
 
+    query_values[ZZ_CFG_KEY_FAST_RAM_OUTCOME] = ZZ_CFG_FAST_RAM_OUTCOME_BAK_ON;
+    check(zzcfg_fast_ram_effective_state(0, &outcome) ==
+          ZZCFG_FAST_RAM_ENABLED &&
+          outcome == ZZ_CFG_FAST_RAM_OUTCOME_BAK_ON,
+          "Fast RAM backup recovery remains enabled");
+
     query_values[ZZ_CFG_KEY_FAST_RAM_OUTCOME] = ZZ_CFG_FAST_RAM_OUTCOME_TIMEOUT;
     check(zzcfg_fast_ram_effective_state(0, &outcome) ==
           ZZCFG_FAST_RAM_WITHHELD &&
           outcome == ZZ_CFG_FAST_RAM_OUTCOME_TIMEOUT,
           "configured Fast RAM withheld by boot gate is distinct");
+
+    query_present[ZZ_CFG_KEY_FAST_RAM] = 0;
+    query_values[ZZ_CFG_KEY_FAST_RAM_OUTCOME] = ZZ_CFG_FAST_RAM_OUTCOME_OFF;
+    check(zzcfg_fast_ram_effective_state(0, &outcome) ==
+          ZZCFG_FAST_RAM_DISABLED &&
+          outcome == ZZ_CFG_FAST_RAM_OUTCOME_OFF,
+          "Fast RAM off outcome is disabled without a saved key");
 
     query_present[ZZ_CFG_KEY_FAST_RAM_OUTCOME] = 0;
     check(zzcfg_fast_ram_effective_state(0, &outcome) ==
@@ -376,11 +389,48 @@ int main(void)
           "malformed Fast RAM remains fail-closed on unrelated saves");
 
     defaults(&a);
-    zzcfg_parse_text("fast_ram on\nfast_ram = on trailing\n",
-                     (UWORD)strlen("fast_ram on\nfast_ram = on trailing\n"),
-                     &a);
+    zzcfg_parse_text("fast_ram on\n", (UWORD)strlen("fast_ram on\n"), &a);
     check(a.fast_ram_invalid && !a.fast_ram_present,
-          "missing equals and trailing Fast RAM text are fail-closed");
+          "missing equals Fast RAM text is fail-closed");
+
+    defaults(&a);
+    zzcfg_parse_text("fast_ram = on trailing\n",
+                     (UWORD)strlen("fast_ram = on trailing\n"), &a);
+    check(a.fast_ram_invalid && !a.fast_ram_present,
+          "trailing Fast RAM text is fail-closed");
+
+    defaults(&a);
+    zzcfg_parse_text("fast_ram = 1\n", (UWORD)strlen("fast_ram = 1\n"), &a);
+    check(a.fast_ram_present && a.fast_ram == 1,
+          "numeric fast_ram=1 parses as on");
+    defaults(&a);
+    zzcfg_parse_text("fast_ram = 0\n", (UWORD)strlen("fast_ram = 0\n"), &a);
+    check(a.fast_ram_present && a.fast_ram == 0,
+          "numeric fast_ram=0 parses as off");
+
+    defaults(&a);
+    zzcfg_parse_text("fast_ram = on\nfast_ram:on\n",
+                     (UWORD)strlen("fast_ram = on\nfast_ram:on\n"), &a);
+    check(a.fast_ram_invalid && !a.fast_ram_present,
+          "stray delimiter after Fast RAM key is fail-closed");
+
+    defaults(&a);
+    zzcfg_parse_text("fast_ram = on\nfast_ramx = invalid\n",
+                     (UWORD)strlen("fast_ram = on\nfast_ramx = invalid\n"), &a);
+    check(!a.fast_ram_invalid && a.fast_ram_present && a.fast_ram == 1,
+          "Fast RAM prefix key does not poison Fast RAM");
+
+    {
+        char overlong[160];
+
+        memset(overlong, ' ', sizeof(overlong));
+        memcpy(overlong, "fast_ram = on", strlen("fast_ram = on"));
+        overlong[151] = '\n';
+        defaults(&a);
+        zzcfg_parse_text(overlong, 152, &a);
+        check(a.fast_ram_invalid && !a.fast_ram_present,
+              "overlong Fast RAM line is fail-closed");
+    }
 
     /* 3. non-default values survive generate -> parse */
     defaults(&a);

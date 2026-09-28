@@ -102,6 +102,30 @@ static int zzcfg_is_space(char c)
     return c == ' ' || c == '\t' || c == '\r';
 }
 
+static int zzcfg_is_ident_char(char c)
+{
+    char lower = zzcfg_lower(c);
+
+    return (lower >= 'a' && lower <= 'z') ||
+        (c >= '0' && c <= '9') || c == '_';
+}
+
+/* Match the firmware's first_token_is boundary rule: an identifier prefix
+ * followed by any non-identifier byte still names this safety-critical key. */
+static int zzcfg_first_token_is(const char *line, UWORD len,
+    const char *keyword)
+{
+    UWORD pos = 0;
+
+    while (pos < len && zzcfg_is_space(line[pos])) pos++;
+    while (*keyword) {
+        if (pos >= len || zzcfg_lower(line[pos]) != *keyword) return 0;
+        pos++;
+        keyword++;
+    }
+    return pos == len || !zzcfg_is_ident_char(line[pos]);
+}
+
 int zzcfg_hdf_name_valid(const char *name)
 {
     UWORD len = 0;
@@ -373,11 +397,22 @@ void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v)
     while (pos < len) {
         char key[24];
         char value[ZZCFG_HDF_CHARS + 2];
+        UWORD line_start = pos;
         UWORD line_end = pos;
+        UWORD content_end;
         UWORD n;
         int extra_value = 0;
+        int fast_ram_line;
 
         while (line_end < len && text[line_end] != '\n') line_end++;
+        content_end = line_start;
+        while (content_end < line_end && text[content_end] != '#' &&
+                text[content_end] != ';')
+            content_end++;
+        fast_ram_line = zzcfg_first_token_is(text + line_start,
+            content_end - line_start, "fast_ram");
+        if (content_end - line_start > 127 && fast_ram_line)
+            zzcfg_fast_ram_invalidate(v);
 
         /* trim leading whitespace, copy the key up to '=' or space */
         while (pos < line_end && zzcfg_is_space(text[pos])) pos++;
@@ -392,7 +427,7 @@ void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v)
 
         while (pos < line_end && zzcfg_is_space(text[pos])) pos++;
         if (n == 0 || pos >= line_end || text[pos] != '=') {
-            if (n && zzcfg_str_eq_ci(key, "fast_ram"))
+            if (fast_ram_line)
                 zzcfg_fast_ram_invalidate(v);
             pos = line_end + 1;
             continue;
@@ -412,9 +447,14 @@ void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v)
         if (pos < line_end && text[pos] != '#' && text[pos] != ';')
             extra_value = 1;
         pos = line_end + 1;
-        if (n == 0 || (extra_value && zzcfg_str_eq_ci(key, "fast_ram"))) {
-            if (zzcfg_str_eq_ci(key, "fast_ram"))
+        if (n == 0 || (extra_value && fast_ram_line)) {
+            if (fast_ram_line)
                 zzcfg_fast_ram_invalidate(v);
+            continue;
+        }
+
+        if (fast_ram_line && !zzcfg_str_eq_ci(key, "fast_ram")) {
+            zzcfg_fast_ram_invalidate(v);
             continue;
         }
 

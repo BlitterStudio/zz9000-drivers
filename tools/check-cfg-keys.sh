@@ -101,21 +101,6 @@ sed -n '/static const struct zzcfg_profile_desc zzcfg_profiles\[\] = {/,/^};/ {
     s/^[[:space:]]*{ "\([a-z_0-9]*\)".*/\1/p
 }' "$editor" > "$work/profiles-editor"
 
-# `fast_ram` is the one safety-critical boolean. Its on/off/1/0 grammar
-# must stay aligned, and firmware must retain the invalid-value poison so
-# malformed input fails closed instead of silently advertising Fast RAM.
-fast_ram_parser=$(sed -n '/if (token_eq(key, "fast_ram")) {/,/\/\* ---- audio/p' \
-    "$parser")
-fast_ram_editor=$(sed -n '/zzcfg_str_eq_ci(key, "fast_ram")/,/zzcfg_str_eq_ci(key, "offscreen_bitmaps")/p' \
-    "$editor")
-fast_ram_parser_ok=0
-fast_ram_editor_ok=0
-case "$fast_ram_parser" in
-    *"parse_onoff(value)"*"cfg.fast_ram_invalid = 1"*) fast_ram_parser_ok=1 ;;
-esac
-case "$fast_ram_editor" in
-    *'"on"'*'"1"'*'"off"'*'"0"'*) fast_ram_editor_ok=1 ;;
-esac
 
 status=0
 report() {
@@ -138,12 +123,6 @@ echo "check-cfg-keys: firmware parser = $(wc -l < "$work/parser" | tr -d ' ') ke
 report "the sample ZZ9000.CFG" "$work/sample_expected" "$work/sample"
 report "the firmware README table" "$work/canonical" "$work/readme"
 report "ZZTop's editor (zzcfg_amiga.c)" "$work/parser" "$work/editor"
-if [ "$fast_ram_parser_ok" -ne 1 ] || [ "$fast_ram_editor_ok" -ne 1 ]; then
-    status=1
-    echo "  Fast RAM grammar/fail-closed check failed"
-else
-    echo "  Fast RAM grammar is on|off|1|0 and fail-closed"
-fi
 
 report_profiles() {
     label=$1

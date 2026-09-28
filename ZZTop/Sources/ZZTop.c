@@ -1056,6 +1056,7 @@ static char settings_fast_ram_status_buf[64];
 #define FAST_RAM_MANUAL_HELP  "Any change: next reboot"
 static char settings_cfg_text[ZZCFG_MAX_SIZE];
 static BOOL settings_fast_ram_available;
+static UWORD settings_fast_ram_outcome;
 /* ZZ9000.CFG needs firmware ABI 2.3+. On older firmware the window
  * still opens for the live scanline controls; the config-file fields
  * and Save/Reload are disabled. */
@@ -1804,6 +1805,7 @@ static void settings_fast_ram_refresh_state(void)
 	UWORD outcome = ZZ_CFG_FAST_RAM_OUTCOME_PENDING;
 	enum zzcfg_fast_ram_state state;
 
+	settings_fast_ram_outcome = outcome;
 	settings_fast_ram_available = FALSE;
 	if (!settings_have_cfg) {
 		snprintf(settings_fast_ram_status_buf,
@@ -1813,6 +1815,7 @@ static void settings_fast_ram_refresh_state(void)
 	}
 
 	state = zzcfg_fast_ram_effective_state((ULONG)zz_regs, &outcome);
+	settings_fast_ram_outcome = outcome;
 	if (state == ZZCFG_FAST_RAM_UNAVAILABLE) {
 		snprintf(settings_fast_ram_status_buf,
 			sizeof(settings_fast_ram_status_buf),
@@ -2076,6 +2079,15 @@ static void settings_populate(struct Window *win, UWORD fw_capabilities)
 			"Config read failed (SD error)");
 	}
 	settings_fast_ram_refresh_state();
+	if (settings_fast_ram_outcome == ZZ_CFG_FAST_RAM_OUTCOME_INVALID ||
+			settings_fast_ram_outcome == ZZ_CFG_FAST_RAM_OUTCOME_TRUNCATED) {
+		/* A malformed or boot-truncated file was withheld. Do not show its
+		 * raw preference as a clean staged-on value; a cycle selection
+		 * explicitly clears this poison before Save. */
+		sv->fast_ram = 0;
+		sv->fast_ram_present = 0;
+		sv->fast_ram_invalid = 1;
+	}
 
 
 	if (!win) return;
