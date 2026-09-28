@@ -383,12 +383,21 @@ static void print_aperture_layout(const struct ZZ9000Board *board)
     }
 
     fw_caps = zz9000_read_reg16(board->address, ZZ_REG_FW_CAPABILITIES);
-    descriptor = zz9000_read_reg32(board->address,
-        ZZ_REG_Z2_APERTURE_INFO_HI);
+    {
+        uint32_t raw_descriptor = zz9000_read_reg32(board->address,
+            ZZ_REG_Z2_APERTURE_INFO_HI);
+        descriptor = zz9000_read_z2_aperture_verified(board->address,
+            board->board_size, fw_caps);
+        printf("FirmwareCapabilities   = 0x%04x\n", (unsigned)fw_caps);
+        printf("Z2ApertureDescriptor   = 0x%08lx\n",
+            (unsigned long)descriptor);
+        if (descriptor != raw_descriptor) {
+            printf("Z2ApertureReadGlitch   = yes (raw 0x%08lx, recovered "
+                "after re-read)\n", (unsigned long)raw_descriptor);
+        }
+    }
     status = zz_z2_aperture_negotiate(descriptor, board->board_size,
         fw_caps, &layout);
-    printf("FirmwareCapabilities   = 0x%04x\n", (unsigned)fw_caps);
-    printf("Z2ApertureDescriptor   = 0x%08lx\n", (unsigned long)descriptor);
     if (status == ZZ_APERTURE_LEGACY) {
         printf("Z2ApertureLayout       = legacy (handshake incomplete/absent)\n");
         return;

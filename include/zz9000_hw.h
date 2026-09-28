@@ -8,6 +8,7 @@
 #ifndef ZZ9000_HW_H
 #define ZZ9000_HW_H
 
+#include "zz9000_aperture.h"
 #include "zz_custom_mode.h"
 
 #include <exec/types.h>
@@ -204,6 +205,37 @@ static inline ULONG zz9000_read_reg32(ULONG board_addr, ULONG offset)
     ULONG low = zz9000_read_reg16(board_addr, offset + 2UL);
 
     return (high << 16) | low;
+}
+
+/* Read the Z2 aperture descriptor with glitch recovery.
+ *
+ * The Z2 register bank historically served reads without a dedicated
+ * data-out setup window before DTACK (firmware Z2_REGREAD FIXME, fixed
+ * alongside v2.8.1), so a marginal bus can corrupt one halfword of a
+ * back-to-back pair: observed in the field as descriptor HI 0x5a02 with
+ * a zero LO, intermittently, re-rolled per power-up. A genuinely
+ * mismatched stack is stable across re-reads; a glitched cycle is not.
+ * Retry before treating the descriptor as invalid, interleaving a benign
+ * register access so a retry does not repeat the exact failing bus
+ * pattern. Returns the last descriptor read (caller still validates). */
+static inline uint32_t zz9000_read_z2_aperture_verified(
+    ULONG board_addr, uint32_t board_size, uint16_t fw_caps)
+{
+    uint32_t descriptor = zz9000_read_reg32(
+        board_addr, ZZ_REG_Z2_APERTURE_INFO_HI);
+    int attempts = 4;
+
+    while (attempts-- > 0 &&
+           zz_z2_aperture_negotiate(
+               descriptor, board_size, fw_caps, NULL) ==
+               ZZ_APERTURE_INVALID) {
+        ULONG high = zz9000_read_reg16(
+            board_addr, ZZ_REG_Z2_APERTURE_INFO_HI);
+        (void)zz9000_read_reg16(board_addr, ZZ_REG_FW_CAPABILITIES);
+        descriptor = (uint32_t)((high << 16) |
+            zz9000_read_reg16(board_addr, ZZ_REG_Z2_APERTURE_INFO_LO));
+    }
+    return descriptor;
 }
 
 static inline void zz9000_write_reg16(ULONG board_addr, ULONG offset, UWORD value)

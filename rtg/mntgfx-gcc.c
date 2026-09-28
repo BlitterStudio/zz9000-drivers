@@ -824,13 +824,14 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 		fw_caps = ((volatile uint16_t*)b->RegisterBase)[ZZ_REG_FW_CAPABILITIES/2];
 		b->CardData[ZZ_CARD_DATA_FW_CAPABILITIES] = fw_caps;
 		if (zorro_version == 2) {
-			volatile UWORD *board = (volatile UWORD *)b->RegisterBase;
-
 			/* These are BOARD offsets.  RegisterBase is cd_BoardAddr, not
-			 * the direct-register bank at +0x1000. */
-			aperture_info =
-				((uint32_t)board[ZZ_REG_Z2_APERTURE_INFO_HI / 2] << 16) |
-				(uint32_t)board[ZZ_REG_Z2_APERTURE_INFO_LO / 2];
+			 * the direct-register bank at +0x1000. Re-read a descriptor
+			 * that fails validation before giving up: a marginal Z2 bus
+			 * can glitch one halfword of the back-to-back pair (fixed in
+			 * FPGA for v2.8.1; this also recovers deployed bitstreams). */
+			aperture_info = zz9000_read_z2_aperture_verified(
+				(ULONG)b->RegisterBase, (uint32_t)cd->cd_BoardSize,
+				fw_caps);
 			aperture_status = zz_z2_aperture_negotiate(aperture_info,
 				(uint32_t)cd->cd_BoardSize, fw_caps, &aperture_layout);
 			if (aperture_status == ZZ_APERTURE_INVALID) {
@@ -2182,6 +2183,7 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 	ULONG mode_width = 0;
 	ULONG alignment = 0;
 	BOOL constant_pitch = FALSE;
+	BOOL clear_requested = FALSE;
 
 	struct TagItem *tag = tags;
 	while (tag && tag->ti_Tag != TAG_DONE) {
@@ -2206,8 +2208,11 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 			case ABMA_ConstantByteSwapping:
 				if (tag->ti_Data) return NULL;
 				break;
-			/* ABMA_Clear needs no handling: the firmware zero-fills
-			 * every surface it allocates */
+			/* ABMA_Clear maps to the firmware's conditional surface
+			 * clear: u8_user[3]==1 tells the firmware NOT to zero-fill
+			 * (this caller did not ask). Legacy default stays 0 =
+			 * cleared, so older drivers keep BMF_CLEAR semantics. */
+			case ABMA_Clear: clear_requested = tag->ti_Data != 0; break;
 			default: break;
 		}
 		tag++;
@@ -2268,6 +2273,11 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 	} else {
 		dmy_cache
 		writeGfxDataU8(gfxdata, 1, 1);
+		/* 1 = caller did not ask for ABMA_Clear: firmware skips the
+		 * zero-fill (AllocBitMap does not promise cleared memory, and
+		 * a re-allocated smart-refresh save buffer must not black out
+		 * the window it backs). 0 keeps the legacy cleared surface. */
+		writeGfxDataU8(gfxdata, 3, clear_requested ? 0 : 1);
 		gfxdata->offset[1] = size;
 		zzwrite16(&registers->blitter_acc_op, ACC_OP_ALLOC_SURFACE);
 		card_offset = gfxdata->offset[0];
