@@ -37,8 +37,8 @@ static int raw_started_before_reset;
 static char raw_buffer[64];
 static const char *raw_next_text;
 static UWORD query_key;
-static UWORD query_values[ZZ_CFG_KEY_FAST_RAM_OUTCOME + 1];
-static UWORD query_present[ZZ_CFG_KEY_FAST_RAM_OUTCOME + 1];
+static UWORD query_values[ZZ_CONFIG_KEY_VIDEOCAP_HEIGHT + 1];
+static UWORD query_present[ZZ_CONFIG_KEY_VIDEOCAP_HEIGHT + 1];
 
 static void query_reset(void)
 {
@@ -66,10 +66,10 @@ UWORD zzcfg_test_reg_read(ULONG board, ULONG offset)
 {
     (void)board;
     if (offset == ZZ_REG_CONFIG_KEY)
-        return query_key <= ZZ_CFG_KEY_FAST_RAM_OUTCOME ?
+        return query_key <= ZZ_CONFIG_KEY_VIDEOCAP_HEIGHT ?
             query_values[query_key] : 0;
     if (offset == ZZ_REG_CONFIG_PRESENT)
-        return query_key <= ZZ_CFG_KEY_FAST_RAM_OUTCOME ?
+        return query_key <= ZZ_CONFIG_KEY_VIDEOCAP_HEIGHT ?
             query_present[query_key] : 0;
     if (offset == ZZ_REG_CONFIG_FILE) {
         if (raw_reset_pending) {
@@ -120,6 +120,7 @@ UBYTE zzcfg_test_buffer_read(ULONG board, UWORD offset)
 static const char *firmware_keys[] = {
     "videocap_profile", "videocap_sample", "videocap_crop_h",
     "videocap_crop_v", "videocap_phase", "videocap_c28_phase",
+    "videocap_width", "videocap_height",
     "scanline_mode", "scanline_parity", "int2", "mac",
     "offscreen_bitmaps", "video_overlay", "hdf", NULL
 };
@@ -363,6 +364,174 @@ static void test_fast_ram_status(void)
     }
 }
 
+static void test_videocap_geometry(void)
+{
+    struct zzcfg_values staged, reloaded, a, b;
+    char text[ZZCFG_MAX_SIZE];
+    UWORD len, n;
+    int i;
+
+    check(ZZ_CONFIG_KEY_VIDEOCAP_WIDTH == 26 &&
+          ZZ_CONFIG_KEY_VIDEOCAP_HEIGHT == 27,
+          "videocap geometry query ABI slots remain stable");
+    check(ZZ_CFG_KEY_VIDEOCAP_WIDTH == 26 &&
+          ZZ_CFG_KEY_VIDEOCAP_HEIGHT == 27,
+          "videocap geometry CFG query aliases match firmware");
+
+    /* Valid parse of both keys */
+    memset(&staged, 0, sizeof(staged));
+    zzcfg_parse_text("videocap_width = 640\nvideocap_height = 480\n", 44, &staged);
+    check(staged.videocap_width_present && staged.videocap_width == 640,
+          "videocap_width parses valid 16-aligned value");
+    check(staged.videocap_height_present && staged.videocap_height == 480,
+          "videocap_height parses valid height value");
+
+    /* Boundary valid values: 256..1280 (16-aligned) and 100..1024 */
+    memset(&staged, 0, sizeof(staged));
+    zzcfg_parse_text("videocap_width = 256\nvideocap_height = 100\n", 44, &staged);
+    check(staged.videocap_width_present && staged.videocap_width == 256,
+          "videocap_width parses minimum valid value (256)");
+    check(staged.videocap_height_present && staged.videocap_height == 100,
+          "videocap_height parses minimum valid value (100)");
+
+    memset(&staged, 0, sizeof(staged));
+    zzcfg_parse_text("videocap_width = 1280\nvideocap_height = 1024\n", 46, &staged);
+    check(staged.videocap_width_present && staged.videocap_width == 1280,
+          "videocap_width parses maximum valid value (1280)");
+    check(staged.videocap_height_present && staged.videocap_height == 1024,
+          "videocap_height parses maximum valid value (1024)");
+
+    /* Rejection of videocap_width = 648 (unaligned), = 240, = 1296 */
+    memset(&staged, 0, sizeof(staged));
+    zzcfg_parse_text("videocap_width = 648\n", 21, &staged);
+    check(!staged.videocap_width_present,
+          "videocap_width rejects unaligned value (648)");
+
+    memset(&staged, 0, sizeof(staged));
+    zzcfg_parse_text("videocap_width = 240\n", 21, &staged);
+    check(!staged.videocap_width_present,
+          "videocap_width rejects below-minimum value (240)");
+
+    memset(&staged, 0, sizeof(staged));
+    zzcfg_parse_text("videocap_width = 1296\n", 22, &staged);
+    check(!staged.videocap_width_present,
+          "videocap_width rejects above-maximum value (1296)");
+
+    /* Rejection of videocap_height = 99, = 1025 */
+    memset(&staged, 0, sizeof(staged));
+    zzcfg_parse_text("videocap_height = 99\n", 21, &staged);
+    check(!staged.videocap_height_present,
+          "videocap_height rejects below-minimum value (99)");
+
+    memset(&staged, 0, sizeof(staged));
+    zzcfg_parse_text("videocap_height = 1025\n", 23, &staged);
+    check(!staged.videocap_height_present,
+          "videocap_height rejects above-maximum value (1025)");
+
+    /* Invalid later key preserves previous valid calibration */
+    memset(&staged, 0, sizeof(staged));
+    staged.videocap_width = 640;
+    staged.videocap_width_present = 1;
+    staged.videocap_height = 480;
+    staged.videocap_height_present = 1;
+    zzcfg_parse_text("videocap_width = 648\nvideocap_height = 99\n", 42, &staged);
+    check(staged.videocap_width_present && staged.videocap_width == 640,
+          "invalid width preserves previous valid value");
+    check(staged.videocap_height_present && staged.videocap_height == 480,
+          "invalid height preserves previous valid value");
+
+    /* Generate round-trip preserves both values */
+    defaults(&staged);
+    staged.videocap_width = 800;
+    staged.videocap_width_present = 1;
+    staged.videocap_height = 600;
+    staged.videocap_height_present = 1;
+    len = zzcfg_generate(&staged, text, sizeof(text));
+    check(len > 0, "generate with geometry keys produced output");
+    check(has_exact_line(text, "videocap_width = 800"),
+          "videocap_width emitted as active line");
+    check(has_exact_line(text, "videocap_height = 600"),
+          "videocap_height emitted as active line");
+
+    /* Order check: after videocap_c28_phase, before scanline_mode */
+    {
+        const char *pos_c28 = strstr(text, "videocap_c28_phase");
+        const char *pos_w = strstr(text, "videocap_width = 800");
+        const char *pos_h = strstr(text, "videocap_height = 600");
+        const char *pos_scan = strstr(text, "scanline_mode");
+        check(pos_c28 != NULL && pos_w != NULL && pos_h != NULL && pos_scan != NULL &&
+              pos_c28 < pos_w && pos_w < pos_h && pos_h < pos_scan,
+              "geometry keys emit after videocap_c28_phase and before scanline_mode");
+    }
+
+    memset(&reloaded, 0, sizeof(reloaded));
+    zzcfg_parse_text(text, len, &reloaded);
+    check(reloaded.videocap_width_present && reloaded.videocap_width == 800,
+          "videocap_width round-trip preserved");
+    check(reloaded.videocap_height_present && reloaded.videocap_height == 600,
+          "videocap_height round-trip preserved");
+
+    /* Absent keys emit commented out */
+    defaults(&staged);
+    staged.videocap_width = 0;
+    staged.videocap_width_present = 0;
+    staged.videocap_height = 0;
+    staged.videocap_height_present = 0;
+    len = zzcfg_generate(&staged, text, sizeof(text));
+    check(len > 0, "generate with absent geometry produced output");
+    check(has_exact_line(text, "#videocap_width = 0"),
+          "absent videocap_width emitted commented out");
+    check(has_exact_line(text, "#videocap_height = 0"),
+          "absent videocap_height emitted commented out");
+
+    /* A full generate with all eight audio scenes plus both geometry keys
+     * still fits ZZCFG_MAX_SIZE */
+    defaults(&b);
+    b.use_videocap_profile_key = 0;
+    b.videocap_crop_h = b.videocap_crop_v = 4095;
+    b.videocap_crop_h_present = b.videocap_crop_v_present = 1;
+    b.videocap_phase = -255;
+    b.videocap_c28_phase = -896;
+    b.videocap_phase_present = b.videocap_c28_phase_present = 1;
+    b.videocap_width = 1280;
+    b.videocap_width_present = 1;
+    b.videocap_height = 1024;
+    b.videocap_height_present = 1;
+    strcpy(b.mac, "AA:BB:CC:DD:EE:FF");
+    memset(b.hdf, 'h', ZZCFG_HDF_CHARS);
+    b.hdf[ZZCFG_HDF_CHARS] = '\0';
+    b.audio_active_present = 1;
+    b.audio_baseline_present = 1;
+    b.audio_ceiling_paula_present = 1;
+    b.audio_ceiling_ax_present = 1;
+    b.audio_active = 7u;
+    b.audio_baseline = 65535u;
+    b.audio_ceiling_paula = 4095u;
+    b.audio_ceiling_ax = 4095u;
+    for (i = 0; i < ZZCFG_AUDIO_SCENES; i++) {
+        int f;
+
+        b.audio_scene_mask[i] = 0xffffu;
+        b.audio_scene_lpf[i] = 23900u - i;
+        b.audio_scene_out[i] = 12900u - i;
+        b.audio_scene_pan[i] = 100u - i;
+        for (f = 0; f < 5; f++) b.audio_scene_eq[i][f] = 12900u - i - f;
+        for (f = 0; f < ZZCFG_AUDIO_SCENE_NM_CHUNKS; f++)
+            b.audio_scene_nm[i][f] = 0x7e7eu - i - f;
+    }
+    n = zzcfg_generate(&b, text, sizeof(text));
+    check(n != 0 && n < ZZCFG_MAX_SIZE - 1,
+          "all settings, eight complete scenes and geometry keys fit ZZCFG_MAX_SIZE");
+    check(zzcfg_save(0, &b) == FWUP_OK,
+          "Settings save accepts eight populated audio scenes and geometry keys");
+    defaults(&a);
+    zzcfg_parse_text(fwup_test_saved_text, fwup_test_saved_len, &a);
+    check(a.videocap_width_present && a.videocap_width == 1280,
+          "full save preserves videocap_width");
+    check(a.videocap_height_present && a.videocap_height == 1024,
+          "full save preserves videocap_height");
+}
+
 int main(void)
 {
     struct zzcfg_values a, b;
@@ -374,6 +543,7 @@ int main(void)
     test_native_key_presence();
     test_fast_ram_status();
     test_capture_phase_preservation();
+    test_videocap_geometry();
 
     /* 1. every firmware key appears in generated output */
     defaults(&a);

@@ -533,6 +533,20 @@ void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v)
                 v->videocap_c28_phase = phase;
                 v->videocap_c28_phase_present = 1;
             }
+        } else if (zzcfg_str_eq_ci(key, "videocap_width")) {
+            UWORD width;
+            if (zzcfg_parse_u16(value, &width) &&
+                width >= 256 && width <= 1280 && (width & 15) == 0) {
+                v->videocap_width = width;
+                v->videocap_width_present = 1;
+            }
+        } else if (zzcfg_str_eq_ci(key, "videocap_height")) {
+            UWORD height;
+            if (zzcfg_parse_u16(value, &height) &&
+                height >= 100 && height <= 1024) {
+                v->videocap_height = height;
+                v->videocap_height_present = 1;
+            }
         } else if (zzcfg_str_eq_ci(key, "nonstandard_vsync")) {
             if (zzcfg_str_eq_ci(value, "off")) legacy_vsync = 0;
             else if (zzcfg_str_eq_ci(value, "pal") ||
@@ -986,7 +1000,7 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
         fast_ram_config[0] = '\0';
     }
 
-    /* Share the firmware's 4 KiB budget with all eight audio scenes.
+    /* Share the firmware's 8 KiB budget with all eight audio scenes.
      * Keep help in the manual rather than expanding a valid audio-save
      * file past the boot parser's limit with per-setting comments. */
     n = snprintf(out, outsz,
@@ -997,6 +1011,8 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
         "%svideocap_crop_v = %u\n"
         "%svideocap_phase = %d\n"
         "%svideocap_c28_phase = %d\n"
+        "%svideocap_width = %u\n"
+        "%svideocap_height = %u\n"
         "%sscanline_mode = %u\n"
         "%sscanline_parity = %u\n"
         "int2 = %s\n"
@@ -1013,6 +1029,8 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
         (unsigned)(v->videocap_crop_v & 4095),
         v->videocap_phase_present ? "" : "#", (int)v->videocap_phase,
         v->videocap_c28_phase_present ? "" : "#", (int)v->videocap_c28_phase,
+        v->videocap_width_present ? "" : "#", (unsigned)v->videocap_width,
+        v->videocap_height_present ? "" : "#", (unsigned)v->videocap_height,
         v->scanline_mode_present ? "" : "#",
         (unsigned)(v->scanline_mode & 3),
         v->scanline_parity_present ? "" : "#",

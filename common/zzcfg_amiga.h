@@ -18,7 +18,7 @@
 #include "zzcfg_query.h"   /* key ids, statuses, inline zzcfg_query() */
 
 /* Matches the firmware's boot-time parse cap (ZZ_CONFIG_MAX_SIZE). */
-#define ZZCFG_MAX_SIZE   4096
+#define ZZCFG_MAX_SIZE   8192
 #define ZZCFG_MAC_CHARS  17          /* aa:bb:cc:dd:ee:ff */
 #define ZZCFG_HDF_CHARS  63
 #define ZZCFG_VIDEOCAP_CROP_H_COMPAT 188
@@ -83,6 +83,10 @@ struct zzcfg_values {
     WORD videocap_c28_phase;   /* C28 MMCM steps, -896..895 */
     UWORD videocap_phase_present;
     UWORD videocap_c28_phase_present;
+    UWORD videocap_width;      /* captured words, 256..1280, 16-aligned */
+    UWORD videocap_height;     /* source lines, 100..1024 */
+    UBYTE videocap_width_present;
+    UBYTE videocap_height_present;
     /* Firmware with the profile capability accepts the atomic key; older
      * firmware gets an equivalent legacy key trio. */
     UWORD use_videocap_profile_key;
