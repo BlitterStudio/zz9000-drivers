@@ -8,6 +8,7 @@
 #ifndef ZZ9000_HW_H
 #define ZZ9000_HW_H
 
+#include "zz9000_aperture.h"
 #include "zz_custom_mode.h"
 
 #include <exec/types.h>
@@ -204,6 +205,122 @@ static inline ULONG zz9000_read_reg32(ULONG board_addr, ULONG offset)
     ULONG low = zz9000_read_reg16(board_addr, offset + 2UL);
 
     return (high << 16) | low;
+}
+
+/* Read the Z2 aperture descriptor with glitch recovery.
+ *
+ * The Z2 register bank historically served reads without a dedicated
+ * data-out setup window before DTACK (firmware Z2_REGREAD FIXME, fixed
+ * alongside v2.8.1), so a marginal bus can corrupt one halfword of a
+ * back-to-back pair: observed in the field as descriptor HI 0x5a02 with
+ * a zero LO, intermittently, re-rolled per power-up; a glitched HIGH
+ * halfword instead breaks the magic and reads as legacy. A descriptor
+ * is trusted only when two consecutive samples agree -- whether the
+ * stable value negotiates as VALID or as LEGACY (a layout-capable
+ * firmware on an older FPGA legitimately reads a stable non-magic
+ * value; that mixed stack is supported). Retries interleave a benign
+ * register access so they do not repeat the exact failing bus
+ * pattern. Without the layout capability there is no descriptor to
+ * recover: the single read is authoritative. Sets *verified to 1 when
+ * the returned descriptor was confirmed by two agreeing samples (or
+ * no contract exists); 0 means the retry budget exhausted with
+ * unstable samples and callers must fail closed. *resamples (optional)
+ * counts samples that differed from their predecessor, including a
+ * differing final sample after exhaustion -- diagnostics use it to
+ * report observed instability even when the endpoints agree. */
+static inline uint32_t zz9000_read_z2_aperture_verified(
+    ULONG board_addr, uint32_t board_size, uint16_t *fw_caps_io,
+    int *verified, int *resamples)
+{
+    uint32_t descriptor = zz9000_read_reg32(
+        board_addr, ZZ_REG_Z2_APERTURE_INFO_HI);
+    int attempts = 5;
+    int unstable = 0;
+    int caps_unstable = 0;
+
+    if (verified) {
+        *verified = 0;
+    }
+    if (resamples) {
+        *resamples = 0;
+    }
+    /* The capability gate needs the same evidence standard as the
+     * descriptor: two agreeing samples, in BOTH directions. A single
+     * corrupted read must neither disable verification (FindCard
+     * silently going legacy while another consumer carves the gen-2
+     * direct ring) nor enable it on a machine with no descriptor
+     * (stable valid-looking garbage could then be acknowledged as a
+     * layout the firmware does not support). Resample on disagreement
+     * and fail closed when the value never stabilizes; the agreed
+     * value is written back so every caller negotiates with the same
+     * view. */
+    {
+        uint16_t caps_confirm = zz9000_read_reg16(
+            board_addr, ZZ_REG_FW_CAPABILITIES);
+        int caps_attempts = 4;
+
+        while (*fw_caps_io != caps_confirm && caps_attempts-- > 0) {
+            *fw_caps_io = caps_confirm;
+            caps_unstable++;
+            (void)zz9000_read_reg16(board_addr,
+                ZZ_REG_Z2_APERTURE_INFO_HI);
+            caps_confirm = zz9000_read_reg16(board_addr,
+                ZZ_REG_FW_CAPABILITIES);
+        }
+        if (*fw_caps_io != caps_confirm) {
+            if (resamples) {
+                *resamples = caps_unstable + 1;
+            }
+            return descriptor;   /* unstable: verified stays 0 */
+        }
+        if (!(*fw_caps_io & ZZ_FW_CAP_Z2_APERTURE_LAYOUT)) {
+            /* No layout contract: there is no descriptor to recover
+             * and the agreed read is authoritative. */
+            if (verified) {
+                *verified = 1;
+            }
+            if (resamples) {
+                *resamples = caps_unstable;
+            }
+            return descriptor;
+        }
+    }
+    /* Confirmation is value-agnostic: two consecutive agreeing samples
+     * are trusted whether they negotiate as VALID or as LEGACY.
+     * A valid-looking glitch can land on the OTHER profile (the
+     * generation byte is one bit apart), so a valid sample needs an
+     * agreeing re-read before it may be acknowledged. Conversely, a
+     * layout-capable firmware paired with an older FPGA consistently
+     * reads a non-magic value -- that stable LEGACY outcome is a
+     * supported mixed stack and must be honored, not rejected. Only
+     * never-stable reads stay unverified. */
+    while (attempts-- > 0) {
+        uint32_t confirm = zz9000_read_reg16(
+            board_addr, ZZ_REG_Z2_APERTURE_INFO_HI);
+        (void)zz9000_read_reg16(board_addr, ZZ_REG_FW_CAPABILITIES);
+        confirm = (uint32_t)((confirm << 16) |
+            zz9000_read_reg16(board_addr,
+                ZZ_REG_Z2_APERTURE_INFO_LO));
+        if (confirm == descriptor) {
+            if (verified) {
+                *verified = 1;
+            }
+            if (resamples) {
+                *resamples = caps_unstable + unstable;
+            }
+            return descriptor;
+        }
+        descriptor = confirm;   /* unstable: keep sampling */
+        unstable++;
+    }
+    /* Budget exhausted without two agreeing samples: the returned
+     * descriptor is UNCONFIRMED. Callers must fail closed when
+     * *verified is 0 -- a valid-looking but wrong generation must
+     * never be acknowledged or used to reserve window regions. */
+    if (resamples) {
+        *resamples = caps_unstable + unstable + 1;
+    }
+    return descriptor;
 }
 
 static inline void zz9000_write_reg16(ULONG board_addr, ULONG offset, UWORD value)

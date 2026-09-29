@@ -530,8 +530,8 @@ static inline void writeGfxDataByte(volatile struct GFXData *gfxdata,
 	}
 }
 
-/* u8_user[2] is firmware-owned by codec operations and u8_user[3] has no
- * repeated cross-command value worth caching. Keep those writes direct. */
+/* u8_user[2] is firmware-owned by codec operations and u8_user[3] doubles
+ * as DrawLine padding and the ALLOC clear flag. Keep those writes direct. */
 static inline void writeGfxDataU8(volatile struct GFXData *gfxdata,
 	uint8 index, uint8 value) {
 	writeGfxDataByte(gfxdata, &gfxdata->u8_user[index], index, value);
@@ -824,17 +824,27 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 		fw_caps = ((volatile uint16_t*)b->RegisterBase)[ZZ_REG_FW_CAPABILITIES/2];
 		b->CardData[ZZ_CARD_DATA_FW_CAPABILITIES] = fw_caps;
 		if (zorro_version == 2) {
-			volatile UWORD *board = (volatile UWORD *)b->RegisterBase;
-
 			/* These are BOARD offsets.  RegisterBase is cd_BoardAddr, not
-			 * the direct-register bank at +0x1000. */
-			aperture_info =
-				((uint32_t)board[ZZ_REG_Z2_APERTURE_INFO_HI / 2] << 16) |
-				(uint32_t)board[ZZ_REG_Z2_APERTURE_INFO_LO / 2];
+			 * the direct-register bank at +0x1000. Re-read a descriptor
+			 * that fails validation before giving up: a marginal Z2 bus
+			 * can glitch one halfword of the back-to-back pair (fixed in
+			 * FPGA for v2.8.1; this also recovers deployed bitstreams).
+			 * Fail closed on an unconfirmed descriptor too: a valid-
+			 * looking but wrong generation must not be acknowledged. */
+			int aperture_verified = 0;
+			aperture_info = zz9000_read_z2_aperture_verified(
+				(ULONG)b->RegisterBase, (uint32_t)cd->cd_BoardSize,
+				&fw_caps, &aperture_verified, NULL);
+			/* Store the capability view the verification actually
+			 * used, so downstream feature gates match the negotiated
+			 * layout decision. */
+			b->CardData[ZZ_CARD_DATA_FW_CAPABILITIES] = fw_caps;
 			aperture_status = zz_z2_aperture_negotiate(aperture_info,
 				(uint32_t)cd->cd_BoardSize, fw_caps, &aperture_layout);
-			if (aperture_status == ZZ_APERTURE_INVALID) {
-				KPrintF("ZZ9000.card: invalid Z2 aperture descriptor %08lx for %08lx-byte window\n",
+			if (!aperture_verified ||
+				aperture_status == ZZ_APERTURE_INVALID) {
+				KPrintF("ZZ9000.card: %s Z2 aperture descriptor %08lx for %08lx-byte window\n",
+					aperture_verified ? "invalid" : "unconfirmed",
 					(ULONG)aperture_info, (ULONG)cd->cd_BoardSize);
 				goto cleanup;
 			}
@@ -869,6 +879,14 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 			volatile struct GFXData *gd = (struct GFXData*)(((uint32_t)b->MemoryBase) + (uint32_t)Z3_GFXDATA_ADDR);
 			b->CardData[ZZ_CARD_DATA_GFXDATA] = (ULONG)gd;
 			memset((void *)gd, 0x00, sizeof(struct GFXData));
+			/* Announce the conditional-clear protocol: after this
+			 * token the firmware honors u8_user[3] as a per-allocation
+			 * no-clear flag (see ZZ_AllocBitMap). Older firmware
+			 * ignores the write; the write is Z3-only because only
+			 * Z3 issues ACC_OP_ALLOC_SURFACE. */
+			zzwrite16((uint16_t *)((uint8_t *)b->RegisterBase +
+				REG_ZZ_ALLOC_CLEAR_PROTOCOL),
+				ZZ_REG_ZZ_ALLOC_CLEAR_TOKEN);
 		}
 		b->MemorySpaceBase = b->MemoryBase;
 		b->MemorySpaceSize = b->MemorySize;
@@ -2182,6 +2200,7 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 	ULONG mode_width = 0;
 	ULONG alignment = 0;
 	BOOL constant_pitch = FALSE;
+	BOOL clear_requested = FALSE;
 
 	struct TagItem *tag = tags;
 	while (tag && tag->ti_Tag != TAG_DONE) {
@@ -2206,8 +2225,13 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 			case ABMA_ConstantByteSwapping:
 				if (tag->ti_Data) return NULL;
 				break;
-			/* ABMA_Clear needs no handling: the firmware zero-fills
-			 * every surface it allocates */
+			/* ABMA_Clear maps to the firmware's conditional surface
+			 * clear, active only after the init-time
+			 * REG_ZZ_ALLOC_CLEAR_PROTOCOL handshake: u8_user[3]==1
+			 * tells the firmware NOT to zero-fill (this caller did
+			 * not ask). Without the handshake the firmware always
+			 * clears, so older drivers keep BMF_CLEAR semantics. */
+			case ABMA_Clear: clear_requested = tag->ti_Data != 0; break;
 			default: break;
 		}
 		tag++;
@@ -2268,6 +2292,16 @@ struct BitMap * ZZ_AllocBitMap(__REGA0(struct BoardInfo *b), __REGD0(ULONG width
 	} else {
 		dmy_cache
 		writeGfxDataU8(gfxdata, 1, 1);
+		/* 1 = caller did not ask for ABMA_Clear: firmware skips the
+		 * zero-fill (AllocBitMap does not promise cleared memory, and
+		 * a re-allocated smart-refresh save buffer must not black out
+		 * the window it backs). 0 keeps the legacy cleared surface.
+		 * Direct write, NOT writeGfxDataU8: byte cache slot 3 is
+		 * MINTERM's, and DrawLine writes this same byte (line
+		 * padding) directly -- routing through the cache helper would
+		 * alias the minterm slot and let stale paddings suppress the
+		 * flag write. */
+		gfxdata->u8_user[3] = clear_requested ? 0 : 1;
 		gfxdata->offset[1] = size;
 		zzwrite16(&registers->blitter_acc_op, ACC_OP_ALLOC_SURFACE);
 		card_offset = gfxdata->offset[0];

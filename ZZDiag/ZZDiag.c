@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include "zz9000_hw.h"
+#include "zzcfg_query.h"
 #include "zz9000_aperture.h"
 
 #include "zzusbhw.h"
@@ -308,6 +309,40 @@ static void print_eth_stats(ULONG board_addr)
     printf("EthernetRXPauseSent    = %u\n", (unsigned)(stats & 0x00ff));
 }
 
+/* Runtime scanout geometry from the firmware's config-key diagnostics
+ * (keys 21-25): what the last video_mode_init programmed. Run during
+ * a transient display fault (e.g. inside the warm-reboot white-band
+ * window) to capture the live VDMA configuration without UART. */
+static void print_rtg_geometry(ULONG board_addr)
+{
+    UWORD present = 0;
+    UWORD line = zzcfg_query(board_addr, ZZ_CFG_KEY_RTG_GEOM_LINE,
+        &present);
+    if (!present) {
+        printf("RTGGeometry            = unsupported (pre-diagnostic "
+            "firmware)\n");
+        return;
+    }
+    UWORD stride = zzcfg_query(board_addr, ZZ_CFG_KEY_RTG_GEOM_STRIDE,
+        &present);
+    UWORD pan = zzcfg_query(board_addr, ZZ_CFG_KEY_RTG_GEOM_PAN,
+        &present);
+    UWORD info = zzcfg_query(board_addr, ZZ_CFG_KEY_RTG_GEOM_INFO,
+        &present);
+    UWORD modesel = zzcfg_query(board_addr,
+        ZZ_CFG_KEY_RTG_GEOM_MODESEL, &present);
+    printf("RTGGeometry            = mode %u, colormode %u, scale %u\n",
+        (unsigned)(modesel & 0xFF),
+        (unsigned)((modesel >> 10) & 0x3F),
+        (unsigned)((modesel >> 8) & 3));
+    printf("RTGGeometryHSize       = %u px (hdiv %u, stride_div %u)\n",
+        (unsigned)(info & 0x7FF), (unsigned)((info >> 13) & 7),
+        (unsigned)((info >> 11) & 3));
+    printf("RTGGeometryFetch       = %u bytes/line, stride %u bytes\n",
+        (unsigned)line, (unsigned)stride);
+    printf("RTGGeometryPanWidth    = %u px\n", (unsigned)pan);
+}
+
 static void print_scanlines(ULONG board_addr)
 {
     UWORD mode = zz9000_read_reg16(board_addr, ZZ_SCANLINE_MODE_REG) & 3;
@@ -383,12 +418,38 @@ static void print_aperture_layout(const struct ZZ9000Board *board)
     }
 
     fw_caps = zz9000_read_reg16(board->address, ZZ_REG_FW_CAPABILITIES);
-    descriptor = zz9000_read_reg32(board->address,
-        ZZ_REG_Z2_APERTURE_INFO_HI);
+    {
+        uint32_t raw_descriptor = zz9000_read_reg32(board->address,
+            ZZ_REG_Z2_APERTURE_INFO_HI);
+        int descriptor_verified = 0;
+        int resamples = 0;
+        descriptor = zz9000_read_z2_aperture_verified(board->address,
+            board->board_size, &fw_caps, &descriptor_verified,
+            &resamples);
+        printf("FirmwareCapabilities   = 0x%04x%s\n", (unsigned)fw_caps,
+            descriptor_verified ? " (confirmed)" : " (unstable)");
+        printf("Z2ApertureDescriptor   = 0x%08lx\n",
+            (unsigned long)descriptor);
+        /* Report from every observation: the helper's resample count
+         * AND the separate raw read. A corrupted raw with a clean
+         * helper run still observed two different descriptors, so it
+         * counts; an exhausted unverified value never reads as
+         * recovered. */
+        if (!descriptor_verified) {
+            printf("Z2ApertureUnverified   = yes (no two agreeing samples "
+                "within the retry budget -- capability or descriptor "
+                "reads unstable, %d resample(s))\n", resamples);
+            /* Both RTG and AHI reject this value; printing a
+             * negotiated layout for it would overstate it. */
+            return;
+        } else if (resamples > 0 || descriptor != raw_descriptor) {
+            printf("Z2ApertureReadGlitch   = yes (raw 0x%08lx, %d "
+                "resample(s))\n",
+                (unsigned long)raw_descriptor, resamples);
+        }
+    }
     status = zz_z2_aperture_negotiate(descriptor, board->board_size,
         fw_caps, &layout);
-    printf("FirmwareCapabilities   = 0x%04x\n", (unsigned)fw_caps);
-    printf("Z2ApertureDescriptor   = 0x%08lx\n", (unsigned long)descriptor);
     if (status == ZZ_APERTURE_LEGACY) {
         printf("Z2ApertureLayout       = legacy (handshake incomplete/absent)\n");
         return;
@@ -761,6 +822,7 @@ static void dump_sample(ULONG board_addr, int sample)
     print_reg("SDBootStatus", board_addr, ZZ_REG_SD_BOOT_STATUS);
     print_reg("SDCapacity", board_addr, ZZ_REG_SD_CAPACITY);
     print_scanlines(board_addr);
+    print_rtg_geometry(board_addr);
     print_eth_stats(board_addr);
     print_videocap(board_addr);
 }

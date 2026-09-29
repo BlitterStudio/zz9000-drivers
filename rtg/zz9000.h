@@ -264,10 +264,15 @@ enum zz_reg_offsets {
   REG_ZZ_UNUSED_REGF4   = 0xF4,
   REG_ZZ_UNUSED_REGF6   = 0xF6,
   REG_ZZ_UNUSED_REGF8   = 0xF8,
-  REG_ZZ_UNUSED_REGFA   = 0xFA,
+  /* Mirror of the firmware handshake register: writing the token at
+   * init activates the conditional ACC surface clear. */
+  REG_ZZ_ALLOC_CLEAR_PROTOCOL = 0xFA,
   REG_ZZ_DEBUG          = 0xFC,
   REG_ZZ_UNUSED_REGFE   = 0xFE,
 };
+
+/* Token for REG_ZZ_ALLOC_CLEAR_PROTOCOL (must match firmware zz_regs.h). */
+#define ZZ_REG_ZZ_ALLOC_CLEAR_TOKEN 0x5AC1U
 
 enum zz9k_card_features {
   CARD_FEATURE_NONE,
