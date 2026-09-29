@@ -45,6 +45,15 @@
 #define ZZ_CFG_KEY_VIDEOCAP_C28_PHASE 18 /* signed C28 phase, -896..895 */
 #define ZZ_CFG_KEY_FAST_RAM          19
 #define ZZ_CFG_KEY_FAST_RAM_OUTCOME  20
+/* Runtime RTG VDMA geometry diagnostics: live video state, not config
+ * file values. LINE/STRIDE/PAN are the raw 16-bit values; INFO packs
+ * [15:13] hdiv, [12:11] stride_div, [10:0] hsize; MODESEL packs
+ * [15:10] colormode, [9:8] scalemode, [7:0] mode id. */
+#define ZZ_CFG_KEY_RTG_GEOM_LINE     21
+#define ZZ_CFG_KEY_RTG_GEOM_STRIDE   22
+#define ZZ_CFG_KEY_RTG_GEOM_PAN      23
+#define ZZ_CFG_KEY_RTG_GEOM_INFO     24
+#define ZZ_CFG_KEY_RTG_GEOM_MODESEL  25
 
 /* ZZ_CFG_KEY_FAST_RAM_OUTCOME values (mirror firmware zz_fastram_outcome). */
 #define ZZ_CFG_FAST_RAM_OUTCOME_PENDING   0

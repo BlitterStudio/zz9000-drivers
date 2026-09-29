@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include "zz9000_hw.h"
+#include "zzcfg_query.h"
 #include "zz9000_aperture.h"
 
 #include "zzusbhw.h"
@@ -306,6 +307,40 @@ static void print_eth_stats(ULONG board_addr)
     printf("EthernetRXBackpress    = %u\n", (unsigned)((status >> 15) & 1));
     printf("EthernetRXDropped      = %u\n", (unsigned)((stats >> 8) & 0x00ff));
     printf("EthernetRXPauseSent    = %u\n", (unsigned)(stats & 0x00ff));
+}
+
+/* Runtime scanout geometry from the firmware's config-key diagnostics
+ * (keys 21-25): what the last video_mode_init programmed. Run during
+ * a transient display fault (e.g. inside the warm-reboot white-band
+ * window) to capture the live VDMA configuration without UART. */
+static void print_rtg_geometry(ULONG board_addr)
+{
+    UWORD present = 0;
+    UWORD line = zzcfg_query(board_addr, ZZ_CFG_KEY_RTG_GEOM_LINE,
+        &present);
+    if (!present) {
+        printf("RTGGeometry            = unsupported (pre-diagnostic "
+            "firmware)\n");
+        return;
+    }
+    UWORD stride = zzcfg_query(board_addr, ZZ_CFG_KEY_RTG_GEOM_STRIDE,
+        &present);
+    UWORD pan = zzcfg_query(board_addr, ZZ_CFG_KEY_RTG_GEOM_PAN,
+        &present);
+    UWORD info = zzcfg_query(board_addr, ZZ_CFG_KEY_RTG_GEOM_INFO,
+        &present);
+    UWORD modesel = zzcfg_query(board_addr,
+        ZZ_CFG_KEY_RTG_GEOM_MODESEL, &present);
+    printf("RTGGeometry            = mode %u, colormode %u, scale %u\n",
+        (unsigned)(modesel & 0xFF),
+        (unsigned)((modesel >> 10) & 0x3F),
+        (unsigned)((modesel >> 8) & 3));
+    printf("RTGGeometryHSize       = %u px (hdiv %u, stride_div %u)\n",
+        (unsigned)(info & 0x7FF), (unsigned)((info >> 13) & 7),
+        (unsigned)((info >> 11) & 3));
+    printf("RTGGeometryFetch       = %u bytes/line, stride %u bytes\n",
+        (unsigned)line, (unsigned)stride);
+    printf("RTGGeometryPanWidth    = %u px\n", (unsigned)pan);
 }
 
 static void print_scanlines(ULONG board_addr)
@@ -787,6 +822,7 @@ static void dump_sample(ULONG board_addr, int sample)
     print_reg("SDBootStatus", board_addr, ZZ_REG_SD_BOOT_STATUS);
     print_reg("SDCapacity", board_addr, ZZ_REG_SD_CAPACITY);
     print_scanlines(board_addr);
+    print_rtg_geometry(board_addr);
     print_eth_stats(board_addr);
     print_videocap(board_addr);
 }
