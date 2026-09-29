@@ -25,8 +25,8 @@
 
 #include "zzusbhw.h"
 #include "zzusb_engine.h"
-#define ZZDIAG_VERSION "1.13"
-#define ZZDIAG_DATE    "27.09.2026"
+#define ZZDIAG_VERSION "1.14"
+#define ZZDIAG_DATE    "29.09.2026"
 
 #define ZZDIAG_CAPTURE_ROWS 320U
 
