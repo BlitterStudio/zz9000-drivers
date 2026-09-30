@@ -112,9 +112,9 @@ else
 fi
 
 mkdir -p "$staging"
-"$PY" "$md2guide" --name ZZ9000-Drivers installer/README.md "$inst/Docs/ZZ9000-Drivers.guide"
-cp "$inst/Docs/ZZ9000-Drivers.guide" "$staging/ZZ9000-Drivers.guide"
-cp "$inst/Docs/ZZ9000-Drivers.guide.info" "$staging/ZZ9000-Drivers.guide.info"
+"$PY" "$md2guide" --name ZZ9000Drivers_Installer installer/README.md "$inst/Docs/ZZ9000Drivers_Installer.guide"
+cp "$inst/Docs/ZZ9000Drivers_Installer.guide" "$staging/ZZ9000Drivers_Installer.guide"
+cp "$inst/Docs/ZZ9000Drivers_Installer.guide.info" "$staging/ZZ9000Drivers_Installer.guide.info"
 cp installer/ZZ9000Installer.info "$staging/ZZ9000Installer.info"
 cp -R installer/ZZ9000Installer "$staging/ZZ9000Installer"
 # .keep files only exist to keep empty source dirs in git.

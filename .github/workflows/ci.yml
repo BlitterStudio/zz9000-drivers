@@ -493,9 +493,9 @@ jobs:
           done
           make_guide amissl/README.md amissl
 
-          python3 "$MD2GUIDE" --name ZZ9000-Drivers installer/README.md "$INST/Docs/ZZ9000-Drivers.guide"
-          cp "$INST/Docs/ZZ9000-Drivers.guide" "$STAGING/ZZ9000-Drivers.guide"
-          cp "$INST/Docs/ZZ9000-Drivers.guide.info" "$STAGING/ZZ9000-Drivers.guide.info"
+          python3 "$MD2GUIDE" --name ZZ9000Drivers_Installer installer/README.md "$INST/Docs/ZZ9000Drivers_Installer.guide"
+          cp "$INST/Docs/ZZ9000Drivers_Installer.guide" "$STAGING/ZZ9000Drivers_Installer.guide"
+          cp "$INST/Docs/ZZ9000Drivers_Installer.guide.info" "$STAGING/ZZ9000Drivers_Installer.guide.info"
           cp installer/ZZ9000Installer.info "$STAGING/ZZ9000Installer.info"
           cp -r installer/ZZ9000Installer "$STAGING/ZZ9000Installer"
           # .keep files only exist to keep empty source dirs in git.

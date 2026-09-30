@@ -641,8 +641,8 @@
 
 (makedir #docs-dest (infos))
 (copyfiles
-   (prompt "ZZ9000-Drivers.guide (package overview)")
-   (source "Docs/ZZ9000-Drivers.guide")
+   (prompt "ZZ9000Drivers_Installer.guide (package overview)")
+   (source "Docs/ZZ9000Drivers_Installer.guide")
    (infos)
    (dest #docs-dest))
 
