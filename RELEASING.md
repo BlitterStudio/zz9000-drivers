@@ -85,5 +85,5 @@ variant is shipped.
 ## 4. Post-release
 
 - Verify the published releases: `gh release view vX.Y.Z -R BlitterStudio/<repo>`.
-- Sanity-check the installer ZIP attached to the drivers release contains the
+- Sanity-check the installer LHA attached to the drivers release contains the
   per-CPU `Libs/AmiSSL/<cpu>/amissl_v362.library` and the SDK payloads.

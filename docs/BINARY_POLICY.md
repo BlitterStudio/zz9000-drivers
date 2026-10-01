@@ -1,7 +1,7 @@
 # Binary Artifact Policy
 
 Release binaries are built by GitHub Actions from source and copied into
-the installer drawer during release assembly. The release zip is the
+the installer drawer during release assembly. The release LHA is the
 supported end-user distribution.
 
 Generated AmigaOS binaries should not be tracked in git. The source tree
