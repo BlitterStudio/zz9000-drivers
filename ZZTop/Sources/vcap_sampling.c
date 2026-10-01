@@ -163,16 +163,23 @@ static int vcap_sampling_open_screen(struct vcap_sampling_run *run,
     int ntsc, int lace, char *failure, unsigned failure_size)
 {
     ULONG colors[770];
-    ULONG display_id = (ntsc ? NTSC_MONITOR_ID : PAL_MONITOR_ID) |
-        (lace ? SUPERLACE_KEY : SUPER_KEY);
+    ULONG key = lace ? SUPERLACE_KEY : SUPER_KEY;
+    ULONG display_id = (ntsc ? NTSC_MONITOR_ID : PAL_MONITOR_ID) | key;
     ULONG error = 0;
     struct BitMap *bitmap;
     unsigned pen, plane, x, y, bit;
 
     if (!vcap_sampling_mode_available(display_id)) {
-        vcap_sampling_set_failure(failure, failure_size,
-            "Requested 256-colour SuperHires sampling mode is unavailable");
-        return 0;
+        /* The explicit PAL/NTSC monitor driver is not loaded. The default
+         * native monitor is a valid substitute when it provides the same
+         * standard, lace, and 24-bit palette; ZZCapture applies the same
+         * fallback before reporting the mode unavailable. */
+        display_id = key;
+        if (!vcap_sampling_mode_matches(display_id, ntsc, lace)) {
+            vcap_sampling_set_failure(failure, failure_size,
+                "Requested 256-colour SuperHires sampling mode is unavailable");
+            return 0;
+        }
     }
     run->screen = OpenScreenTags(NULL, SA_Type, CUSTOMSCREEN,
         SA_DisplayID, display_id, SA_Width, 1280,
@@ -306,6 +313,7 @@ static enum zz_vcap_result vcap_sampling_measure(
     unsigned capture, parity, actual_lace;
     unsigned limit = 6U * (comparisons + 1U);
     enum zz_vcap_result result;
+    unsigned last_parity = 2;
 
     *wrong = *changed = 0;
     if (!vcap_sampling_keep_running(run))
@@ -345,6 +353,11 @@ static enum zz_vcap_result vcap_sampling_measure(
         if (have_comparison[0] >= comparisons &&
                 (!actual_lace || have_comparison[1] >= comparisons))
             return ZZ_VCAP_OK;
+        if (actual_lace && parity == last_parity &&
+                have_comparison[parity ^ 1] < comparisons) {
+            WaitTOF();
+        }
+        last_parity = parity;
     }
     return ZZ_VCAP_UNSTABLE;
 }
