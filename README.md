@@ -210,10 +210,10 @@ The drivers in this repo consult it too:
   720x480 at nominal 60 Hz);
   the nonstandard-sync firmware variant defaults to PAL timing. Use
   ZZTop to choose another combination and save it to `ZZ9000.CFG` for
-  the next cold boot. **Capture…** opens sampling, framing and calibration
-  controls from the Scandoubler window. Framing defaults to **Automatic**:
-  full-rate/full-width capture uses `280/40`, while filtered and Denise-adapter paths retain
-  `188/26`. **Custom** values remain literal per-machine overrides.
+  the next cold boot. **Capture…** opens sampling, phase, framing and
+  calibration controls from the Scandoubler window. Framing defaults to
+  **Automatic**: full-rate/full-width capture uses `278/40`, while filtered and Denise-adapter paths retain
+  `188/26`. Manual values remain literal per-machine overrides.
   Firmware 2.8 with the profile capability stores this as
   `videocap_profile`; ZZTop transparently writes the equivalent legacy
   key combination for older firmware, including 2.8 RC1.
@@ -307,6 +307,17 @@ adjusted.
 - **Done** in Capture stages an accepted preview in Scandoubler; **Save** is
   the only action that writes `ZZ9000.CFG`. A cold boot later reproduces the
   saved pair.
+- The Capture window also edits the sampling phase (in the build clock's
+  own step units, shown in the window title as *C28 clock* or *E7M
+  clock*; disabled when the card has no phase engine) and, on firmware
+  advertising the geometry capability, the capture window width and
+  height. Every field applies live as you leave it; an empty Window
+  field means Automatic. The single **Automatic** button restores every
+  override at once — automatic crop through the live engine, phase back
+  to the routed default (0) and the capture window back to the per-mode
+  automatic size — and Done then clears the saved values. **Save**
+  persists `videocap_phase`/`videocap_c28_phase` (whichever clock the
+  card uses) and `videocap_width`/`videocap_height`.
 
 Capture Cancel, Scandoubler Reload, and closing the Scandoubler window
 restore their owning live snapshots before discarding an unsaved preview; the

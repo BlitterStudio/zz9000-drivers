@@ -19,12 +19,15 @@
 #include <intuition/gadgetclass.h>
 #include <intuition/screens.h>
 #include <graphics/displayinfo.h>
+#include <graphics/modeid.h>
 #include <graphics/rastport.h>
 #include <libraries/gadtools.h>
 #include <libraries/asl.h>
 #include <devices/timer.h>
 #include <devices/inputevent.h>
 
+#include <clib/alib_protos.h>
+#include <clib/exec_protos.h>
 #include <clib/debug_protos.h>
 #include <clib/graphics_protos.h>
 #include <clib/intuition_protos.h>
@@ -43,6 +46,12 @@
 #include "fwup_amiga.h"
 #include "zzcfg_amiga.h"
 #include "zz_vcap_live.h"
+#include "zz_vcap_client.h"
+#include "zz_vcap_geometry.h"
+#include "zz_vcap_edit.h"
+#include "zz9000_capture_calibration.h"
+#include "zz9000_sampling_calibration.h"
+#include "vcap_sampling.h"
 /* zz9k.library client surface for the firmware audio control plane
  * (the Audio window). The staged zz9k-headers tree is synced from the
  * SDK checkout by build-gcc.sh, like the AHI/MHI drivers. */
@@ -113,16 +122,27 @@ static const char version[] __attribute__((used)) =
 #define SDGAD_BTN_RELOAD   (8)
 #define SDGAD_COUNT        (9)
 
-/* Advanced native-video window gadgets. */
+/* Advanced native-video window gadgets. One Reset to Auto button
+ * clears every manual override (crop, window, phase); each value field
+ * is independently manual - editing it makes just that field explicit. */
 #define AGAD_VCAP_SAMPLE   (0)
-#define AGAD_VCAP_FRAMING  (1)
-#define AGAD_VCAP_CROP_H   (2)
-#define AGAD_VCAP_CROP_V   (3)
-#define AGAD_BTN_CALIBRATE (4)
-#define AGAD_STATUS        (5)
-#define AGAD_BTN_DONE      (6)
-#define AGAD_BTN_CANCEL    (7)
-#define AGAD_COUNT         (8)
+#define AGAD_VCAP_PHASE    (1)
+#define AGAD_BTN_PHASE_FINE_MINUS (2)
+#define AGAD_BTN_PHASE_FINE_PLUS  (3)
+#define AGAD_BTN_PHASE_COARSE_MINUS (4)
+#define AGAD_BTN_PHASE_COARSE_PLUS  (5)
+#define AGAD_PHASE_EYE     (6)
+#define AGAD_VCAP_CROP_H   (7)
+#define AGAD_VCAP_CROP_V   (8)
+#define AGAD_VCAP_WIDTH    (9)
+#define AGAD_VCAP_HEIGHT   (10)
+#define AGAD_BTN_AUTO      (11)
+#define AGAD_BTN_CALIBRATE (12)
+#define AGAD_BTN_SAMPLING_CALIBRATE (13)
+#define AGAD_STATUS        (14)
+#define AGAD_BTN_DONE      (15)
+#define AGAD_BTN_CANCEL    (16)
+#define AGAD_COUNT         (17)
 
 /* Audio window gadgets (own id space, own window). */
 #define AUDGAD_SCENE        (0)
@@ -196,8 +216,13 @@ static const char version[] __attribute__((used)) =
 #define LABEL_SD_OUTPUT    "Output"
 #define LABEL_SD_REFRESH   "Refresh"
 #define LABEL_VCAP_SAMPLE  "Capture Sample"
-#define LABEL_VCAP_FRAMING "Framing"
+#define LABEL_VCAP_PHASE   "Sampling Phase"
+#define LABEL_VCAP_EYE     "Last phase sweep"
+#define LABEL_VCAP_SIZE    "Capture W / H"
 #define LABEL_VCAP_CROP    "Crop H / V"
+#define LABEL_VCAP_BTN_AUTO   "Reset to Auto"
+#define LABEL_VCAP_BTN_ALIGN  "Align picture..."
+#define LABEL_VCAP_BTN_PHASE  "Find phase..."
 #define LABEL_SD_CAPTURE   "Capture..."
 #define LABEL_INT2         "Interrupt"
 #define LABEL_OFFSCREEN    "Offscreen BMs"
@@ -258,20 +283,10 @@ struct Gadget *gads[MYGAD_COUNT];
 #define ZZTOP_REG_SCANLINE_MODE   (0x100C)
 #define ZZTOP_REG_SCANLINE_PARITY (0x100E)
 
-/* Bit layout for REG_ZZ_VIDEOCAP_STATS (issue #11 diagnostic).
- *   [9:0]   videocap_ymax  (lines per detected field, max 1023)
- *   [11:10] top 2 bits of the per-field MAX HSYNC pulse width
- *   [13:12] top 2 bits of the per-field MIN HSYNC pulse width
- *           (0=short, 3=very wide; both tiers use the same scale)
- *   [15:14] reserved (always 0)
- * Comparing max and min tells genlock failure modes apart:
- *   max only wide  => some pulses wide (CSYNC pulses in VBI)
- *   max + min wide => every pulse wide (polarity flip / EXTSYNC timing) */
+/* REG_ZZ_VIDEOCAP_STATS is advertised by ZZ_FW_CAP_VIDEOCAP_STATS.
+ *   [9:0]  live cap_ymax (lines per detected field, max 1023)
+ *   [15:10] reserved (always 0) */
 #define VCAP_LINES_MASK         (0x3FF)
-#define VCAP_PW_MAX_TIER_SHIFT  (10)
-#define VCAP_PW_MIN_TIER_SHIFT  (12)
-#define VCAP_PW_TIER_MASK       (0x3)
-#define VCAP_PW_TIER_MAX        (3)
 
 #define SCANLINE_MODE_COUNT 4
 #define REFRESH_MODE_COUNT  3
@@ -799,7 +814,7 @@ void refresh_zz_info(struct Window* win)
 	uint16_t raw_sd_boot = zz_get_reg16(ZZTOP_REG_SD_BOOT_STATUS);
 	uint16_t raw_scanline = zz_get_reg16(ZZTOP_REG_SCANLINE_MODE);
 	uint16_t raw_parity = zz_get_reg16(ZZTOP_REG_SCANLINE_PARITY);
-	uint16_t raw_vcap = zz_get_reg16(REG_ZZ_VIDEOCAP_STATS);
+	uint16_t fw_capabilities = zz_get_reg16(REG_ZZ_FW_CAPABILITIES);
 
 	int fwrev_major = fwrev>>8;
 	int fwrev_minor = fwrev&0xff;
@@ -849,18 +864,17 @@ void refresh_zz_info(struct Window* win)
 		raw_scanline, raw_parity, raw_temp, raw_vaux);
 	zztop_set_text_display(win, MYGAD_RAWREGS, txt_buf);
 
-	/* Videocap diagnostic readout (issue #11 genlock investigation).
-	 * Pulse-width tiers are the per-field max and min, so a wide-sync
-	 * reading is sticky across the frame and won't be missed by an
-	 * unlucky sample. Two tiers let the reporter tell apart "all pulses
-	 * wide" from "some pulses wide". */
-	{
-		uint16_t lines = raw_vcap & VCAP_LINES_MASK;
-		uint16_t pw_max = (raw_vcap >> VCAP_PW_MAX_TIER_SHIFT) & VCAP_PW_TIER_MASK;
-		uint16_t pw_min = (raw_vcap >> VCAP_PW_MIN_TIER_SHIFT) & VCAP_PW_TIER_MASK;
-		snprintf(txt_buf, 64, "Lines:%u  Max:%u/%u  Min:%u/%u",
-			lines, pw_max, VCAP_PW_TIER_MAX, pw_min, VCAP_PW_TIER_MAX);
+	/* REG_ZZ_VIDEOCAP_STATS is meaningful only when its capability bit
+	 * advertises the live-line-count ABI. Older firmware leaves stale bus
+	 * data at 0x4e, so do not present it as a diagnostic. */
+	if (fw_capabilities & ZZ_FW_CAP_VIDEOCAP_STATS) {
+		uint16_t lines = zz_get_reg16(REG_ZZ_VIDEOCAP_STATS) &
+			VCAP_LINES_MASK;
+
+		snprintf(txt_buf, 64, "Lines:%u  Max:n/a  Min:n/a", lines);
 		zztop_set_text_display(win, MYGAD_VIDEOCAP, txt_buf);
+	} else {
+		zztop_set_text_display(win, MYGAD_VIDEOCAP, "-");
 	}
 }
 
@@ -1027,11 +1041,6 @@ static STRPTR vcapsample_labels[] = {
 	NULL
 };
 
-static STRPTR vcapframing_labels[] = {
-	(STRPTR)"Automatic (recommended)",
-	(STRPTR)"Custom",
-	NULL
-};
 
 /* Feature kill-switches: index == the config value, so 1 is enabled -
  * which is also what ZZ9000.card assumes when the key is absent. */
@@ -1063,6 +1072,7 @@ static UWORD settings_fast_ram_outcome;
 static BOOL settings_have_cfg;
 
 enum vcap_apply_result {
+	VCAP_APPLY_CANCELLED = -3,
 	VCAP_APPLY_ERROR = -2,
 	VCAP_APPLY_CONFLICT = -1,
 	VCAP_APPLY_TIMEOUT = 0,
@@ -1075,6 +1085,11 @@ struct settings_live_session {
 	struct zz_vcap_anchors anchors;
 	struct zz_vcap_control preview_control;
 	BOOL preview_valid;
+	BOOL phase_anchor_valid, phase_touched;
+	int phase_anchor;
+	BOOL geometry_anchor_valid, geometry_touched;
+	struct zz_vcap_geometry_state geometry_anchor;
+	enum zz_vcap_result restore_result;
 };
 
 /* Shared context for the Settings and Scandoubler config windows.
@@ -1090,12 +1105,32 @@ struct zztop_cfg_ctx {
 	struct settings_live_session live;
 };
 
+static uint16_t settings_vcap_read16(void *ctx, uint32_t offset)
+{
+	(void)ctx;
+	return zz_get_reg16(offset);
+}
+
+static void settings_vcap_write16(void *ctx, uint32_t offset, uint16_t value)
+{
+	(void)ctx;
+	zz_set_reg(offset, value);
+}
+
+static void settings_vcap_delay(void *ctx, unsigned ticks)
+{
+	(void)ctx;
+	Delay(ticks);
+}
+
+static const struct zz_vcap_io settings_vcap_io = {
+	NULL, settings_vcap_read16, settings_vcap_write16, settings_vcap_delay,
+	NULL, NULL
+};
+
 static ULONG vcap_read32(ULONG offset)
 {
-	ULONG high = zz_get_reg16(offset);
-	ULONG low = zz_get_reg16(offset + 2);
-
-	return (high << 16) | low;
+	return zz_vcap_read32(&settings_vcap_io, offset);
 }
 
 static BOOL vcap_read_stable_status(ULONG *status)
@@ -1148,13 +1183,15 @@ static BOOL vcap_begin_apply(ULONG raw, UBYTE *expected_sequence)
 }
 
 static int vcap_poll_apply(UBYTE expected_sequence, ULONG expected_raw,
-	UWORD ticks, struct zz_vcap_snapshot *applied)
+	UWORD ticks, struct zz_vcap_snapshot *applied, const struct zz_vcap_io *control)
 {
 	UWORD elapsed;
 
 	for (elapsed = 0; elapsed < ticks; elapsed++) {
 		ULONG status;
 
+		if (control && control->keep_running && !control->keep_running(control->control_ctx))
+			return VCAP_APPLY_CANCELLED;
 		if (vcap_read_stable_status(&status)) {
 			if (zz_vcap_request_complete(status, expected_sequence)) {
 				int request_result;
@@ -1174,13 +1211,68 @@ static int vcap_poll_apply(UBYTE expected_sequence, ULONG expected_raw,
 }
 
 static int vcap_apply_raw(ULONG raw, struct zz_vcap_snapshot *applied,
-	UBYTE *pending_sequence)
+	const struct zz_vcap_io *control)
 {
 	UBYTE expected;
 
+	if (control && control->keep_running && !control->keep_running(control->control_ctx))
+		return VCAP_APPLY_CANCELLED;
 	if (!vcap_begin_apply(raw, &expected)) return VCAP_APPLY_ERROR;
-	if (pending_sequence) *pending_sequence = expected;
-	return vcap_poll_apply(expected, raw, VCAP_APPLY_TIMEOUT_TICKS, applied);
+	return vcap_poll_apply(expected, raw, VCAP_APPLY_TIMEOUT_TICKS, applied, control);
+}
+
+/* ---- live capture-phase control ----
+ *
+ * The MMCM fine-phase engine is reached through the direct-register
+ * window at 0x1240..0x124e; the domain (C28 or legacy E7M) comes from
+ * its capability word. Targets are signed steps in the domain's own
+ * units; 0 is the routed default. */
+static enum zz_vcap_phase_domain settings_phase_domain =
+	ZZ_VCAP_PHASE_NONE;
+
+static enum zz_vcap_result settings_phase_read(int *phase)
+{
+	struct zz_vcap_phase_state state;
+	enum zz_vcap_result result = zz_vcap_phase_read(&settings_vcap_io, &state);
+
+	if (result != ZZ_VCAP_OK) return result;
+	result = zz_vcap_phase_check(&settings_vcap_io, state.applied);
+	if (result == ZZ_VCAP_OK) *phase = state.applied;
+	return result;
+}
+
+static enum zz_vcap_result settings_phase_apply(int phase, BOOL restoring)
+{
+	return zz_vcap_phase_apply(&settings_vcap_io, phase, restoring);
+}
+
+static BOOL settings_geometry_supported(void)
+{
+	return zz_vcap_geometry_supported(&settings_vcap_io);
+}
+
+static enum zz_vcap_result settings_geometry_apply(UWORD width, UWORD height,
+	BOOL restoring)
+{
+	return zz_vcap_geometry_apply(&settings_vcap_io, width, height, restoring);
+}
+
+/* Nominal automatic source-window fallback before live geometry readback is
+ * available. Confirmed geometry uses captured words/source rows, not HDMI
+ * output pixels; zero in the request retains per-axis Automatic. */
+static void settings_capture_window_seed(UWORD profile, ULONG applied_raw,
+	ULONG status_raw, UWORD *width, UWORD *height)
+{
+	UWORD pal_mode = 0, legacy_full = 0, legacy_vsync = 0;
+	struct zz_vcap_status live_status;
+	int full = (applied_raw & 0x4U) != 0;
+
+	zzcfg_profile_to_legacy(profile, &pal_mode, &legacy_full,
+		&legacy_vsync);
+	*width = full ? 1280 : (pal_mode ? 720 : 800);
+	zz_vcap_status_unpack(status_raw, &live_status);
+	*height = (live_status.standard_valid && live_status.ntsc) ?
+		200 : 256;
 }
 
 static void settings_live_init(struct settings_live_session *session,
@@ -1199,12 +1291,20 @@ static BOOL settings_live_refresh(struct settings_live_session *session)
 {
 	struct zz_vcap_snapshot snapshot;
 
-	if (!session->supported || !vcap_capture_snapshot(&snapshot))
-		return FALSE;
+	/* Each hardware domain owns its anchor; crop support is not a phase gate. */
+	if (!session->phase_anchor_valid &&
+		settings_phase_read(&session->phase_anchor) == ZZ_VCAP_OK)
+		session->phase_anchor_valid = TRUE;
+	if (!session->geometry_anchor_valid &&
+		zz_vcap_geometry_read(&settings_vcap_io, &session->geometry_anchor) == ZZ_VCAP_OK &&
+		(session->geometry_anchor.status & ZZ_VCAP_GEOMETRY_STATUS_APPLIED_VALID) &&
+		!(session->geometry_anchor.status & ZZ_VCAP_GEOMETRY_STATUS_PENDING) &&
+		session->geometry_anchor.request_serial == session->geometry_anchor.applied_serial)
+		session->geometry_anchor_valid = TRUE;
+	if (!session->supported || !vcap_capture_snapshot(&snapshot)) return FALSE;
 	session->current = snapshot;
 	if (!session->anchors.valid[ZZ_VCAP_ANCHOR_SETTINGS])
-		zz_vcap_anchor_store(&session->anchors, ZZ_VCAP_ANCHOR_SETTINGS,
-			&snapshot);
+		zz_vcap_anchor_store(&session->anchors, ZZ_VCAP_ANCHOR_SETTINGS, &snapshot);
 	return TRUE;
 }
 
@@ -1215,15 +1315,54 @@ static BOOL settings_live_restore(struct settings_live_session *session,
 	struct zz_vcap_snapshot applied;
 	int result;
 
-	if (!session->supported ||
-		!zz_vcap_anchor_load(&session->anchors, owner, &anchor))
-		return TRUE;
-	if (settings_live_refresh(session) && session->current.raw == anchor.raw)
-		return TRUE;
-	result = vcap_apply_raw(anchor.raw, &applied, NULL);
-	if (result != VCAP_APPLY_OK) return FALSE;
-	session->current = applied;
+	session->restore_result = ZZ_VCAP_OK;
+	if (session->supported && zz_vcap_anchor_load(&session->anchors, owner, &anchor) &&
+		!(settings_live_refresh(session) && session->current.raw == anchor.raw)) {
+		result = vcap_apply_raw(anchor.raw, &applied, NULL);
+		if (result != VCAP_APPLY_OK) {
+			session->restore_result = result == VCAP_APPLY_TIMEOUT ?
+				ZZ_VCAP_TIMEOUT : ZZ_VCAP_STATE_CHANGED;
+			return FALSE;
+		}
+		session->current = applied;
+	}
+	/* Advanced and calibration restore their own immutable local phase/window
+	 * anchors. The outer Settings anchor owns accepted, not-yet-saved edits. */
+	if (owner == ZZ_VCAP_ANCHOR_SETTINGS) {
+		if (session->phase_touched) {
+			session->restore_result = session->phase_anchor_valid ?
+				settings_phase_apply(session->phase_anchor, TRUE) : ZZ_VCAP_STATE_CHANGED;
+			if (session->restore_result != ZZ_VCAP_OK) return FALSE;
+			session->phase_touched = FALSE;
+		}
+		if (session->geometry_touched) {
+			session->restore_result = session->geometry_anchor_valid ? settings_geometry_apply(
+				session->geometry_anchor.requested_width,
+				session->geometry_anchor.requested_height, TRUE) : ZZ_VCAP_STATE_CHANGED;
+			if (session->restore_result != ZZ_VCAP_OK) return FALSE;
+			session->geometry_touched = FALSE;
+		}
+	}
 	return TRUE;
+}
+
+static void settings_live_accept(struct settings_live_session *session)
+{
+	/* Save was gated on these exact applied targets. Rebase to the accepted
+	 * values, not a second potentially racing read after the flash write. */
+	if (session->phase_touched) {
+		session->phase_anchor = settings_phase_domain == ZZ_VCAP_PHASE_C28 ?
+			(settings_vals.videocap_c28_phase_present ? settings_vals.videocap_c28_phase : 0) :
+			(settings_vals.videocap_phase_present ? settings_vals.videocap_phase : 0);
+		session->phase_anchor_valid = TRUE;
+		session->phase_touched = FALSE;
+	}
+	if (session->geometry_touched) {
+		session->geometry_anchor.requested_width = settings_vals.videocap_width_present ? settings_vals.videocap_width : 0;
+		session->geometry_anchor.requested_height = settings_vals.videocap_height_present ? settings_vals.videocap_height : 0;
+		session->geometry_anchor_valid = TRUE;
+		session->geometry_touched = FALSE;
+	}
 }
 
 static void settings_path_for(struct zz_vcap_path *path, UWORD profile,
@@ -1274,8 +1413,22 @@ static BOOL settings_custom_framing(void)
 
 static BOOL settings_custom_save_allowed(struct settings_live_session *session)
 {
-	if (!session->supported || !settings_custom_framing()) return TRUE;
-	return settings_path_matches(session, settings_vals.videocap_sample);
+	session->restore_result = ZZ_VCAP_OK;
+	if (session->phase_touched) {
+		int target = settings_phase_domain == ZZ_VCAP_PHASE_C28 ?
+			(settings_vals.videocap_c28_phase_present ? settings_vals.videocap_c28_phase : 0) :
+			(settings_vals.videocap_phase_present ? settings_vals.videocap_phase : 0);
+		session->restore_result = zz_vcap_phase_check(&settings_vcap_io, target);
+		if (session->restore_result != ZZ_VCAP_OK) return FALSE;
+	}
+	if (session->geometry_touched) {
+		session->restore_result = zz_vcap_geometry_check(&settings_vcap_io,
+			settings_vals.videocap_width_present ? settings_vals.videocap_width : 0,
+			settings_vals.videocap_height_present ? settings_vals.videocap_height : 0);
+		if (session->restore_result != ZZ_VCAP_OK) return FALSE;
+	}
+	return !session->supported || !settings_custom_framing() ||
+		settings_path_matches(session, settings_vals.videocap_sample);
 }
 
 enum vcap_pending_action {
@@ -1352,14 +1505,11 @@ static void vcap_draw_calibration(struct vcap_calibration *calibration)
 	Text(rp, (CONST_STRPTR)legend, strlen(legend));
 }
 
-static int vcap_calibration_start_apply(struct vcap_calibration *calibration,
+static void vcap_calibration_start_apply(struct vcap_calibration *calibration,
 	const struct zz_vcap_working *candidate, UWORD action)
 {
-	struct zz_vcap_snapshot applied;
 	ULONG raw = action == VCAP_PENDING_RESTORE ? calibration->entry.raw :
 		zz_vcap_control_pack(&candidate->control);
-	int result;
-
 	if (raw == calibration->current.raw) {
 		if (action == VCAP_PENDING_ACCEPT) {
 			calibration->working = *candidate;
@@ -1368,38 +1518,20 @@ static int vcap_calibration_start_apply(struct vcap_calibration *calibration,
 		} else if (action == VCAP_PENDING_RESTORE) {
 			calibration->done = TRUE;
 		}
-		return VCAP_APPLY_OK;
+		return;
 	}
-
-	result = vcap_apply_raw(raw, &applied, &calibration->pending_sequence);
-	if (result == VCAP_APPLY_OK) {
-		calibration->current = applied;
-		if (action == VCAP_PENDING_RESTORE) {
-			calibration->done = TRUE;
-		} else {
-			calibration->working = *candidate;
-			if (action == VCAP_PENDING_ACCEPT) {
-				calibration->accepted = TRUE;
-				calibration->done = TRUE;
-			}
-		}
-		return result;
-	}
-	if (result == VCAP_APPLY_TIMEOUT) {
+	/* The existing modal loop reconciles one poll at a time. Never block
+	 * that loop for a frame timeout before it can consume Escape. */
+	if (vcap_begin_apply(raw, &calibration->pending_sequence)) {
 		calibration->pending_raw = raw;
 		calibration->pending_action = action;
 		if (candidate) calibration->pending_working = *candidate;
 		snprintf(calibration->message, sizeof(calibration->message),
-			"No frame acknowledgement; Esc restores when frames return");
-	} else if (result == VCAP_APPLY_CONFLICT) {
-		calibration->current = applied;
-		snprintf(calibration->message, sizeof(calibration->message),
-			"Another writer won the request; retry or Esc to restore");
+			"Waiting for native frame ACK; Esc queues entry restore");
 	} else {
 		snprintf(calibration->message, sizeof(calibration->message),
 			"Request not accepted; retry or Esc to restore");
 	}
-	return result;
 }
 
 static void vcap_calibration_reconcile(struct vcap_calibration *calibration)
@@ -1411,7 +1543,7 @@ static void vcap_calibration_reconcile(struct vcap_calibration *calibration)
 
 	if (calibration->pending_action == VCAP_PENDING_NONE) return;
 	result = vcap_poll_apply(calibration->pending_sequence,
-		calibration->pending_raw, 1, &applied);
+		calibration->pending_raw, 1, &applied, NULL);
 	if (result == VCAP_APPLY_CONFLICT) {
 		UWORD conflict_action = calibration->pending_action;
 
@@ -1641,6 +1773,10 @@ static int vcap_calibration_run(struct Screen *return_screen,
 	calibration.working.crop_v = calibration.entry.effective_v;
 	snprintf(calibration.message, sizeof(calibration.message),
 		"Adjust until the boxes are centred");
+	/* With capability bit 9 this is the live line count; older firmware
+	 * falls back to a non-zero REVISION. In either case standard selection
+	 * below trusts the live status word's standard_valid/ntsc; 0x4e only
+	 * gates the calibration path. */
 	lines = zz_get_reg16(REG_ZZ_VIDEOCAP_STATS) & VCAP_LINES_MASK;
 	caller_is_foreign = vcap_screen_is_foreign(return_screen);
 	detected_standard = zz_vcap_calibration_standard(
@@ -1881,6 +2017,52 @@ static int settings_parse_u12(const char *s, UWORD *out)
 		s++;
 	}
 	*out = (UWORD)value;
+	return 1;
+}
+
+/* Capture-window bounds: unsigned decimal; the width's range and
+ * 16-alignment and the height's 100..1024 are enforced by the caller
+ * with the firmware's exact rules. */
+static int settings_parse_window_field(const char *s, UWORD *out)
+{
+	ULONG value = 0;
+
+	if (!s || !*s) return 0;
+	while (*s) {
+		if (*s < '0' || *s > '9') return 0;
+		value = value * 10 + (ULONG)(*s - '0');
+		if (value > 65535) return 0;
+		s++;
+	}
+	*out = (UWORD)value;
+	return 1;
+}
+
+/* Signed decimal phase steps; the range is checked against the
+ * detected domain by the caller (the two unit systems never
+ * convert into each other). */
+static int settings_parse_phase_field(const char *s, int *out)
+{
+	LONG value = 0;
+	int negative = 0;
+	int digits = 0;
+
+	if (!s || !*s) return 0;
+	if (*s == '-') {
+		negative = 1;
+		s++;
+	} else if (*s == '+') {
+		s++;
+	}
+	while (*s) {
+		if (*s < '0' || *s > '9') return 0;
+		value = value * 10 + (LONG)(*s - '0');
+		if (value > 99999) return 0;
+		digits = 1;
+		s++;
+	}
+	if (!digits) return 0;
+	*out = negative ? -(int)value : (int)value;
 	return 1;
 }
 
@@ -2321,9 +2503,11 @@ static struct Gadget *settings_create_gadgets(struct Gadget **glistptr,
 	return gad;
 }
 
+/* Only explicitly edited fields are staged. Live display seeding is not a
+ * persistence operation; Automatic is tracked independently for every axis. */
 static BOOL settings_video_advanced_candidate(struct Window *win,
-	struct Gadget **agads, UWORD sample, UWORD framing,
-	BOOL framing_changed, const struct zzcfg_values *base,
+	struct Gadget **agads, UWORD sample, const struct zz_vcap_edit *edit,
+	const struct zzcfg_values *base,
 	char *status, UWORD status_size, struct zzcfg_values *candidate,
 	BOOL *changed)
 {
@@ -2331,54 +2515,67 @@ static BOOL settings_video_advanced_candidate(struct Window *win,
 		(struct StringInfo *)agads[AGAD_VCAP_CROP_H]->SpecialInfo;
 	struct StringInfo *vsi =
 		(struct StringInfo *)agads[AGAD_VCAP_CROP_V]->SpecialInfo;
-	UWORD crop_h, crop_v;
-	UWORD crop_h_present, crop_v_present;
+	struct StringInfo *wsi =
+		(struct StringInfo *)agads[AGAD_VCAP_WIDTH]->SpecialInfo;
+	struct StringInfo *htsi =
+		(struct StringInfo *)agads[AGAD_VCAP_HEIGHT]->SpecialInfo;
+	struct StringInfo *psi =
+		(struct StringInfo *)agads[AGAD_VCAP_PHASE]->SpecialInfo;
+	UWORD crop_h = 0, crop_v = 0, width = 0, height = 0;
+	int phase = 0;
 
-	*candidate = *base;
-	if (framing == 0) {
-		*changed = sample != base->videocap_sample ||
-			base->videocap_crop_h_present || base->videocap_crop_v_present;
-		candidate->videocap_sample = sample;
-		candidate->videocap_crop_h_present = 0;
-		candidate->videocap_crop_v_present = 0;
-		return TRUE;
-	}
-
-	if (!settings_parse_u12((const char *)hsi->Buffer, &crop_h)) {
+	if (hsi->Buffer[0] && !settings_parse_u12((const char *)hsi->Buffer, &crop_h)) {
 		snprintf(status, status_size, "Bad Crop H - use 0..4095");
 		GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL,
 			GTTX_Text, status, TAG_END);
 		return FALSE;
 	}
-	if (!settings_parse_u12((const char *)vsi->Buffer, &crop_v)) {
+	if (vsi->Buffer[0] && !settings_parse_u12((const char *)vsi->Buffer, &crop_v)) {
 		snprintf(status, status_size, "Bad Crop V - use 0..4095");
 		GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL,
 			GTTX_Text, status, TAG_END);
 		return FALSE;
 	}
-
-	/* A one-axis hand-edited file opens as Custom. Merely pressing Done must
-	 * not materialize its missing axis; changing that field does. A deliberate
-	 * framing cycle (including Automatic -> Custom) makes both axes explicit. */
-	if (framing_changed) {
-		crop_h_present = 1;
-		crop_v_present = 1;
-	} else {
-		crop_h_present = base->videocap_crop_h_present ||
-			crop_h != base->videocap_crop_h;
-		crop_v_present = base->videocap_crop_v_present ||
-			crop_v != base->videocap_crop_v;
+	if (wsi->Buffer[0] != '\0' &&
+			!settings_parse_window_field((const char *)wsi->Buffer,
+			&width)) {
+		snprintf(status, status_size,
+			"Bad Width - use 256..1280 in steps of 16");
+		GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL,
+			GTTX_Text, status, TAG_END);
+		return FALSE;
+	}
+	if (wsi->Buffer[0] == '\0') width = 0;
+	if (width != 0 && (width < 256 || width > 1280 || (width & 15) != 0)) {
+		snprintf(status, status_size,
+			"Bad Width - use 256..1280 in steps of 16");
+		GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL,
+			GTTX_Text, status, TAG_END);
+		return FALSE;
+	}
+	if (htsi->Buffer[0] != '\0' &&
+			(!settings_parse_window_field((const char *)htsi->Buffer,
+			&height) || height < 100 || height > 1024)) {
+		snprintf(status, status_size, "Bad Height - use 100..1024");
+		GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL,
+			GTTX_Text, status, TAG_END);
+		return FALSE;
+	}
+	if (htsi->Buffer[0] == '\0') height = 0;
+	if (settings_phase_domain != ZZ_VCAP_PHASE_NONE &&
+			psi->Buffer[0] != '\0' &&
+			(!settings_parse_phase_field((const char *)psi->Buffer,
+			&phase) ||
+			!zz_vcap_phase_valid(phase, settings_phase_domain))) {
+		snprintf(status, status_size,
+			"Bad Phase - signed steps in this clock's range");
+		GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL,
+			GTTX_Text, status, TAG_END);
+		return FALSE;
 	}
 
-	*changed = sample != base->videocap_sample ||
-		crop_h != base->videocap_crop_h || crop_v != base->videocap_crop_v ||
-		crop_h_present != base->videocap_crop_h_present ||
-		crop_v_present != base->videocap_crop_v_present;
-	candidate->videocap_sample = sample;
-	candidate->videocap_crop_h = crop_h;
-	candidate->videocap_crop_v = crop_v;
-	candidate->videocap_crop_h_present = crop_h_present;
-	candidate->videocap_crop_v_present = crop_v_present;
+	*changed = zz_vcap_edit_stage(edit, base, settings_phase_domain, sample,
+		crop_h, crop_v, width, height, phase, candidate);
 	return TRUE;
 }
 
@@ -2391,8 +2588,8 @@ static void settings_control_from_values(const struct zzcfg_values *values,
 		values->videocap_sample);
 	control->sample = path.sample;
 	control->full_width = path.full_width;
-	control->crop_h = values->videocap_crop_h;
-	control->crop_v = values->videocap_crop_v;
+	control->crop_h = values->videocap_crop_h_present ? values->videocap_crop_h : 0;
+	control->crop_v = values->videocap_crop_v_present ? values->videocap_crop_v : 0;
 	control->crop_h_present = values->videocap_crop_h_present;
 	control->crop_v_present = values->videocap_crop_v_present;
 }
@@ -2412,22 +2609,41 @@ settings_video_calibration_availability(
 {
 	if (!session->supported) {
 		snprintf(status, status_size,
-			"Calibrate needs firmware 2.8 live control and protocol-1 bitstream");
+			"Align picture needs firmware 2.8 live control and protocol-1 bitstream");
 		return VCAP_CALIBRATION_UNSUPPORTED;
 	}
 	if (!settings_live_refresh(session)) {
 		snprintf(status, status_size,
-			"Calibrate waiting for stable native video frames");
+			"Align picture waiting for stable native video frames");
 		return VCAP_CALIBRATION_WAITING;
 	}
 	if (!settings_current_path_matches(session,
 		settings_vals.videocap_profile, sample)) {
 		snprintf(status, status_size,
-			"Staged capture path differs; restore it or Save Automatic + reboot");
+			"Staged path differs; Save + reboot or restore it");
 		return VCAP_CALIBRATION_PATH_MISMATCH;
 	}
-	snprintf(status, status_size,
-		"Calibrate is ready on the currently applied capture path");
+	{
+		struct zz_vcap_status live_status;
+		int phase;
+		/* The ready line is a short action summary. A disabled Find phase
+		 * names its missing gate instead of inviting it. */
+		zz_vcap_status_unpack(session->current.status, &live_status);
+		if (settings_phase_domain != ZZ_VCAP_PHASE_C28)
+			snprintf(status, status_size,
+				"Auto: reset all; Align: crop; Phase sweep requires C28");
+		else if (live_status.standard_valid &&
+				vcap_read32(ZZ_CAPTURE_METADATA_CAP_REG) == ZZ_CAPTURE_METADATA_CAP &&
+				settings_phase_read(&phase) == ZZ_VCAP_OK)
+			snprintf(status, status_size,
+				"Auto: reset all; Align: crop; Find phase: sweep");
+		else if (vcap_read32(ZZ_CAPTURE_METADATA_CAP_REG) != ZZ_CAPTURE_METADATA_CAP)
+			snprintf(status, status_size,
+				"Find phase needs frozen-field metadata");
+		else
+			snprintf(status, status_size,
+				"Find phase needs verified C28 input");
+	}
 	return VCAP_CALIBRATION_READY;
 }
 
@@ -2437,20 +2653,171 @@ settings_video_calibration_availability(
  * button so the main scandoubler rows describe outcomes instead of
  * implementation details. Values are committed to settings_vals only
  * by Done; the Scandoubler window's Save button still writes the card. */
+/* The eye is the last measured C28 sweep, never a continuous measurement. */
+static unsigned char vcap_sampling_quality[ZZ_CAPTURE_BINS];
+static BOOL vcap_sampling_quality_valid;
+
+static void vcap_sampling_eye_text(char *text, UWORD text_size, int phase,
+	BOOL find_phase_ready)
+{
+	unsigned i, marker;
+	if (text_size < ZZ_CAPTURE_BINS + 1) return;
+	if (settings_phase_domain != ZZ_VCAP_PHASE_C28) {
+		snprintf(text, text_size, "Phase sweep is C28-only");
+		return;
+	}
+	if (!vcap_sampling_quality_valid) {
+		/* Never invite a disabled action: name the missing gate instead. */
+		if (!find_phase_ready) {
+			if (vcap_read32(ZZ_CAPTURE_METADATA_CAP_REG) != ZZ_CAPTURE_METADATA_CAP)
+				snprintf(text, text_size, "Needs frozen metadata");
+			else
+				snprintf(text, text_size, "Needs verified C28");
+		} else
+			snprintf(text, text_size, "Run Find phase...");
+		return;
+	}
+	/* Four measured bins per glyph keep the whole sweep visible on a 640px
+	 * native Workbench. '=' is all clean, '+' mixed, '.' all dirty. */
+	marker = zz_sampling_phase_bin(phase) / 4;
+	for (i = 0; i < ZZ_CAPTURE_BINS / 4; ++i) {
+		unsigned n = vcap_sampling_quality[i * 4] + vcap_sampling_quality[i * 4 + 1] +
+			vcap_sampling_quality[i * 4 + 2] + vcap_sampling_quality[i * 4 + 3];
+		text[i] = n == 4 ? '=' : n ? '+' : '.';
+	}
+	text[marker] = '|';
+	text[ZZ_CAPTURE_BINS / 4] = '\0';
+}
+
+static BOOL settings_sampling_calibration_ready(
+	enum vcap_calibration_availability availability,
+	const struct settings_live_session *session)
+{
+	struct zz_vcap_status status;
+	int phase;
+	zz_vcap_status_unpack(session->current.status, &status);
+	return availability == VCAP_CALIBRATION_READY && status.standard_valid &&
+		settings_phase_domain == ZZ_VCAP_PHASE_C28 &&
+		vcap_read32(ZZ_CAPTURE_METADATA_CAP_REG) == ZZ_CAPTURE_METADATA_CAP &&
+		settings_phase_read(&phase) == ZZ_VCAP_OK;
+}
+
+static void settings_sampling_invalidate(struct Window *window,
+	struct Gadget **agads, char *text, UWORD text_size, BOOL find_phase_ready)
+{
+	if (!vcap_sampling_quality_valid) return;
+	vcap_sampling_quality_valid = FALSE;
+	vcap_sampling_eye_text(text, text_size, 0, find_phase_ready);
+	GT_SetGadgetAttrs(agads[AGAD_PHASE_EYE], window, NULL, GTTX_Text, text, TAG_END);
+}
+
+/* Service Close/Cancel and refresh while a bounded command is in flight.
+ * Defer raw messages: GadTools filtering/reply must happen exactly once. */
+struct settings_vcap_wait {
+	struct Window *window;
+	BOOL *cancel;
+	struct List deferred;
+};
+
+static int settings_vcap_keep_running(void *ctx)
+{
+	struct settings_vcap_wait *wait = ctx;
+	struct IntuiMessage *message;
+	while ((message = (struct IntuiMessage *)GetMsg(wait->window->UserPort))) {
+		if (message->Class == IDCMP_CLOSEWINDOW ||
+			(message->Class == IDCMP_GADGETUP && message->IAddress &&
+			 ((struct Gadget *)message->IAddress)->GadgetID == AGAD_BTN_CANCEL)) {
+			*wait->cancel = TRUE;
+			ReplyMsg((struct Message *)message);
+		} else if (message->Class == IDCMP_REFRESHWINDOW) {
+			GT_BeginRefresh(wait->window);
+			GT_EndRefresh(wait->window, TRUE);
+			ReplyMsg((struct Message *)message);
+		} else {
+			AddTail(&wait->deferred, (struct Node *)message);
+		}
+	}
+	return !*wait->cancel;
+}
+
+static void settings_vcap_wait_begin(struct settings_vcap_wait *wait,
+	struct Window *window, BOOL *cancel, struct zz_vcap_io *io)
+{
+	wait->window = window;
+	wait->cancel = cancel;
+	NewList(&wait->deferred);
+	*io = settings_vcap_io;
+	io->control_ctx = wait;
+	io->keep_running = settings_vcap_keep_running;
+}
+
+static void settings_vcap_wait_end(struct settings_vcap_wait *wait)
+{
+	struct Message *message;
+	while ((message = (struct Message *)RemHead(&wait->deferred)))
+		PutMsg(wait->window->UserPort, message);
+}
+
+static int settings_capture_crop_command(struct Window *window, BOOL *cancel,
+	ULONG raw, struct zz_vcap_snapshot *applied)
+{
+	struct settings_vcap_wait wait;
+	struct zz_vcap_io io;
+	int result;
+	settings_vcap_wait_begin(&wait, window, cancel, &io);
+	result = vcap_apply_raw(raw, applied, &io);
+	settings_vcap_wait_end(&wait);
+	return result;
+}
+
+static enum zz_vcap_result settings_capture_phase_command(struct Window *window,
+	BOOL *cancel, int phase)
+{
+	struct settings_vcap_wait wait;
+	struct zz_vcap_io io;
+	enum zz_vcap_result result;
+	settings_vcap_wait_begin(&wait, window, cancel, &io);
+	result = zz_vcap_phase_apply(&io, phase, 0);
+	settings_vcap_wait_end(&wait);
+	return result;
+}
+
+static enum zz_vcap_result settings_capture_geometry_command(struct Window *window,
+	BOOL *cancel, UWORD width, UWORD height)
+{
+	struct settings_vcap_wait wait;
+	struct zz_vcap_io io;
+	enum zz_vcap_result result;
+	settings_vcap_wait_begin(&wait, window, cancel, &io);
+	result = zz_vcap_geometry_apply(&io, width, height, 0);
+	settings_vcap_wait_end(&wait);
+	return result;
+}
+
 static BOOL scandoubler_capture_window(struct Screen *mysc, void *vi,
 	const struct ZZTopLayout *mainlayout,
 	struct settings_live_session *live_session)
 {
 	static CONST_STRPTR label_samples[] = {
 		(CONST_STRPTR)LABEL_VCAP_SAMPLE,
-		(CONST_STRPTR)LABEL_VCAP_FRAMING,
+		(CONST_STRPTR)LABEL_VCAP_PHASE,
+		(CONST_STRPTR)LABEL_VCAP_EYE,
 		(CONST_STRPTR)LABEL_VCAP_CROP,
+		(CONST_STRPTR)LABEL_VCAP_SIZE,
 		NULL
 	};
 	static CONST_STRPTR value_samples[] = {
-		(CONST_STRPTR)"Automatic (recommended)",
 		(CONST_STRPTR)"Average (recommended)",
 		(CONST_STRPTR)"Even (diagnostic)",
+		(CONST_STRPTR)"-255",
+		NULL
+	};
+	static CONST_STRPTR action_samples[] = {
+		(CONST_STRPTR)LABEL_VCAP_BTN_AUTO,
+		(CONST_STRPTR)LABEL_VCAP_BTN_ALIGN,
+		(CONST_STRPTR)LABEL_VCAP_BTN_PHASE,
+		(CONST_STRPTR)"Done",
+		(CONST_STRPTR)"Cancel",
 		NULL
 	};
 	struct ZZTopLayout l = *mainlayout;
@@ -2460,52 +2827,128 @@ static BOOL scandoubler_capture_window(struct Screen *mysc, void *vi,
 	struct Gadget *agads[AGAD_COUNT];
 	struct Window *win;
 	struct IntuiMessage *imsg;
-	struct zzcfg_values entry_values = settings_vals;
+	struct RastPort *rp;
+	const struct zzcfg_values staged_entry = settings_vals;
+	UWORD display_crop_h = staged_entry.videocap_crop_h;
+	UWORD display_crop_v = staged_entry.videocap_crop_v;
+	UWORD display_width = staged_entry.videocap_width;
+	UWORD display_height = staged_entry.videocap_height;
+	struct zz_vcap_edit edit;
 	struct zzcfg_values candidate_values;
 	struct zz_vcap_control candidate_control;
 	struct zz_vcap_control accepted_control;
 	UWORD sample = settings_vals.videocap_sample;
-	UWORD framing = (settings_vals.videocap_crop_h_present ||
-		settings_vals.videocap_crop_v_present) ? 1 : 0;
 	ULONG imsg_class;
 	UWORD imsg_code;
 	WORD label_width, value_width, y, content_right;
-	WORD crop_width, crop_gap, button_width, button_gap;
+	WORD half_width, half_gap, button_width, button_gap;
 	WORD w, h;
 	BOOL done = FALSE;
 	BOOL changed = FALSE;
-	BOOL framing_changed = FALSE;
+	BOOL phase_entry_valid = FALSE, geometry_entry_valid = FALSE;
 	BOOL cancel = FALSE;
+	BOOL phase_edited = FALSE;
+	BOOL geometry_edited = FALSE;
+	BOOL phase_confirmed = TRUE, geometry_confirmed = TRUE;
+	const BOOL phase_was_touched = live_session->phase_touched;
+	const BOOL geometry_was_touched = live_session->geometry_touched;
+	int seeded_ntsc = -1;
+	BOOL geometry_supported, geometry_unacknowledged;
+	int entry_phase = 0;
+	UWORD entry_width = 0, entry_height = 0;
+	struct zz_vcap_geometry_state geometry_state;
 	char crop_h_buf[6];
 	char crop_v_buf[6];
+	char width_buf[8];
+	char height_buf[8];
+	char phase_buf[7];
+	char phase_eye_buf[ZZ_CAPTURE_BINS + 1];
 	char status[128] = "Checking live calibration support...";
 	enum vcap_calibration_availability availability =
 		VCAP_CALIBRATION_UNKNOWN;
 	int i;
 
+	BOOL live_refreshed;
+	BOOL sampling_ready = FALSE;
+	enum zz_vcap_result previous_phase_result = ZZ_VCAP_INVALID;
+
 	zz_vcap_anchor_clear(&live_session->anchors, ZZ_VCAP_ANCHOR_ADVANCED);
 	zz_vcap_anchor_clear(&live_session->anchors, ZZ_VCAP_ANCHOR_PREVIEW);
 	live_session->preview_valid = FALSE;
-	if (settings_live_refresh(live_session))
+	live_refreshed = settings_live_refresh(live_session);
+	if (live_refreshed)
 		zz_vcap_anchor_store(&live_session->anchors, ZZ_VCAP_ANCHOR_ADVANCED,
 			&live_session->current);
 
-	label_width = zztop_max_text_width(
-		zztop_screen ? &zztop_screen->RastPort : NULL, label_samples, 8);
-	value_width = zztop_max_text_width(
-		zztop_screen ? &zztop_screen->RastPort : NULL, value_samples, 8);
+	/* The phase engine is build-specific: its capability word names the
+	 * domain (C28 or legacy E7M) and with it the unit system of the
+	 * phase field. No engine, no editable phase. */
+	settings_phase_domain = zz_vcap_phase_domain(
+		vcap_read32(ZZ_CAPTURE_CAP_REG));
+	zz_vcap_edit_init(&edit, &staged_entry, settings_phase_domain);
+	vcap_sampling_quality_valid = FALSE;
+	phase_entry_valid = settings_phase_read(&entry_phase) == ZZ_VCAP_OK;
+	/* Display live crop, but keep staged_entry immutable for Done/Cancel. */
+	if (live_refreshed) {
+		display_crop_h = live_session->current.effective_h;
+		display_crop_v = live_session->current.effective_v;
+	}
+	geometry_supported = settings_geometry_supported();
+	geometry_unacknowledged = !geometry_supported &&
+		(zz_get_reg16(REG_ZZ_FW_CAPABILITIES) & ZZ_FW_CAP_VIDEOCAP_GEOMETRY) != 0;
+	if (geometry_supported &&
+		zz_vcap_geometry_read(&settings_vcap_io, &geometry_state) == ZZ_VCAP_OK &&
+		(geometry_state.status & ZZ_VCAP_GEOMETRY_STATUS_APPLIED_VALID) &&
+		!(geometry_state.status & ZZ_VCAP_GEOMETRY_STATUS_PENDING) &&
+		geometry_state.request_serial == geometry_state.applied_serial) {
+		geometry_entry_valid = TRUE;
+		entry_width = geometry_state.requested_width;
+		entry_height = geometry_state.requested_height;
+		display_width = entry_width ? entry_width : geometry_state.applied_width;
+		display_height = entry_height ? entry_height : geometry_state.applied_height;
+	} else if (live_refreshed) {
+		settings_capture_window_seed(staged_entry.videocap_profile,
+			live_session->current.raw, live_session->current.status,
+			&display_width, &display_height);
+	}
+	{
+		struct zz_vcap_status open_status;
+
+		zz_vcap_status_unpack(live_session->current.status,
+			&open_status);
+		if (open_status.standard_valid)
+			seeded_ntsc = open_status.ntsc ? 1 : 0;
+	}
+	rp = zztop_screen ? &zztop_screen->RastPort : NULL;
+	label_width = zztop_max_text_width(rp, label_samples, 8);
+	value_width = zztop_max_text_width(rp, value_samples, 8);
 	l.gadget_left = l.margin_x + label_width + l.label_gap;
 	l.gadget_width = zztop_max_word(184, value_width + 48);
-	content_right = l.gadget_left + l.gadget_width;
-	crop_gap = 8;
-	crop_width = (l.gadget_width - crop_gap) / 2;
+	half_gap = 8;
 	button_gap = 16;
-	button_width = 88;
+	/* The action row (two buttons plus gap) and the full-width sweep
+	 * button must fit the control column, so the column is sized from
+	 * the action text with the other windows' padding convention. */
+	button_width = zztop_max_word(90,
+		zztop_max_text_width(rp, action_samples, 8) + 32);
+	l.gadget_width = zztop_max_word(l.gadget_width,
+		2 * button_width + button_gap);
+	content_right = l.gadget_left + l.gadget_width;
+	half_width = (l.gadget_width - half_gap) / 2;
 
 	snprintf(crop_h_buf, sizeof(crop_h_buf), "%u",
-		(unsigned)settings_vals.videocap_crop_h);
+		(unsigned)display_crop_h);
 	snprintf(crop_v_buf, sizeof(crop_v_buf), "%u",
-		(unsigned)settings_vals.videocap_crop_v);
+		(unsigned)display_crop_v);
+	/* Every field opens showing the CURRENT values (live registers when
+	 * the CFG has no explicit key). Clearing a Window field back to
+	 * empty means Automatic again. */
+	snprintf(width_buf, sizeof(width_buf), "%u",
+		(unsigned)display_width);
+	snprintf(height_buf, sizeof(height_buf), "%u",
+		(unsigned)display_height);
+	snprintf(phase_buf, sizeof(phase_buf), "%d", entry_phase);
+	vcap_sampling_eye_text(phase_eye_buf, sizeof(phase_eye_buf), entry_phase, FALSE);
 
 	gad = CreateContext(&glist);
 	for (i = 0; i < AGAD_COUNT; i++) agads[i] = NULL;
@@ -2525,35 +2968,101 @@ static BOOL scandoubler_capture_window(struct Screen *mysc, void *vi,
 	y += l.row_step;
 
 	ng.ng_TopEdge = y;
-	ng.ng_GadgetID = AGAD_VCAP_FRAMING;
-	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_FRAMING;
-	agads[AGAD_VCAP_FRAMING] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
-		GTCY_Labels, vcapframing_labels, GTCY_Active, framing, TAG_END);
+	ng.ng_GadgetID = AGAD_VCAP_PHASE;
+	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_PHASE;
+	agads[AGAD_VCAP_PHASE] = gad = CreateGadget(STRING_KIND, gad, &ng,
+		GTST_MaxChars, 6, GTST_String, phase_buf,
+		GA_Disabled, !phase_entry_valid,
+		TAG_END);
 	y += l.row_step;
 
+	/* Coarse nudges span one sweep bin so the eye marker can move by
+	 * meaningful calibration-sized increments without hiding fine control. */
+	ng.ng_LeftEdge = l.gadget_left;
 	ng.ng_TopEdge = y;
-	ng.ng_Width = crop_width;
-	ng.ng_GadgetID = AGAD_VCAP_CROP_H;
-	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_CROP;
-	agads[AGAD_VCAP_CROP_H] = gad = CreateGadget(STRING_KIND, gad, &ng,
-		GTST_MaxChars, 5, GTST_String, crop_h_buf,
-		GA_Disabled, framing == 0, TAG_END);
-	ng.ng_LeftEdge = l.gadget_left + crop_width + crop_gap;
-	ng.ng_GadgetID = AGAD_VCAP_CROP_V;
-	ng.ng_GadgetText = NULL;
-	agads[AGAD_VCAP_CROP_V] = gad = CreateGadget(STRING_KIND, gad, &ng,
-		GTST_MaxChars, 5, GTST_String, crop_v_buf,
-		GA_Disabled, framing == 0, TAG_END);
+	ng.ng_Width = (l.gadget_width - 24) / 4;
+	ng.ng_GadgetID = AGAD_BTN_PHASE_FINE_MINUS;
+	ng.ng_GadgetText = (STRPTR)"-1";
+	ng.ng_Flags = PLACETEXT_IN;
+	agads[AGAD_BTN_PHASE_FINE_MINUS] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		GA_Disabled, !phase_entry_valid, TAG_END);
+	ng.ng_LeftEdge += ng.ng_Width + 8;
+	ng.ng_GadgetID = AGAD_BTN_PHASE_FINE_PLUS;
+	ng.ng_GadgetText = (STRPTR)"+1";
+	agads[AGAD_BTN_PHASE_FINE_PLUS] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		GA_Disabled, !phase_entry_valid, TAG_END);
+	ng.ng_LeftEdge += ng.ng_Width + 8;
+	ng.ng_GadgetID = AGAD_BTN_PHASE_COARSE_MINUS;
+	ng.ng_GadgetText = (STRPTR)"-28";
+	agads[AGAD_BTN_PHASE_COARSE_MINUS] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		GA_Disabled, !phase_entry_valid, TAG_END);
+	ng.ng_LeftEdge += ng.ng_Width + 8;
+	ng.ng_GadgetID = AGAD_BTN_PHASE_COARSE_PLUS;
+	ng.ng_GadgetText = (STRPTR)"+28";
+	agads[AGAD_BTN_PHASE_COARSE_PLUS] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		GA_Disabled, !phase_entry_valid, TAG_END);
 	y += l.row_step;
 
 	ng.ng_LeftEdge = l.gadget_left;
 	ng.ng_TopEdge = y;
 	ng.ng_Width = l.gadget_width;
-	ng.ng_GadgetID = AGAD_BTN_CALIBRATE;
-	ng.ng_GadgetText = (STRPTR)"Calibrate...";
+	ng.ng_GadgetID = AGAD_PHASE_EYE;
+	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_EYE;
+	ng.ng_Flags = PLACETEXT_LEFT;
+	agads[AGAD_PHASE_EYE] = gad = CreateGadget(TEXT_KIND, gad, &ng,
+		GTTX_Text, phase_eye_buf, GTTX_Border, TRUE, TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge = y;
+	ng.ng_Width = half_width;
+	ng.ng_GadgetID = AGAD_VCAP_CROP_H;
+	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_CROP;
+	agads[AGAD_VCAP_CROP_H] = gad = CreateGadget(STRING_KIND, gad, &ng,
+		GTST_MaxChars, 5, GTST_String, crop_h_buf, TAG_END);
+	ng.ng_LeftEdge = l.gadget_left + half_width + half_gap;
+	ng.ng_GadgetID = AGAD_VCAP_CROP_V;
+	ng.ng_GadgetText = NULL;
+	agads[AGAD_VCAP_CROP_V] = gad = CreateGadget(STRING_KIND, gad, &ng,
+		GTST_MaxChars, 5, GTST_String, crop_v_buf, TAG_END);
+	y += l.row_step;
+
+	ng.ng_LeftEdge = l.gadget_left;
+	ng.ng_TopEdge = y;
+	ng.ng_GadgetID = AGAD_VCAP_WIDTH;
+	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_SIZE;
+	agads[AGAD_VCAP_WIDTH] = gad = CreateGadget(STRING_KIND, gad, &ng,
+		GTST_MaxChars, 5, GTST_String, width_buf,
+		GA_Disabled, !geometry_entry_valid, TAG_END);
+	ng.ng_LeftEdge = l.gadget_left + half_width + half_gap;
+	ng.ng_GadgetID = AGAD_VCAP_HEIGHT;
+	ng.ng_GadgetText = NULL;
+	agads[AGAD_VCAP_HEIGHT] = gad = CreateGadget(STRING_KIND, gad, &ng,
+		GTST_MaxChars, 5, GTST_String, height_buf,
+		GA_Disabled, !geometry_entry_valid, TAG_END);
+	y += l.row_step + l.section_gap;
+
+	ng.ng_LeftEdge = l.gadget_left;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = button_width;
+	ng.ng_GadgetID = AGAD_BTN_AUTO;
+	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_BTN_AUTO;
 	ng.ng_Flags = PLACETEXT_IN;
+	agads[AGAD_BTN_AUTO] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		TAG_END);
+	ng.ng_LeftEdge = l.gadget_left + button_width + button_gap;
+	ng.ng_Width = button_width;
+	ng.ng_GadgetID = AGAD_BTN_CALIBRATE;
+	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_BTN_ALIGN;
 	agads[AGAD_BTN_CALIBRATE] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
 		GA_Disabled, TRUE, TAG_END);
+	y += l.row_step;
+	ng.ng_LeftEdge = l.gadget_left;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = l.gadget_width;
+	ng.ng_GadgetID = AGAD_BTN_SAMPLING_CALIBRATE;
+	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_BTN_PHASE;
+	agads[AGAD_BTN_SAMPLING_CALIBRATE] = gad = CreateGadget(BUTTON_KIND,
+		gad, &ng, GA_Disabled, TRUE, TAG_END);
 	y += l.row_step + l.section_gap;
 
 	ng.ng_LeftEdge = l.margin_x;
@@ -2587,11 +3096,14 @@ static BOOL scandoubler_capture_window(struct Screen *mysc, void *vi,
 		}
 	}
 
-	w = zztop_max_word(content_right + l.margin_x,
-		l.margin_x + button_width + button_gap + button_width + l.margin_x);
+	w = content_right + l.margin_x;
 	h = y + l.gadget_height + (l.margin_y / 2) - l.topborder;
 	win = OpenWindowTags(NULL,
-		WA_Title, "Scandoubler Capture",
+		WA_Title, settings_phase_domain == ZZ_VCAP_PHASE_C28 ?
+			"Scandoubler Capture (C28 clock)" :
+			(settings_phase_domain == ZZ_VCAP_PHASE_E7M ?
+				"Scandoubler Capture (E7M clock)" :
+				"Scandoubler Capture"),
 		WA_Gadgets, glist, WA_AutoAdjust, TRUE,
 		WA_Width, w, WA_MinWidth, w,
 		WA_InnerHeight, h, WA_MinHeight, h,
@@ -2610,23 +3122,141 @@ static BOOL scandoubler_capture_window(struct Screen *mysc, void *vi,
 
 	GT_RefreshWindow(win, NULL);
 	while (!done) {
+		char availability_status[sizeof(status)];
+		int applied_phase = 0;
+		enum zz_vcap_result phase_result;
 		enum vcap_calibration_availability now_available =
-			settings_video_calibration_availability(
-			live_session, sample, status, sizeof(status));
-
+			settings_video_calibration_availability(live_session, sample,
+				availability_status, sizeof(availability_status));
+		BOOL now_sampling_ready;
+		phase_result = settings_phase_read(&applied_phase);
+		if (!phase_entry_valid && phase_result == ZZ_VCAP_OK) {
+			entry_phase = applied_phase;
+			phase_entry_valid = TRUE;
+			snprintf(phase_buf, sizeof(phase_buf), "%d", entry_phase);
+			GT_SetGadgetAttrs(agads[AGAD_VCAP_PHASE], win, NULL, GTST_String, phase_buf, TAG_END);
+		}
+		if (!geometry_entry_valid && geometry_supported &&
+			zz_vcap_geometry_read(&settings_vcap_io, &geometry_state) == ZZ_VCAP_OK &&
+			(geometry_state.status & ZZ_VCAP_GEOMETRY_STATUS_APPLIED_VALID) &&
+			!(geometry_state.status & ZZ_VCAP_GEOMETRY_STATUS_PENDING) &&
+			geometry_state.request_serial == geometry_state.applied_serial) {
+			geometry_entry_valid = TRUE;
+			availability = VCAP_CALIBRATION_UNKNOWN;
+			entry_width = geometry_state.requested_width;
+			entry_height = geometry_state.requested_height;
+			snprintf(width_buf, sizeof(width_buf), "%u", entry_width ? entry_width : geometry_state.applied_width);
+			snprintf(height_buf, sizeof(height_buf), "%u", entry_height ? entry_height : geometry_state.applied_height);
+			GT_SetGadgetAttrs(agads[AGAD_VCAP_WIDTH], win, NULL, GTST_String, width_buf, GA_Disabled, FALSE, TAG_END);
+			GT_SetGadgetAttrs(agads[AGAD_VCAP_HEIGHT], win, NULL, GTST_String, height_buf, GA_Disabled, FALSE, TAG_END);
+		}
+		now_sampling_ready = phase_entry_valid && phase_result == ZZ_VCAP_OK &&
+			settings_sampling_calibration_ready(now_available, live_session);
 		if (now_available == VCAP_CALIBRATION_READY &&
 			!live_session->anchors.valid[ZZ_VCAP_ANCHOR_ADVANCED])
-			zz_vcap_anchor_store(&live_session->anchors,
-				ZZ_VCAP_ANCHOR_ADVANCED, &live_session->current);
-		if (now_available != availability) {
+			zz_vcap_anchor_store(&live_session->anchors, ZZ_VCAP_ANCHOR_ADVANCED, &live_session->current);
+		if (now_available != availability || now_sampling_ready != sampling_ready ||
+			phase_result != previous_phase_result) {
 			availability = now_available;
-			GT_SetGadgetAttrs(agads[AGAD_BTN_CALIBRATE], win, NULL,
-				GA_Disabled, availability != VCAP_CALIBRATION_READY, TAG_END);
-			GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL,
-				GTTX_Text, status, TAG_END);
+			sampling_ready = now_sampling_ready;
+			previous_phase_result = phase_result;
+			GT_SetGadgetAttrs(agads[AGAD_BTN_CALIBRATE], win, NULL, GA_Disabled, availability != VCAP_CALIBRATION_READY, TAG_END);
+			GT_SetGadgetAttrs(agads[AGAD_BTN_SAMPLING_CALIBRATE], win, NULL, GA_Disabled, !sampling_ready, TAG_END);
+			GT_SetGadgetAttrs(agads[AGAD_BTN_AUTO], win, NULL, GA_Disabled,
+				availability != VCAP_CALIBRATION_READY ||
+				(settings_phase_domain != ZZ_VCAP_PHASE_NONE && phase_result != ZZ_VCAP_OK) ||
+				(geometry_supported && !geometry_entry_valid) ||
+				geometry_unacknowledged, TAG_END);
+			for (i = AGAD_BTN_PHASE_FINE_MINUS; i <= AGAD_BTN_PHASE_COARSE_PLUS; ++i)
+				GT_SetGadgetAttrs(agads[i], win, NULL, GA_Disabled, !phase_entry_valid || phase_result != ZZ_VCAP_OK, TAG_END);
+			GT_SetGadgetAttrs(agads[AGAD_VCAP_PHASE], win, NULL, GA_Disabled, !phase_entry_valid || phase_result != ZZ_VCAP_OK, TAG_END);
+			if (phase_result != ZZ_VCAP_OK)
+				snprintf(status, sizeof(status), "Phase unavailable: %s", zz_vcap_result_text(phase_result));
+			else if (geometry_unacknowledged && availability == VCAP_CALIBRATION_READY)
+				snprintf(status, sizeof(status), "Window/Reset to Auto need geometry-ACK firmware");
+			else
+				snprintf(status, sizeof(status), "%s", availability_status);
+			if (!vcap_sampling_quality_valid) {
+				/* The idle eye guidance names the Find phase gate; keep it
+				 * in sync with the button state. */
+				vcap_sampling_eye_text(phase_eye_buf, sizeof(phase_eye_buf), 0, sampling_ready);
+				GT_SetGadgetAttrs(agads[AGAD_PHASE_EYE], win, NULL, GTTX_Text, phase_eye_buf, TAG_END);
+			}
+			GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL, GTTX_Text, status, TAG_END);
+		}
+		/* The input standard can change while the window is open -
+		 * typically the RTG-era blank placeholder (often NTSC-class
+		 * on a PAL machine) giving way to a real native screen. As
+		 * long as the Window fields were not edited, re-seed them
+		 * (and absent crops) from the new input so the display keeps
+		 * showing CURRENT values. */
+		{
+			struct zz_vcap_status loop_status;
+
+			zz_vcap_status_unpack(live_session->current.status,
+				&loop_status);
+			if (loop_status.standard_valid &&
+				(loop_status.ntsc ? 1 : 0) != seeded_ntsc) {
+				UWORD seed_width = 0, seed_height = 0;
+				BOOL was_unknown = seeded_ntsc == -1;
+
+				seeded_ntsc = loop_status.ntsc ? 1 : 0;
+				settings_capture_window_seed(
+					staged_entry.videocap_profile,
+					live_session->current.raw,
+					live_session->current.status,
+					&seed_width, &seed_height);
+				if (geometry_entry_valid &&
+					zz_vcap_geometry_read(&settings_vcap_io, &geometry_state) == ZZ_VCAP_OK &&
+					(geometry_state.status & ZZ_VCAP_GEOMETRY_STATUS_APPLIED_VALID) &&
+					!(geometry_state.status & ZZ_VCAP_GEOMETRY_STATUS_PENDING) &&
+					geometry_state.request_serial == geometry_state.applied_serial) {
+					seed_width = geometry_state.requested_width ? geometry_state.requested_width : geometry_state.applied_width;
+					seed_height = geometry_state.requested_height ? geometry_state.requested_height : geometry_state.applied_height;
+				}
+				if (!(edit.edited & ZZ_VCAP_EDIT_WIDTH)) {
+
+					snprintf(width_buf, sizeof(width_buf), "%u",
+						(unsigned)seed_width);
+					GT_SetGadgetAttrs(agads[AGAD_VCAP_WIDTH],
+						win, NULL, GTST_String, width_buf,
+						TAG_END);
+				}
+				if (!(edit.edited & ZZ_VCAP_EDIT_HEIGHT)) {
+
+					snprintf(height_buf, sizeof(height_buf), "%u",
+						(unsigned)seed_height);
+					GT_SetGadgetAttrs(agads[AGAD_VCAP_HEIGHT],
+						win, NULL, GTST_String, height_buf,
+						TAG_END);
+				}
+				if (!(edit.edited & ZZ_VCAP_EDIT_CROP_H)) {
+					snprintf(crop_h_buf, sizeof(crop_h_buf), "%u",
+						(unsigned)live_session->current.effective_h);
+					GT_SetGadgetAttrs(agads[AGAD_VCAP_CROP_H],
+						win, NULL, GTST_String, crop_h_buf,
+						TAG_END);
+				}
+				if (!(edit.edited & ZZ_VCAP_EDIT_CROP_V)) {
+					snprintf(crop_v_buf, sizeof(crop_v_buf), "%u",
+						(unsigned)live_session->current.effective_v);
+					GT_SetGadgetAttrs(agads[AGAD_VCAP_CROP_V],
+						win, NULL, GTST_String, crop_v_buf,
+						TAG_END);
+				}
+				settings_sampling_invalidate(win, agads, phase_eye_buf, sizeof(phase_eye_buf), sampling_ready);
+				if (!was_unknown)
+					snprintf(status, sizeof(status),
+						"Input changed to %s - unedited values reseeded",
+						seeded_ntsc ? "NTSC" : "PAL");
+			}
 		}
 		Delay(2);
 		while ((imsg = GT_GetIMsg(win->UserPort))) {
+			if (done) {
+				GT_ReplyIMsg(imsg);
+				continue;
+			}
 			gad = (struct Gadget *)imsg->IAddress;
 			imsg_class = imsg->Class;
 			imsg_code = imsg->Code;
@@ -2638,88 +3268,267 @@ static BOOL scandoubler_capture_window(struct Screen *mysc, void *vi,
 				GT_BeginRefresh(win);
 				GT_EndRefresh(win, TRUE);
 			} else if (imsg_class == IDCMP_GADGETUP && gad) {
+				if (cancel) continue;
 				if (gad->GadgetID == AGAD_VCAP_SAMPLE) {
 					sample = imsg_code;
+					settings_sampling_invalidate(win, agads, phase_eye_buf, sizeof(phase_eye_buf), sampling_ready);
 					availability = VCAP_CALIBRATION_UNKNOWN;
-				} else if (gad->GadgetID == AGAD_VCAP_FRAMING) {
-					if (imsg_code != framing) {
-						framing_changed = TRUE;
-						framing = imsg_code ? 1 : 0;
-						GT_SetGadgetAttrs(agads[AGAD_VCAP_CROP_H], win, NULL,
-							GA_Disabled, framing == 0, TAG_END);
-						GT_SetGadgetAttrs(agads[AGAD_VCAP_CROP_V], win, NULL,
-							GA_Disabled, framing == 0, TAG_END);
+				} else if (gad->GadgetID == AGAD_VCAP_CROP_H ||
+					gad->GadgetID == AGAD_VCAP_CROP_V) {
+					struct StringInfo *field = (struct StringInfo *)gad->SpecialInfo;
+					zz_vcap_edit_set(&edit, gad->GadgetID == AGAD_VCAP_CROP_H ?
+						ZZ_VCAP_EDIT_CROP_H : ZZ_VCAP_EDIT_CROP_V, field->Buffer[0] != '\0');
+				} else if (gad->GadgetID == AGAD_VCAP_PHASE ||
+					gad->GadgetID == AGAD_BTN_PHASE_FINE_MINUS ||
+					gad->GadgetID == AGAD_BTN_PHASE_FINE_PLUS ||
+					gad->GadgetID == AGAD_BTN_PHASE_COARSE_MINUS ||
+					gad->GadgetID == AGAD_BTN_PHASE_COARSE_PLUS) {
+					const char *text = (const char *)((struct StringInfo *)agads[AGAD_VCAP_PHASE]->SpecialInfo)->Buffer;
+					int phase = 0, delta = 0;
+					enum zz_vcap_result result = ZZ_VCAP_INVALID;
+					if ((!text[0] || settings_parse_phase_field(text, &phase)) &&
+						zz_vcap_phase_valid(phase, settings_phase_domain) && phase_entry_valid) {
+						if (gad->GadgetID != AGAD_VCAP_PHASE)
+							delta = gad->GadgetID == AGAD_BTN_PHASE_FINE_MINUS ? -1 :
+								gad->GadgetID == AGAD_BTN_PHASE_FINE_PLUS ? 1 :
+								gad->GadgetID == AGAD_BTN_PHASE_COARSE_MINUS ?
+								-(int)ZZ_CAPTURE_BIN_STEPS : (int)ZZ_CAPTURE_BIN_STEPS;
+						phase = zz_vcap_phase_step(phase, delta, settings_phase_domain);
+						zz_vcap_edit_set(&edit, ZZ_VCAP_EDIT_PHASE,
+							gad->GadgetID != AGAD_VCAP_PHASE || text[0] != '\0');
+						phase_edited = TRUE;
+						live_session->phase_touched = TRUE;
+						snprintf(phase_buf, sizeof(phase_buf), "%d", phase);
+						GT_SetGadgetAttrs(agads[AGAD_VCAP_PHASE], win, NULL,
+							GTST_String, phase_buf, TAG_END);
+						snprintf(status, sizeof(status), "Phase %d pending acknowledgement", phase);
+						GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL, GTTX_Text, status, TAG_END);
+						result = settings_capture_phase_command(win, &cancel, phase);
+						phase_confirmed = result == ZZ_VCAP_OK;
+						if (result == ZZ_VCAP_OK) {
+							vcap_sampling_eye_text(phase_eye_buf, sizeof(phase_eye_buf), phase, sampling_ready);
+							GT_SetGadgetAttrs(agads[AGAD_PHASE_EYE], win, NULL,
+								GTTX_Text, phase_eye_buf, TAG_END);
+						}
 					}
-				} else if (gad->GadgetID == AGAD_BTN_CALIBRATE &&
-					availability == VCAP_CALIBRATION_READY) {
-					int result = vcap_calibration_run(mysc, win, live_session,
-						&accepted_control, status, sizeof(status));
-
+					if (result == ZZ_VCAP_OK)
+						snprintf(status, sizeof(status), "Phase %d applied; Done stages", phase);
+					else
+						snprintf(status, sizeof(status), "Phase not confirmed: %s", zz_vcap_result_text(result));
+					GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL, GTTX_Text, status, TAG_END);
+				} else if (gad->GadgetID == AGAD_VCAP_WIDTH || gad->GadgetID == AGAD_VCAP_HEIGHT) {
+					const char *wtext = (const char *)((struct StringInfo *)agads[AGAD_VCAP_WIDTH]->SpecialInfo)->Buffer;
+					const char *htext = (const char *)((struct StringInfo *)agads[AGAD_VCAP_HEIGHT]->SpecialInfo)->Buffer;
+					UWORD width = 0, height = 0;
+					enum zz_vcap_result result = ZZ_VCAP_INVALID;
+					if (geometry_entry_valid &&
+						(!wtext[0] || (settings_parse_window_field(wtext, &width) &&
+							width >= 256 && width <= 1280 && !(width & 15))) &&
+						(!htext[0] || (settings_parse_window_field(htext, &height) &&
+							height >= 100 && height <= 1024))) {
+						zz_vcap_edit_set(&edit, gad->GadgetID == AGAD_VCAP_WIDTH ?
+							ZZ_VCAP_EDIT_WIDTH : ZZ_VCAP_EDIT_HEIGHT,
+							gad->GadgetID == AGAD_VCAP_WIDTH ? wtext[0] != '\0' : htext[0] != '\0');
+						if (!(edit.present & ZZ_VCAP_EDIT_WIDTH)) width = 0;
+						if (!(edit.present & ZZ_VCAP_EDIT_HEIGHT)) height = 0;
+						geometry_edited = TRUE;
+						live_session->geometry_touched = TRUE;
+						snprintf(status, sizeof(status), "Window %ux%u pending native vblank", width, height);
+						GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL, GTTX_Text, status, TAG_END);
+						result = settings_capture_geometry_command(win, &cancel, width, height);
+					}
+					if (result == ZZ_VCAP_OK) result = zz_vcap_geometry_read(&settings_vcap_io, &geometry_state);
+					geometry_confirmed = result == ZZ_VCAP_OK;
+					if (geometry_confirmed)
+						snprintf(status, sizeof(status), "Request %ux%u; applied %ux%u", width, height,
+							geometry_state.applied_width, geometry_state.applied_height);
+					else
+						snprintf(status, sizeof(status), "Window not confirmed: %s", zz_vcap_result_text(result));
+					GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL, GTTX_Text, status, TAG_END);
+				} else if (gad->GadgetID == AGAD_BTN_AUTO) {
+					struct zz_vcap_control auto_control;
+					struct zz_vcap_path path;
+					struct zz_vcap_snapshot applied;
+					int crop_result;
+					enum zz_vcap_result phase_result = ZZ_VCAP_OK, geometry_result = ZZ_VCAP_OK;
+					if (!live_session->supported || geometry_unacknowledged) {
+						snprintf(status, sizeof(status), "%s", geometry_unacknowledged ?
+							"Reset to Auto needs geometry-ACK firmware" : "Reset to Auto needs live-control firmware");
+						GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL, GTTX_Text, status, TAG_END);
+						continue;
+					}
+					settings_path_for(&path, settings_vals.videocap_profile, sample);
+					auto_control.sample = path.sample;
+					auto_control.full_width = path.full_width;
+					auto_control.crop_h = auto_control.crop_v = 0;
+					auto_control.crop_h_present = auto_control.crop_v_present = 0;
+					snprintf(status, sizeof(status), "Reset to Auto pending acknowledgement");
+					GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL, GTTX_Text, status, TAG_END);
+					crop_result = settings_capture_crop_command(win, &cancel, zz_vcap_control_pack(&auto_control), &applied);
+					if (!cancel && settings_phase_domain != ZZ_VCAP_PHASE_NONE) {
+						if (phase_entry_valid) {
+							phase_edited = TRUE;
+							live_session->phase_touched = TRUE;
+							phase_result = settings_capture_phase_command(win, &cancel, 0);
+						} else phase_result = ZZ_VCAP_CLOCK_UNQUALIFIED;
+					}
+					if (!cancel && geometry_supported) {
+						if (geometry_entry_valid) {
+							geometry_edited = TRUE;
+							live_session->geometry_touched = TRUE;
+							geometry_result = settings_capture_geometry_command(win, &cancel, 0, 0);
+						} else geometry_result = ZZ_VCAP_BUSY;
+					}
+					phase_confirmed = phase_result == ZZ_VCAP_OK;
+					geometry_confirmed = geometry_result == ZZ_VCAP_OK;
+					if (crop_result == VCAP_APPLY_OK && phase_result == ZZ_VCAP_OK &&
+						geometry_result == ZZ_VCAP_OK && !cancel) {
+						UWORD seed_width = 0, seed_height = 0;
+						zz_vcap_edit_automatic(&edit);
+						live_session->current = applied;
+						live_session->preview_control = auto_control;
+						live_session->preview_valid = TRUE;
+						vcap_sampling_quality_valid = FALSE;
+						snprintf(crop_h_buf, sizeof(crop_h_buf), "%u", applied.effective_h);
+						snprintf(crop_v_buf, sizeof(crop_v_buf), "%u", applied.effective_v);
+						settings_capture_window_seed(settings_vals.videocap_profile,
+							applied.raw, applied.status, &seed_width, &seed_height);
+						if (geometry_supported && zz_vcap_geometry_read(&settings_vcap_io, &geometry_state) == ZZ_VCAP_OK) {
+							seed_width = geometry_state.applied_width;
+							seed_height = geometry_state.applied_height;
+						}
+						snprintf(width_buf, sizeof(width_buf), "%u", seed_width);
+						snprintf(height_buf, sizeof(height_buf), "%u", seed_height);
+						snprintf(phase_buf, sizeof(phase_buf), "0");
+						GT_SetGadgetAttrs(agads[AGAD_VCAP_CROP_H], win, NULL, GTST_String, crop_h_buf, TAG_END);
+						GT_SetGadgetAttrs(agads[AGAD_VCAP_CROP_V], win, NULL, GTST_String, crop_v_buf, TAG_END);
+						GT_SetGadgetAttrs(agads[AGAD_VCAP_WIDTH], win, NULL, GTST_String, width_buf, TAG_END);
+						GT_SetGadgetAttrs(agads[AGAD_VCAP_HEIGHT], win, NULL, GTST_String, height_buf, TAG_END);
+						GT_SetGadgetAttrs(agads[AGAD_VCAP_PHASE], win, NULL, GTST_String, phase_buf, TAG_END);
+						vcap_sampling_eye_text(phase_eye_buf, sizeof(phase_eye_buf), 0, sampling_ready);
+						GT_SetGadgetAttrs(agads[AGAD_PHASE_EYE], win, NULL, GTTX_Text, phase_eye_buf, TAG_END);
+						snprintf(status, sizeof(status), "Reset to Auto applied; Done stages, Save persists");
+					} else if (crop_result != VCAP_APPLY_OK)
+						snprintf(status, sizeof(status), "Reset to Auto crop: %s; retry or Cancel",
+							crop_result == VCAP_APPLY_CANCELLED ? "cancelled" :
+							crop_result == VCAP_APPLY_TIMEOUT ? "native-frame timeout" :
+							crop_result == VCAP_APPLY_CONFLICT ? "competing writer" : "request not accepted");
+					else
+						snprintf(status, sizeof(status), "Reset to Auto incomplete: %s; retry or Cancel",
+							zz_vcap_result_text(phase_result != ZZ_VCAP_OK ? phase_result : geometry_result));
+					GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL, GTTX_Text, status, TAG_END);
+				} else if (gad->GadgetID == AGAD_BTN_CALIBRATE && availability == VCAP_CALIBRATION_READY) {
+					int result = vcap_calibration_run(mysc, win, live_session, &accepted_control, status, sizeof(status));
 					if (result == 1) {
 						sample = accepted_control.sample;
-						framing = 1;
-						framing_changed = TRUE;
-						snprintf(crop_h_buf, sizeof(crop_h_buf), "%u",
-							(unsigned)accepted_control.crop_h);
-						snprintf(crop_v_buf, sizeof(crop_v_buf), "%u",
-							(unsigned)accepted_control.crop_v);
-						GT_SetGadgetAttrs(agads[AGAD_VCAP_SAMPLE], win, NULL,
-							GTCY_Active, sample, TAG_END);
-						GT_SetGadgetAttrs(agads[AGAD_VCAP_FRAMING], win, NULL,
-							GTCY_Active, 1, TAG_END);
-						GT_SetGadgetAttrs(agads[AGAD_VCAP_CROP_H], win, NULL,
-							GTST_String, crop_h_buf, GA_Disabled, FALSE, TAG_END);
-						GT_SetGadgetAttrs(agads[AGAD_VCAP_CROP_V], win, NULL,
-							GTST_String, crop_v_buf, GA_Disabled, FALSE, TAG_END);
-						snprintf(status, sizeof(status),
-							"Live preview accepted; Done stages it, Cancel restores it");
-						GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL,
-							GTTX_Text, status, TAG_END);
-					} else if (result < 0) {
-						GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL,
-							GTTX_Text, status, TAG_END);
+						zz_vcap_edit_set(&edit, ZZ_VCAP_EDIT_CROP_H, accepted_control.crop_h_present);
+						zz_vcap_edit_set(&edit, ZZ_VCAP_EDIT_CROP_V, accepted_control.crop_v_present);
+						settings_sampling_invalidate(win, agads, phase_eye_buf, sizeof(phase_eye_buf), sampling_ready);
+						snprintf(crop_h_buf, sizeof(crop_h_buf), "%u", accepted_control.crop_h);
+						snprintf(crop_v_buf, sizeof(crop_v_buf), "%u", accepted_control.crop_v);
+						GT_SetGadgetAttrs(agads[AGAD_VCAP_SAMPLE], win, NULL, GTCY_Active, sample, TAG_END);
+						GT_SetGadgetAttrs(agads[AGAD_VCAP_CROP_H], win, NULL, GTST_String, crop_h_buf, TAG_END);
+						GT_SetGadgetAttrs(agads[AGAD_VCAP_CROP_V], win, NULL, GTST_String, crop_v_buf, TAG_END);
+						snprintf(status, sizeof(status), "Preview accepted; Done stages, Cancel restores");
 					}
+					GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL, GTTX_Text, status, TAG_END);
+				} else if (gad->GadgetID == AGAD_BTN_SAMPLING_CALIBRATE && sampling_ready) {
+					struct zz_vcap_status source;
+					int child_entry = 0, chosen_phase = 0, result = -1, lace = 0;
+					enum zz_vcap_result phase_result = settings_phase_read(&child_entry);
+					zz_vcap_status_unpack(live_session->current.status, &source);
+					/* A native caller supplies its field mode; RTG has none, so
+					 * deliberately request a progressive native test pattern. */
+					if (mysc) {
+						struct DisplayInfo info = {0};
+						ULONG id = GetVPModeID(&mysc->ViewPort);
+						if (id != (ULONG)INVALID_ID && GetDisplayInfoData(NULL,
+							(UBYTE *)&info, sizeof(info), DTAG_DISP, id) != 0 &&
+							!(info.PropertyFlags & DIPF_IS_FOREIGN))
+							lace = (info.PropertyFlags & DIPF_IS_LACE) != 0;
+					}
+					if (phase_result == ZZ_VCAP_OK)
+						result = vcap_sampling_run(&settings_vcap_io, source.ntsc, lace, child_entry,
+							&chosen_phase, vcap_sampling_quality, status, sizeof(status));
+					else snprintf(status, sizeof(status), "Sampling unavailable: %s", zz_vcap_result_text(phase_result));
+					if (result == 1) {
+						phase_edited = TRUE;
+						phase_confirmed = TRUE;
+						live_session->phase_touched = TRUE;
+						zz_vcap_edit_set(&edit, ZZ_VCAP_EDIT_PHASE, 1);
+						vcap_sampling_quality_valid = TRUE;
+						snprintf(phase_buf, sizeof(phase_buf), "%d", chosen_phase);
+						vcap_sampling_eye_text(phase_eye_buf, sizeof(phase_eye_buf), chosen_phase, sampling_ready);
+						GT_SetGadgetAttrs(agads[AGAD_VCAP_PHASE], win, NULL, GTST_String, phase_buf, TAG_END);
+						GT_SetGadgetAttrs(agads[AGAD_PHASE_EYE], win, NULL, GTTX_Text, phase_eye_buf, TAG_END);
+						snprintf(status, sizeof(status), "Phase %d applied; Done stages, Cancel restores", chosen_phase);
+					} else if (result == -2) {
+						phase_edited = TRUE;
+						phase_confirmed = FALSE;
+						live_session->phase_touched = TRUE;
+						vcap_sampling_quality_valid = FALSE;
+					}
+					GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL, GTTX_Text, status, TAG_END);
 				} else if (gad->GadgetID == AGAD_BTN_CANCEL) {
 					cancel = TRUE;
 				} else if (gad->GadgetID == AGAD_BTN_DONE) {
-					if (settings_video_advanced_candidate(win, agads, sample,
-						framing, framing_changed, &entry_values, status,
-						sizeof(status), &candidate_values, &changed)) {
-						settings_control_from_values(&candidate_values,
-							&candidate_control);
-						if ((!live_session->preview_valid ||
-							!zz_vcap_control_equal(&candidate_control,
-								&live_session->preview_control)) &&
-							!settings_live_restore(live_session,
-								ZZ_VCAP_ANCHOR_ADVANCED)) {
-							snprintf(status, sizeof(status),
-								"Cannot restore live preview; keep window open and retry");
-							GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL,
-								GTTX_Text, status, TAG_END);
+					if (settings_video_advanced_candidate(win, agads, sample, &edit, &staged_entry,
+						status, sizeof(status), &candidate_values, &changed)) {
+						enum zz_vcap_result result = phase_confirmed && geometry_confirmed ? ZZ_VCAP_OK : ZZ_VCAP_STATE_CHANGED;
+						int phase = 0;
+						const char *text = (const char *)((struct StringInfo *)agads[AGAD_VCAP_PHASE]->SpecialInfo)->Buffer;
+						if (result == ZZ_VCAP_OK && phase_edited) {
+							if (text[0]) settings_parse_phase_field(text, &phase);
+							result = zz_vcap_phase_check(&settings_vcap_io, phase);
+						}
+						if (result == ZZ_VCAP_OK && geometry_edited)
+							result = zz_vcap_geometry_check(&settings_vcap_io,
+								candidate_values.videocap_width_present ? candidate_values.videocap_width : 0,
+								candidate_values.videocap_height_present ? candidate_values.videocap_height : 0);
+						settings_control_from_values(&candidate_values, &candidate_control);
+						if (result != ZZ_VCAP_OK) {
+							changed = FALSE;
+							snprintf(status, sizeof(status), "Cannot stage unconfirmed command: %s", zz_vcap_result_text(result));
+						} else if ((!live_session->preview_valid ||
+							!zz_vcap_control_equal(&candidate_control, &live_session->preview_control)) &&
+							!settings_live_restore(live_session, ZZ_VCAP_ANCHOR_ADVANCED)) {
+							changed = FALSE;
+							snprintf(status, sizeof(status), "Preview restore failed; retry or Cancel");
 						} else {
 							settings_vals = candidate_values;
-							live_session->preview_valid =
-								live_session->preview_valid &&
-								zz_vcap_control_equal(&candidate_control,
-									&live_session->preview_control);
+							live_session->preview_valid = live_session->preview_valid &&
+								zz_vcap_control_equal(&candidate_control, &live_session->preview_control);
 							done = TRUE;
 						}
+						GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL, GTTX_Text, status, TAG_END);
 					}
 				}
 			}
 		}
 		if (cancel) {
-			if (settings_live_restore(live_session,
-				ZZ_VCAP_ANCHOR_ADVANCED)) {
+			BOOL restored = settings_live_restore(live_session, ZZ_VCAP_ANCHOR_ADVANCED);
+			enum zz_vcap_result result = ZZ_VCAP_OK, geometry_result = ZZ_VCAP_OK;
+			live_session->preview_valid = FALSE;
+			if (phase_edited) {
+				result = settings_phase_apply(entry_phase, TRUE);
+				phase_confirmed = result == ZZ_VCAP_OK;
+			}
+			if (geometry_edited) {
+				geometry_result = settings_geometry_apply(entry_width, entry_height, TRUE);
+				geometry_confirmed = geometry_result == ZZ_VCAP_OK;
+			}
+			if (restored && result == ZZ_VCAP_OK && geometry_result == ZZ_VCAP_OK) {
+				live_session->phase_touched = phase_was_touched;
+				live_session->geometry_touched = geometry_was_touched;
 				live_session->preview_valid = FALSE;
 				changed = FALSE;
 				done = TRUE;
 			} else {
 				cancel = FALSE;
-				snprintf(status, sizeof(status),
-					"Cancel waiting for acknowledged live restore; retry or cold boot");
-				GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL,
-					GTTX_Text, status, TAG_END);
+				changed = FALSE;
+				snprintf(status, sizeof(status), "Restore failed; live state unknown: %s",
+					!restored ? "crop acknowledgement" : zz_vcap_result_text(result != ZZ_VCAP_OK ? result : geometry_result));
+				GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL, GTTX_Text, status, TAG_END);
 			}
 		}
 	}
@@ -3014,7 +3823,7 @@ static BOOL scandoubler_stage_profile(struct Window *win,
 			*framing_reset = TRUE;
 		scandoubler_update_save_gate(win, live, FALSE);
 		sd_set_status(win,
-			"Framing reset to Automatic - Save, reboot, recalibrate");
+			"Framing reset to Automatic - Save, reboot, re-align picture");
 		return TRUE;
 	}
 	if (scandoubler_update_save_gate(win, live, TRUE))
@@ -3121,9 +3930,13 @@ static BOOL scandoubler_update_save_gate(struct Window *win,
 
 	GT_SetGadgetAttrs(sdgads[SDGAD_BTN_SAVE], win, NULL,
 		GA_Disabled, !allowed, TAG_END);
-	if (!allowed && settings_have_cfg && explain)
-		sd_set_status(win,
-			"Custom crop belongs to another capture path; use Automatic, Save and reboot");
+	if (!allowed && settings_have_cfg && explain) {
+		if (live_session->restore_result != ZZ_VCAP_OK) {
+			snprintf(sd_status_buf, sizeof(sd_status_buf), "Save blocked: %s; restore or retry",
+				zz_vcap_result_text(live_session->restore_result));
+			sd_set_status(win, sd_status_buf);
+		} else sd_set_status(win, "Custom crop belongs to another path; use Automatic");
+	}
 	return allowed;
 }
 
@@ -3354,6 +4167,7 @@ static BOOL scandoubler_gadget_up(struct Window *win, struct Gadget *gad,
 					ZZ_VCAP_ANCHOR_SETTINGS, &live->current);
 			}
 			live->preview_valid = FALSE;
+			settings_live_accept(live);
 		}
 		break;
 	case SDGAD_BTN_RELOAD:
@@ -3362,8 +4176,9 @@ static BOOL scandoubler_gadget_up(struct Window *win, struct Gadget *gad,
 			scandoubler_populate(win, ctx);
 			scandoubler_update_save_gate(win, live, FALSE);
 		} else {
-			sd_set_status(win,
-				"Reload waiting for acknowledged live restore; retry");
+			snprintf(sd_status_buf, sizeof(sd_status_buf), "Reload restore failed: %s",
+				zz_vcap_result_text(live->restore_result));
+			sd_set_status(win, sd_status_buf);
 		}
 		break;
 	}
@@ -3375,8 +4190,9 @@ static BOOL scandoubler_allow_close(struct Window *win,
 {
 	if (settings_live_restore(&ctx->live, ZZ_VCAP_ANCHOR_SETTINGS))
 		return TRUE;
-	sd_set_status(win,
-		"Close waiting for acknowledged live restore; retry or cold boot");
+	snprintf(sd_status_buf, sizeof(sd_status_buf), "Close restore failed: %s; state unknown",
+		zz_vcap_result_text(ctx->live.restore_result));
+	sd_set_status(win, sd_status_buf);
 	return FALSE;
 }
 

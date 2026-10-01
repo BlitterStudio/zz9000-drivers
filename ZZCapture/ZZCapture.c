@@ -27,6 +27,7 @@
 #include <limits.h>
 
 #include "zz9000_capture_calibration.h"
+#include "zz_vcap_client.h"
 
 struct GfxBase *GfxBase;
 struct IntuitionBase *IntuitionBase;
@@ -85,9 +86,40 @@ static struct {
     unsigned first_sequence, last_sequence, min_step, max_step;
 } coverage;
 
+static UWORD capture_read16(void *ctx, uint32_t reg)
+{
+    const struct ZZ9000Board *capture_board = ctx;
+    return zz9000_read_reg16(capture_board->address, reg);
+}
+
+static void capture_write16(void *ctx, uint32_t reg, UWORD value)
+{
+    const struct ZZ9000Board *capture_board = ctx;
+    zz9000_write_reg16(capture_board->address, reg, value);
+}
+
+static void capture_delay(void *ctx, unsigned ticks)
+{
+    (void)ctx;
+    Delay(ticks);
+}
+
+static int continue_test(void);
+
+static int capture_keep_running(void *ctx)
+{
+    (void)ctx;
+    return continue_test();
+}
+
+static struct zz_vcap_io capture_io = {
+    &board, capture_read16, capture_write16, capture_delay,
+    0, capture_keep_running
+};
+
 static ULONG read32(ULONG reg)
 {
-    return zz9000_read_reg32(board.address, reg);
+    return zz_vcap_read32(&capture_io, reg);
 }
 
 static int fail(const char *message)
@@ -107,7 +139,10 @@ static int stack_ready(void)
 
 static int capability(void)
 {
-    if (read32(ZZ_CAPTURE_CAP_REG) != ZZ_CAPTURE_CAP_C28 ||
+    struct zz_vcap_phase_state state;
+
+    if (zz_vcap_phase_read(&capture_io, &state) != ZZ_VCAP_OK ||
+        state.domain != ZZ_VCAP_PHASE_C28 ||
         read32(ZZ_CAPTURE_METADATA_CAP_REG) != ZZ_CAPTURE_METADATA_CAP)
         return fail("This firmware does not support matched C28 row-timing capture.");
     return 1;
@@ -115,8 +150,9 @@ static int capability(void)
 
 static int observation_capability(void)
 {
-    ULONG capture = read32(ZZ_CAPTURE_CAP_REG);
-    if ((capture != ZZ_CAPTURE_CAP_E7M && capture != ZZ_CAPTURE_CAP_C28) ||
+    struct zz_vcap_phase_state state;
+
+    if (zz_vcap_phase_read(&capture_io, &state) != ZZ_VCAP_OK ||
         read32(ZZ_CAPTURE_METADATA_CAP_REG) != ZZ_CAPTURE_METADATA_CAP ||
         read32(ZZ_CAPTURE_FIELD_DIAG_CAP_REG) != ZZ_CAPTURE_FIELD_DIAG_CAP)
         return fail("This firmware does not support matched row-metadata observation.");
@@ -154,136 +190,94 @@ static int continue_test(void)
     return 1;
 }
 
+static int client_failure(enum zz_vcap_result result, const char *message)
+{
+    if (result == ZZ_VCAP_CANCELLED)
+        return 0;
+    return fail(message ? message : zz_vcap_result_text(result));
+}
+
 static int clock_ready(void)
 {
-    ULONG status = read32(ZZ_CAPTURE_CLOCK_STATUS_REG);
+    struct zz_vcap_phase_state state;
+    enum zz_vcap_result result = zz_vcap_phase_read(&capture_io, &state);
     const ULONG required = ZZ_CAPTURE_CLOCK_FREQUENCY | ZZ_CAPTURE_CLOCK_LOCKED |
         ZZ_CAPTURE_CLOCK_READY | ZZ_CAPTURE_CLOCK_C28;
-    if ((status & required) != required || (status & ZZ_CAPTURE_CLOCK_FAULT))
+
+    if (result != ZZ_VCAP_OK || state.domain != ZZ_VCAP_PHASE_C28 ||
+        (state.clock_raw & required) != required ||
+        (state.clock_raw & ZZ_CAPTURE_CLOCK_FAULT))
         return fail("The 28 MHz input clock is missing, unlocked, or unstable.");
     return 1;
 }
 
-static int phase_is(int target)
-{
-    ULONG status = read32(ZZ_CAPTURE_PHASE_STATUS_REG);
-    if (!clock_ready()) return 0;
-    if (!(status & ZZ_CAPTURE_PHASE_READY) ||
-        (status & (ZZ_CAPTURE_PHASE_BUSY | ZZ_CAPTURE_PHASE_ERROR)) ||
-        zz_capture_phase_decode(status) != target)
-        return fail("The sampling phase changed or stopped responding during capture.");
-    return 1;
-}
 
-/* Restore also uses this bounded path, but ignores cancellation and permits
- * an error flag to be cleared by a fresh request. No blind writes on a mixed
- * firmware install, and no claim of restoration without applied readback. */
+/* Restore uses the same bounded acknowledged path but deliberately ignores
+ * cancellation. A fresh request also clears a sticky engine error. */
 static int apply_phase(int target, int restoring)
 {
-    unsigned tick;
-    ULONG status, clocks;
+    enum zz_vcap_result result;
+
     if (!capability() || !zz_capture_phase_valid(target)) return 0;
-    for (tick = 0; tick < PHASE_WAIT_TICKS; ++tick) {
-        status = read32(ZZ_CAPTURE_PHASE_STATUS_REG);
-        if (!(status & ZZ_CAPTURE_PHASE_BUSY)) break;
-        if (!restoring && !continue_test()) return 0;
-        Delay(1);
-    }
-    if (tick == PHASE_WAIT_TICKS)
-        return fail("The phase controller did not become idle.");
-    clocks = read32(ZZ_CAPTURE_CLOCK_STATUS_REG);
-    if ((clocks & (ZZ_CAPTURE_CLOCK_FREQUENCY | ZZ_CAPTURE_CLOCK_LOCKED |
-                   ZZ_CAPTURE_CLOCK_C28)) !=
-        (ZZ_CAPTURE_CLOCK_FREQUENCY | ZZ_CAPTURE_CLOCK_LOCKED | ZZ_CAPTURE_CLOCK_C28))
+    result = zz_vcap_phase_apply(&capture_io, target, restoring);
+    if (result == ZZ_VCAP_OK) return 1;
+    if (result == ZZ_VCAP_CLOCK_UNQUALIFIED)
         return fail("Cannot set the sampling phase without a locked 28 MHz input.");
-    zz9000_write_reg16(board.address, ZZ_CAPTURE_PHASE_TARGET_REG,
-        (UWORD)zz_capture_phase_encode(target));
-    zz9000_write_reg16(board.address, ZZ_CAPTURE_PHASE_COMMIT_REG,
-        ZZ_CAPTURE_PHASE_TOKEN);
-    /* Give the request a chance to replace old done/error flags. */
-    Delay(1);
-    for (tick = 0; tick < PHASE_WAIT_TICKS; ++tick) {
-        status = read32(ZZ_CAPTURE_PHASE_STATUS_REG);
-        if ((status & (ZZ_CAPTURE_PHASE_READY | ZZ_CAPTURE_PHASE_DONE)) ==
-            (ZZ_CAPTURE_PHASE_READY | ZZ_CAPTURE_PHASE_DONE) &&
-            !(status & (ZZ_CAPTURE_PHASE_BUSY | ZZ_CAPTURE_PHASE_ERROR)) &&
-            zz_capture_phase_decode(status) == target)
-            return clock_ready();
-        if (!restoring && !continue_test()) return 0;
-        Delay(1);
-    }
-    return fail("The requested sampling phase was not acknowledged in time.");
+    if (result == ZZ_VCAP_TIMEOUT)
+        return fail("The requested sampling phase was not acknowledged in time.");
+    return client_failure(result, 0);
 }
 
-/* Status crosses a 16-bit host bus. Require two identical complete reads to
- * avoid joining a new field sequence to the previous snapshot's flags. */
+/* Status crosses a 16-bit host bus. The shared client requires two equal
+ * ordered 32-bit reads before consumers join status flags and sequence. */
 static int snapshot_status(ULONG *result)
 {
-    unsigned attempt;
-    for (attempt = 0; attempt < 8; ++attempt) {
-        ULONG first = read32(ZZ_CAPTURE_SNAPSHOT_REG);
-        ULONG second = read32(ZZ_CAPTURE_SNAPSHOT_REG);
-        if (first == second) {
-            *result = first;
-            return 1;
-        }
-    }
-    return fail("Capture status would not remain stable for a read.");
+    uint32_t status;
+    enum zz_vcap_result client_result = zz_vcap_read_stable(&capture_io,
+        ZZ_CAPTURE_SNAPSHOT_REG, &status);
+
+    if (client_result != ZZ_VCAP_OK)
+        return client_failure(client_result,
+            "Capture status would not remain stable for a read.");
+    *result = status;
+    return 1;
 }
 
 static int take_snapshot_options(struct snapshot *sample, int target,
     int read_pixels, int read_metadata, int require_phase)
 {
-    ULONG before, status, after;
-    unsigned tick, i;
-    if (!continue_test() ||
-        !(require_phase ? capability() : observation_capability()) ||
-        (require_phase && !phase_is(target)) ||
-        !snapshot_status(&before)) return 0;
-    if (before & ZZ_CAPTURE_SNAPSHOT_BUSY)
-        return fail("Another capture is already running. Close other diagnostic tools.");
-    zz9000_write_reg16(board.address, ZZ_CAPTURE_ARM_REG, ZZ_CAPTURE_ARM_TOKEN);
-    for (tick = 0; tick < FRAME_WAIT_TICKS; ++tick) {
-        if (!continue_test() || (require_phase && !phase_is(target)) ||
-            !snapshot_status(&status))
-            return 0;
-        if ((status & (ZZ_CAPTURE_SNAPSHOT_VALID | ZZ_CAPTURE_SNAPSHOT_BUSY)) ==
-                ZZ_CAPTURE_SNAPSHOT_VALID &&
-            ((status ^ before) & ZZ_CAPTURE_SNAPSHOT_ARM) &&
-            (!(before & ZZ_CAPTURE_SNAPSHOT_VALID) || (status >> 16) != (before >> 16)))
-            break;
-        Delay(1);
+    struct zz_vcap_capture_context context;
+    struct zz_vcap_capture_data data;
+    enum zz_vcap_result result;
+
+    if (!continue_test()) return 0;
+    context.phase = target;
+    context.require_phase = require_phase;
+    context.ntsc = wanted_ntsc;
+    context.lace = wanted_lace;
+    context.have_geometry = have_geometry;
+    context.geometry = geometry;
+    data.status = data.geometry = 0;
+    data.pixels = read_pixels ? sample->pixels : 0;
+    data.metadata = read_metadata ? sample->metadata : 0;
+    result = zz_vcap_capture(&capture_io, &context, &data);
+    if (result != ZZ_VCAP_OK) {
+        if (result == ZZ_VCAP_BUSY)
+            return fail("Another capture is already running. Close other diagnostic tools.");
+        if (result == ZZ_VCAP_TIMEOUT)
+            return fail("No fresh native-video capture arrived in time.");
+        if (result == ZZ_VCAP_STATE_CHANGED)
+            return fail("The capture changed while being read. Close other diagnostic tools.");
+        if (result == ZZ_VCAP_UNSUPPORTED)
+            return fail(require_phase ?
+                "This firmware does not support matched C28 row-timing capture." :
+                "This firmware does not support matched row-metadata observation.");
+        return client_failure(result, 0);
     }
-    if (tick == FRAME_WAIT_TICKS)
-        return fail("No fresh native-video capture arrived in time.");
-    sample->status = status;
-    sample->geometry = read32(ZZ_CAPTURE_GEOMETRY_REG);
-    if (require_phase &&
-        (!!(status & ZZ_CAPTURE_SNAPSHOT_NTSC) != wanted_ntsc ||
-         !!(status & ZZ_CAPTURE_SNAPSHOT_LACE) != wanted_lace))
-        return fail("The captured PAL/NTSC or interlace mode does not match the test screen.");
-    if (have_geometry && sample->geometry != geometry)
-        return fail("Capture framing changed during calibration. Close other video controls.");
-    if (read_pixels) {
-        for (i = 0; i < ZZ_CAPTURE_SAMPLES; ++i) {
-            zz9000_write_reg16(board.address, ZZ_CAPTURE_ADDRESS_REG, (UWORD)i);
-            sample->pixels[i] = read32(ZZ_CAPTURE_DATA_REG);
-        }
-    }
-    if (read_metadata) {
-        for (i = 0; i < ZZ_CAPTURE_METADATA_WORDS; ++i) {
-            zz9000_write_reg16(board.address, ZZ_CAPTURE_METADATA_ADDR_REG,
-                (UWORD)i);
-            sample->metadata[i] = read32(ZZ_CAPTURE_METADATA_DATA_REG);
-        }
-    }
-    if (!snapshot_status(&after) || (require_phase && !phase_is(target))) return 0;
-    if (after != status || sample->geometry != read32(ZZ_CAPTURE_GEOMETRY_REG))
-        return fail("The capture changed while being read. Close other diagnostic tools.");
-    if (!have_geometry) {
-        geometry = sample->geometry;
-        have_geometry = 1;
-    }
+    sample->status = data.status;
+    sample->geometry = data.geometry;
+    geometry = context.geometry;
+    have_geometry = context.have_geometry;
     return 1;
 }
 
@@ -636,7 +630,8 @@ static int observe_rows(void)
     ULONG capture, metadata, diagnostic, build, variant, clocks, counts;
     unsigned y;
     memset(&current, 0, sizeof(current));
-    if (!take_snapshot_options(&current, 0, 0, 1, 0)) {
+    if (!observation_capability() ||
+        !take_snapshot_options(&current, 0, 0, 1, 0)) {
         puts(failure);
         return 20;
     }
