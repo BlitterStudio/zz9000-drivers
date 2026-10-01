@@ -5,7 +5,7 @@ tag=${1:-local}
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH='' cd -- "$script_dir/.." && pwd)
 staging="$repo_root/zz9000-drivers-$tag"
-zipfile="$repo_root/zz9000-drivers-$tag.zip"
+archive="$repo_root/zz9000-drivers-$tag.lha"
 inst="$repo_root/installer/ZZ9000Installer"
 
 # Python interpreter: python3 on CI/Linux; Windows may expose a Store
@@ -42,7 +42,7 @@ make_guide() {
     "$PY" "$md2guide" --name "$2" $SIBLINGS "$repo_root/$1" "$inst/Docs/$2.guide"
 }
 
-rm -rf "$staging" "$zipfile"
+rm -rf "$staging" "$archive"
 
 install -Dm644 rtg/ZZ9000.card                  "$inst/Libs/Picasso96/ZZ9000.card"
 install -Dm644 mhi/mhizz9000.library            "$inst/Libs/MHI/mhizz9000.library"
@@ -120,19 +120,5 @@ cp -R installer/ZZ9000Installer "$staging/ZZ9000Installer"
 # .keep files only exist to keep empty source dirs in git.
 find "$staging" -name '.keep' -type f -delete
 "$PY" tools/encode-amiga-docs.py "$staging"
-if command -v zip >/dev/null 2>&1; then
-    zip -r "$zipfile" "$(basename "$staging")"
-else
-    # Git Bash ships no zip; Python's zipfile produces the same layout
-    # (deflated, forward-slash names, staging dir as the zip root).
-    "$PY" - "$zipfile" "$(basename "$staging")" <<'PYEOF'
-import os, sys, zipfile
-zipfile_path, root = sys.argv[1], sys.argv[2]
-with zipfile.ZipFile(zipfile_path, "w", zipfile.ZIP_DEFLATED) as zf:
-    for dirpath, dirnames, files in os.walk(root):
-        for name in sorted(files):
-            path = os.path.join(dirpath, name)
-            zf.write(path, path.replace(os.sep, "/"))
-PYEOF
-fi
-printf '%s\n' "$zipfile"
+sh tools/create-lha.sh "$archive" "$(basename "$staging")"
+printf '%s\n' "$archive"

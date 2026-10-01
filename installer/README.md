@@ -7,7 +7,7 @@
 
 This is a Commodore Installer script drawer that end users run on an
 AmigaOS system to install the ZZ9000's drivers, tools and config
-files. It's bundled into every GitHub Release zip.
+files. It's bundled into every GitHub Release LHA.
 
 ## Layout
 
@@ -149,7 +149,7 @@ unsupported algorithms automatically stay on AmiSSL's software provider.
 ## Trying the installer locally
 
 If you want to test the installer with your own local builds (rather
-than downloading a release zip), copy each artifact into the drawer
+than downloading a release LHA), copy each artifact into the drawer
 using the same layout CI uses:
 
 ```sh
@@ -190,7 +190,7 @@ For a direct RTG-only test, copy `rtg/ZZ9000.card` to
 
 ## Release bundle layout
 
-The CI release job (tag push `v*`) produces a zip with the installer
+The CI release job (tag push `v*`) produces an LHA archive with the installer
 contents at the package root:
 
 ```
@@ -200,7 +200,7 @@ zz9000-drivers-<tag>/
 └── ZZ9000Installer/
 ```
 
-Driver and tool binaries are not duplicated as loose files at the zip
+Driver and tool binaries are not duplicated as loose files at the archive
 root; they live in the exact drawer paths consumed by `Install ZZ9000`.
 
 The release job also copies component docs into `ZZ9000Installer/Docs/`:
@@ -231,4 +231,4 @@ because it doesn't live on the AmigaOS filesystem:
     path inside the drawer and `(dest ...)` on the target filesystem.
   - A matching `install -Dm...` line in the `release` job of
     `.github/workflows/ci.yml` so the binary actually lands in the
-    drawer before zipping.
+    drawer before archiving.
