@@ -49,9 +49,9 @@ payloads from the same release—particularly on Zorro II.
 
 ## Quick Start
 
-For normal installation, use the latest GitHub Release zip:
+For normal installation, use the latest GitHub Release LHA:
 
-1. Download `zz9000-drivers-<tag>.zip` from
+1. Download `zz9000-drivers-<tag>.lha` from
    [Releases](https://github.com/BlitterStudio/zz9000-drivers/releases).
 2. Unpack it on the Amiga.
 3. Double-click `ZZ9000Installer/Install ZZ9000`.
@@ -139,7 +139,7 @@ exists for future work, but no 8 MiB bitstream variant is shipped.
 | SDK tools | `zz9k-info`, `zz9k-services`, `zz9k-view`, `zz9k-mp3`, `zz9k-cryptobench`, `zz9k-archive` | `C:` | Board/service introspection and release smoke check, plus accelerated image viewer, MP3 player, crypto-offload benchmark, and archive extractor (from zz9000-sdk). |
 | ZZPlay | `ZZPlay` + `ZZPlay.info` | `SYS:Utilities/ZZ9000/` | MPEG-1 video and MP3 media player (from zz9000-sdk). See [the ZZ9000 drawer](#the-zz9000-drawer). |
 | TLS offload | `amissl_v362.library` | `Libs:AmiSSL/` | AmiSSL 5.27 core with the ZZ9000 crypto-offload provider compiled in; accelerates supported TLS handshake and record crypto for all AmiSSL applications. Built per CPU (`68020-40` for 68020/030/040 and `68060`); the installer auto-detects the CPU and installs the matching build. Requires an existing AmiSSL 5.27 install. |
-| Installer | `ZZ9000Installer` | Release zip root | Commodore Installer drawer used for end-user deployment. |
+| Installer | `ZZ9000Installer` | Release LHA root | Commodore Installer drawer used for end-user deployment. |
 
 ## The ZZ9000 drawer
 
@@ -460,7 +460,7 @@ check or copy a phase value between machines. See the complete
 GitHub Actions is the source of truth for release builds. Every push and
 pull request builds each component inside
 `sacredbanana/amiga-compiler:m68k-amigaos`; tag builds assemble the
-release zip.
+release LHA.
 
 The same image can be used locally with Docker or Podman:
 
@@ -477,6 +477,15 @@ make package-local
 make check-release
 make quality
 ```
+
+`make package-local` produces `zz9000-drivers-local.lha` and requires
+a native `lha` that supports compression. CI uses the `lha` included in
+`sacredbanana/amiga-compiler:m68k-amigaos` for packaging.
+
+Commit and pull-request builds retain the individual component artifacts
+and also upload `zz9000-drivers-<short-sha>.lha`, a complete installer
+bundle with the same layout as a release. Tag builds upload the bundle
+as `zz9000-drivers-<tag>.lha` and publish it on the GitHub Release.
 
 Component `build.sh` wrappers also use the same Docker image when the
 Amiga cross-toolchain is not already on `PATH`.
@@ -495,7 +504,7 @@ tree unless there is a documented exception; see
 ## Release Packaging
 
 Pushing a tag matching `v*` builds all artifacts and publishes a GitHub
-Release zip:
+Release LHA:
 
 ```bash
 git tag -a v2.3.0 -m "ZZ9000 drivers 2.3.0"
@@ -512,8 +521,8 @@ zz9000-drivers-<tag>/
 ```
 
 The release job populates `ZZ9000Installer/` with fresh CI-built
-binaries before zipping it. Binaries are not duplicated as loose files
-at the zip root. The release zip's `README.md` is copied from
+binaries before archiving it. Binaries are not duplicated as loose files
+at the archive root. The release LHA's `README.md` is copied from
 [installer/README.md](installer/README.md), which is focused on the
 installer drawer layout and local installer testing.
 
