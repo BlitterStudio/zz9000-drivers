@@ -57,6 +57,12 @@
 #define ZZ_CAPTURE_PHASE_STEPS 1792
 #define ZZ_CAPTURE_PHASE_MIN   (-896)
 #define ZZ_CAPTURE_PHASE_MAX   895
+/* The legacy E7M engine exposes a quarter of the fine-step circle:
+ * 448 steps per capture-clock turn, signed range -255..255. The E7M
+ * and C28 step counts are different physical units; never convert. */
+#define ZZ_CAPTURE_PHASE_E7M_STEPS 448
+#define ZZ_CAPTURE_PHASE_E7M_MIN   (-255)
+#define ZZ_CAPTURE_PHASE_E7M_MAX   255
 #define ZZ_CAPTURE_BINS        64U
 #define ZZ_CAPTURE_BIN_STEPS   28U
 #define ZZ_CAPTURE_MIN_EYE     3U

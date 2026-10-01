@@ -110,4 +110,24 @@ int zz_vcap_anchor_load(const struct zz_vcap_anchors *anchors, UWORD owner,
     struct zz_vcap_snapshot *snapshot);
 void zz_vcap_anchor_clear(struct zz_vcap_anchors *anchors, UWORD owner);
 
+/* ---- capture-phase domain model ----
+ *
+ * The MMCM fine-phase engine is build-specific: a C28 bitstream
+ * exposes 1792 steps per capture-clock turn (signed -896..895), a
+ * legacy E7M one a quarter circle (448 steps, -255..255). The domain
+ * comes from the phase capability register (0x1240); the two unit
+ * systems are never converted into each other. */
+enum zz_vcap_phase_domain {
+    ZZ_VCAP_PHASE_NONE = 0,
+    ZZ_VCAP_PHASE_E7M,
+    ZZ_VCAP_PHASE_C28
+};
+
+enum zz_vcap_phase_domain zz_vcap_phase_domain(ULONG phase_capability);
+int zz_vcap_phase_valid(int phase,
+    enum zz_vcap_phase_domain domain);
+UWORD zz_vcap_phase_encode(int phase);
+int zz_vcap_phase_step(int phase, int delta,
+    enum zz_vcap_phase_domain domain);
+
 #endif /* ZZ_VCAP_LIVE_H */

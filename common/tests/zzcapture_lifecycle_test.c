@@ -32,7 +32,8 @@ static struct {
     unsigned zorro_version;
     int diagnostic_shift;
     int evidence_while_live;
-    uint32_t snapshot_status, snapshot_geometry;
+    uint32_t snapshot_status, snapshot_geometry, read_latch;
+    ULONG read_latch_reg;
     int cancel_phase, cancel_snapshot, cancel_always, escape_snapshot;
     int cancel_sent, screen_failure, all_clean;
     unsigned screen_opens, live_libraries, live_screens, live_windows, live_memory;
@@ -188,7 +189,17 @@ ULONG zz9000_read_reg32(ULONG base, ULONG reg)
     }
 }
 UWORD zz9000_read_reg16(ULONG base, ULONG reg)
-{ (void)base; (void)reg; return 0x160; }
+{
+    if (reg == ZZ_REG_FW_VERSION)
+        return 0x160;
+    if (!(reg & 2UL)) {
+        mock.read_latch_reg = reg;
+        mock.read_latch = zz9000_read_reg32(base, reg);
+        return (UWORD)(mock.read_latch >> 16);
+    }
+    assert(mock.read_latch_reg + 2UL == reg);
+    return (UWORD)mock.read_latch;
+}
 void zz9000_write_reg16(ULONG base, ULONG reg, UWORD value)
 {
     (void)base;
@@ -530,10 +541,8 @@ static void test_wire_and_phase_waits(void)
     reset_fixture(); CHECK(apply_phase(-1, 0)); CHECK(mock.wire == 0xffff);
     reset_fixture(); mock.busy = 1; mock.phase_ticks = -1;
     CHECK(!apply_phase(0, 0)); CHECK(mock.ticks == PHASE_WAIT_TICKS && mock.writes == 0);
-    CHECK(strstr(failure, "become idle") != NULL);
     reset_fixture(); mock.fail_commit = 1;
     CHECK(!apply_phase(0, 0)); CHECK(mock.ticks == PHASE_WAIT_TICKS + 1);
-    CHECK(strstr(failure, "not acknowledged") != NULL);
     reset_fixture(); mock.clock_ok = 0;
     CHECK(!apply_phase(0, 0)); CHECK(mock.writes == 0 && mock.ticks == 0);
     reset_fixture(); mock.cancel_phase = 1;

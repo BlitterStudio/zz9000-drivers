@@ -86,6 +86,12 @@
 #define ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P_50 (1U << 4)
 #define ZZ_FW_CAP_VIDEOCAP_SOURCE_SYNC (1U << 5)
 #define ZZ_FW_CAP_VIDEOCAP_SCANOUT_ORIGIN (1U << 6)
+#define ZZ_FW_CAP_VIDEOCAP_GEOMETRY (1U << 8)
+#define ZZ_FW_CAP_VIDEOCAP_GEOMETRY_ACK (1U << 10)
+#define ZZ_VCAP_GEOMETRY_STATUS_APPLIED_VALID 1U
+#define ZZ_VCAP_GEOMETRY_STATUS_PENDING       2U
+#define ZZ_VCAP_GEOMETRY_STATUS_REJECTED      4U
+#define ZZ_FW_CAP_VIDEOCAP_STATS (1U << 9)
 #define ZZ_REG_AUDIO_CONFIG      0xF4
 #define ZZ_REG_AUDIO_RX_STATUS   0xF6
 #define ZZ_REG_AUDIO_TX_STATUS   0xF8
@@ -93,8 +99,13 @@
 
 /* Feature toggles (write ZZ_REG_USER1 = feature id, then the value here). */
 #define ZZ_REG_USER1             0x40
+#define ZZ_REG_USER2             0x42
 #define ZZ_REG_SET_FEATURE       0x60
 #define ZZ_CARD_FEATURE_NONSTANDARD_VSYNC 2
+/* Capture-window override: value packs (height << 16) | width in
+ * captured words (16-aligned, 256..1280; height 100..1024). 0 restores
+ * the automatic window. Gated by ZZ_FW_CAP_VIDEOCAP_GEOMETRY. */
+#define ZZ_CARD_FEATURE_VIDEOCAP_GEOMETRY 5
 
 /* ZZ9000.CFG interface (firmware >= 2.3, issue #33). Key ids, file
  * statuses and the client API live in common/zzcfg_amiga.h. */

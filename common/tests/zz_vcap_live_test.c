@@ -2,6 +2,7 @@
 #include <stdio.h>
 
 #include "zz_vcap_live.h"
+#include "zz9000_capture_calibration.h"
 
 static int checks;
 static int failures;
@@ -260,6 +261,50 @@ static void test_path_preview_and_anchors(void)
         "invalidated preview cannot be restored");
 }
 
+static void test_phase_domain(void)
+{
+    CHECK(zz_vcap_phase_domain(ZZ_CAPTURE_CAP_C28) == ZZ_VCAP_PHASE_C28,
+        "C28 capability word maps to the C28 domain");
+    CHECK(zz_vcap_phase_domain(ZZ_CAPTURE_CAP_E7M) == ZZ_VCAP_PHASE_E7M,
+        "E7M capability word maps to the E7M domain");
+    CHECK(zz_vcap_phase_domain(0) == ZZ_VCAP_PHASE_NONE &&
+        zz_vcap_phase_domain(0x564c010fUL) == ZZ_VCAP_PHASE_NONE,
+        "unknown capability words disable the phase editor");
+
+    CHECK(zz_vcap_phase_valid(0, ZZ_VCAP_PHASE_C28) &&
+        zz_vcap_phase_valid(-896, ZZ_VCAP_PHASE_C28) &&
+        zz_vcap_phase_valid(895, ZZ_VCAP_PHASE_C28),
+        "C28 range endpoints are valid");
+    CHECK(!zz_vcap_phase_valid(-897, ZZ_VCAP_PHASE_C28) &&
+        !zz_vcap_phase_valid(896, ZZ_VCAP_PHASE_C28),
+        "C28 out-of-range steps are rejected");
+    CHECK(zz_vcap_phase_valid(0, ZZ_VCAP_PHASE_E7M) &&
+        zz_vcap_phase_valid(-255, ZZ_VCAP_PHASE_E7M) &&
+        zz_vcap_phase_valid(255, ZZ_VCAP_PHASE_E7M) &&
+        !zz_vcap_phase_valid(-256, ZZ_VCAP_PHASE_E7M) &&
+        !zz_vcap_phase_valid(256, ZZ_VCAP_PHASE_E7M),
+        "E7M range is a quarter circle and never converts");
+    CHECK(!zz_vcap_phase_valid(0, ZZ_VCAP_PHASE_NONE),
+        "no engine rejects every phase");
+
+    CHECK(zz_vcap_phase_encode(-896) == 0xfc80U &&
+        zz_vcap_phase_encode(-1) == 0xffffU &&
+        zz_vcap_phase_encode(895) == 0x037fU,
+        "signed targets encode as raw 16-bit words");
+
+    CHECK(zz_vcap_phase_step(100, 10, ZZ_VCAP_PHASE_E7M) == 110,
+        "a step inside the range does not clamp");
+    CHECK(zz_vcap_phase_step(255, 1, ZZ_VCAP_PHASE_E7M) == 255,
+        "stepping past the E7M maximum clamps");
+    CHECK(zz_vcap_phase_step(-255, -1, ZZ_VCAP_PHASE_E7M) == -255,
+        "stepping past the E7M minimum clamps");
+    CHECK(zz_vcap_phase_step(895, 1, ZZ_VCAP_PHASE_C28) == 895,
+        "stepping past the C28 maximum clamps");
+    CHECK(zz_vcap_phase_step(0, 5, ZZ_VCAP_PHASE_NONE) == 0,
+        "no engine steps nowhere");
+}
+
+
 int main(void)
 {
     test_capability();
@@ -267,6 +312,7 @@ int main(void)
     test_status_and_sequences();
     test_movement();
     test_path_preview_and_anchors();
+    test_phase_domain();
     printf("zz_vcap_live: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }
