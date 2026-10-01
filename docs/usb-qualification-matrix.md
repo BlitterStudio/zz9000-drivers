@@ -28,7 +28,7 @@ Automated evidence is not promoted into a physical-device claim.
 | Firmware artifact | Pass | Current and legacy-bitstream ELFs linked; default `BOOT-sdk-docker.bin` generated from the committed bitstream |
 | Firmware release profiles | Pass for assembly only | Seven archives generated with `--require-all`: Zorro III, Zorro III no-fast-RAM, Zorro II, Zorro II 2 MiB, A500, A500 2 MiB, A500+ |
 | Amiga artifacts | Pass for cross-build only | `zzusbhw.device` 2.2 and `ZZDiag` 1.12 linked in `sacredbanana/amiga-compiler:m68k-amigaos` |
-| Driver release package | Pass for assembly only | Full release input check passed and the installer ZIP assembled with fresh driver, diagnostics, USB README, and this matrix |
+| Driver release package | Pass for assembly only | Full release input check passed and the installer LHA assembled with fresh driver, diagnostics, USB README, and this matrix |
 
 These gates validate code, wire compatibility, artifact construction, and
 bounded lifecycle models. They do not validate electrical behavior, Zorro bus
