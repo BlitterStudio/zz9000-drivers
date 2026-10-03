@@ -78,7 +78,11 @@ behavior across A3000, A2000 and supported Denise-adapter machines.
 `phase N` applies a temporary phase from -896 through +895 and waits for exact
 acknowledgement. These units describe the C28 clock: 1792 fine steps span a
 complete pixel period, roughly 20 ps per step. They are different from the
-legacy `videocap_phase` units.
+legacy `videocap_phase` units. Phase/status reads and native-source checks use
+the same domain-aware client as ZZTop: complete bus words, qualified C28
+clock, stable engine state, and exact readback. Busy, engine error, timeout
+and changed source are failures, not a phase-zero fallback. Phase-changing
+ZZCapture commands remain C28-only.
 
 `check pal|ntsc [lace]` tests the current phase with the same native pattern
 and 50 comparisons per field parity, without a sweep or a new phase choice.

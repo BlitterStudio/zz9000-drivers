@@ -3,6 +3,9 @@
  * pixel storage remains uint32_t. SPDX-License-Identifier: GPL-3.0-or-later */
 #ifndef ZZCAPTURE_TEST_PLATFORM_H
 #define ZZCAPTURE_TEST_PLATFORM_H
+#ifndef ZZ_TEST_EXEC_TYPES_H
+#define ZZ_TEST_EXEC_TYPES_H
+#endif
 #include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>

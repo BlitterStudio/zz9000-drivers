@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 #include "zz_vcap_live.h"
+#include "zz9000_capture_calibration.h"
 
 int zz_vcap_live_supported(UWORD firmware_revision,
     UWORD firmware_capabilities, ULONG rtl_capability)
@@ -11,6 +12,61 @@ int zz_vcap_live_supported(UWORD firmware_revision,
     return firmware_revision >= ZZ_VCAP_LIVE_MIN_FW &&
         (firmware_capabilities & ZZ_FW_CAP_VIDEOCAP_LIVE) != 0 &&
         rtl_capability == ZZ_VCAP_LIVE_CAPABILITY_VALUE;
+}
+
+enum zz_vcap_phase_domain zz_vcap_phase_domain(ULONG phase_capability)
+{
+    if (phase_capability == ZZ_CAPTURE_CAP_C28)
+        return ZZ_VCAP_PHASE_C28;
+    if (phase_capability == ZZ_CAPTURE_CAP_E7M)
+        return ZZ_VCAP_PHASE_E7M;
+    return ZZ_VCAP_PHASE_NONE;
+}
+
+int zz_vcap_phase_valid(int phase, enum zz_vcap_phase_domain domain)
+{
+    switch (domain) {
+    case ZZ_VCAP_PHASE_E7M:
+        return phase >= ZZ_CAPTURE_PHASE_E7M_MIN &&
+            phase <= ZZ_CAPTURE_PHASE_E7M_MAX;
+    case ZZ_VCAP_PHASE_C28:
+        return phase >= ZZ_CAPTURE_PHASE_MIN &&
+            phase <= ZZ_CAPTURE_PHASE_MAX;
+    default:
+        return 0;
+    }
+}
+
+UWORD zz_vcap_phase_encode(int phase)
+{
+    return (UWORD)(unsigned short)(unsigned int)phase;
+}
+
+int zz_vcap_phase_step(int phase, int delta,
+    enum zz_vcap_phase_domain domain)
+{
+    int lo = 0, hi = 0;
+
+    switch (domain) {
+    case ZZ_VCAP_PHASE_E7M:
+        lo = ZZ_CAPTURE_PHASE_E7M_MIN;
+        hi = ZZ_CAPTURE_PHASE_E7M_MAX;
+        break;
+    case ZZ_VCAP_PHASE_C28:
+        lo = ZZ_CAPTURE_PHASE_MIN;
+        hi = ZZ_CAPTURE_PHASE_MAX;
+        break;
+    default:
+        return 0;
+    }
+
+    /* Clamp, not wrap: the E7M accepted range (-255..255) spans more
+     * than its 448-step circle, so a circular fold would fold valid
+     * interior positions; an editor arrow stops at the range ends. */
+    phase += delta;
+    if (phase > hi) phase = hi;
+    if (phase < lo) phase = lo;
+    return phase;
 }
 
 int zz_vcap_control_valid(const struct zz_vcap_control *control)

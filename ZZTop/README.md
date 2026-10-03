@@ -17,9 +17,9 @@ with ZZPlay. The installer offers to put that drawer on the command path
 an old `SYS:Tools/ZZTop` when upgrading.
 
 Most controls write the SD card's `ZZ9000.CFG`, which firmware reads at
-the next cold boot. Nothing you change in ZZTop affects the running video
-path until the card is power-cycled, except where a window says otherwise
-(scanline settings and audio levels apply live).
+the next cold boot. Scanlines, audio levels and explicitly live capture
+calibration also affect the running card. Live changes still need Save to
+survive a power cycle.
 
 ## Main window
 
@@ -65,32 +65,80 @@ cycle.
 
 ### Capture and live calibration
 
-**Capture…** opens sampling, framing and calibration controls. Framing
-defaults to **Automatic** (`280/40` on full-rate paths, `188/26` on
-filtered and Denise-adapter paths); **Custom** values are literal
-per-machine overrides.
+**Capture…** separates live hardware values, edits staged by **Done**, and
+values persisted by the Scandoubler window's **Save**. Opening the window
+or leaving a field untouched does not turn a live Automatic value into a
+saved override.
 
-**Calibrate…** moves the picture with the cursor keys on a native PAL or
-NTSC Hires screen, so what you align is the physical capture path:
+- **Sampling Phase** and the ±1/±28 buttons apply live. The title names the
+  C28 or legacy E7M engine; its signed range and step units are used
+  throughout. C28 requires a qualified, locked C28 input clock. E7M uses
+  its own ready/error/status layout, not the C28 clock gate.
+- **Capture W / H** requests a window at the next stable native vblank.
+  Width is 256–1280, aligned to 16 words; height is 100–1024 in the existing
+  capture-window units. Clear either axis for Automatic independently.
+  The status distinguishes the requested overrides from the resolved
+  VDMA word width/source-row count. It reports applied only after the
+  firmware acknowledges successful programming; RTG vblanks do not count.
+  This needs the geometry-ACK firmware capability (bit 10 plus bit 8).
+- Crop fields stage per-axis overrides. An empty field stages Automatic
+  for that axis. **Align picture...** is the live framing editor. Automatic crop
+  is resolved by the capture path and source class, not saved as a number.
+- **Reset to Auto** resets the supported crop, phase and window controls live,
+  then stages removal of their active-domain overrides with Done. Editing
+  only phase afterwards leaves crop/window Automatic. A legacy geometry
+  stack without readback/ACK disables Window and Reset to Auto rather than
+  claiming that an unconfirmed reset succeeded. Cancel stops later
+  steps of the reset: it does not force phase/window requests for components
+  the cancelled reset never reached.
 
-- Arrow keys move the picture in the named direction, one crop unit at a
-  time; hold Shift for 16-unit steps.
-- **Enter** accepts the displayed pair as Custom values. It does not
-  write the SD card.
-- **Escape** restores the exact state from calibration entry, including
-  the per-axis Automatic flags.
-- **Done** stages the accepted preview; **Save** is the only action that
-  writes `ZZ9000.CFG`. A cold boot later reproduces the saved pair.
-Calibrate requires matched firmware 2.8-or-newer and a live-calibration
-bitstream. On an older or mixed install the Automatic and numeric Custom
-controls stay available and **Calibrate** stays disabled. A Custom pair is
-tied to the capture path it was measured on (sample mode plus full-width
-state); if staged settings select a different path, Calibrate and Custom
-Save stay unavailable until the path is restored. Cancelling a capture or
-reloading the window restores the live state it owned; if a control
-acknowledgement times out, ZZTop keeps the window open and says the state
-is unknown — retry when native frames return, or cold-boot to recover the
-saved state.
+**Align picture...** opens a native PAL or NTSC Hires alignment screen:
+
+- Arrows move the picture in the named direction, one crop unit at a
+  time; Shift selects 16-unit steps.
+- Enter accepts the displayed crop pair; Escape queues restoration of the
+  exact entry state, including per-axis Automatic flags. Pending requests
+  are reconciled without blocking keyboard input for the frame timeout.
+- Accepted previews remain live. Done stages their values; Save alone
+  writes `ZZ9000.CFG`. A cold boot reproduces the saved settings. Once
+  Done accepts, later queued edits or Close do not alter that decision.
+
+To populate **Last phase sweep**, open **Scandoubler -> Capture...**,
+then select **Find phase...**. Keep the native pattern screen in front
+while it sweeps and retests. Press **Enter** at the final prompt to accept
+the selected phase; **Escape/Ctrl-C** restores the entry phase. Then use
+Capture **Done** to stage it and Scandoubler **Save** to persist it.
+
+**Find phase...** is C28-only and requires the frozen-field metadata
+interface. It opens a native SuperHires 8-bit pattern with the verified
+PAL/NTSC standard; a native caller's interlace mode is preserved, while an
+RTG caller requests a progressive native test pattern. It verifies the
+actual screen/mode, front-screen ownership, phase, source flags and frozen
+geometry throughout acquisition. Each measured phase is applied once,
+settling fields are discarded, and the selected circular eye is refined
+and retested before acceptance. Escape/Ctrl-C restores the child's entry
+phase before its screen closes. Progress text stays in the unsampled
+header band, and the pointer is hidden so UI overlays cannot spoil the
+measured pattern.
+
+**Last phase sweep** is a measured pattern sweep, not a continuous live
+eye: each glyph groups four coarse bins (`=` all clean, `+` mixed,
+`.` all dirty); `|` marks the last confirmed phase group. Unsupported
+E7M sampling and an unmeasured/invalidated sweep have no fabricated eye.
+
+Capture **Cancel** restores the immutable parent entry phase, crop and
+window even after a child sweep was accepted. Reload/closing Scandoubler
+restores its unsaved live changes; a successful Save rebases that anchor.
+Unconfirmed commands cannot be staged or saved. A failed restore leaves
+the window open with live state explicitly unknown: retry when native
+frames/clock return, or cold-boot to recover. Close/Cancel remains serviced
+while normal phase/window/Automatic requests await acknowledgement.
+
+Live framing requires matched firmware 2.8+ and a protocol-1 live-control
+bitstream. Custom crop is tied to its sample/full-width capture path;
+Align picture and Custom Save stay unavailable while staged settings select a
+different path. Other numeric configuration edits can still be staged on
+older stacks, but disabled live controls do not confirm running hardware.
 
 ## Settings — Audio
 
