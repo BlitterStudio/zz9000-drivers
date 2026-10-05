@@ -23,11 +23,15 @@
 #define SLOTS 128
 #define FRAME 60
 
-/* Firmware side: slots are cleared when consumed and when the backlog
+/* Firmware 2.1+: slots are cleared when consumed and when the backlog
  * drains; serials skip 0 and 1; acks must match the presented serial
  * (1 is the legacy bare advance); a DMA restart clears everything and
- * resets the serial counter. */
+ * resets the serial counter; ETH_RX_STATUS reports the ready count.
+ *
+ * Legacy (before 2.1): the backlog restarts at slot 0 once drained, slots
+ * are never cleared, any ack advances, and ETH_RX_STATUS reads 0. */
 struct fw {
+	int legacy;
 	uint16_t size[SLOTS];
 	uint16_t serial[SLOTS];
 	uint16_t read, write, backlog, frame_serial;
@@ -35,13 +39,16 @@ struct fw {
 
 static void fw_restart(struct fw *f)
 {
+	int legacy = f->legacy;
+
 	memset(f, 0, sizeof(*f));
+	f->legacy = legacy;
 }
 
 static uint16_t fw_next_serial(struct fw *f)
 {
 	f->frame_serial++;
-	if (f->frame_serial == 0 || f->frame_serial == 1)
+	if (!f->legacy && (f->frame_serial == 0 || f->frame_serial == 1))
 		f->frame_serial = 2;
 	return f->frame_serial;
 }
@@ -68,9 +75,15 @@ static void fw_clear(struct fw *f, uint16_t slot)
 
 static void fw_ack(struct fw *f, uint16_t acked)
 {
-	if (f->backlog == 0 || acked == 0)
+	if (f->backlog == 0)
 		return;
-	if (acked != 1 && acked != f->serial[f->read])
+	if (f->legacy) {
+		f->read++;
+		if (--f->backlog == 0)
+			f->read = f->write = 0;
+		return;
+	}
+	if (acked == 0 || (acked != 1 && acked != f->serial[f->read]))
 		return;
 	fw_clear(f, f->read);
 	f->read = (f->read + 1) % SLOTS;
@@ -79,50 +92,72 @@ static void fw_ack(struct fw *f, uint16_t acked)
 		fw_clear(f, f->read);
 }
 
+static uint32_t fw_header(void *ctx)
+{
+	struct fw *f = ctx;
+
+	return ((uint32_t)f->size[f->read] << 16) | f->serial[f->read];
+}
+
+static uint16_t fw_status(void *ctx)
+{
+	struct fw *f = ctx;
+
+	return f->legacy ? 0 : (uint16_t)(f->backlog > 0xff ? 0xff : f->backlog);
+}
+
 struct framer {
 	struct zznet_rx_state state;
+	struct zznet_rx_io io;
 	unsigned delivered, overruns, bad_data;
 };
 
-/* One frame_proc wake-up. Firmware re-raises the IRQ as soon as the framer
- * re-arms it while backlog > 0, so a WAIT with frames pending repeats until
- * the spin bound: that is the issue #127 livelock. Returns 0 when the
- * framer legitimately sleeps on an empty backlog, -1 on livelock. */
+static void framer_init(struct framer *fr, struct fw *f)
+{
+	memset(fr, 0, sizeof(*fr));
+	zznet_rx_reset(&fr->state);
+	fr->io.read_header = fw_header;
+	fr->io.rx_status = fw_status;
+	fr->io.ctx = f;
+}
+
+/* One frame_proc iteration; acks before returning, as frame_proc does. */
+static enum zznet_rx_action framer_step(struct framer *fr, struct fw *f)
+{
+	struct zznet_rx_decision d = zznet_rx_next(&fr->state, &fr->io);
+
+	fr->overruns += d.overruns;
+	fr->bad_data += d.bad_data;
+	if (d.action == ZZNET_RX_DELIVER)
+		fr->delivered++;
+	if (d.action != ZZNET_RX_WAIT)
+		fw_ack(f, d.serial);
+	return (enum zznet_rx_action)d.action;
+}
+
+/* Run until the framer sleeps. Firmware re-raises the IRQ as soon as the
+ * framer re-arms it while frames wait, so a WAIT with backlog repeats until
+ * the spin bound: the issue #127 livelock. Returns 0 on a legitimate sleep,
+ * -1 on livelock. */
 static int framer_run(struct framer *fr, struct fw *f)
 {
 	int spins;
 
 	for (spins = 0; spins < 4 * SLOTS; spins++) {
-		uint16_t size = f->size[f->read];
-		uint16_t serial = f->serial[f->read];
-		struct zznet_rx_decision d =
-			zznet_rx_classify(&fr->state, size, serial);
-
-		fr->overruns += d.overruns;
-		fr->bad_data += d.bad_data;
-		if (d.action == ZZNET_RX_WAIT) {
-			if (f->backlog == 0)
-				return 0;
-			continue;
-		}
-		if (d.action == ZZNET_RX_DELIVER)
-			fr->delivered++;
-		fw_ack(f, serial);
+		if (framer_step(fr, f) == ZZNET_RX_WAIT && f->backlog == 0)
+			return 0;
 	}
 	return -1;
 }
 
-static int test_restart_after_one_frame_delivers_next(void)
+static int test_restart_after_drain_delivers_reused_serial(void)
 {
-	struct fw f;
+	struct fw f = { 0 };
 	struct framer fr;
 
-	memset(&fr, 0, sizeof(fr));
-	zznet_rx_reset(&fr.state);
-	fw_restart(&f);
-
+	framer_init(&fr, &f);
 	fw_receive(&f);                 /* serial 2 */
-	CHECK(framer_run(&fr, &f) == 0);
+	CHECK(framer_run(&fr, &f) == 0); /* delivers, then reads an empty slot */
 	CHECK(fr.delivered == 1);
 
 	fw_restart(&f);                 /* TX-timeout recovery */
@@ -133,32 +168,57 @@ static int test_restart_after_one_frame_delivers_next(void)
 	return EXIT_SUCCESS;
 }
 
-static int test_unacked_frame_is_not_redelivered(void)
+static int test_restart_between_ack_and_next_read(void)
 {
-	struct zznet_rx_state s;
-	struct zznet_rx_decision d;
+	struct fw f = { 0 };
+	struct framer fr;
 
-	zznet_rx_reset(&s);
-	d = zznet_rx_classify(&s, FRAME, 7);
-	CHECK(d.action == ZZNET_RX_DELIVER);
-	/* Re-read before the ack moved the firmware cursor. */
-	d = zznet_rx_classify(&s, FRAME, 7);
-	CHECK(d.action == ZZNET_RX_WAIT);
-	CHECK(!d.empty);
+	framer_init(&fr, &f);
+	fw_receive(&f);                 /* serial 2 */
+	CHECK(framer_step(&fr, &f) == ZZNET_RX_DELIVER);
+
+	/* Restart and the next frame land before the framer reads again, so
+	 * it never observes the cleared slot. */
+	fw_restart(&f);
+	fw_receive(&f);                 /* serial 2 again */
+	CHECK(framer_run(&fr, &f) == 0);
+	CHECK(fr.delivered == 2);
+	CHECK(f.backlog == 0);
+	return EXIT_SUCCESS;
+}
+
+static int test_legacy_stale_slot_is_not_redelivered(void)
+{
+	struct fw f = { 0 };
+	struct framer fr;
+
+	f.legacy = 1;
+	framer_init(&fr, &f);
+	fw_receive(&f);
+	fw_receive(&f);
+	CHECK(framer_run(&fr, &f) == 0);
+	/* Drained: the read cursor is back on slot 0, which still holds frame
+	 * 1. Its serial differs from the last acked one, so it is delivered
+	 * once more (legacy behavior since rev 2.1); after that it must not
+	 * loop. */
+	CHECK(fr.delivered == 3);
+	CHECK(framer_run(&fr, &f) == 0);
+	CHECK(fr.delivered == 3);
+
+	fw_receive(&f);                 /* overwrites slot 0 */
+	CHECK(framer_run(&fr, &f) == 0);
+	CHECK(fr.delivered == 4);
 	return EXIT_SUCCESS;
 }
 
 static int test_gap_spans_empty_drain_boundary(void)
 {
-	struct fw f;
+	struct fw f = { 0 };
 	struct framer fr;
 
-	memset(&fr, 0, sizeof(fr));
-	zznet_rx_reset(&fr.state);
-	fw_restart(&f);
-
+	framer_init(&fr, &f);
 	fw_receive(&f);                 /* serial 2 */
-	CHECK(framer_run(&fr, &f) == 0); /* drains, then reads an empty slot */
+	CHECK(framer_run(&fr, &f) == 0);
 	fw_drop(&f);                    /* 3 */
 	fw_drop(&f);                    /* 4 */
 	fw_receive(&f);                 /* 5 */
@@ -171,14 +231,11 @@ static int test_gap_spans_empty_drain_boundary(void)
 
 static int test_serial_wrap_is_not_an_overrun(void)
 {
-	struct fw f;
+	struct fw f = { 0 };
 	struct framer fr;
 
-	memset(&fr, 0, sizeof(fr));
-	zznet_rx_reset(&fr.state);
-	fw_restart(&f);
+	framer_init(&fr, &f);
 	f.frame_serial = 0xfffe;
-
 	fw_receive(&f);                 /* 0xffff */
 	fw_receive(&f);                 /* wraps past 0 and 1 to 2 */
 	CHECK(framer_run(&fr, &f) == 0);
@@ -190,9 +247,11 @@ static int test_serial_wrap_is_not_an_overrun(void)
 
 int main(void)
 {
-	if (test_restart_after_one_frame_delivers_next() != EXIT_SUCCESS)
+	if (test_restart_after_drain_delivers_reused_serial() != EXIT_SUCCESS)
 		return EXIT_FAILURE;
-	if (test_unacked_frame_is_not_redelivered() != EXIT_SUCCESS)
+	if (test_restart_between_ack_and_next_read() != EXIT_SUCCESS)
+		return EXIT_FAILURE;
+	if (test_legacy_stale_slot_is_not_redelivered() != EXIT_SUCCESS)
 		return EXIT_FAILURE;
 	if (test_gap_spans_empty_drain_boundary() != EXIT_SUCCESS)
 		return EXIT_FAILURE;

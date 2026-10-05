@@ -5,40 +5,45 @@ void zznet_rx_reset(struct zznet_rx_state *state)
 {
 	state->old_serial = 0;
 	state->have_baseline = 0;
-	state->saw_empty = 0;
 }
 
-struct zznet_rx_decision zznet_rx_classify(struct zznet_rx_state *state,
-                                           uint16_t size, uint16_t serial)
+struct zznet_rx_decision zznet_rx_next(struct zznet_rx_state *state,
+                                       const struct zznet_rx_io *io)
 {
-	struct zznet_rx_decision d = { ZZNET_RX_WAIT, 0, 0, 0 };
+	struct zznet_rx_decision d = { ZZNET_RX_WAIT, 0, 0, 0, 0, 0 };
+	uint32_t header = io->read_header(io->ctx);
+
+	d.size = (uint16_t)(header >> 16);
+	d.serial = (uint16_t)header;
 
 	/* issue #29: an all-zero header is an empty slot, not a frame. Acking it
 	 * would race a frame landing in the same slot and consume it unread.
 	 * old_serial stays put so gap detection spans the drain boundary. */
-	if (size == 0 && serial == 0) {
-		state->saw_empty = 1;
+	if (d.size == 0 && d.serial == 0) {
 		d.empty = 1;
 		return d;
 	}
 
-	/* An unchanged serial means the slot still holds the frame we consumed
-	 * last — unless an empty slot was read since. Firmware clears a slot
-	 * before the read cursor leaves it, so a consumed frame never reappears
-	 * after an empty read; a matching serial there is a new frame after a
-	 * firmware DMA restart reset the counter (issue #127). Treating it as
-	 * old would never ack it while firmware re-raises the IRQ forever. */
-	if (serial == state->old_serial && !state->saw_empty)
+	/* The ack of old_serial completed before this read, so firmware already
+	 * consumed that frame. A header still carrying old_serial is either a
+	 * stale slot on firmware that never clears slots, or a new frame after
+	 * an RX DMA restart reset the counter (issue #127); treating the latter
+	 * as old never acks it while firmware re-raises the IRQ forever. Only
+	 * the ready count tells them apart, and firmware before 2.1 has neither
+	 * restarts nor the register. The re-read rejects a frame that replaced
+	 * a stale slot between the two reads; its IRQ wakes the framer again. */
+	if (d.serial == state->old_serial &&
+	    (!(io->rx_status(io->ctx) & ZZNET_ETH_RX_STATUS_READY) ||
+	     io->read_header(io->ctx) != header))
 		return d;
-	state->saw_empty = 0;
 
 	/* Torn reads, cold-boot 0xFFFF and corrupt slots: release the slot
 	 * without completing a client read. */
-	if (size < ZZNET_RX_MIN_FRAME || size > ZZNET_RX_MAX_FRAME) {
+	if (d.size < ZZNET_RX_MIN_FRAME || d.size > ZZNET_RX_MAX_FRAME) {
 		d.action = ZZNET_RX_DROP;
 		d.bad_data = 1;
 		state->have_baseline = 1;
-		state->old_serial = serial;
+		state->old_serial = d.serial;
 		return d;
 	}
 
@@ -48,9 +53,9 @@ struct zznet_rx_decision zznet_rx_classify(struct zznet_rx_state *state,
 	 * and 1 on its u16 wrap, so a clean 0xffff -> 2 step has a raw delta
 	 * of 3; discount the two sentinels when the serial wrapped. */
 	if (state->have_baseline) {
-		uint16_t delta = (uint16_t)(serial - state->old_serial);
+		uint16_t delta = (uint16_t)(d.serial - state->old_serial);
 
-		if (serial < state->old_serial)
+		if (d.serial < state->old_serial)
 			delta = (uint16_t)(delta - 2);
 		if (delta > 1 && delta <= 128)
 			d.overruns = (uint16_t)(delta - 1);
@@ -58,7 +63,7 @@ struct zznet_rx_decision zznet_rx_classify(struct zznet_rx_state *state,
 			d.bad_data = 1;
 	}
 	state->have_baseline = 1;
-	state->old_serial = serial;
+	state->old_serial = d.serial;
 	d.action = ZZNET_RX_DELIVER;
 	return d;
 }

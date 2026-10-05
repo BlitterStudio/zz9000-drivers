@@ -926,13 +926,24 @@ static inline USHORT zznet_read_word(volatile UBYTE *frame, ULONG offset) {
 
 /* Fetch [size:2][serial:2] in one bus cycle on Z3 (32-bit) — the two
  * values always move together and live in adjacent words, so there is
- * no reason to poke the card twice. Caller gets them back via the out
- * params. */
-static inline void zznet_read_header(volatile UBYTE *frame, USHORT *size, USHORT *serial) {
-	ULONG hdr = *(volatile ULONG*)frame;
-	*size   = (USHORT)(hdr >> 16);
-	*serial = (USHORT)(hdr & 0xFFFF);
+ * no reason to poke the card twice. */
+static uint32_t zznet_rx_hw_header(void *ctx)
+{
+	(void)ctx;
+	return *(volatile ULONG *)(ZZ9K_REGS + ZZ9K_RX);
 }
+
+static uint16_t zznet_rx_hw_status(void *ctx)
+{
+	(void)ctx;
+	return *(volatile USHORT *)(ZZ9K_REGS + ZZNET_ETH_RX_STATUS);
+}
+
+static const struct zznet_rx_io zznet_rx_hw = {
+	zznet_rx_hw_header,
+	zznet_rx_hw_status,
+	0
+};
 
 /* Bulk MMIO→RAM copy for an RX payload.
  *
@@ -1231,32 +1242,28 @@ SAVEDS void frame_proc() {
       break;
     }
 
-    USHORT sz, serial;
-    zznet_read_header(frm, &sz, &serial);
+    struct zznet_rx_decision d = zznet_rx_next(&rx_state, &zznet_rx_hw);
+    USHORT sz = d.size, serial = d.serial;
 
-    {
-      struct zznet_rx_decision d = zznet_rx_classify(&rx_state, sz, serial);
+    if (d.empty)
+      rxv_empty_slot++;
+    global_stats.BadData  += d.bad_data;
+    global_stats.Overruns += d.overruns;
 
-      if (d.empty)
-        rxv_empty_slot++;
-      global_stats.BadData  += d.bad_data;
-      global_stats.Overruns += d.overruns;
-
-      if (d.action == ZZNET_RX_WAIT) {
-        /* Nothing new or an empty slot. Re-enable the ethernet IRQ so the
-         * ISR can wake us, then sleep. Enable-before-wait is correct: if a
-         * frame raced in between our header read and the enable, the ISR
-         * will signal and Wait returns immediately. */
-        *irq_ctrl = 1;
-        recv = Wait(wmask);
-        continue;
-      }
-      if (d.action == ZZNET_RX_DROP) {
-        /* Ack with the frame's serial so the firmware RX-accept handshake
-         * advances past exactly this (bad) frame and nothing else. */
-        *rx_accept = serial;
-        continue;
-      }
+    if (d.action == ZZNET_RX_WAIT) {
+      /* Nothing new or an empty slot. Re-enable the ethernet IRQ so the
+       * ISR can wake us, then sleep. Enable-before-wait is correct: if a
+       * frame raced in between our header read and the enable, the ISR
+       * will signal and Wait returns immediately. */
+      *irq_ctrl = 1;
+      recv = Wait(wmask);
+      continue;
+    }
+    if (d.action == ZZNET_RX_DROP) {
+      /* Ack with the frame's serial so the firmware RX-accept handshake
+       * advances past exactly this (bad) frame and nothing else. */
+      *rx_accept = serial;
+      continue;
     }
 
     USHORT packet_type = *(volatile USHORT*)(frm + 16);
