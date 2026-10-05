@@ -67,9 +67,13 @@ const struct NSDeviceQueryResult NSDQueryAnswer = {
 };
 #endif /* DEVICES_NEWSTYLE_H */
 
+/* Before device.h: its SysBase/ExpansionBase macros would rewrite the
+ * library-base names in this header's helpers. */
+#include "zz9000_hw.h"
 #include "device.h"
 #include "zzcfg_query.h"
 #include "macros.h"
+#include "rx.h"
 
 #if ZZNET_S2ERR_NO_RESOURCES != S2ERR_NO_RESOURCES || \
     ZZNET_S2ERR_BAD_STATE != S2ERR_BAD_STATE || \
@@ -79,6 +83,10 @@ const struct NSDeviceQueryResult NSDQueryAnswer = {
     ZZNET_RXF_BCAST != SANA2IOF_BCAST || \
     ZZNET_MCAST_ADDR_LEN != HW_ADDRFIELDSIZE
 #error multicast model drifted from the SANA-II driver contract
+#endif
+
+#if ZZNET_RX_MIN_FRAME != HW_ETH_HDR_SIZE || ZZNET_RX_MAX_FRAME != HW_ETH_MAX_RAW
+#error RX slot model drifted from the driver frame size bounds
 #endif
 
 // FIXME get rid of global var!
@@ -910,24 +918,28 @@ void DevTermIO( DEVBASEP, struct IORequest *ioreq )
  *   +10..+15 UBYTE[] source MAC
  *   +16..+17 USHORT  ethertype
  *   +18..    payload
- *
- * Byte-wise shift-and-OR loads used to cost two MMIO cycles each. Word
- * reads are a single bus cycle on a word-aligned address, which roughly
- * halves the per-packet overhead on Zorro. */
-
-static inline USHORT zznet_read_word(volatile UBYTE *frame, ULONG offset) {
-	return *(volatile USHORT*)(frame + offset);
-}
+ */
 
 /* Fetch [size:2][serial:2] in one bus cycle on Z3 (32-bit) — the two
  * values always move together and live in adjacent words, so there is
- * no reason to poke the card twice. Caller gets them back via the out
- * params. */
-static inline void zznet_read_header(volatile UBYTE *frame, USHORT *size, USHORT *serial) {
-	ULONG hdr = *(volatile ULONG*)frame;
-	*size   = (USHORT)(hdr >> 16);
-	*serial = (USHORT)(hdr & 0xFFFF);
+ * no reason to poke the card twice. */
+static uint32_t zznet_rx_hw_header(void *ctx)
+{
+	(void)ctx;
+	return *(volatile ULONG *)(ZZ9K_REGS + ZZ9K_RX);
 }
+
+static uint16_t zznet_rx_hw_status(void *ctx)
+{
+	(void)ctx;
+	return *(volatile USHORT *)(ZZ9K_REGS + ZZ_REG_ETH_RX_STATUS);
+}
+
+static const struct zznet_rx_io zznet_rx_hw = {
+	zznet_rx_hw_header,
+	zznet_rx_hw_status,
+	0
+};
 
 /* Bulk MMIO→RAM copy for an RX payload.
  *
@@ -1210,8 +1222,9 @@ SAVEDS void frame_proc() {
 
   wmask = SIGBREAKF_CTRL_F | SIGBREAKF_CTRL_C;
 
-  USHORT old_serial    = 0;
-  BOOL   have_baseline = FALSE;
+  struct zznet_rx_state rx_state;
+  zznet_rx_reset(&rx_state,
+                 *(volatile USHORT *)(ZZ9K_REGS + ZZ_REG_FW_VERSION));
   ULONG  recv          = Wait(wmask);   /* wait for first packet */
 
   volatile UBYTE*  frm       = (volatile UBYTE*)(ZZ9K_REGS+ZZ9K_RX);
@@ -1226,162 +1239,89 @@ SAVEDS void frame_proc() {
       break;
     }
 
-    USHORT sz, serial;
-    zznet_read_header(frm, &sz, &serial);
+    struct zznet_rx_decision d = zznet_rx_next(&rx_state, &zznet_rx_hw);
+    USHORT sz = d.size, serial = d.serial;
 
-    /* issue #29: an all-zero header is an EMPTY (firmware-cleared) slot, not
-     * a frame. The firmware zeroes a slot when it has no frame for it, and a
-     * real frame always has serial >= 2 (the firmware's frame_serial counter
-     * skips both 0 and 1 — reserved for the empty-slot sentinel and the
-     * legacy bare-advance ack — so neither is ever assigned to a frame) and
-     * size >= 14. Reading a 0 header happens
-     * routinely at the backlog drain boundary.
-     *
-     * We must NOT ack it (*rx_accept). Doing so races a frame landing in this
-     * same slot between our read and the ack: ethernet_receive_frame would
-     * then consume that real frame (advance + clear the slot) without us ever
-     * reading its payload — a silent inbound loss, invisible to the firmware
-     * (its frames_dropped stays 0). Treat an empty slot exactly like "nothing
-     * new": re-arm the IRQ and wait, leaving old_serial untouched so the next
-     * real frame's gap detection is not poisoned. */
-    if (sz == 0 && serial == 0) {
+    if (d.empty)
       rxv_empty_slot++;
+    global_stats.BadData  += d.bad_data;
+    global_stats.Overruns += d.overruns;
+
+    if (d.action == ZZNET_RX_WAIT) {
+      /* Nothing new or an empty slot. Re-enable the ethernet IRQ so the
+       * ISR can wake us, then sleep. Enable-before-wait is correct: if a
+       * frame raced in between our header read and the enable, the ISR
+       * will signal and Wait returns immediately. */
       *irq_ctrl = 1;
       recv = Wait(wmask);
       continue;
     }
+    if (d.action == ZZNET_RX_DROP) {
+      /* Ack with the frame's serial so the firmware RX-accept handshake
+       * advances past exactly this (bad) frame and nothing else. */
+      *rx_accept = serial;
+      continue;
+    }
 
-    if (serial != old_serial) {
-      /* Wire-level sanity check on the HW frame size. Reject frames
-       * whose size field is shorter than the full ethernet header (14
-       * bytes — dst/src MAC + ethertype) or longer than the widest
-       * accepted frame (HW_ETH_MAX_RAW, 1518 incl. 802.1Q tag). These
-       * are HW- or firmware-level artifacts (torn reads, cold-boot
-       * 0xFFFF, corrupt backlog slots) — completing a client read
-       * with an error for them would turn line noise into user-visible
-       * RX failures.
-       *
-       * The lower bound is 14, not 18: a frame with sz == 14 has a
-       * full ethernet header (ethertype included at bytes 12-13, i.e.
-       * frame+16..17 after the 4-byte HW size/serial prefix) and a
-       * zero-byte payload. Such frames are legitimate on the wire
-       * once the EMAC strips FCS and padding — rejecting them would
-       * silently drop valid short control frames from RAW listeners.
-       *
-       * On the happy path we drop the bad HW frame only: bump
-       * BadData, release the backlog slot via rx_accept, leave every
-       * pending listener untouched on the read list. */
-      if (sz < HW_ETH_HDR_SIZE || sz > HW_ETH_MAX_RAW) {
-        global_stats.BadData++;
-        have_baseline = TRUE;
-        old_serial    = serial;
-        /* Ack with the frame's serial so the firmware RX-accept handshake
-         * advances past exactly this (bad) frame and nothing else. */
+    USHORT packet_type = *(volatile USHORT*)(frm + 16);
+    struct IOSana2Req *match = NULL;
+
+    /* GEM hash collisions are not unknown packet types. Ack and drop
+     * the exact miss before reader selection; UnknownTypesReceived
+     * stays reserved for an accepted frame with no reader or a failed
+     * read. */
+    {
+      struct zznet_rx_plan plan = zznet_frame_plan(db, frm + 4);
+
+      if (!plan.select_reader) {
+        if (plan.count_unknown)
+          global_stats.UnknownTypesReceived++;
         *rx_accept = serial;
         continue;
       }
+    }
 
-      USHORT packet_type = *(volatile USHORT*)(frm + 16);
-      struct IOSana2Req *match = NULL;
-
-      /* Gap detection: the firmware increments 'serial' once per
-       * received frame; when the Amiga falls behind and the firmware
-       * backlog overflows, frames are dropped
-       * at the MAC layer and the next delivered frame's serial skips
-       * ahead. A "reasonable" gap is bounded by the backlog depth.
-       *
-       * Any much larger delta is almost certainly an artifact — a torn
-       * header read, an uninitialised-DRAM 0xFFFF on cold boot before
-       * the first real frame lands, or a firmware-side reset — not a
-       * genuine miss. Count those separately in BadData so Overruns
-       * stays trustworthy.
-       *
-       * Unsigned 16-bit subtraction gives the forward distance directly.
-       * The firmware skips BOTH serial 0 and 1 on its u16 wraparound (0 is
-       * the empty-slot sentinel, 1 the legacy bare-advance ack), so real
-       * serials run 2..0xffff and a clean 0xffff→2 wrap step has a raw delta
-       * of 3, not 1. When the serial wrapped (serial < old_serial), discount
-       * those two skipped sentinels so the wrap itself is not miscounted as
-       * dropped frames. */
-      if (have_baseline) {
-        USHORT delta = (USHORT)(serial - old_serial);
-        if (serial < old_serial)   /* wrapped past the skipped 0 and 1 sentinels */
-          delta -= 2;
-        if (delta > 1 && delta <= 128) {
-          global_stats.Overruns += (ULONG)(delta - 1);
-        } else if (delta > 128) {
-          /* anomaly — don't pollute Overruns */
-          global_stats.BadData++;
-        }
+    /* Walk the read list only long enough to find a matching listener
+     * and detach it. Doing the payload copy (read_frame) and ReplyMsg
+     * outside the semaphore keeps DevAbortIO / CMD_READ unblocked for
+     * the duration of the Zorro bus copy. */
+    ObtainSemaphore(&db->db_ReadListSem);
+    for (ior = (struct IOSana2Req *)db->db_ReadList.lh_Head;
+         ior->ios2_Req.io_Message.mn_Node.ln_Succ;
+         ior = (struct IOSana2Req *)ior->ios2_Req.io_Message.mn_Node.ln_Succ) {
+      if (ior->ios2_PacketType == packet_type) {
+        Remove((struct Node*)ior);
+        match = ior;
+        break;
       }
-      have_baseline = TRUE;
-      old_serial    = serial;
+    }
+    ReleaseSemaphore(&db->db_ReadListSem);
 
-      /* GEM hash collisions are not unknown packet types. Ack and drop
-       * the exact miss before reader selection; UnknownTypesReceived
-       * stays reserved for an accepted frame with no reader or a failed
-       * read. */
-      {
-        struct zznet_rx_plan plan = zznet_frame_plan(db, frm + 4);
-
-        if (!plan.select_reader) {
-          if (plan.count_unknown)
-            global_stats.UnknownTypesReceived++;
-          *rx_accept = serial;
-          continue;
-        }
-      }
-
-      /* Walk the read list only long enough to find a matching listener
-       * and detach it. Doing the payload copy (read_frame) and ReplyMsg
-       * outside the semaphore keeps DevAbortIO / CMD_READ unblocked for
-       * the duration of the Zorro bus copy. */
-      ObtainSemaphore(&db->db_ReadListSem);
-      for (ior = (struct IOSana2Req *)db->db_ReadList.lh_Head;
-           ior->ios2_Req.io_Message.mn_Node.ln_Succ;
-           ior = (struct IOSana2Req *)ior->ios2_Req.io_Message.mn_Node.ln_Succ) {
-        if (ior->ios2_PacketType == packet_type) {
-          Remove((struct Node*)ior);
-          match = ior;
-          break;
-        }
-      }
-      ReleaseSemaphore(&db->db_ReadListSem);
-
-      if (match) {
-        ULONG res = read_frame(db, match, frm, sz, packet_type);
-        if (res == 0) {
-          global_stats.PacketsReceived++;
-        } else {
-          /* read_frame already set io_Error/ios2_WireError; reply so the
-           * caller learns the request failed instead of leaving it on
-           * a now-dangling list entry. */
-          D(("RERR %ld\n", res));
-          global_stats.UnknownTypesReceived++;
-        }
-        ReplyMsg((struct Message *)match);
+    if (match) {
+      ULONG res = read_frame(db, match, frm, sz, packet_type);
+      if (res == 0) {
+        global_stats.PacketsReceived++;
       } else {
-        /* No listener matched — frame dropped. A future change could
-         * route these to S2_READORPHAN requests. */
+        /* read_frame already set io_Error/ios2_WireError; reply so the
+         * caller learns the request failed instead of leaving it on
+         * a now-dangling list entry. */
+        D(("RERR %ld\n", res));
         global_stats.UnknownTypesReceived++;
       }
-
-      /* Release the FPGA RX slot so the next frame can land. We ack with the
-       * frame's own serial so the firmware RX-accept handshake advances past
-       * exactly the frame we just read (a stray ack of an empty/other slot is
-       * rejected firmware-side). We do NOT re-enable the ethernet IRQ here —
-       * staying masked lets us drain any already-queued frames via the serial
-       * recheck on the next loop iteration without paying for an IRQ we'd
-       * ignore anyway. */
-      *rx_accept = serial;
+      ReplyMsg((struct Message *)match);
     } else {
-      /* Nothing new. Re-enable the ethernet IRQ so the ISR can wake us,
-       * then sleep. Enable-before-wait is correct: if a frame raced in
-       * between our serial read and the enable, the ISR will signal
-       * and Wait returns immediately. */
-      *irq_ctrl = 1;
-      recv = Wait(wmask);
+      /* No listener matched — frame dropped. A future change could
+       * route these to S2_READORPHAN requests. */
+      global_stats.UnknownTypesReceived++;
     }
+
+    /* Release the FPGA RX slot so the next frame can land. We ack with the
+     * frame's own serial so the firmware RX-accept handshake advances past
+     * exactly the frame we just read (a stray ack of an empty/other slot is
+     * rejected firmware-side). We do NOT re-enable the ethernet IRQ here —
+     * staying masked lets us drain any already-queued frames via the next
+     * loop iteration without paying for an IRQ we'd ignore anyway. */
+    *rx_accept = serial;
   }
   // disable interrupt
   *(volatile USHORT*)(ZZ9K_REGS+0x04) = 0;

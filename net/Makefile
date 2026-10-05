@@ -13,7 +13,7 @@ DEVICEID = ZZ9000Net.device
 CC      = m68k-amigaos-gcc
 CPU     = 68020
 
-SOURCES = deviceheader.c deviceinit.c device.c mcast.c
+SOURCES = deviceheader.c deviceinit.c device.c mcast.c rx.c
 
 # DEVICEVERSION/DEVICEREVISION/DEVICEDATE come from version.h (HAVE_VERSION_H).
 CFLAGS  = -m$(CPU) -mtune=68020-60 -msoft-float -O2 \
@@ -33,7 +33,8 @@ endif
 
 all: $(DEVICEID)
 
-$(DEVICEID): $(SOURCES) device.h compiler.h debug.h macros.h sana2.h version.h mcast.h
+$(DEVICEID): $(SOURCES) device.h compiler.h debug.h macros.h sana2.h version.h mcast.h rx.h \
+              ../include/zzcfg_query.h ../include/zz9000_hw.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(SOURCES) $(LDLIBS)
 
 clean:
