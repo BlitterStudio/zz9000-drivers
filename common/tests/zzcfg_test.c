@@ -288,6 +288,44 @@ static void test_native_key_presence(void)
           "explicit legacy profile and zero values remain active");
 }
 
+/* Issue #131: the Settings HDF field shows what firmware boots, and
+ * clearing it must save an explicit disable, not the commented default
+ * that firmware still boots from. */
+static void test_hdf_gadget_off(void)
+{
+    struct zzcfg_values v;
+    char text[ZZCFG_MAX_SIZE];
+    const char *absent = "#hdf = zz9000.hdf\n";
+
+    defaults(&v);
+    zzcfg_parse_text(absent, (UWORD)strlen(absent), &v);
+    check(strcmp(zzcfg_hdf_gadget_text(v.hdf), "zz9000.hdf") == 0,
+          "absent hdf shows the default image firmware boots");
+    zzcfg_hdf_from_gadget(v.hdf, sizeof(v.hdf), "ZZ9000.HDF");
+    check(zzcfg_generate(&v, text, sizeof(text)) > 0 &&
+          strstr(text, "\n#hdf = zz9000.hdf\n") != NULL,
+          "untouched default keeps hdf absent");
+
+    zzcfg_hdf_from_gadget(v.hdf, sizeof(v.hdf), "");
+    check(zzcfg_generate(&v, text, sizeof(text)) > 0 &&
+          strstr(text, "\nhdf = off\n") != NULL,
+          "cleared hdf field saves hdf = off");
+    defaults(&v);
+    zzcfg_parse_text(text, (UWORD)strlen(text), &v);
+    check(zzcfg_hdf_gadget_text(v.hdf)[0] == '\0',
+          "hdf = off reloads as an empty field");
+
+    zzcfg_hdf_from_gadget(v.hdf, sizeof(v.hdf), "zz9000.hdf");
+    check(zzcfg_generate(&v, text, sizeof(text)) > 0 &&
+          strstr(text, "\nhdf = zz9000.hdf\n") != NULL,
+          "re-enabling the default after off writes it explicitly");
+
+    defaults(&v);
+    zzcfg_parse_text("HDF = OFF\n", 10, &v);
+    check(zzcfg_hdf_gadget_text(v.hdf)[0] == '\0',
+          "hdf off is case-insensitive like the firmware");
+}
+
 static void test_fast_ram_status(void)
 {
     UWORD value = 0, outcome = 0;
@@ -542,6 +580,7 @@ int main(void)
 
     test_native_key_presence();
     test_fast_ram_status();
+    test_hdf_gadget_off();
     test_capture_phase_preservation();
     test_videocap_geometry();
 

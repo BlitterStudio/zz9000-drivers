@@ -20,7 +20,8 @@ contents as bootable volumes.
 * A file named exactly `/zz9000.hdf` at the root of that card
   (firmware 2.3+ can boot a different root-level image via a
   `hdf = name.hdf` line in `ZZ9000.CFG`, editable from ZZTop's
-  Settings window).
+  Settings window; `hdf = off`, or clearing that field, disables SD
+  boot even when `zz9000.hdf` is present).
 * The HDF must use **Amiga RDB partitioning** — the first 16 blocks
   must contain an `RDSK` block pointing at one or more `PART` blocks
   plus `FSHD`/`LSEG` entries for any custom filesystems (PFS3, SFS,

@@ -186,7 +186,10 @@ invalid entry keeps the card's built-in address.
 **HDF** names a root-level hard-disk image on the microSD card that the
 firmware presents to the Amiga at boot — booting Workbench straight from
 the SD card with no hard drive attached. Type the file name of an HDF
-placed in the card's root; clearing the entry disables SD boot.
+placed in the card's root. With no `hdf` line in `ZZ9000.CFG` the field
+shows `zz9000.hdf`, the image the firmware boots by default. Clearing
+the entry saves `hdf = off`, which disables SD boot even when
+`zz9000.hdf` is present.
 
 **Fast RAM** controls Zorro III Fast RAM where the running firmware supports
 the fail-closed boot gate. The status line reports the *effective* boot result,
