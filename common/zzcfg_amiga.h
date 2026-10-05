@@ -21,6 +21,8 @@
 #define ZZCFG_MAX_SIZE   8192
 #define ZZCFG_MAC_CHARS  17          /* aa:bb:cc:dd:ee:ff */
 #define ZZCFG_HDF_CHARS  63
+#define ZZCFG_HDF_DEFAULT "zz9000.hdf" /* firmware image when hdf is absent */
+#define ZZCFG_HDF_OFF     "off"        /* hdf = off disables SD boot */
 #define ZZCFG_VIDEOCAP_CROP_H_COMPAT 188
 #define ZZCFG_VIDEOCAP_CROP_V_COMPAT 26
 
@@ -60,9 +62,9 @@ enum zzcfg_vcap_refresh {
 };
 
 /* Configuration shared by ZZTop's Settings, Scandoubler and Audio windows.
- * mac/hdf are C strings;
+ * mac/hdf are C strings holding the raw config value;
  * an empty string means "not configured" and is emitted as a
- * commented-out example line. */
+ * commented-out example line. hdf "off" (any case) disables SD boot. */
 struct zzcfg_values {
     UWORD videocap_profile;  /* enum zzcfg_videocap_profile */
     UWORD videocap_sample;   /* 0 = average, 1 = even, 2 = odd */
@@ -195,6 +197,15 @@ void zzcfg_fast_ram_invalidate_withheld(struct zzcfg_values *v, UWORD outcome);
  * cold-boot parse. Validate with this before saving; these rules
  * differ from the FWUP destination-name rules. */
 int zzcfg_hdf_name_valid(const char *name);
+
+/* Settings gadget text for a stored hdf value: the default image name
+ * when the key is absent (that is what firmware boots), empty when SD
+ * boot is off, otherwise the configured name. */
+const char *zzcfg_hdf_gadget_text(const char *hdf);
+
+/* Store edited gadget text into hdf (size bytes): an empty field saves
+ * `hdf = off`; the default name over an absent key stays absent. */
+void zzcfg_hdf_from_gadget(char *hdf, UWORD size, const char *text);
 
 /* Decode the ZZTop-editable keys from raw config text into v, using
  * the firmware parser's line rules (comments, case-insensitive keys,

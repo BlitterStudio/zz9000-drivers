@@ -2282,7 +2282,7 @@ static void settings_populate(struct Window *win, UWORD fw_capabilities)
 	GT_SetGadgetAttrs(sgads[SGAD_MAC], win, NULL,
 		GTST_String, sv->mac, TAG_END);
 	GT_SetGadgetAttrs(sgads[SGAD_HDF], win, NULL,
-		GTST_String, sv->hdf, TAG_END);
+		GTST_String, (STRPTR)zzcfg_hdf_gadget_text(sv->hdf), TAG_END);
 	GT_SetGadgetAttrs(sgads[SGAD_OFFSCREEN], win, NULL,
 		GTCY_Active, sv->offscreen_bitmaps ? 1 : 0, TAG_END);
 	GT_SetGadgetAttrs(sgads[SGAD_OVERLAY], win, NULL,
@@ -2341,7 +2341,8 @@ static BOOL settings_save(struct Window *win)
 	si = (struct StringInfo *)sgads[SGAD_MAC]->SpecialInfo;
 	snprintf(sv->mac, sizeof(sv->mac), "%s", (const char *)si->Buffer);
 	si = (struct StringInfo *)sgads[SGAD_HDF]->SpecialInfo;
-	snprintf(sv->hdf, sizeof(sv->hdf), "%s", (const char *)si->Buffer);
+	zzcfg_hdf_from_gadget(sv->hdf, sizeof(sv->hdf),
+		(const char *)si->Buffer);
 
 	if (sv->mac[0] && !settings_parse_mac(sv->mac)) {
 		settings_set_status(win, "Bad MAC - use aa:bb:cc:dd:ee:ff");

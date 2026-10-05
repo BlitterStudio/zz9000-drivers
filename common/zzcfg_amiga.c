@@ -153,6 +153,26 @@ static int zzcfg_str_eq_ci(const char *a, const char *b)
     return *a == *b;
 }
 
+const char *zzcfg_hdf_gadget_text(const char *hdf)
+{
+    if (!hdf[0]) return ZZCFG_HDF_DEFAULT;
+    if (zzcfg_str_eq_ci(hdf, ZZCFG_HDF_OFF)) return "";
+    return hdf;
+}
+
+void zzcfg_hdf_from_gadget(char *hdf, UWORD size, const char *text)
+{
+    if (!text[0]) {
+        snprintf(hdf, size, "%s", ZZCFG_HDF_OFF);
+        return;
+    }
+    /* The default shown for an absent key stays absent, so an
+     * untouched field keeps the file's commented example line. */
+    if (!hdf[0] && zzcfg_str_eq_ci(text, ZZCFG_HDF_DEFAULT))
+        return;
+    snprintf(hdf, size, "%s", text);
+}
+
 static int zzcfg_parse_u12(const char *s, UWORD *out)
 {
     ULONG value = 0;
@@ -1040,7 +1060,7 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
         v->offscreen_bitmaps ? "on" : "off",
         v->video_overlay ? "on" : "off",
         v->mac[0] ? "" : "#", v->mac[0] ? v->mac : "68:82:F2:00:00:01",
-        v->hdf[0] ? "" : "#", v->hdf[0] ? v->hdf : "zz9000.hdf");
+        v->hdf[0] ? "" : "#", v->hdf[0] ? v->hdf : ZZCFG_HDF_DEFAULT);
 
     if (n < 0 || (UWORD)n >= outsz) return 0;
 
