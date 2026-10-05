@@ -33,7 +33,8 @@ endif
 
 all: $(DEVICEID)
 
-$(DEVICEID): $(SOURCES) device.h compiler.h debug.h macros.h sana2.h version.h mcast.h rx.h
+$(DEVICEID): $(SOURCES) device.h compiler.h debug.h macros.h sana2.h version.h mcast.h rx.h \
+              ../include/zzcfg_query.h ../include/zz9000_hw.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(SOURCES) $(LDLIBS)
 
 clean:

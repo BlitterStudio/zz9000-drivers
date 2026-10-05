@@ -1,10 +1,11 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "rx.h"
 
-void zznet_rx_reset(struct zznet_rx_state *state)
+void zznet_rx_reset(struct zznet_rx_state *state, uint16_t fw_version)
 {
 	state->old_serial = 0;
 	state->have_baseline = 0;
+	state->ready_valid = fw_version >= ZZNET_RX_STATUS_MIN_FW;
 }
 
 struct zznet_rx_decision zznet_rx_next(struct zznet_rx_state *state,
@@ -29,11 +30,15 @@ struct zznet_rx_decision zznet_rx_next(struct zznet_rx_state *state,
 	 * stale slot on firmware that never clears slots, or a new frame after
 	 * an RX DMA restart reset the counter (issue #127); treating the latter
 	 * as old never acks it while firmware re-raises the IRQ forever. Only
-	 * the ready count tells them apart, and firmware before 2.1 has neither
-	 * restarts nor the register. The re-read rejects a frame that replaced
-	 * a stale slot between the two reads; its IRQ wakes the framer again. */
+	 * the ready count tells them apart, and firmware before 2.1 has no
+	 * restarts and no ready count. The re-read rejects a frame that replaced
+	 * a stale slot between the two reads; its IRQ wakes the framer again.
+	 * Serial 0 never starts a post-restart sequence (2.1/2.2 restart at 1,
+	 * later firmware at 2) and handshake firmware rejects an ack of 0, so
+	 * delivering a repeated serial 0 would loop on a corrupt slot. */
 	if (d.serial == state->old_serial &&
-	    (!(io->rx_status(io->ctx) & ZZNET_ETH_RX_STATUS_READY) ||
+	    (d.serial == 0 || !state->ready_valid ||
+	     !(io->rx_status(io->ctx) & ZZNET_ETH_RX_STATUS_READY) ||
 	     io->read_header(io->ctx) != header))
 		return d;
 

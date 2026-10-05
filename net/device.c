@@ -67,6 +67,9 @@ const struct NSDeviceQueryResult NSDQueryAnswer = {
 };
 #endif /* DEVICES_NEWSTYLE_H */
 
+/* Before device.h: its SysBase/ExpansionBase macros would rewrite the
+ * library-base names in this header's helpers. */
+#include "zz9000_hw.h"
 #include "device.h"
 #include "zzcfg_query.h"
 #include "macros.h"
@@ -915,14 +918,7 @@ void DevTermIO( DEVBASEP, struct IORequest *ioreq )
  *   +10..+15 UBYTE[] source MAC
  *   +16..+17 USHORT  ethertype
  *   +18..    payload
- *
- * Byte-wise shift-and-OR loads used to cost two MMIO cycles each. Word
- * reads are a single bus cycle on a word-aligned address, which roughly
- * halves the per-packet overhead on Zorro. */
-
-static inline USHORT zznet_read_word(volatile UBYTE *frame, ULONG offset) {
-	return *(volatile USHORT*)(frame + offset);
-}
+ */
 
 /* Fetch [size:2][serial:2] in one bus cycle on Z3 (32-bit) — the two
  * values always move together and live in adjacent words, so there is
@@ -936,7 +932,7 @@ static uint32_t zznet_rx_hw_header(void *ctx)
 static uint16_t zznet_rx_hw_status(void *ctx)
 {
 	(void)ctx;
-	return *(volatile USHORT *)(ZZ9K_REGS + ZZNET_ETH_RX_STATUS);
+	return *(volatile USHORT *)(ZZ9K_REGS + ZZ_REG_ETH_RX_STATUS);
 }
 
 static const struct zznet_rx_io zznet_rx_hw = {
@@ -1227,7 +1223,8 @@ SAVEDS void frame_proc() {
   wmask = SIGBREAKF_CTRL_F | SIGBREAKF_CTRL_C;
 
   struct zznet_rx_state rx_state;
-  zznet_rx_reset(&rx_state);
+  zznet_rx_reset(&rx_state,
+                 *(volatile USHORT *)(ZZ9K_REGS + ZZ_REG_FW_VERSION));
   ULONG  recv          = Wait(wmask);   /* wait for first packet */
 
   volatile UBYTE*  frm       = (volatile UBYTE*)(ZZ9K_REGS+ZZ9K_RX);
