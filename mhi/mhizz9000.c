@@ -149,20 +149,28 @@ static void mhi_probe_audio_caps(struct MHI_LibBase *MHI_LibBase,
 		published_here = TRUE;
 	}
 	if(ZZ9KQueryCaps(&caps) == ZZ9K_STATUS_OK) {
-		MHI_LibBase->audio_capability_bits = caps.capability_bits;
-		if(caps.capability_bits & ZZ9K_CAP_AUDIO_CONTROL) {
-			MHI_LibBase->audio_control_capped = TRUE;
-			if(base->lib_Revision >=
-			   ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_GAIN &&
-			   ZZ9KQueryService(ZZ9K_SERVICE_AUDIO, &service) ==
-			   ZZ9K_STATUS_OK &&
-			   (service.flags & ZZ9K_SERVICE_FLAG_AUDIO_STREAM_GAIN)) {
-				MHI_LibBase->audio_stream_gain_capped = TRUE;
-			}
+		BOOL answered = TRUE;
+		BOOL gain = FALSE;
+
+		if((caps.capability_bits & ZZ9K_CAP_AUDIO_CONTROL) &&
+		   base->lib_Revision >=
+		   ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_GAIN) {
+			if(ZZ9KQueryService(ZZ9K_SERVICE_AUDIO, &service) ==
+			   ZZ9K_STATUS_OK)
+				gain = (service.flags &
+				        ZZ9K_SERVICE_FLAG_AUDIO_STREAM_GAIN) != 0;
+			else
+				answered = FALSE;
 		}
-		// Cache only an answer: a failed open or query (card not yet
-		// up) must not make every later allocation refuse the card.
-		MHI_LibBase->audio_caps_checked = TRUE;
+		MHI_LibBase->audio_capability_bits = caps.capability_bits;
+		MHI_LibBase->audio_control_capped =
+			(caps.capability_bits & ZZ9K_CAP_AUDIO_CONTROL) != 0;
+		MHI_LibBase->audio_stream_gain_capped = gain;
+		// Cache only a definitive answer: a failed open or query (card
+		// not up yet, a mailbox timeout) is retried by the next MHIQuery
+		// or allocation instead of disabling the card or its volume for
+		// the library's lifetime.
+		MHI_LibBase->audio_caps_checked = answered;
 	}
 done:
 	if(published_here)
