@@ -22,8 +22,14 @@ struct MHI_LibBase {
 
 	UBYTE zorro_version;
 	UBYTE flags;
+	/* Firmware audio capabilities are probed once per MHI library lifetime.
+	 * MHIQuery has no decoder handle, so it must be able to use this cache. */
+	ULONG audio_capability_bits;
+	UBYTE audio_caps_checked;
+	UBYTE audio_control_capped;
+	UBYTE audio_stream_gain_capped;
+	struct SignalSemaphore audio_caps_lock;
 };
-
 struct MhiPlayer {
 	struct Task *MhiTask;
 	ULONG MhiMask;
@@ -40,10 +46,10 @@ struct MhiPlayer {
 	UBYTE zorro_version;
 	UBYTE volume;
 	UBYTE panning;
-	UBYTE audio_control_capped; /* firmware advertised the control
-	                               plane at allocate: gates the
-	                               release-time trim submit, the legacy
-	                               LPF stamp, and the app mixer API */
+	UBYTE audio_control_capped; /* gates trim, legacy LPF stamps, and
+	                               scene-owned master-chain controls */
+	UBYTE audio_stream_gain_capped; /* per-stream attenuation is safe
+	                                  * beneath the scene-owned chain */
 	UBYTE fabric_token_installed;
 
 	/*

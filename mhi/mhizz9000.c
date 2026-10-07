@@ -124,6 +124,55 @@ static void submit_source_trim(void) {
 	}
 }
 
+// Cache the firmware's audio surface at library scope because MHIQuery has no
+// decoder handle. The temporary publication is serialized with allocation, so
+// proto inlines always have a live zz9k.library base during the mailbox calls.
+static void mhi_probe_audio_caps(struct MHI_LibBase *MHI_LibBase,
+                                 struct Library *base) {
+	ZZ9KCaps caps;
+	ZZ9KServiceInfo service;
+	BOOL opened_here = FALSE;
+	BOOL published_here = FALSE;
+
+	ObtainSemaphore(&MHI_LibBase->audio_caps_lock);
+	if(MHI_LibBase->audio_caps_checked)
+		goto out;
+
+	if(!base) {
+		base = OpenLibrary((STRPTR)"zz9k.library", 0);
+		opened_here = TRUE;
+	}
+	if(!base)
+		goto done;
+	if(!ZZ9KBase) {
+		ZZ9KBase = base;
+		published_here = TRUE;
+	}
+	if(ZZ9KQueryCaps(&caps) == ZZ9K_STATUS_OK) {
+		MHI_LibBase->audio_capability_bits = caps.capability_bits;
+		if(caps.capability_bits & ZZ9K_CAP_AUDIO_CONTROL) {
+			MHI_LibBase->audio_control_capped = TRUE;
+			if(base->lib_Revision >=
+			   ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_GAIN &&
+			   ZZ9KQueryService(ZZ9K_SERVICE_AUDIO, &service) ==
+			   ZZ9K_STATUS_OK &&
+			   (service.flags & ZZ9K_SERVICE_FLAG_AUDIO_STREAM_GAIN)) {
+				MHI_LibBase->audio_stream_gain_capped = TRUE;
+			}
+		}
+		// Cache only an answer: a failed open or query (card not yet
+		// up) must not make every later allocation refuse the card.
+		MHI_LibBase->audio_caps_checked = TRUE;
+	}
+done:
+	if(published_here)
+		ZZ9KBase = NULL;
+	if(opened_here && base)
+		CloseLibrary(base);
+out:
+	ReleaseSemaphore(&MHI_LibBase->audio_caps_lock);
+}
+
 /* ****************************** */
 /*  END ZZ9000AX parameter access */
 /* ****************************** */
@@ -166,6 +215,11 @@ BOOL UserLibInit(struct MHI_LibBase *MhiLibBase) {
 	MhiLibBase->hw_size = 0;
 	MhiLibBase->flags = 0;
 	MhiLibBase->NumAllocatedDecoders = 0;
+	MhiLibBase->audio_capability_bits = 0;
+	MhiLibBase->audio_caps_checked = FALSE;
+	MhiLibBase->audio_control_capped = FALSE;
+	MhiLibBase->audio_stream_gain_capped = FALSE;
+	InitSemaphore(&MhiLibBase->audio_caps_lock);
 
 	ExpansionBase = (struct ExpansionBase*) OpenLibrary((STRPTR)"expansion.library", 0);
 	if(!ExpansionBase) {
@@ -390,6 +444,21 @@ static void mhi_feed_pending(struct MhiPlayer *mp) {
 	}
 }
 
+// io_lock must be held. Gain is per session and never touches the
+// scene-owned master chain; 128 is unity and all smaller values attenuate.
+static void mhi_stream_apply_gain(struct MhiPlayer *mp) {
+	ZZ9KAudioStreamResult r;
+	ULONG gain;
+
+	if(!mp->audio_stream_gain_capped || mp->session == 0)
+		return;
+	gain = ((ULONG)mp->volume * 128U + 50U) / 100U;
+	if(ZZ9KAudioStreamSetGain(mp->session, gain, 0, &r) !=
+	   ZZ9K_STATUS_OK) {
+		KPrintF("MHI: stream gain rejected.\n");
+	}
+}
+
 // Open the SDK session (and, once, the shared buffers backing it).
 static BOOL mhi_stream_open(struct MhiPlayer *mp) {
 	ZZ9KAudioStreamBeginDesc begin;
@@ -449,6 +518,7 @@ static BOOL mhi_stream_open(struct MhiPlayer *mp) {
 	}
 
 	mp->session = mp->result.session;
+	mhi_stream_apply_gain(mp);
 	mp->backpressure = FALSE;
 	mp->eof_announced = FALSE;
 	mp->drain_requested = FALSE;
@@ -562,6 +632,7 @@ static void mhi_try_bind(struct MhiPlayer *mp) {
 		KPrintF("mhi_try_bind: PLAY rejected.\n");
 		return;
 	}
+	mhi_stream_apply_gain(mp);
 	// A Stop/Pause that raced the mailbox call above already unbound
 	// the session card-side; nothing to undo here.
 	mp->play_pending = FALSE;
@@ -1011,6 +1082,8 @@ static void unclaim_ownership_locked(struct MhiPlayer *mp,
 APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 	struct MhiPlayer *mp = NULL;
 	struct Library *base;
+	const ULONG required_caps =
+		ZZ9K_CAP_AUDIO_PLAYBACK | ZZ9K_CAP_AUDIO_STREAM_DRAIN;
 
 	// The modern decoder path runs through zz9k.library audio-stream
 	// sessions plus the firmware's AX playback binding; require both.
@@ -1040,6 +1113,14 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 		return NULL;
 	}
 
+	mhi_probe_audio_caps(MHI_LibBase, base);
+	if((MHI_LibBase->audio_capability_bits & required_caps) !=
+	   required_caps) {
+		KPrintF("Firmware lacks matched MHI drain capability.\n");
+		CloseLibrary(base);
+		return NULL;
+	}
+
 	mp = AllocVec(sizeof(struct MhiPlayer), MEMF_CLEAR);
 	if(!mp) {
 		KPrintF("Can't allocate MhiPlayer.\n");
@@ -1057,6 +1138,8 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 
 	mp->volume  = 100;
 	mp->panning = 50;
+	mp->audio_control_capped = MHI_LibBase->audio_control_capped;
+	mp->audio_stream_gain_capped = MHI_LibBase->audio_stream_gain_capped;
 
 	mp->BufferList = AllocVec(sizeof(struct MinList), MEMF_PUBLIC|MEMF_CLEAR);
 	if(!mp->BufferList) {
@@ -1096,47 +1179,11 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 	ZZ9KBase = base;
 	Permit();
 
-	// A current zz9k.library (revision-checked above) can still front a
-	// firmware image that predates the AX playback op -- the binding lives
-	// in firmware, not the library. Now that ZZ9KBase is live, ask the
-	// running firmware what it advertises: without AUDIO_PLAYBACK the
-	// MHIPlay stream bind returns UNSUPPORTED while the driver still reports
-	// MHIF_PLAYING with no audio, so refuse the decoder here and let the app
-	// fall back to Paula/AHI. The query blocks on the mailbox completion, so
-	// it must run after the claim Permit, never under Forbid.
-	{
-		ZZ9KCaps caps;
-		const ULONG required_caps =
-			ZZ9K_CAP_AUDIO_PLAYBACK | ZZ9K_CAP_AUDIO_STREAM_DRAIN;
-		if(ZZ9KQueryCaps(&caps) != ZZ9K_STATUS_OK ||
-		   (caps.capability_bits & required_caps) != required_caps) {
-			KPrintF("Firmware lacks matched MHI drain capability.\n");
-			Forbid();
-			unclaim_ownership_locked(mp, MHI_LibBase);
-			Permit();
-			FreeVec(mp->BufferList);
-			FreeVec(mp);
-			CloseLibrary(base);
-			return NULL;
-		}
-
-		// R16 capability gate: the firmware-authoritative control plane
-		// is deliberately unadvertised until qualified, so an absent
-		// ZZ9K_CAP_AUDIO_CONTROL is the normal old-firmware case --
-		// legacy playback with the old DSP stamps (LPF at Play start)
-		// and no trim. Only a firmware that advertises the surface ever
-		// hears from us as a control-plane client: remember the
-		// capability for this decoder's lifetime (release trim, no
-		// legacy stamps, scene-owned app mixer API) and submit this
-		// owner's neutral source trim -- the pinned keep-baseline word,
-		// "no trim from this owner" (R4). Like the query above, the
-		// trim submission blocks on the mailbox completion and must
-		// stay outside Forbid().
-		if(caps.capability_bits & ZZ9K_CAP_AUDIO_CONTROL) {
-			mp->audio_control_capped = TRUE;
-			submit_source_trim();
-		}
-	}
+	// The library-level probe ran before this claim, while its temporary
+	// zz9k.library publication was serialized. A control-plane client submits
+	// the neutral trim only after its decoder owns the card.
+	if(mp->audio_control_capped)
+		submit_source_trim();
 
 	// AHI/MHI exclusion decision (AHI migration): the active AHI IRQ
 	// token was observed inside the atomic claim above. Only the
@@ -1154,7 +1201,7 @@ APTR i_MHIAllocDecoder(REGA0(struct Task *mhi_task), REGD0(ULONG mhi_sigmask), R
 	}
 
 	// The legacy node kept concurrent and pre-fabric AHI claims fail-closed
-	// while the blocking capability query ran, and remains installed for
+	// while allocation was probing capabilities, and remains installed for
 	// mixed-version protection. Add the qualified inert sentinel under
 	// Forbid so current AHI observes fabric compatibility atomically.
 	Forbid();
@@ -1539,6 +1586,7 @@ void i_MHIPlay(REGA3(APTR mhi_handle), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 				KPrintF("MHIPlay: resume rejected.\n");
 				return;
 			}
+			mhi_stream_apply_gain(mp);
 			Forbid();
 			if(mp->Status != MHIF_PAUSED) {
 				// Stop landed during the blocking rebind; it owns the
@@ -1675,13 +1723,16 @@ ULONG i_MHIQuery(REGD1( ULONG mhi_query), REGA6(struct MHI_LibBase *MHI_LibBase)
 		case MHIQ_JOINT_STEREO:
 			return MHIF_SUPPORTED;
 
-		// Mixer controls (volume, panning, prefactor, the EQ bands)
-		// are deliberately NOT advertised: support is not universal,
-		// and matched control-plane firmware rejects the corresponding
-		// setters (see i_MHISetParam). Advertising them would make
-		// compliant players expose dead controls. Direct MHISetParam
-		// calls still work against pre-control-plane firmware.
+		// Per-stream volume is advertised only when the cached firmware
+		// control plane, zz9k.library vector revision, and audio-service
+		// gain flag all agree. MHIQuery has no decoder handle, so probe on
+		// demand before consulting the library-level cache.
 		case MHIQ_VOLUME_CONTROL:
+			mhi_probe_audio_caps(MHI_LibBase, NULL);
+			return MHI_LibBase->audio_stream_gain_capped ?
+				MHIF_SUPPORTED : MHIF_UNSUPPORTED;
+
+		// Panning, prefactor, and EQ address the scene-owned master chain.
 		case MHIQ_PREFACTOR_CONTROL:
 		case MHIQ_BASS_CONTROL:
 		case MHIQ_TREBLE_CONTROL:
@@ -1697,26 +1748,25 @@ ULONG i_MHIQuery(REGD1( ULONG mhi_query), REGA6(struct MHI_LibBase *MHI_LibBase)
 }
 
 /*
- * App mixer API. The master-chain parameters (volume/panning,
- * prefactor, the EQ bands) are legacy-only, and i_MHIQuery therefore
- * does not advertise them: support is not universal, and matched
- * control-plane firmware returns unsupported for these setters. They
- * map straight onto master-chain DSP registers that the scene module
- * owns once the firmware advertised the control plane at allocate. In
- * that case the register write is skipped -- the scene authority gate
- * would reject it anyway -- and the documented not-supported status
- * is reported; use scenes (ZZTop's Audio window) on control-plane
- * firmware. Against pre-control-plane firmware the direct writes
- * stand, so legacy callers that invoke MHISetParam directly (without
- * probing MHIQuery) keep working.
+ * Volume becomes per-stream attenuation only when the cached gain capability
+ * is present; it never writes ZZTop's scene-owned master chain. Panning,
+ * prefactor, and EQ remain legacy master-chain controls and are rejected on
+ * control-plane firmware. Pre-control-plane firmware keeps every legacy DSP
+ * write unchanged.
  */
 ULONG i_MHISetParam(REGA3(APTR mhi_handle), REGD0(UWORD mhi_param), REGD1(ULONG mhi_value), REGA6(struct MHI_LibBase *MHI_LibBase)) {
 	struct MhiPlayer *mp = (struct MhiPlayer *)mhi_handle;
 
 	if(mp) {
 		switch(mhi_param) {
-			case MHIP_PANNING:
 			case MHIP_VOLUME:
+				if(mp->audio_control_capped &&
+				   !mp->audio_stream_gain_capped) {
+					KPrintF("MHISetParam: volume gain unsupported.\n");
+					return MHIF_UNSUPPORTED;
+				}
+				break;
+			case MHIP_PANNING:
 			case MHIP_PREFACTOR:
 			case MHIP_BAND1:
 			case MHIP_BAND2:
@@ -1745,10 +1795,22 @@ ULONG i_MHISetParam(REGA3(APTR mhi_handle), REGD0(UWORD mhi_param), REGD1(ULONG 
 				break;
 
 			case MHIP_VOLUME: // 0..100
-				if(mhi_value > 100) mhi_value = 100;
-				mp->volume = mhi_value;
-				// set volume/panning
-				setAudioParam(mp, ZZ_AX_AP_DSP_SET_STEREO_VOLUME, mp->volume | (mp->panning<<8));
+				if(mp->audio_control_capped) {
+					if((LONG)mhi_value < 0)
+						mhi_value = 0;
+					else if(mhi_value > 100)
+						mhi_value = 100;
+					ObtainSemaphore(&mp->io_lock);
+					mp->volume = mhi_value;
+					mhi_stream_apply_gain(mp);
+					ReleaseSemaphore(&mp->io_lock);
+				} else {
+					if(mhi_value > 100) mhi_value = 100;
+					mp->volume = mhi_value;
+					// set volume/panning
+					setAudioParam(mp, ZZ_AX_AP_DSP_SET_STEREO_VOLUME,
+					              mp->volume | (mp->panning<<8));
+				}
 				break;
 
 			case MHIP_PREFACTOR: // 0..50..100

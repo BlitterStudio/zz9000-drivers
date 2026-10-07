@@ -160,14 +160,18 @@ resubmitted at release. The firmware owns every master-chain write
 Play start, or release, so a dialed-in scene survives apps opening and
 closing the device.
 
-The MHI app mixer API (`MHISetParam` for volume, panning, prefactor,
-and the EQ bands) is legacy-only against pre-control-plane firmware:
-those parameters map straight onto the master chain the scene module
-owns, so on control-plane firmware the call reports the documented
-not-supported status and the chain is left alone — use scenes
-(ZZTop's Audio window) instead.
-The calibrated matched firmware advertises the capability after its
-hardware gate. Clients still require a matched pair and retain these
+MHI volume is the exception: matched gain-capable firmware applies it as a
+per-stream attenuation below the scene. `MHIQuery(MHIQ_VOLUME_CONTROL)` only
+advertises it when the firmware advertises the audio control plane and the
+audio-service gain flag, and `zz9k.library` supplies the stream-gain vector.
+At 100% it preserves the scene level; lower values attenuate and never write
+the master chain.
+
+MHI panning, prefactor, and EQ remain legacy-only against
+pre-control-plane firmware because they address the master chain the scene
+module owns. On control-plane firmware those calls report the documented
+not-supported status and leave the chain alone — use scenes (ZZTop's Audio
+window) instead. Clients still require a matched pair and retain these
 mixed-version fallbacks:
 
 - **New driver + old firmware** — no control surface, no trims: the

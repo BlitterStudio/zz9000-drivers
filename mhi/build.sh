@@ -38,6 +38,14 @@ if ! grep -q "ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_DRAIN" \
   exit 1
 fi
 
+if ! grep -q "ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_GAIN" \
+    "$script_dir/zz9k-headers/zz9k/library_vectors.h"; then
+  echo "ERROR: the staged zz9000-sdk headers lack audio-stream gain support" >&2
+  echo "       (ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_GAIN). Point ZZ9000_SDK" >&2
+  echo "       at a checkout that includes the per-stream gain changes." >&2
+  exit 1
+fi
+
 # Same discipline for the firmware-authoritative control plane this driver
 # submits its source trim through.
 if ! grep -q "ZZ9K_OP_AUDIO_TRIM_SUBMIT" \
