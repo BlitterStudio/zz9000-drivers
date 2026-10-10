@@ -35,7 +35,7 @@ extern const char DeviceName[];
 extern const char DeviceVersionString[];
 extern const APTR DeviceInitTab[];
 
-static const struct Resident _00RomTag = {
+static const struct Resident _00RomTag __attribute__((used)) = {
 	RTC_MATCHWORD,
 	( struct Resident* ) &_00RomTag,
 	( struct Resident* ) &_00RomTag + 1,
