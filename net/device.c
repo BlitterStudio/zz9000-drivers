@@ -1225,9 +1225,18 @@ SAVEDS void frame_proc() {
   struct zznet_rx_state rx_state;
   zznet_rx_reset(&rx_state,
                  *(volatile USHORT *)(ZZ9K_REGS + ZZ_REG_FW_VERSION));
+  /* Ask for the payload longword aligned in the window when the firmware
+   * can do it: the staging copy then reads the window aligned. The
+   * firmware flags each frame written that way, so a frame queued before
+   * the switch is still read correctly. */
+  BOOL rx_offset2 = (*(volatile USHORT *)(ZZ9K_REGS + ZZNET_ETH_CONFIG) &
+                     ZZNET_ETH_CONFIG_CAP_RX_OFFSET2) != 0;
+  if (rx_offset2)
+    *(volatile USHORT *)(ZZ9K_REGS + ZZNET_ETH_CONFIG) =
+      ZZNET_ETH_CONFIG_RX_OFFSET2 | 1;
   ULONG  recv          = Wait(wmask);   /* wait for first packet */
 
-  volatile UBYTE*  frm       = (volatile UBYTE*)(ZZ9K_REGS+ZZ9K_RX);
+  volatile UBYTE*  frm_base  = (volatile UBYTE*)(ZZ9K_REGS+ZZ9K_RX);
   volatile USHORT* rx_accept = (volatile USHORT*)(ZZ9K_REGS+0x82);
   volatile USHORT* irq_ctrl  = (volatile USHORT*)(ZZ9K_REGS+0x04);
 
@@ -1241,6 +1250,8 @@ SAVEDS void frame_proc() {
 
     struct zznet_rx_decision d = zznet_rx_next(&rx_state, &zznet_rx_hw);
     USHORT sz = d.size, serial = d.serial;
+    /* frm + 4 is the frame's first byte; 2 later on an offset-2 frame. */
+    volatile UBYTE* frm = frm_base + (d.offset2 ? 2 : 0);
 
     if (d.empty)
       rxv_empty_slot++;
@@ -1325,6 +1336,9 @@ SAVEDS void frame_proc() {
   }
   // disable interrupt
   *(volatile USHORT*)(ZZ9K_REGS+0x04) = 0;
+  /* Hand the default layout back for whatever opens the card next. */
+  if (rx_offset2)
+    *(volatile USHORT *)(ZZ9K_REGS + ZZNET_ETH_CONFIG) = ZZNET_ETH_CONFIG_RX_OFFSET2;
 
   Forbid();
   ReleaseSemaphore(&db->db_ProcExitSem);

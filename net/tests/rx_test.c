@@ -403,6 +403,30 @@ static int test_serial_wrap_is_not_an_overrun(void)
 	return EXIT_SUCCESS;
 }
 
+/* An offset-2 frame: the length word carries the flag, the decision
+ * carries the plain size and the offset. */
+static int test_offset2_flag_is_masked_from_size(void)
+{
+	struct fw f;
+	struct framer fr;
+	struct zznet_rx_decision d;
+
+	fw_init(&f, FW_28);
+	framer_init(&fr, &f);
+	fw_receive(&f);
+	f.size[f.read] |= ZZNET_RX_LEN_OFFSET2;
+	f.reads = 0;
+	d = zznet_rx_next(&fr.state, &fr.io);
+	CHECK(d.action == ZZNET_RX_DELIVER && d.size == FRAME && d.offset2 == 1);
+	CHECK(d.bad_data == 0);
+	fw_ack(&f, d.serial);
+	fw_receive(&f);
+	f.reads = 0;
+	d = zznet_rx_next(&fr.state, &fr.io);
+	CHECK(d.action == ZZNET_RX_DELIVER && d.size == FRAME && d.offset2 == 0);
+	return EXIT_SUCCESS;
+}
+
 int main(void)
 {
 	static int (*const tests[])(void) = {
@@ -417,6 +441,7 @@ int main(void)
 		test_bad_size_is_dropped,
 		test_gap_spans_empty_drain_boundary,
 		test_serial_wrap_is_not_an_overrun,
+		test_offset2_flag_is_masked_from_size,
 	};
 	unsigned i;
 

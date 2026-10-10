@@ -26,6 +26,12 @@
 #define ZZNET_RX_STATUS_MIN_FW    0x0201
 
 /* Wire-level size bounds; device.c checks them against device.h. */
+/* Length-word flag: the frame starts 2 bytes further into the slot, so the
+ * payload behind the 14-byte Ethernet header is longword aligned. Only on
+ * firmware that reports ZZNET_ETH_CONFIG_CAP_RX_OFFSET2 and was asked for
+ * it (ZZNET_ETH_CONFIG_RX_OFFSET2). */
+#define ZZNET_RX_LEN_OFFSET2 0x8000
+
 #define ZZNET_RX_MIN_FRAME 14    /* full Ethernet header, empty payload */
 #define ZZNET_RX_MAX_FRAME 1518  /* 802.1Q-tagged frame without FCS */
 
@@ -54,8 +60,9 @@ struct zznet_rx_decision {
 	uint8_t  empty;      /* 1: the slot was empty (RxEmptySlot) */
 	uint8_t  bad_data;   /* BadData increment, 0 or 1 */
 	uint16_t overruns;   /* frames the serial gap says were missed */
-	uint16_t size;
+	uint16_t size;       /* without ZZNET_RX_LEN_OFFSET2 */
 	uint16_t serial;     /* ack value for DROP and DELIVER */
+	uint8_t  offset2;    /* the frame starts 2 bytes later in the slot */
 };
 
 /* fw_version is the FW_VERSION register value. */
