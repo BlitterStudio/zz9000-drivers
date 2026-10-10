@@ -228,6 +228,11 @@ SAVEDS ULONG dev_isr(struct devbase* db __asm("a1")) {
 
 static UBYTE HW_MAC[] = {0x00,0x00,0x00,0x00,0x00,0x00};
 
+/* The presented frame's Ethernet header, read from the window once per
+ * frame by frame_proc (3 longwords and a word) and used from RAM. Only
+ * frame_proc touches it. */
+static ULONG zznet_rx_hdr[4];
+
 static int zznet_mcast_hw_capable(void *ctx)
 {
 	(void)ctx;
@@ -1263,7 +1268,11 @@ SAVEDS void frame_proc() {
       continue;
     }
 
-    USHORT packet_type = *(volatile USHORT*)(frm + 16);
+    zznet_rx_hdr[0] = *(volatile ULONG*)(frm + 4);
+    zznet_rx_hdr[1] = *(volatile ULONG*)(frm + 8);
+    zznet_rx_hdr[2] = *(volatile ULONG*)(frm + 12);
+    zznet_rx_hdr[3] = (ULONG)*(volatile USHORT*)(frm + 16) << 16;
+    USHORT packet_type = (USHORT)(zznet_rx_hdr[3] >> 16);
     struct IOSana2Req *match = NULL;
 
     /* GEM hash collisions are not unknown packet types. Ack and drop
@@ -1271,7 +1280,7 @@ SAVEDS void frame_proc() {
      * stays reserved for an accepted frame with no reader or a failed
      * read. */
     {
-      struct zznet_rx_plan plan = zznet_frame_plan(db, frm + 4);
+      struct zznet_rx_plan plan = zznet_frame_plan(db, (const UBYTE *)zznet_rx_hdr);
 
       if (!plan.select_reader) {
         if (plan.count_unknown)
