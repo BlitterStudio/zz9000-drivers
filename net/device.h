@@ -34,6 +34,7 @@
 /* includes */
 #include "compiler.h"
 #include "mcast.h"
+#include "tx.h"
 #include <dos/dos.h>
 #include <exec/lists.h>
 #include <exec/libraries.h>
@@ -60,6 +61,8 @@ struct DevUnit {
 
 
 #define DEVF_INT2MODE		(1L << 0)
+#define DEVF_TXASYNC		(1L << 1) /* firmware has the asynchronous TX path */
+#define DEVF_TXSHIFT		(1L << 2) /* ... and shifted slots (ETH_TX bit 14) */
 
 struct devbase {
 	struct Library db_Lib;
@@ -85,6 +88,12 @@ struct devbase {
 	 * exited. Kept here (instead of file-static) so ownership and
 	 * lifetime are bound to the devbase the RX path dereferences. */
 	UBYTE *db_RxStage;
+
+	/* Asynchronous TX slots (DEVF_TXASYNC). Set up once in DevInit and kept
+	 * across close/reopen: frames submitted before a close may still be
+	 * owned by the firmware, so their slots must retire before reuse. */
+	struct zznet_tx_state db_Tx;
+	struct SignalSemaphore db_TxSem;
 
 	struct DevUnit db_Units[MAX_UNITS]; /* unused in construct */
 };
