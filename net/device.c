@@ -91,6 +91,8 @@ const struct NSDeviceQueryResult NSDQueryAnswer = {
 
 // FIXME get rid of global var!
 static ULONG ZZ9K_REGS = 0;
+/* Zorro II board: the bus splits a longword read into two word cycles. */
+static BOOL zznet_z2 = FALSE;
 #define ZZ9K_RX 0x2000
 #define ZZ9K_TX 0x8000
 
@@ -339,6 +341,7 @@ SAVEDS struct Device *DevInit( ASMR(d0) DEVBASEP                  ASMREG(d0),
 
           D(("ZZ9000Net: MNT ZZ9000 found.\n"));
           ZZ9K_REGS = (ULONG)cd->cd_BoardAddr;
+          zznet_z2 = (cd->cd_Rom.er_Product == 0x3);
 
           BOOL have_env_mac = FALSE;
 
@@ -920,11 +923,20 @@ void DevTermIO( DEVBASEP, struct IORequest *ioreq )
  *   +18..    payload
  */
 
+static uint16_t zznet_rx_hw_word(void *ctx, unsigned off)
+{
+	(void)ctx;
+	return *(volatile USHORT *)(ZZ9K_REGS + ZZ9K_RX + off);
+}
+
 /* Fetch [size:2][serial:2] in one bus cycle on Z3 (32-bit) — the two
  * values always move together and live in adjacent words, so there is
- * no reason to poke the card twice. */
+ * no reason to poke the card twice.  Zorro II splits that read, size
+ * first, so read the serial first there (zznet_rx_header_split). */
 static uint32_t zznet_rx_hw_header(void *ctx)
 {
+	if (zznet_z2)
+		return zznet_rx_header_split(zznet_rx_hw_word, ctx);
 	(void)ctx;
 	return *(volatile ULONG *)(ZZ9K_REGS + ZZ9K_RX);
 }

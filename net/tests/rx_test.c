@@ -44,6 +44,10 @@ struct fw {
 	int swap_on_reread;
 	uint16_t swap_size, swap_serial;
 	unsigned reads;
+	/* One-shot: a frame lands between the two word reads of a split
+	 * (Zorro II) header read. */
+	int publish_between_words;
+	unsigned words;
 };
 
 static uint16_t fw_version(const struct fw *f)
@@ -126,6 +130,32 @@ static uint32_t fw_header(void *ctx)
 	return ((uint32_t)f->size[f->read] << 16) | f->serial[f->read];
 }
 
+/* Zorro II: the longword header read is two word cycles. */
+static uint16_t fw_word(void *ctx, unsigned off)
+{
+	struct fw *f = ctx;
+	uint16_t v = off == 0 ? f->size[f->read] : f->serial[f->read];
+
+	if (++f->words == 1 && f->publish_between_words) {
+		f->publish_between_words = 0;
+		fw_receive(f);
+	}
+	return v;
+}
+
+/* The longword read as the bus splits it: size word, then serial word. */
+static uint32_t fw_header_size_first(void *ctx)
+{
+	uint16_t size = fw_word(ctx, 0);
+
+	return ((uint32_t)size << 16) | fw_word(ctx, 2);
+}
+
+static uint32_t fw_header_serial_first(void *ctx)
+{
+	return zznet_rx_header_split(fw_word, ctx);
+}
+
 static uint16_t fw_status(void *ctx)
 {
 	struct fw *f = ctx;
@@ -157,6 +187,7 @@ static enum zznet_rx_action framer_step(struct framer *fr, struct fw *f)
 	struct zznet_rx_decision d;
 
 	f->reads = 0;
+	f->words = 0;
 	d = zznet_rx_next(&fr->state, &fr->io);
 	fr->overruns += d.overruns;
 	fr->bad_data += d.bad_data;
@@ -403,6 +434,43 @@ static int test_serial_wrap_is_not_an_overrun(void)
 	return EXIT_SUCCESS;
 }
 
+/* A frame published between the two word reads of a split header read.
+ * Size first reads the empty slot's size 0 beside the new serial: the
+ * framer drops it as a torn header and the ack consumes it unread.  Serial
+ * first sees the empty slot, and the frame on the next read. */
+static int run_split_race(uint32_t (*reader)(void *), unsigned *delivered,
+                          unsigned *bad_data)
+{
+	struct fw f;
+	struct framer fr;
+
+	fw_init(&f, FW_28);
+	framer_init(&fr, &f);
+	fr.io.read_header = reader;
+	fw_receive(&f);                  /* serial 2 */
+	CHECK(framer_run(&fr, &f) == 0);
+	CHECK(fr.delivered == 1);
+	f.publish_between_words = 1;     /* serial 3 lands mid-read */
+	framer_step(&fr, &f);
+	CHECK(framer_run(&fr, &f) == 0);
+	*delivered = fr.delivered;
+	*bad_data = fr.bad_data;
+	return EXIT_SUCCESS;
+}
+
+static int test_split_header_read_serial_first(void)
+{
+	unsigned delivered, bad_data;
+
+	CHECK(run_split_race(fw_header_size_first, &delivered, &bad_data) ==
+	      EXIT_SUCCESS);
+	CHECK(delivered == 1 && bad_data == 1);  /* the failure this avoids */
+	CHECK(run_split_race(fw_header_serial_first, &delivered, &bad_data) ==
+	      EXIT_SUCCESS);
+	CHECK(delivered == 2 && bad_data == 0);
+	return EXIT_SUCCESS;
+}
+
 int main(void)
 {
 	static int (*const tests[])(void) = {
@@ -417,6 +485,7 @@ int main(void)
 		test_bad_size_is_dropped,
 		test_gap_spans_empty_drain_boundary,
 		test_serial_wrap_is_not_an_overrun,
+		test_split_header_read_serial_first,
 	};
 	unsigned i;
 

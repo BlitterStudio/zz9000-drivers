@@ -58,6 +58,17 @@ struct zznet_rx_decision {
 	uint16_t serial;     /* ack value for DROP and DELIVER */
 };
 
+/* The presented header from two 16-bit reads, for a bus that splits a
+ * longword read (Zorro II: two word cycles, size first).  Size first can
+ * read the size of the empty slot, then the serial of a frame published in
+ * between: size 0 beside a fresh serial, which zznet_rx_next() drops as a
+ * torn header, acking the frame unread.  The serial goes first instead, as
+ * the publication marker: 0 is an empty slot and the size is not read; any
+ * other serial was published together with its size.  read16(ctx, off)
+ * reads the header word at off (0 size, 2 serial). */
+uint32_t zznet_rx_header_split(uint16_t (*read16)(void *ctx, unsigned off),
+                               void *ctx);
+
 /* fw_version is the FW_VERSION register value. */
 void zznet_rx_reset(struct zznet_rx_state *state, uint16_t fw_version);
 
