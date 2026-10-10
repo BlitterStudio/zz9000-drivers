@@ -8,6 +8,16 @@ void zznet_rx_reset(struct zznet_rx_state *state, uint16_t fw_version)
 	state->ready_valid = fw_version >= ZZNET_RX_STATUS_MIN_FW;
 }
 
+uint32_t zznet_rx_header_split(uint16_t (*read16)(void *ctx, unsigned off),
+                               void *ctx)
+{
+	uint16_t serial = read16(ctx, 2);
+
+	if (serial == 0)
+		return 0;
+	return ((uint32_t)read16(ctx, 0) << 16) | serial;
+}
+
 struct zznet_rx_decision zznet_rx_next(struct zznet_rx_state *state,
                                        const struct zznet_rx_io *io)
 {
