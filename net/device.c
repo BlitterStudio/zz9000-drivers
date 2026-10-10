@@ -95,6 +95,9 @@ static ULONG ZZ9K_REGS = 0;
 #define ZZ9K_RX 0x2000
 #define ZZ9K_TX 0x8000
 #define ZZ9K_TX_STATUS 0x68
+/* ETH_RX_META: bit 13 = shifted TX slots (ETH_TX bit 14) understood. */
+#define ZZ9K_RX_META 0xA6
+#define ZZ9K_RX_META_TX_OFFSET2 0x2000
 
 /* Status reads (about 1 us each, served by the ARM) a writer spends waiting
  * for one of the four TX slots to retire before it gives up on the frame.
@@ -397,6 +400,10 @@ SAVEDS struct Device *DevInit( ASMR(d0) DEVBASEP                  ASMREG(d0),
                              *(volatile USHORT*)(ZZ9K_REGS+ZZ9K_TX_STATUS))) {
             D(("ZZ9000Net: Using asynchronous TX.\n"));
             db->db_Flags |= DEVF_TXASYNC;
+            /* Firmware without the register reads 0 there. */
+            if (*(volatile USHORT*)(ZZ9K_REGS+ZZ9K_RX_META) &
+                ZZ9K_RX_META_TX_OFFSET2)
+              db->db_Flags |= DEVF_TXSHIFT;
           }
 
           ok = 1;
@@ -1215,7 +1222,11 @@ ULONG write_frame(DEVBASETYPE *db, struct IOSana2Req *req, UBYTE *frame, int slo
 		 * stays the firmware's until ETH_TX_STATUS retires it. A refused
 		 * submission is retired the same way and cannot be told apart
 		 * from a sent one, so there is no result to read back. */
-		*(volatile USHORT*)(ZZ9K_REGS+0x80) = zznet_tx_word(slot, sz);
+		USHORT word = zznet_tx_word(slot, sz);
+
+		if (db->db_Flags & DEVF_TXSHIFT)
+			word |= ZZNET_TX_OFFSET2;
+		*(volatile USHORT*)(ZZ9K_REGS+0x80) = word;
 		zznet_tx_submitted(&db->db_Tx);
 		return 0;
 	}
@@ -1252,9 +1263,14 @@ static ULONG write_frame_async(DEVBASETYPE *db, struct IOSana2Req *req)
 		zznet_tx_reclaim(&db->db_Tx,
 		                 *(volatile USHORT*)(ZZ9K_REGS+ZZ9K_TX_STATUS));
 	if (slot >= 0) {
+		/* Shifted, the frame starts 2 bytes into the slot and the
+		 * stack's CopyFromBuff writes the IP payload to a longword
+		 * aligned card address. */
 		rc = write_frame(db, req,
 		                 (UBYTE*)(ZZ9K_REGS + ZZ9K_TX +
-		                          (ULONG)slot * ZZNET_TX_SLOT_SIZE), slot);
+		                          (ULONG)slot * ZZNET_TX_SLOT_SIZE +
+		                          ((db->db_Flags & DEVF_TXSHIFT) ? 2 : 0)),
+		                 slot);
 	} else {
 		D(("tx: no slot retired\n"));
 	}

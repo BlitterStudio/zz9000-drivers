@@ -167,6 +167,8 @@ int main(void)
 
 	/* Length word layout. */
 	CHECK(zznet_tx_word(3, 1518) == (0x8000 | (3 << 11) | 1518));
+	CHECK((zznet_tx_word(3, 0x7ff) & ZZNET_TX_OFFSET2) == 0);
+	CHECK(zznet_tx_word(0, 2046) == (ZZNET_TX_ASYNC | 2046));
 
 	printf("tx_test: ok\n");
 	return EXIT_SUCCESS;

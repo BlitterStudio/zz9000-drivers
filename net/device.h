@@ -62,6 +62,7 @@ struct DevUnit {
 
 #define DEVF_INT2MODE		(1L << 0)
 #define DEVF_TXASYNC		(1L << 1) /* firmware has the asynchronous TX path */
+#define DEVF_TXSHIFT		(1L << 2) /* ... and shifted slots (ETH_TX bit 14) */
 
 struct devbase {
 	struct Library db_Lib;
