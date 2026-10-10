@@ -495,7 +495,7 @@ SAVEDS LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
       if (port = CreateMsgPort()) {
         D(("ZZ9000Net: Starting Process\n"));
         if ((db->db_Proc = CreateNewProcTags(NP_Entry, (ULONG)frame_proc, NP_Name,
-                                             (ULONG)frame_proc_name, NP_Priority, 0, TAG_DONE))) {
+                                             (ULONG)frame_proc_name, NP_Priority, 10, TAG_DONE))) {
           InitSemaphore(&db->db_ProcExitSem);
 
           init.error = 1;
