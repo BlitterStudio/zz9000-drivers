@@ -495,7 +495,7 @@ SAVEDS LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
       if (port = CreateMsgPort()) {
         D(("ZZ9000Net: Starting Process\n"));
         if ((db->db_Proc = CreateNewProcTags(NP_Entry, (ULONG)frame_proc, NP_Name,
-                                             (ULONG)frame_proc_name, NP_Priority, 10, TAG_DONE))) {
+                                             (ULONG)frame_proc_name, NP_Priority, ZZNET_FRAMER_PRI, TAG_DONE))) {
           InitSemaphore(&db->db_ProcExitSem);
 
           init.error = 1;
@@ -1222,9 +1222,12 @@ SAVEDS void frame_proc() {
 
   wmask = SIGBREAKF_CTRL_F | SIGBREAKF_CTRL_C;
 
+  struct Task *self = FindTask(NULL);
+  struct zznet_rx_drain drain;
   struct zznet_rx_state rx_state;
   zznet_rx_reset(&rx_state,
                  *(volatile USHORT *)(ZZ9K_REGS + ZZ_REG_FW_VERSION));
+  zznet_rx_drain_reset(&drain);
   ULONG  recv          = Wait(wmask);   /* wait for first packet */
 
   volatile UBYTE*  frm       = (volatile UBYTE*)(ZZ9K_REGS+ZZ9K_RX);
@@ -1252,10 +1255,24 @@ SAVEDS void frame_proc() {
        * ISR can wake us, then sleep. Enable-before-wait is correct: if a
        * frame raced in between our header read and the enable, the ISR
        * will signal and Wait returns immediately. */
+      int pri = zznet_rx_drain_reset(&drain);
+      if (pri != ZZNET_RX_PRI_KEEP)
+        SetTaskPri(self, pri);
       *irq_ctrl = 1;
       recv = Wait(wmask);
       continue;
     }
+
+    /* Bound the drain: under a flood the backlog never empties and the
+     * WAIT branch never sleeps. Every ZZNET_RX_DRAIN_BUDGET frames,
+     * alternate with a budget at ZZNET_FRAMER_YIELD_PRI, where tasks
+     * above it preempt the framer and equal tasks share time slices. */
+    {
+      int pri = zznet_rx_drain_frame(&drain);
+      if (pri != ZZNET_RX_PRI_KEEP)
+        SetTaskPri(self, pri);
+    }
+
     if (d.action == ZZNET_RX_DROP) {
       /* Ack with the frame's serial so the firmware RX-accept handshake
        * advances past exactly this (bad) frame and nothing else. */
