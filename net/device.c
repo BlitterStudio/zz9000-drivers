@@ -228,6 +228,11 @@ SAVEDS ULONG dev_isr(struct devbase* db __asm("a1")) {
 
 static UBYTE HW_MAC[] = {0x00,0x00,0x00,0x00,0x00,0x00};
 
+/* The presented frame's Ethernet header, read from the window once per
+ * frame by frame_proc (3 longwords and a word) and used from RAM. Only
+ * frame_proc touches it. */
+static ULONG zznet_rx_hdr[4];
+
 static int zznet_mcast_hw_capable(void *ctx)
 {
 	(void)ctx;
@@ -952,6 +957,26 @@ static const struct zznet_rx_io zznet_rx_hw = {
  * Returns the start of the valid bytes inside `base`, which the caller
  * then passes to Roadshow's CopyToBuffer as a RAM source.
  */
+/* 32 bytes per block, eight registers in and out: on a 68060 reading the
+ * Zorro III RX window the per-longword loop spends as much on instructions
+ * as on the bus.  `blocks` is at least 1. */
+static void zznet_copy_blocks(ULONG *dst, volatile ULONG *src, ULONG blocks)
+{
+	register ULONG *d __asm__("a0") = dst;
+	register volatile ULONG *s __asm__("a1") = src;
+	register ULONG n __asm__("d0") = blocks;
+
+	__asm__ volatile(
+		"1:	movem.l (%1)+,%%d1-%%d7/%%a2\n"
+		"	movem.l %%d1-%%d7/%%a2,(%0)\n"
+		"	lea 32(%0),%0\n"
+		"	subq.l #1,%2\n"
+		"	bne.s 1b\n"
+		: "+a"(d), "+a"(s), "+d"(n)
+		:
+		: "d1", "d2", "d3", "d4", "d5", "d6", "d7", "a2", "cc", "memory");
+}
+
 static inline UBYTE* zznet_mmio_read_block(volatile UBYTE *src, UBYTE *base, ULONG n) {
 	/* Caller contract: `base` is longword-aligned (enforced at AllocVec
 	 * time in DevOpen). `src` is word-aligned and its 2-byte phase
@@ -983,6 +1008,12 @@ static inline UBYTE* zznet_mmio_read_block(volatile UBYTE *src, UBYTE *base, ULO
 		volatile ULONG *ls = (volatile ULONG*)src;
 		ULONG          *ld = (ULONG*)dst;
 		ULONG longs = n >> 2;
+		if (longs >= 8) {
+			zznet_copy_blocks(ld, ls, longs >> 3);
+			ld += longs & ~7UL;
+			ls += longs & ~7UL;
+			longs &= 7;
+		}
 		while (longs--) *ld++ = *ls++;
 		src = (volatile UBYTE*)ls;
 		dst = (UBYTE*)ld;
@@ -1228,9 +1259,18 @@ SAVEDS void frame_proc() {
   zznet_rx_reset(&rx_state,
                  *(volatile USHORT *)(ZZ9K_REGS + ZZ_REG_FW_VERSION));
   zznet_rx_drain_reset(&drain);
+  /* Ask for the payload longword aligned in the window when the firmware
+   * can do it: the staging copy then reads the window aligned. The
+   * firmware flags each frame written that way, so a frame queued before
+   * the switch is still read correctly. */
+  BOOL rx_offset2 = (*(volatile USHORT *)(ZZ9K_REGS + ZZNET_ETH_CONFIG) &
+                     ZZNET_ETH_CONFIG_CAP_RX_OFFSET2) != 0;
+  if (rx_offset2)
+    *(volatile USHORT *)(ZZ9K_REGS + ZZNET_ETH_CONFIG) =
+      ZZNET_ETH_CONFIG_RX_OFFSET2 | 1;
   ULONG  recv          = Wait(wmask);   /* wait for first packet */
 
-  volatile UBYTE*  frm       = (volatile UBYTE*)(ZZ9K_REGS+ZZ9K_RX);
+  volatile UBYTE*  frm_base  = (volatile UBYTE*)(ZZ9K_REGS+ZZ9K_RX);
   volatile USHORT* rx_accept = (volatile USHORT*)(ZZ9K_REGS+0x82);
   volatile USHORT* irq_ctrl  = (volatile USHORT*)(ZZ9K_REGS+0x04);
 
@@ -1244,6 +1284,8 @@ SAVEDS void frame_proc() {
 
     struct zznet_rx_decision d = zznet_rx_next(&rx_state, &zznet_rx_hw);
     USHORT sz = d.size, serial = d.serial;
+    /* frm + 4 is the frame's first byte; 2 later on an offset-2 frame. */
+    volatile UBYTE* frm = frm_base + (d.offset2 ? 2 : 0);
 
     if (d.empty)
       rxv_empty_slot++;
@@ -1280,7 +1322,11 @@ SAVEDS void frame_proc() {
       continue;
     }
 
-    USHORT packet_type = *(volatile USHORT*)(frm + 16);
+    zznet_rx_hdr[0] = *(volatile ULONG*)(frm + 4);
+    zznet_rx_hdr[1] = *(volatile ULONG*)(frm + 8);
+    zznet_rx_hdr[2] = *(volatile ULONG*)(frm + 12);
+    zznet_rx_hdr[3] = (ULONG)*(volatile USHORT*)(frm + 16) << 16;
+    USHORT packet_type = (USHORT)(zznet_rx_hdr[3] >> 16);
     struct IOSana2Req *match = NULL;
 
     /* GEM hash collisions are not unknown packet types. Ack and drop
@@ -1288,7 +1334,7 @@ SAVEDS void frame_proc() {
      * stays reserved for an accepted frame with no reader or a failed
      * read. */
     {
-      struct zznet_rx_plan plan = zznet_frame_plan(db, frm + 4);
+      struct zznet_rx_plan plan = zznet_frame_plan(db, (const UBYTE *)zznet_rx_hdr);
 
       if (!plan.select_reader) {
         if (plan.count_unknown)
@@ -1342,6 +1388,9 @@ SAVEDS void frame_proc() {
   }
   // disable interrupt
   *(volatile USHORT*)(ZZ9K_REGS+0x04) = 0;
+  /* Hand the default layout back for whatever opens the card next. */
+  if (rx_offset2)
+    *(volatile USHORT *)(ZZ9K_REGS + ZZNET_ETH_CONFIG) = ZZNET_ETH_CONFIG_RX_OFFSET2;
 
   Forbid();
   ReleaseSemaphore(&db->db_ProcExitSem);

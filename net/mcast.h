@@ -9,6 +9,8 @@
  *   write 0x8000|b  program GEM hash bucket b (0..63)
  *   write 0x4000|b  clear bucket b
  *   write 0x2000    clear every bucket
+ *   read  bit 2     ZZNET_ETH_CONFIG_CAP_RX_OFFSET2
+ *   write 0x1000|on RX offset 2 on (1) or off (0); off after an Amiga reset
  * A 64-bucket hash collides, so delivery still requires an exact join.
  */
 #ifndef ZZNET_MCAST_H
@@ -25,6 +27,8 @@
 #define ZZNET_ETH_CONFIG_HASH_SET       0x8000
 #define ZZNET_ETH_CONFIG_HASH_CLEAR     0x4000
 #define ZZNET_ETH_CONFIG_HASH_RESET     0x2000
+#define ZZNET_ETH_CONFIG_CAP_RX_OFFSET2 0x0004
+#define ZZNET_ETH_CONFIG_RX_OFFSET2     0x1000
 
 /* Numeric values of devices/sana2.h. device.c static-asserts the match. */
 #define ZZNET_S2ERR_NO_RESOURCES  1
