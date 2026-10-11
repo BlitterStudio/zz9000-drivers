@@ -44,3 +44,14 @@ void zznet_tx_submitted(struct zznet_tx_state *state)
 	state->next++;
 	state->inuse++;
 }
+
+int zznet_tx_drain(struct zznet_tx_state *state,
+                   uint16_t (*read_status)(void *context), void *context,
+                   unsigned long max_reads)
+{
+	unsigned long reads;
+
+	for (reads = 0; state->inuse != 0 && reads < max_reads; reads++)
+		zznet_tx_reclaim(state, read_status(context));
+	return state->inuse == 0;
+}

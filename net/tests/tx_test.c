@@ -98,6 +98,19 @@ static int submit(struct zznet_tx_state *s, struct fw *f, int accept)
 	return slot;
 }
 
+/* A status register whose card retires everything after a number of reads. */
+static struct fw *drain_fw;
+static unsigned long drain_reads, drain_complete_after = ~0UL;
+
+static uint16_t drain_status(void *context)
+{
+	(void)context;
+	if (++drain_reads >= drain_complete_after)
+		while (drain_fw->len)
+			fw_complete(drain_fw);
+	return fw_status(drain_fw);
+}
+
 int main(void)
 {
 	struct zznet_tx_state s;
@@ -164,6 +177,20 @@ int main(void)
 	CHECK(s.inuse == 0 && s.done == 0x1234);
 	CHECK(zznet_tx_reclaim(&s, ZZNET_TX_STATUS_PRESENT | 0x1240) == 0);
 	CHECK(s.done == 0x1240);
+
+	/* Expunge drain: outstanding sends keep the device until they retire. */
+	memset(&f, 0, sizeof(f));
+	zznet_tx_reset(&s, fw_status(&f));
+	CHECK(submit(&s, &f, 1) == 0);
+	CHECK(submit(&s, &f, 1) == 1);
+	drain_fw = &f;
+	drain_reads = 0;
+	CHECK(zznet_tx_drain(&s, drain_status, NULL, 10) == 0);   /* still in DMA */
+	CHECK(s.inuse == 2 && drain_reads == 10);
+	drain_complete_after = drain_reads + 3;                    /* card finishes */
+	CHECK(zznet_tx_drain(&s, drain_status, NULL, 10) == 1);
+	CHECK(s.inuse == 0);
+	CHECK(zznet_tx_drain(&s, drain_status, NULL, 0) == 1);    /* nothing outstanding */
 
 	/* Length word layout. */
 	CHECK(zznet_tx_word(3, 1518) == (0x8000 | (3 << 11) | 1518));

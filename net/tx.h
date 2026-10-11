@@ -62,6 +62,13 @@ int zznet_tx_slot(const struct zznet_tx_state *state);
 /* The ETH_TX word that submits `len` bytes from `slot`. */
 uint16_t zznet_tx_word(int slot, uint16_t len);
 
+/* Reclaim until nothing is outstanding, reading the status through
+ * read_status at most max_reads times. Returns 1 once every submission has
+ * retired, 0 if some are still owned by the card's DMA. */
+int zznet_tx_drain(struct zznet_tx_state *state,
+                   uint16_t (*read_status)(void *context), void *context,
+                   unsigned long max_reads);
+
 /* Record a submission written with zznet_tx_word(zznet_tx_slot(), ...). */
 void zznet_tx_submitted(struct zznet_tx_state *state);
 
