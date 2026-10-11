@@ -687,12 +687,32 @@ SAVEDS BPTR DevClose(   ASMR(a1) struct IORequest *ioreq        ASMREG(a1),
 	return ret;
 }
 
+static uint16_t read_tx_status(void *context)
+{
+	(void)context;
+	return *(volatile USHORT*)(ZZ9K_REGS+ZZ9K_TX_STATUS);
+}
+
 SAVEDS BPTR DevExpunge( ASMR(a6) DEVBASEP                        ASMREG(a6) )
 {
 	BPTR seglist = db->db_SegList;
 
 	if( db->db_Lib.lib_OpenCnt )
 	{
+		db->db_Lib.lib_Flags |= LIBF_DELEXP;
+		return (0);
+	}
+
+	/* Asynchronous sends still outstanding own their TX-window slots until
+	 * the card retires them. A reloaded driver would hand those slots out
+	 * again and count the old completions against its new sends, so give
+	 * them a moment and refuse the expunge if they are still in DMA (the
+	 * firmware retires a stalled send, so a later expunge succeeds). */
+	if ((db->db_Flags & DEVF_TXASYNC) &&
+	    !zznet_tx_drain(&db->db_Tx, read_tx_status, NULL,
+	                    ZZNET_TX_WAIT_READS))
+	{
+		D(("ZZ9000Net: TX still in flight, expunge deferred\n"));
 		db->db_Lib.lib_Flags |= LIBF_DELEXP;
 		return (0);
 	}
