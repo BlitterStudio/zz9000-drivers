@@ -93,6 +93,9 @@ const struct NSDeviceQueryResult NSDQueryAnswer = {
 static ULONG ZZ9K_REGS = 0;
 /* Zorro II board: the bus splits a longword read into two word cycles. */
 static BOOL zznet_z2 = FALSE;
+/* Zorro II and firmware that never hands out serial 0: frame_proc reads
+ * the RX header serial first (zznet_rx_serial_first). */
+static BOOL zznet_rx_split = FALSE;
 #define ZZ9K_RX 0x2000
 #define ZZ9K_TX 0x8000
 
@@ -937,10 +940,11 @@ static uint16_t zznet_rx_hw_word(void *ctx, unsigned off)
 /* Fetch [size:2][serial:2] in one bus cycle on Z3 (32-bit) — the two
  * values always move together and live in adjacent words, so there is
  * no reason to poke the card twice.  Zorro II splits that read, size
- * first, so read the serial first there (zznet_rx_header_split). */
+ * first, so read the serial first there (zznet_rx_header_split) when the
+ * firmware allows it. */
 static uint32_t zznet_rx_hw_header(void *ctx)
 {
-	if (zznet_z2)
+	if (zznet_rx_split)
 		return zznet_rx_header_split(zznet_rx_hw_word, ctx);
 	(void)ctx;
 	return *(volatile ULONG *)(ZZ9K_REGS + ZZ9K_RX);
@@ -1266,8 +1270,9 @@ SAVEDS void frame_proc() {
   wmask = SIGBREAKF_CTRL_F | SIGBREAKF_CTRL_C;
 
   struct zznet_rx_state rx_state;
-  zznet_rx_reset(&rx_state,
-                 *(volatile USHORT *)(ZZ9K_REGS + ZZ_REG_FW_VERSION));
+  USHORT fw_version = *(volatile USHORT *)(ZZ9K_REGS + ZZ_REG_FW_VERSION);
+  zznet_rx_reset(&rx_state, fw_version);
+  zznet_rx_split = zznet_z2 && zznet_rx_serial_first(fw_version);
   /* Ask for the payload longword aligned in the window when the firmware
    * can do it: the staging copy then reads the window aligned. The
    * firmware flags each frame written that way, so a frame queued before

@@ -18,6 +18,11 @@ uint32_t zznet_rx_header_split(uint16_t (*read16)(void *ctx, unsigned off),
 	return ((uint32_t)read16(ctx, 0) << 16) | serial;
 }
 
+int zznet_rx_serial_first(uint16_t fw_version)
+{
+	return fw_version >= ZZNET_RX_SERIAL_SKIP_MIN_FW;
+}
+
 struct zznet_rx_decision zznet_rx_next(struct zznet_rx_state *state,
                                        const struct zznet_rx_io *io)
 {

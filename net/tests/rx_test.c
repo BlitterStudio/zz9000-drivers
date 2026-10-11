@@ -156,6 +156,17 @@ static uint32_t fw_header_serial_first(void *ctx)
 	return zznet_rx_header_split(fw_word, ctx);
 }
 
+/* The Zorro II header read frame_proc makes: serial first where the
+ * firmware allows it, else the bus-split longword, size first. */
+static uint32_t fw_header_z2(void *ctx)
+{
+	struct fw *f = ctx;
+
+	if (zznet_rx_serial_first(fw_version(f)))
+		return zznet_rx_header_split(fw_word, ctx);
+	return fw_header_size_first(ctx);
+}
+
 static uint16_t fw_status(void *ctx)
 {
 	struct fw *f = ctx;
@@ -495,6 +506,68 @@ static int test_offset2_flag_is_masked_from_size(void)
 	return EXIT_SUCCESS;
 }
 
+/* Firmware before 2.8 gives serial 0 to the frame after 0xffff. The
+ * Zorro II read must deliver it: serial first would take it for an empty
+ * slot, never ack it, and stall with the frame waiting. One frame per drain,
+ * so the legacy backlog presents a fresh slot 0 each time. */
+static int run_split_wrap(enum fw_gen gen, uint32_t (*reader)(void *),
+                          unsigned *delivered)
+{
+	struct fw f;
+	struct framer fr;
+	int i, rc = 0;
+
+	fw_init(&f, gen);
+	framer_init(&fr, &f);
+	fr.io.read_header = reader;
+	f.frame_serial = 0xfffe;
+	for (i = 0; i < 3 && rc == 0; i++) {
+		fw_receive(&f);         /* 0xffff, 0, 1 */
+		rc = framer_run(&fr, &f);
+	}
+	*delivered = fr.delivered;
+	return rc;
+}
+
+static int test_split_header_read_serial_wrap_before_2_8(void)
+{
+	static const enum fw_gen gens[] = { FW_LEGACY, FW_21 };
+	unsigned i, delivered;
+
+	CHECK(!zznet_rx_serial_first(0x0200));
+	CHECK(!zznet_rx_serial_first(0x0201));
+	CHECK(!zznet_rx_serial_first(0x0202));
+	CHECK(zznet_rx_serial_first(0x0208));
+	for (i = 0; i < sizeof(gens) / sizeof(gens[0]); i++) {
+		/* the stall the firmware gate avoids */
+		CHECK(run_split_wrap(gens[i], fw_header_serial_first,
+		                     &delivered) == -1);
+		CHECK(delivered == 1);
+		CHECK(run_split_wrap(gens[i], fw_header_z2, &delivered) == 0);
+		CHECK(delivered == 3);
+	}
+	return EXIT_SUCCESS;
+}
+
+/* Firmware 2.8+ skips 0 and 1: the Zorro II read is serial first and
+ * crosses the wrap. */
+static int test_split_header_read_serial_wrap_2_8(void)
+{
+	struct fw f;
+	struct framer fr;
+
+	fw_init(&f, FW_28);
+	framer_init(&fr, &f);
+	fr.io.read_header = fw_header_z2;
+	f.frame_serial = 0xfffe;
+	fw_receive(&f);                 /* 0xffff */
+	fw_receive(&f);                 /* 2 */
+	CHECK(framer_run(&fr, &f) == 0);
+	CHECK(fr.delivered == 2);
+	CHECK(fr.overruns == 0 && fr.bad_data == 0);
+	return EXIT_SUCCESS;
+}
+
 int main(void)
 {
 	static int (*const tests[])(void) = {
@@ -510,6 +583,8 @@ int main(void)
 		test_gap_spans_empty_drain_boundary,
 		test_serial_wrap_is_not_an_overrun,
 		test_split_header_read_serial_first,
+		test_split_header_read_serial_wrap_before_2_8,
+		test_split_header_read_serial_wrap_2_8,
 		test_offset2_flag_is_masked_from_size,
 	};
 	unsigned i;
