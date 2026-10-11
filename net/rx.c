@@ -21,10 +21,11 @@ uint32_t zznet_rx_header_split(uint16_t (*read16)(void *ctx, unsigned off),
 struct zznet_rx_decision zznet_rx_next(struct zznet_rx_state *state,
                                        const struct zznet_rx_io *io)
 {
-	struct zznet_rx_decision d = { ZZNET_RX_WAIT, 0, 0, 0, 0, 0 };
+	struct zznet_rx_decision d = { ZZNET_RX_WAIT, 0, 0, 0, 0, 0, 0 };
 	uint32_t header = io->read_header(io->ctx);
 
-	d.size = (uint16_t)(header >> 16);
+	d.size = (uint16_t)(header >> 16) & (uint16_t)~ZZNET_RX_LEN_OFFSET2;
+	d.offset2 = (header >> 16) & ZZNET_RX_LEN_OFFSET2 ? 1 : 0;
 	d.serial = (uint16_t)header;
 
 	/* issue #29: an all-zero header is an empty slot, not a frame. Acking it
