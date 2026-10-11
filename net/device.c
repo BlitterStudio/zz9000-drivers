@@ -952,6 +952,26 @@ static const struct zznet_rx_io zznet_rx_hw = {
  * Returns the start of the valid bytes inside `base`, which the caller
  * then passes to Roadshow's CopyToBuffer as a RAM source.
  */
+/* 32 bytes per block, eight registers in and out: on a 68060 reading the
+ * Zorro III RX window the per-longword loop spends as much on instructions
+ * as on the bus.  `blocks` is at least 1. */
+static void zznet_copy_blocks(ULONG *dst, volatile ULONG *src, ULONG blocks)
+{
+	register ULONG *d __asm__("a0") = dst;
+	register volatile ULONG *s __asm__("a1") = src;
+	register ULONG n __asm__("d0") = blocks;
+
+	__asm__ volatile(
+		"1:	movem.l (%1)+,%%d1-%%d7/%%a2\n"
+		"	movem.l %%d1-%%d7/%%a2,(%0)\n"
+		"	lea 32(%0),%0\n"
+		"	subq.l #1,%2\n"
+		"	bne.s 1b\n"
+		: "+a"(d), "+a"(s), "+d"(n)
+		:
+		: "d1", "d2", "d3", "d4", "d5", "d6", "d7", "a2", "cc", "memory");
+}
+
 static inline UBYTE* zznet_mmio_read_block(volatile UBYTE *src, UBYTE *base, ULONG n) {
 	/* Caller contract: `base` is longword-aligned (enforced at AllocVec
 	 * time in DevOpen). `src` is word-aligned and its 2-byte phase
@@ -983,6 +1003,12 @@ static inline UBYTE* zznet_mmio_read_block(volatile UBYTE *src, UBYTE *base, ULO
 		volatile ULONG *ls = (volatile ULONG*)src;
 		ULONG          *ld = (ULONG*)dst;
 		ULONG longs = n >> 2;
+		if (longs >= 8) {
+			zznet_copy_blocks(ld, ls, longs >> 3);
+			ld += longs & ~7UL;
+			ls += longs & ~7UL;
+			longs &= 7;
+		}
 		while (longs--) *ld++ = *ls++;
 		src = (volatile UBYTE*)ls;
 		dst = (UBYTE*)ld;
