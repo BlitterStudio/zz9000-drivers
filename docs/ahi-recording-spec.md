@@ -1,227 +1,154 @@
 # ZZ9000AX AHI recording specification
 
-**Implementation and hardware status (2026-07-29):** the production `0xa204`
-candidate completed the R17 gate on a real Amiga and default-Z3 ZZ9000AX
-system. RCA channel isolation, stereo and silence capture, all six advertised
-recording rates, repeated teardown/reopen, final playback, and true
-one-`AHIAudioCtrl` full duplex all passed without noise or unexpected
-behavior. Host tests and both repository CI pipelines also passed.
+`zz9000ax.audio` records stereo audio from the ZZ9000AX RCA inputs when the
+running firmware advertises the capture protocol. It delivers one 20 ms buffer
+at the selected AHI mix rate, supports 8, 12, 24, 32, 44.1, and 48 kHz, and can
+record while the same `AHIAudioCtrl` plays.
 
-That acceptance applies to the exact R17 firmware, default-Z3 bitstream and
-driver artifacts. The later post-review firmware build and final matched
-installer/release payload still require their combined release smoke; rebuilt
-non-default bitstream variants are build/report validated but not
-hardware-tested.
+Recording requires matching FPGA, firmware, and AHI-driver releases. On
+firmware without the capture capability, the driver continues to provide
+playback and does not advertise recording.
 
-## Scope
+## AHI interface
 
-Add stereo recording from the ZZ9000AX RCA inputs to `zz9000ax.audio`.
-Characterization established that the ADAU1761 publishes valid input on TDM8
-slots 0 and 1, while its nominal I2S output leaves the published right channel
-zero. The production FPGA therefore converts those two TDM slots to the
-conventional I2S stream expected by the existing receiver. The existing S2MM
-audio formatter, DDR ring and receive interrupt remain in use. ARM firmware
-selects and verifies the matching codec serial-output mode, then publishes the
-capture ring through the protocol below.
+The driver exposes recording only when `ZZ_REG_AUDIO_CONFIG` reports that the
+codec is present and `ZZ_REG_AUDIO_RX_STATUS` reports `CAPABLE`. When those
+checks pass, it provides the following AHI interface.
 
-Recording must remain compatible with:
+| AHI property | Value |
+| --- | --- |
+| Allocation flag | `AHISF_CANRECORD` |
+| Recording and duplex attributes | `AHIDB_Record = TRUE`, `AHIDB_FullDuplex = TRUE` |
+| Input | One input, index 0, named `RCA In` |
+| Recording buffer limit | 960 sample frames (`AHIDB_MaxRecordSamples`) |
+| Input gain | Fixed at unity (`0x10000`) |
+| Monitor volume | Fixed at zero |
+| Callback format | `AHIST_S16S`, signed 16-bit stereo frames in Amiga big-endian byte order |
 
-- old firmware, where the driver continues to provide playback and does not
-  advertise recording;
-- old drivers, whose `ZZ_REG_AUDIO_CONFIG` writes contain only playback bit 0;
-- simultaneous AHI playback and recording on one `AHIAudioCtrl`;
-- every sample rate currently advertised by the `ZZ9000AX` AudioMode.
+The driver sets `ahiac_BuffSamples` to `ahiac_MixFreq / 50`. For every
+published period, it copies exactly that many frames to its bounce buffer and
+calls `ahiac_SamplerFunc` with an `AHIRecordMessage`. The buffer remains valid
+until the following recording callback.
 
-A matching FPGA bitstream, ARM firmware and AHI driver are required.
+Start and stop the two directions independently with `AHISF_PLAY` and
+`AHISF_RECORD`. For full duplex, pass both flags to `AHIsub_Start` on one
+allocated `AHIAudioCtrl`. The low-level AHI interface permits one hardware
+owner, so a second `AHIsub_AllocAudio` fails before it changes shared registers,
+buffers, or interrupt servers.
 
-## AHI-facing behavior
+## Capture protocol
 
-When supported by the running firmware, `zz9000ax.audio` shall:
+The driver and firmware share an eight-period receive ring. A period always
+occupies 3840 bytes: 960 stereo S16LE frames at the 48 kHz capture rate. Once a
+period completes, firmware converts it to the requested output frame count,
+rewrites the resulting stereo frames as S16BE at the start of that period,
+flushes the converted bytes, and publishes its status. Bytes after the
+converted data are undefined.
 
-- return `AHISF_CANRECORD` from `AHIsub_AllocAudio`;
-- report `AHIDB_Record = TRUE` and `AHIDB_FullDuplex = TRUE`;
-- expose one stereo input named `RCA In`;
-- report a maximum recording buffer of 960 sample frames;
-- accept `AHISF_PLAY` and `AHISF_RECORD` independently in `AHIsub_Start` and
-  `AHIsub_Stop`;
-- reject a second low-level `AHIsub_AllocAudio` while an instance owns the
-  hardware, before changing registers, buffers, or interrupt servers;
-- call `ahiac_SamplerFunc` once for each completed 20 ms capture period, using
-  an `AHIRecordMessage` with `ahirm_Type = AHIST_S16S`;
-- provide exactly `ahiac_BuffSamples` signed 16-bit stereo frames at
-  `ahiac_MixFreq`, in native Amiga big-endian byte order;
-- keep the callback buffer valid until the next recording callback.
+The driver derives the number of completed periods from the receive sequence,
+then processes them in chronological order. Seven completed periods are
+recoverable. The eighth ring slot is the active DMA target, so delayed service
+that spans more than seven periods drops the older data and continues from the
+newest seven. It does not generate replacement silence.
 
-Input gain is fixed at unity. Input selection has a single valid index, zero.
-The driver does not claim an independently adjustable monitor path.
+`ZZ_REG_AUDIO_SCALE` (`0x74`) selects the requested output frames per period.
+The AHI driver writes `ahiac_BuffSamples` before it enables recording.
 
-AHI's full-duplex contract is directional operation on one allocated
-`AHIAudioCtrl`: the driver must also accept both `AHISF_PLAY` and
-`AHISF_RECORD` in one start call. It does not make separate low-level clients
-share the hardware. AHIRecord uses the low-level `AHI_NO_UNIT` interface and
-allocates its own control, so opening it while another control owns the card
-must fail cleanly without silencing or reconfiguring the owner.
+| Frames per period | Rate |
+| ---: | ---: |
+| 160 | 8 kHz |
+| 240 | 12 kHz |
+| 480 | 24 kHz |
+| 640 | 32 kHz |
+| 882 | 44.1 kHz |
+| 960 | 48 kHz |
 
-This follows the behavior of the tested UAESND implementation: recording is
-started independently of playback, capture data is delivered as signed
-16-bit stereo, and the sampler hook receives complete buffers rather than
-access to a live DMA area.
+Firmware retains converter filter state between periods. It resets that state
+when the frame count changes, recording starts, or the receive ring changes;
+writing the existing frame count again does not reset it. A value of zero or a
+value above 960 selects 960 frames. Values from 1 through 959 that are absent
+from the table also produce 960 frames, with byte-order conversion only.
 
-## Firmware register protocol
+### Receive-ring assignment
 
-All values below are 16-bit Amiga-visible register values.
+Select the receive ring through `ZZ_REG_AUDIO_PARAM` and `ZZ_REG_AUDIO_VAL`:
 
-### `ZZ_REG_AUDIO_CONFIG` (`0xF4`)
+1. Write `AP_RX_BUF_OFFS_HI` with the high half of the framebuffer-relative
+   offset.
+2. Write `AP_RX_BUF_OFFS_LO` with the low half.
 
-Reads retain their existing meaning: bit 0 reports whether the ZZ9000AX codec
-was detected.
+The low-half write installs the pending CPU pointer and schedules I2S and audio
+formatter reinitialization. Until that completes, firmware acknowledges receive
+interrupts without conversion, sequence advancement, or an Amiga audio
+interrupt. It then starts publishing to the new ring while retaining the
+receive sequence.
 
-Writes become a control mask:
+The AHI driver places its receive ring 32768 bytes after its transmit ring. Each
+ring occupies 30720 bytes, leaving 2048 bytes in the 64 KiB audio reservation.
+On Zorro II, the transmit-ring base can come from the negotiated aperture
+layout; the receive-ring offset remains 32768 bytes after it.
 
-| Bit | Name | Meaning |
-| --- | --- | --- |
-| 0 | `ZZ_AX_AUDIO_CONFIG_PLAY` | Enable legacy/AHI playback-period interrupts. |
-| 1 | `ZZ_AX_AUDIO_CONFIG_RECORD` | Enable capture-ready interrupts. |
+## Registers and interrupts
 
-All other bits are reserved and ignored. A legacy write of zero or one
-therefore keeps its original behavior.
+The driver headers use `ZZ_REG_*` names. The firmware protocol uses the same
+registers as `REG_ZZ_*`.
 
-Reads have separate semantics. Bit 0 remains codec presence and bit 1
-advertises the packed transmit-period status at `ZZ_REG_AUDIO_TX_STATUS`.
-Requiring this read capability prevents a new driver from mistaking bit 15 of
-an older firmware's raw 16-bit sequence for the new status marker.
+| Register | Access | Bits | Meaning |
+| --- | --- | --- | --- |
+| `ZZ_REG_AUDIO_CONFIG` (`0xF4`) | Read | 0 | Codec present. |
+| | Read | 1 | Packed transmit-period status available at `ZZ_REG_AUDIO_TX_STATUS`. |
+| | Write | 0 | Enable playback-period interrupts. |
+| | Write | 1 | Enable capture-ready interrupts. |
+| `ZZ_REG_AUDIO_RX_STATUS` (`0xF6`) | Read | 15 | Capture protocol available. |
+| | Read | 14:12 | Newest completed receive-period index, 0 through 7. |
+| | Read | 11:0 | Completion sequence, modulo 4096. |
+| `ZZ_REG_AUDIO_TX_STATUS` (`0xF8`) | Read | 15 | Packed transmit-period status available. |
+| | Read | 14:12 | Most recently completed transmit-period index, 0 through 7. |
+| | Read | 11:0 | Completion sequence, modulo 4096. |
 
-### `ZZ_REG_AUDIO_RX_STATUS` (`0xF6`)
+Writes to `ZZ_REG_AUDIO_CONFIG` are masked to bits 0 and 1. Existing software
+that writes zero or one therefore retains its playback control values. Reads
+have separate semantics: bit 0 remains codec presence, and bit 1 indicates
+that packed transmit status is available.
 
-This new read-only register publishes the completed capture period:
+The sequence value is the publication boundary. A driver samples the receive
+sequence when recording starts and reads a period only after the sequence
+changes. Firmware increments it modulo 4096 after the converted bytes are
+visible to the Amiga. Playback and recording share `AMIGA_INTERRUPT_AUDIO`;
+events may coalesce, so the driver checks transmit and receive status separately.
+A capture-only event does not advance playback.
 
-| Bits | Name | Meaning |
-| --- | --- | --- |
-| 15 | `CAPABLE` | Firmware implements this capture protocol. |
-| 14:12 | `PERIOD` | Index, 0 through 7, of the newest completed period. |
-| 11:0 | `SEQUENCE` | Completion counter, incremented modulo 4096. |
+Recording remains available when the SDK audio fabric owns playback. Firmware
+clears a requested playback bit in that case and retains the recording bit.
 
-Firmware without recording support returns zero for the previously unused
-register. The driver must require both `CAPABLE` and the existing codec-present
-bit before advertising recording.
+The driver uses packed transmit status only when both the configuration read bit
+and transmit-status `CAPABLE` bit are set. Otherwise it retains the legacy
+sequential playback cursor. This preserves compatibility with older firmware,
+whose 16-bit transmit value can change without being a packed status word.
 
-### `ZZ_REG_AUDIO_TX_STATUS` (`0xF8`)
+## Compatibility history
 
-This read-only status publishes the completed playback period:
+| Earlier interface | Current handling |
+| --- | --- |
+| `ZZ_REG_AUDIO_CONFIG` was a zero-or-one playback control. | Zero and one remain valid write masks. |
+| Firmware had no receive-status capability. | The driver does not advertise recording. |
+| Playback used a sequential refill cursor. | New drivers use capability-gated packed transmit status. |
 
-| Bits | Name | Meaning |
-| --- | --- | --- |
-| 15 | `CAPABLE` | Firmware publishes the transmit-period cursor. |
-| 14:12 | `PERIOD` | Index, 0 through 7, of the most recently completed period. |
-| 11:0 | `SEQUENCE` | Completion counter, incremented modulo 4096. |
+## Qualification record
 
-Firmware publishes it before asserting the shared audio interrupt. The driver
-samples the sequence when playback starts and advances the player/mixer only
-when the sequence changes. It writes the new mix into `PERIOD`, which is safely
-behind the formatter's active MM2S cursor, instead of assuming playback began
-at ring offset zero. This prevents the startup collision that could emit the
-first sample once while it was being written and again after the ring wrapped.
+The following result was recorded on 2026-07-29 for the production `0xa204`
+candidate, R17 firmware, and default-Z3 bitstream on a physical ZZ9000AX
+Amiga system. It applies to those matched artifacts.
 
-The driver uses this layout only when both the `ZZ_REG_AUDIO_CONFIG` read
-capability and TX `CAPABLE` are set. With older firmware it retains the legacy
-sequential cursor. Older drivers also remain compatible because the complete
-16-bit status still changes on each period.
+| Area | Recorded result |
+| --- | --- |
+| RCA capture | Channel isolation, stereo capture, and silence capture passed. |
+| Rates | All six advertised recording rates passed. |
+| Lifecycle | Repeated teardown and reopen, final playback, and one-`AHIAudioCtrl` full duplex passed without recorded noise or unexpected behavior. |
+| Tooling | Host tests and both repository CI pipelines passed. |
+| Other bitstreams | Rebuilt non-default variants were build and report validated; this record contains no hardware qualification for them. |
 
-The sequence value is the publication boundary. Firmware shall not change it
-until the period named by `PERIOD` has been converted, flushed from the ARM
-caches and made visible to the Zorro/ACP side. The Amiga shall sample the
-status at recording start and consume only later sequence values.
-
-The shared audio interrupt bit remains `AMIGA_INTERRUPT_AUDIO`. Playback and
-recording events may coalesce; after acknowledging it, the driver uses the
-transmit sequence to decide whether to service playback and the receive
-sequence to discover every still-resident capture period. A capture-only
-wake-up must never advance the playback buffer.
-
-## Capture ring and sample format
-
-The driver selects the receive ring through the existing
-`AP_RX_BUF_OFFS_HI/LO` audio parameters. The offset is relative to the ARM
-framebuffer base, exactly like the transmit-ring parameters.
-
-The receive ring has eight periods at a fixed 3840-byte stride. The formatter
-writes each period as 960 native 48 kHz stereo frames in little-endian signed
-16-bit format. On every receive completion, firmware shall:
-
-1. invalidate the completed 3840-byte period from the ARM caches;
-2. resample its 960 frames to `output_frame_count` frames
-   (`ZZ_REG_AUDIO_SCALE`, defined below);
-3. write signed stereo samples in big-endian order at the start of the same
-   period;
-4. flush `output_frame_count * 4` bytes and issue the required memory
-   barrier;
-5. publish the period and incremented sequence in `ZZ_REG_AUDIO_RX_STATUS`;
-6. assert the shared Amiga audio interrupt when recording is enabled.
-
-`ZZ_REG_AUDIO_SCALE` is the number of sample frames per 20 ms period and is
-shared with playback. Its written value is the `requested_frame_count`; the
-number of frames firmware converts and publishes for the period is the
-`output_frame_count`. The AHI driver writes `ahiac_BuffSamples`, which is
-`ahiac_MixFreq / 50`. Supported conversion counts are 160/240/480/640/882/960
-frames (8/12/24/32/44.1/48 kHz), where `output_frame_count` equals
-`requested_frame_count`; every off-table value in the register's 1-960 range
-converts as native 48 kHz identity (endian swap only) with
-`output_frame_count = 960`, regardless of the requested count.
-
-Only the first `output_frame_count * 4` bytes of a published period are
-defined. The remaining bytes retain DMA or prior-period data and must not be
-copied by the driver.
-
-The driver places the receive ring 32768 bytes after the existing transmit
-ring inside the final 64 KiB reserved at the top of board memory. Each ring is
-30720 bytes, leaving 2048 bytes of separation/end padding.
-
-## Resampling
-
-The codec and S2MM formatter continue to run at 48 kHz. Firmware converts
-each completed period through one shared qualified band-limited kernel (a
-Kaiser windowed-sinc polyphase FIR; see the firmware repository's
-`docs/audio-conversion.md` for the measured passband, stop-band, group-delay,
-and cycle-cost table) at every rate advertised by the AudioMode: 8, 12, 24,
-32, 44.1 and 48 kHz. Conversion is deterministic and per-period counts are
-exact at 20 ms. Filter history crosses periods inside a dedicated converter
-instance, while the exact-rational phase lands on every period boundary.
-
-The conversion uses integer arithmetic only in the receive ISR and never
-shares state with the playback converter instance. The period is converted
-through a CPU-side scratch copy -- in-place conversion is not used -- and the
-result is written back as big-endian stereo at `output_frame_count` frames:
-the requested count for the six supported counts, and 960 identity frames
-for every off-table request.
-
-## Overrun behavior
-
-The driver calculates the unsigned modulo-4096 distance from its last consumed
-sequence. Although the ring contains eight periods, only seven completed
-periods are immutable because the formatter is already writing the eighth.
-If more than seven periods completed, older data has been overwritten; the
-driver drops it and delivers only the newest seven periods in chronological
-order. Recording then continues without restarting the formatter.
-
-No synthetic silence is required for dropped capture periods. A future
-diagnostic counter may expose overruns, but it is not part of this protocol.
-
-## Acceptance criteria
-
-- Recording is absent, but playback still works, with firmware lacking the
-  `CAPABLE` bit.
-- AHI Record records both RCA channels through `zz9000ax.audio` at all six
-  AudioMode rates.
-- Playback-only, record-only and full-duplex sessions start and stop without
-  changing the other direction's state.
-- A second low-level allocation fails without changing the active owner's
-  playback, registers, ring contents, or interrupt server.
-- Callback messages use `AHIST_S16S`, the selected mix rate and one complete
-  20 ms buffer.
-- Repeated opens, starts, stops and closes do not leak memory or leave the
-  shared audio interrupt enabled.
-- `ZZAXDuplexTest` reports `result=PASS` while its generated stereo playback
-  tone and the normal RCA analogue pass-through remain audible; its WAVE file
-  contains clean stereo RCA input and not the generated playback tone.
-- Firmware unit tests cover conversion, status packing and sequence wrap.
-- The firmware-only build, AHI Docker build and repository host checks pass.
+`ZZAXDuplexTest` checks simultaneous generated playback and RCA capture. A
+passing run reports `result=PASS`, keeps the normal RCA analogue pass-through
+audible, and writes a WAVE file containing the RCA input rather than the
+generated playback tone.
