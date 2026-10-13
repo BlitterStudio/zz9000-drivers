@@ -86,6 +86,11 @@
 #define ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P_50 (1U << 4)
 #define ZZ_FW_CAP_VIDEOCAP_SOURCE_SYNC (1U << 5)
 #define ZZ_FW_CAP_VIDEOCAP_SCANOUT_ORIGIN (1U << 6)
+/* Completed FWUP commands are mirrored as one longword at
+ * ZZ_FWUP_STATUS_MIRROR_OFFSET, the last longword of the boot ROM window
+ * (see common/fwup_client.h). */
+#define ZZ_FW_CAP_FWUP_STATUS_MIRROR (1U << 11)
+#define ZZ_FWUP_STATUS_MIRROR_OFFSET 0x7FFC
 #define ZZ_REG_AUDIO_CONFIG      0xF4
 #define ZZ_REG_AUDIO_RX_STATUS   0xF6
 #define ZZ_REG_AUDIO_TX_STATUS   0xF8

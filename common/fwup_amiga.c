@@ -27,13 +27,27 @@ static void board_write_len(struct fwup_io *io, uint16_t len) {
 static uint8_t *board_buffer(struct fwup_io *io) {
     return (uint8_t *)((ULONG)io->ctx + ZZ_BUFFER_OFFSET);
 }
+/* The mirror is the boot ROM window's last longword, which the FPGA
+ * serves from card memory without waiting for the ARM. */
+static uint32_t board_read_mirror(struct fwup_io *io) {
+    return *(volatile ULONG *)((ULONG)io->ctx + ZZ_FWUP_STATUS_MIRROR_OFFSET);
+}
+static void board_idle(struct fwup_io *io) {
+    (void)io;
+    Delay(1);
+}
 
 void fwup_io_init_board(struct fwup_io *io, ULONG board) {
+    UWORD caps = *(volatile UWORD *)(board + ZZ_REG_FW_CAPABILITIES);
+
     io->read_status = board_read_status;
     io->write_cmd   = board_write_cmd;
     io->write_len   = board_write_len;
     io->buffer      = board_buffer;
     io->ctx         = (void *)board;
+    io->read_mirror = (caps & ZZ_FW_CAP_FWUP_STATUS_MIRROR) ?
+                      board_read_mirror : NULL;
+    io->idle        = board_idle;
 }
 
 UWORD fwup_probe_board(ULONG board) {
