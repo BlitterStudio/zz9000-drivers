@@ -28,6 +28,9 @@
 
 #include "frontend.h"
 
+/* This front end's program name; the version is shared (Core/zztop.h). */
+#define ZZTOP_NAME "ZZTop3"
+
 /* Gadget ids: one block of 1000 per page, so a page owns ids
  * UI_GID(page, 0..999). Framework gadgets live below 1000. */
 #define UI_GID(page, n)      ((ULONG)(((page) + 1) * 1000 + (n)))
@@ -88,6 +91,8 @@ void ui_flush(void);
 BOOL ui_open_classes(char *missing, UWORD missing_size);
 void ui_close_classes(void);
 BOOL ui_create(void);
+/* Set when ui_create failed because the screen cannot hold the window. */
+extern BOOL ui_too_small;
 void ui_run(void);
 void ui_destroy(void);
 

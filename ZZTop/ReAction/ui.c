@@ -1057,6 +1057,27 @@ static Object *build_root(void)
 		TAG_END);
 }
 
+BOOL ui_too_small;
+
+/* The window cannot shrink below its layout's minimum. On a screen that
+ * cannot hold it (a 640x256 PAL Workbench), say so instead of opening a
+ * clipped, unusable window: the GadTools ZZTop is laid out for that. */
+static BOOL fits_screen(void)
+{
+	struct gpDomain d;
+	LONG width, height;
+
+	memset(&d, 0, sizeof(d));
+	d.MethodID = GM_DOMAIN;
+	d.gpd_RPort = &screen->RastPort;
+	d.gpd_Which = GDOMAIN_MINIMUM;
+	DoMethodA(root_layout, (Msg)&d);
+	width = d.gpd_Domain.Width + screen->WBorLeft + screen->WBorRight;
+	height = d.gpd_Domain.Height + screen->WBorTop +
+		screen->Font->ta_YSize + 1 + 10;   /* bottom border, size gadget */
+	return width <= screen->Width && height <= screen->Height;
+}
+
 BOOL ui_create(void)
 {
 	UWORD i;
@@ -1087,6 +1108,10 @@ BOOL ui_create(void)
 
 	root_layout = build_root();
 	if (!root_layout) return FALSE;
+	if (!fits_screen()) {
+		ui_too_small = TRUE;
+		return FALSE;
+	}
 
 	window_obj = NewObject(WINDOW_GetClass(), NULL,
 		WA_Title, (ULONG)window_title,

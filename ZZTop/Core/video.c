@@ -275,7 +275,7 @@ BOOL video_live_supported(void)
 const char *video_unavailable_reason(void)
 {
 	return live.supported ? "" :
-		"Live picture controls need firmware 2.8 and the live-control bitstream";
+		"Live controls need firmware 2.8 with matching bitstream";
 }
 
 /* Return the currently detected phase-engine domain. */

@@ -21,7 +21,7 @@ ZZFwUpdate RAM:BOOT.bin
 ```
 
 Power-cycle the Amiga after replacing `BOOT.bin` so the ZZ9000 boots the
-new firmware. The ZZTop Project menu offers the same operation with a
+new firmware. ZZTop's Firmware page offers the same operation with a
 file requester.
 
 By default the destination filename on the SD card is the source
@@ -146,6 +146,6 @@ ZZScanlines 3 0
 Modes are `0=off`, `1=classic`, `2=soft`, `3=gradient`; parity is
 `0=odd dark`, `1=even dark`.
 
-Like ZZTop's Scandoubler window, `ZZScanlines` changes the live FPGA
+Like ZZTop's Display page, `ZZScanlines` changes the live FPGA
 state immediately. To make scanlines survive a power cycle, save them to
-`ZZ9000.CFG` — the ZZTop Scandoubler window's Save button does that.
+`ZZ9000.CFG` — ZZTop's Save button does that.

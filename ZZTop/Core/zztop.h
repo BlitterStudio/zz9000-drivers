@@ -19,7 +19,6 @@
 
 #include <exec/types.h>
 
-#define ZZTOP_NAME    "ZZTop3"
 #define ZZTOP_RELEASE "3.0"
 #define ZZTOP_DATE    "13.10.2026"
 

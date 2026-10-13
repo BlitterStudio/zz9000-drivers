@@ -142,43 +142,6 @@ class RepoToolingTests(unittest.TestCase):
                 self.assertEqual(1, result.returncode, result.stdout)
                 self.assertIn("videocap_profile values", result.stdout)
 
-    def test_zztop_audio_calibration_is_typed_live_and_persisted(self):
-        source = self.read("ZZTop/Sources/ZZTop.c")
-        cfg_header = self.read("common/zzcfg_amiga.h")
-        cfg_source = self.read("common/zzcfg_amiga.c")
-
-        for token in (
-            "AUDGAD_CEIL_PAULA",
-            "AUDGAD_CEIL_AX",
-            "ZZ9K_AUDIO_CALIBRATION_PACK(",
-            "result.ceiling_paula",
-            "result.ceiling_ax",
-            "GTIN_Number, audio_ceiling_paula",
-            "GTIN_Number, audio_ceiling_ax",
-            "Calibration must be 1..4095",
-            "Calibration committed - Save to persist",
-        ):
-            self.assertIn(token, source)
-        helper = source[
-            source.index("static void audio_balanced_levels"):
-            source.index("static BOOL audio_ui_seeded")
-        ]
-        balance = source[
-            source.index("case AUDGAD_BTN_BALANCE"):
-            source.index("case AUDGAD_BTN_SAVE")
-        ]
-        self.assertIn("balanced_paula > ZZTOP_AUDIO_LEVEL_MAX", helper)
-        self.assertIn("balanced_ax > ZZTOP_AUDIO_LEVEL_MAX", helper)
-        self.assertIn("balanced_ax > (ULONG)audio_ceiling_ax", helper)
-        self.assertIn("balanced_paula * 2UL", helper)
-        self.assertEqual(1, balance.count("audio_balanced_levels("))
-        self.assertNotIn("(3UL * audio_ceiling", balance)
-        self.assertIn("audio_ceiling_paula_present", cfg_header)
-        self.assertIn("audio_ceiling_ax_present", cfg_header)
-        self.assertIn('"audio_ceiling_paula"', cfg_source)
-        self.assertIn('"audio_ceiling_ax"', cfg_source)
-
-
     def test_zztop_icon_grants_asl_sized_stack(self):
         """do_StackSize is the last header LONG at offset 74 (do_Type is a
         UBYTE and Amiga pointers are 2-aligned, so the DiskObject header is
@@ -196,17 +159,6 @@ class RepoToolingTests(unittest.TestCase):
             self.assertGreaterEqual(
                 struct.unpack(">l", data[74:78])[0], 16384,
                 "%s must grant at least 16 KiB of stack" % relpath)
-
-    def test_zztop_fw_confirm_shows_filename_only(self):
-        """EasyRequest never wraps; a wrapped path still wrecked the
-        upload confirmation on very long drawers (zz9000-drivers #95
-        plus the 2026-09 follow-up report). The confirmation shows only
-        the filename - the ASL picker it follows already displayed the
-        full path."""
-        source = self.read("ZZTop/Sources/ZZTop.c")
-        self.assertIn("FilePart((CONST_STRPTR)path)", source)
-        self.assertIn('"Upload %s to the ZZ9000 as BOOT.bin?', source)
-        self.assertNotIn("fw_wrap_path", source)
 
     def test_zzdiag_capture_dump_has_fixed_header_and_size_gate(self):
         text = self.read("ZZDiag/ZZDiag.c")

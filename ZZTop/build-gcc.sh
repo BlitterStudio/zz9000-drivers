@@ -43,20 +43,21 @@ export PATH=/opt/amiga/bin:"$PATH"
 # Two programs share one core (Core/: board, ZZ9000.CFG model, live video,
 # audio control plane, Save/Revert/Quit) and differ only in their user
 # interface:
-#   ZZTop   classic GadTools front end (Kickstart 3.0+, fits 640x256)
+#   ZZTop   GadTools front end (Kickstart 2.04+, fits 640x256)
 #   ZZTop3  ReAction front end (AmigaOS 3.2 / 3.5-3.9 / ClassAct), preview
 common="../common/fwup_amiga.c ../common/fwup_client.c \
   ../common/zzcfg_amiga.c ../common/zz_vcap_live.c \
   ../common/zz_vcap_client.c ../common/zz_vcap_geometry.c"
-flags="-m68030 -O2 -I../common -I../include -Izz9k-headers -ICore \
+flags="-m68030 -O2 -DNO_INLINE_STDARG -I../common -I../include -Izz9k-headers -ICore \
   -Wall -Wextra -Wno-unused-parameter"
 libs="-lamiga -ldebug -noixemul -lm"
 
-# shellcheck disable=SC2086 # the lists above are word lists on purpose
-m68k-amigaos-gcc Sources/ZZTop.c Core/vcap_sampling.c $common \
-  $flags -o ZZTop $libs
+# shellcheck disable=SC2086
+m68k-amigaos-gcc GadTools/*.c Core/*.c $common \
+  $flags -IGadTools -o ZZTop $libs
 
-# NO_INLINE_STDARG: the ReAction object macros need real varargs functions.
+# NO_INLINE_STDARG (both): the ReAction object macros need real varargs
+# functions, and inline varargs macros warn on pointer tag values.
 # shellcheck disable=SC2086
 m68k-amigaos-gcc ReAction/*.c Core/*.c $common \
-  $flags -DNO_INLINE_STDARG -IReAction -o ZZTop3 $libs
+  $flags -IReAction -o ZZTop3 $libs
