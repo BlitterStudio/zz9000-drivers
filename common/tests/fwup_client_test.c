@@ -269,15 +269,16 @@ static void test_mirror_first_publication_after_invalid_word(void) {
     CHECK(sim_mirror_reads < 10, "no wait past the completion");
 }
 
-/* A mirror that never advances falls back to the authoritative
- * register. */
-static void test_mirror_frozen_falls_back_to_register(void) {
-    printf("test_mirror_frozen_falls_back_to_register\n");
+/* A mirror that never advances is a timeout. The client must not read
+ * the status register then: on hardware that read holds the bus until
+ * the ARM answers, which may be never. */
+static void test_mirror_frozen_times_out_without_register(void) {
+    printf("test_mirror_frozen_times_out_without_register\n");
     sim_reset();
     sim_mirror_frozen = 1;
-    CHECK(fwup_open(&sim_mirror_io, "BOOT.bin") == FWUP_OK,
-          "open result read from the register");
-    CHECK(sim_register_reads > 0, "register consulted after the mirror stalled");
+    CHECK(fwup_open(&sim_mirror_io, "BOOT.bin") == FWUP_STATUS_BUSY,
+          "stalled mirror reported as a timeout");
+    CHECK(sim_register_reads == 0, "register never read after the stall");
 }
 
 int main(void) {
@@ -291,7 +292,7 @@ int main(void) {
     test_mirror_send_never_reads_register();
     test_mirror_waits_for_new_sequence();
     test_mirror_first_publication_after_invalid_word();
-    test_mirror_frozen_falls_back_to_register();
+    test_mirror_frozen_times_out_without_register();
     printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails ? 1 : 0;
 }

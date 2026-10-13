@@ -14,7 +14,7 @@
 
 /* Mirror polling: spin on the card-memory longword first (each read is a
  * short Zorro III cycle that never waits on the ARM), then yield between
- * reads. Past both budgets fall back to the authoritative register. */
+ * reads. Past both budgets the command has timed out. */
 #ifndef FWUP_MIRROR_SPINS
 #define FWUP_MIRROR_SPINS 50000UL
 #endif
@@ -98,9 +98,10 @@ static uint16_t poll_mirror(struct fwup_io *io, uint32_t before) {
             if (mirror_completed(now, before)) return (uint16_t)now;
         }
     }
-    /* The mirror never moved (overwritten by another user of the shared
-     * buffer, or the command is still running): ask the register. */
-    return poll_status(io);
+    /* Nothing else writes the mirror, so the command is still running or
+     * the card is wedged. Reading the register now would hold the bus
+     * until the ARM answers, which is the hang this path avoids. */
+    return FWUP_STATUS_BUSY;
 }
 
 static uint16_t run_command(struct fwup_io *io, uint16_t cmd) {
