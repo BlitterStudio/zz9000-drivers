@@ -68,4 +68,6 @@ void fwup_io_init_board(struct fwup_io *io, ULONG board)
     io->write_len = write_len;
     io->buffer = buffer;
     io->ctx = NULL;
+    io->read_mirror = NULL;
+    io->idle = NULL;
 }
