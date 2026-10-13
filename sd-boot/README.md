@@ -3,137 +3,130 @@
   SPDX-License-Identifier: GPL-3.0-or-later
 -->
 
-# zzsd.device — SD-card-backed boot driver for ZZ9000
+# zzsd.device: SD-card boot driver for ZZ9000
 
-`zzsd.device` lets the ZZ9000 boot AmigaOS from a **hardfile** (`.hdf`)
-stored as a regular file on a FAT-formatted SD card. The whole stack
-is self-contained: at boot, the firmware locates the HDF through FatFs,
-records its on-card extents, then services block I/O directly through
-raw SD sectors instead of keeping FatFs in the hot path. A shared Zorro
-window carries the block data, and a small AmigaOS device driver shipped
-inside the board's autoboot ROM presents the HDF's RDB-partitioned
-contents as bootable volumes.
+`zzsd.device` lets a ZZ9000 boot AmigaOS from an RDB-partitioned hardfile
+(`.hdf`) on the card's FAT32 volume. Firmware opens the image at boot, maps
+its clusters, and serves the image as a block device. The device in the
+ZZ9000 autoboot ROM then registers the image's bootable partitions with
+Kickstart. It is packed into firmware `BOOT.bin`; it is not installed as a
+normal AmigaOS file.
 
-## What you need
+## Set up an SD boot image
 
-* An SD card formatted as **FAT32** (not ExFAT).
-* A file named exactly `/zz9000.hdf` at the root of that card
-  (firmware 2.3+ can boot a different root-level image via a
-  `hdf = name.hdf` line in `ZZ9000.CFG`, editable from ZZTop's
-  Settings window; `hdf = off`, or clearing that field, disables SD
-  boot even when `zz9000.hdf` is present).
-* The HDF must use **Amiga RDB partitioning** — the first 16 blocks
-  must contain an `RDSK` block pointing at one or more `PART` blocks
-  plus `FSHD`/`LSEG` entries for any custom filesystems (PFS3, SFS,
-  etc.). UAE "single-partition hardfiles" (those starting with
-  `DOS\N`/`PFS\N`/`SFS\N` at block 0) are **not** supported — you have
-  to repartition them with HDToolBox or create a new RDB image in
-  WinUAE/FS-UAE/Amiberry.
-* Plus the usual `BOOT.bin` on the SD card for ZZ9000 itself.
+1. Format the microSD card as FAT32 and place the matching firmware
+   `BOOT.bin` in its root.
+2. Create an HDF with an Amiga RDB. Its first 16 blocks must contain an
+   `RDSK` block, with `PART` blocks for its partitions. Include `FSHD` and
+   `LSEG` entries for any filesystem that must be loaded from the image, such
+   as PFS3 or SFS.
+3. Copy the HDF to the card root. With no `hdf` entry in `ZZ9000.CFG`, name
+   it `zz9000.hdf`.
+4. Power-cycle the Amiga after changing the image or `ZZ9000.CFG`.
 
-No HDF? Boot still works; the driver just never publishes a volume,
-and other boot sources (DF0:, ROM) take over normally.
+Images that begin with `DOS\N`, `PFS\N`, or `SFS\N` at block 0 are
+single-partition hardfiles, not RDB images, and this driver does not boot
+them. Repartition such an image with HDToolBox, or create an RDB image in
+WinUAE, FS-UAE, or Amiberry.
 
-## How it boots
+If no selected HDF is available, the driver registers no SD volumes. Other
+boot sources, including `DF0:` and ROM, remain available.
 
-1. Zorro autoconfig hands Kickstart the ZZ9000's DiagArea (8 KB at
-   `cardbase+0x6000`). The first 32 bytes are the standard Amiga
-   DiagArea header; then a small m68k thunk (the "diag code", built
-   from `boot-rom/boot.S`); then the relocatable `zzsd.device` image
-   packed in after a fixed offset so everything fits inside the FPGA-
-   decoded 8 KB ROM window.
-2. Kickstart calls the DiagEntry thunk, which:
-   - copies `zzsd.device` from Kickstart's RAM copy of the DiagArea into
-     a private buffer,
-   - relocates the HUNK_HEADER/CODE/RELOC32/END stream into freshly
-     allocated Amiga RAM,
-   - patches a RomTagCopy in the DiagArea so Kickstart's resident
-     scan finds the driver and AutoInit-creates `zzsd.device`.
-3. `init_device()` opens `expansion.library`, locates the ZZ9000's
-   `ConfigDev`, issues a **GETINFO** to the firmware, snapshots the
-   returned RDB metadata into local RAM, then streams each partition's
-   filesystem LSEG binary in 16 KB chunks through the shared buffer
-   (`LOADFS` command, one chunk per call), relocates it with a
-   lightweight HUNK parser, registers the `FileSysEntry` in the system
-   `FileSystem.resource`, builds a `DeviceNode`, and calls
-   `AddBootNode()` for every bootable partition.
+## Select the HDF in `ZZ9000.CFG`
+
+`ZZ9000.CFG` is read from the FAT32 card root beside `BOOT.bin`. It accepts
+one `key = value` assignment per line; keys and keyword values are
+case-insensitive. The `hdf` key has these forms:
+
+| Setting | Firmware action |
+|---|---|
+| No `hdf` entry | Opens `/zz9000.hdf`. |
+| `hdf = workbench.hdf` | Opens `workbench.hdf` in the card root. The value must be a flat file name, not a path. |
+| `hdf = off` | Disables SD boot, even when `/zz9000.hdf` exists. |
+
+The configured name may contain up to 63 printable characters. It cannot
+start with `.` or contain `/`, `\\`, `:`, `#`, `;`, or whitespace. Invalid
+`hdf` values are skipped. If the file contains no valid `hdf` entry, firmware
+selects the default image. In ZZTop, clear the **HDF** field to save
+`hdf = off`; remove the `hdf` entry to restore the default `zz9000.hdf`
+selection.
+
+## Boot path
+
+| Stage | Action |
+|---|---|
+| Firmware | Opens the selected HDF, records its capacity and RDB metadata, and resolves its FAT cluster chain into physical SD extents when possible. Block I/O uses direct SD-sector reads and writes for a mapped image; firmware falls back to FatFs when it cannot map the chain. |
+| DiagArea | The 8 KiB ROM window at `cardbase+0x6000` contains the Amiga DiagArea header, code from `boot-rom/boot.S`, and the packed relocatable `zzsd.device` image. |
+| Kickstart | The DiagEntry code relocates the packed driver, patches its resident tag, and lets Kickstart create `zzsd.device`. |
+| Driver | `init_device()` requests boot metadata with `GETINFO`, loads required filesystem segments with `LOADFS`, registers `FileSysEntry` records, and adds an `AddBootNode()` for each bootable partition. |
+
+The firmware returns metadata for at most 16 partitions and four filesystem
+headers. The driver reuses a filesystem already registered in
+`FileSystem.resource`; otherwise it loads the matching HDF `FSHD`/`LSEG`
+segment.
 
 ## Shared-buffer protocol
 
-All communication with the firmware goes through register writes at
-`cardbase+0xC0..0xCF` and a 24 KB shared buffer at
-`cardbase+0xA000..0x10000` that maps to `USB_BLOCK_STORAGE_ADDRESS` in
-the firmware.
+The driver and firmware use the shared buffer at
+`cardbase+0xA000..0x10000`, mapped by firmware to
+`USB_BLOCK_STORAGE_ADDRESS`, plus the following registers.
 
-| Register       | Offset | Direction | Purpose |
-|----------------|--------|-----------|---------|
-| `BOOT_CMD`     | 0xC2   | write     | Packed 16-bit cmd: bits [3:0]=cmd, [15:4]=chunk index. cmd 1 = GETINFO, 2..9 = LOADFS for filesystem 0..7 |
-| `BOOT_STATUS`  | 0xC4   | read      | Non-0xFFFF = cmd done; 0 = OK, anything else = error |
-| `SDBLK_TX_HI`  | 0xB4   | write     | Upper 16 bits of block number for WRITE |
-| `SDBLK_TX_LO`  | 0xB6   | write     | Lower 16 bits, triggers the write |
-| `SDBLK_RX_HI`  | 0xB8   | write     | Upper 16 bits of block number for READ |
-| `SDBLK_RX_LO`  | 0xBA   | write     | Lower 16 bits, triggers the read |
-| `SD_STATUS`    | 0xBC   | read/write| Sets `num_blocks` on write; returns firmware status on read (`0xFFFF` = busy, 0 = OK, else error) |
+| Register | Offset | Direction | Purpose |
+|---|---:|---|---|
+| `BOOT_CMD` | `0xC2` | Write | Packed 16-bit command. Bits 3:0 select `GETINFO` (`1`) or `LOADFS` for filesystem slots 0–7 (`2`–`9`); bits 15:4 are the `LOADFS` chunk index. The current firmware exports at most four filesystem slots. |
+| `BOOT_STATUS` | `0xC4` | Read | `0xFFFF` while a command runs, `0` on success, and another value on error. |
+| `SDBLK_TX_HI` | `0xB4` | Write | Upper 16 bits of the block number for a write. |
+| `SDBLK_TX_LO` | `0xB6` | Write | Lower 16 bits of the block number; writing it starts the transfer. |
+| `SDBLK_RX_HI` | `0xB8` | Write | Upper 16 bits of the block number for a read. |
+| `SDBLK_RX_LO` | `0xBA` | Write | Lower 16 bits of the block number; writing it starts the transfer. |
+| `SD_STATUS` | `0xBC` | Read/write | Write the number of blocks for the next transfer. Read `0xFFFF` while busy, `0` on success, or a nonzero firmware error code. |
 
-Block transfers move 1–48 blocks (max 24 KB = the visible buffer
-window) per round-trip. The driver loops internally for larger I/O.
+Each transfer contains 1–48 512-byte blocks, or at most 24 KiB. The driver
+splits larger I/O requests into those transfers.
 
-## Known limitations
+## Limits and troubleshooting
 
-* **Polling-only completion.** The driver spins on `SD_STATUS` until
-  the firmware clears the BUSY sentinel. There's no interrupt path, so
-  the m68k CPU is fully occupied during each I/O. Observed effects on
-  heavy workloads (SysSpeed, large copies):
-  - bulk throughput plateaus around 1–2 MB/s even though raw bus
-    bandwidth is higher — most of the wall-clock time is polling,
-  - mouse and other UI elements stutter while sustained I/O runs.
+The driver polls `SD_STATUS`; it has no interrupt completion path. Sustained
+I/O occupies the m68k while it waits. Recorded tests put bulk throughput at
+about 1–2 MB/s, and the Workbench pointer and other interface elements can
+stutter during large copies or SysSpeed runs.
 
-  The planned fix is an FPGA-assisted Zorro interrupt. Until then,
-  single-threaded heavy I/O is going to feel sluggish.
+Firmware maps HDF extents during boot. Removing the card afterwards causes
+I/O errors, and the card is not remounted while the Amiga is running.
+Power-cycle after reinserting it.
 
-* **HDF extents are captured once at firmware boot.** If the card is
-  removed afterwards, writes fail mid-stream and subsequent I/O returns
-  errors; there is no hot-remount. Power-cycle to recover.
+If `pfs3aio` reports `Initialization Failure`, check the `FSHD` DosType in
+the RDB and the filesystem root-block magic. They must match, for example
+`PFS\0` and `PFS\3` are different values.
 
-* **RDB-only HDFs.** No DOS-style single-partition hardfiles.
-
-* **PFS3 must match the on-disk magic**. The `FSHD` DosType in the RDB
-  has to match the magic byte in the filesystem's root block; a
-  mismatch (e.g. RDB says `PFS\0` but the volume was formatted as
-  `PFS\3`) causes `pfs3aio` to fail with "Initialization Failure".
-
-## Layout & files
+## Source layout
 
 ```
 sd-boot/
-├── README.md            ← this document
-├── build.sh             ← Docker + m68k-amigaos-gcc, DEBUG=1 to enable trace
-├── zzsd_device.c        ← Exec device exec-vectors (open/close/beginio/...)
-├── zzsd_cmd.c           ← low-level block-read/write Zorro protocol
-├── zzsd_boot.c          ← GETINFO + LOADFS handling, FSHD relocation, AddBootNode
-├── zzsd_cmd.h           ← struct SDBase, register map, protocol constants
+├── build.sh          build script; set DEBUG=1 for serial trace output
+├── zzsd_device.c     AmigaOS device vectors and I/O dispatch
+├── zzsd_cmd.c        shared-buffer block-transfer protocol
+├── zzsd_boot.c       boot metadata, filesystem loading, and boot nodes
+├── zzsd_cmd.h        SDBase layout, register map, and protocol constants
 └── boot-rom/
-    ├── boot.S           ← m68k DiagEntry/BootEntry + hunk relocator
-    ├── boot.bin         ← assembled artifact (generated, untracked)
-    └── diag-code.h      ← hex dump of boot.bin, embedded in firmware
+    ├── boot.S        DiagArea entry and packed-driver relocator
+    └── diag-code.h   boot.S image embedded by firmware
 ```
 
 `zzsd.device`, `zzsd-device.h`, `boot-rom/boot.o`, and
-`boot-rom/boot.bin` are build artifacts and are in `.gitignore`. After
-building here, copy `zzsd-device.h` into the firmware tree
-(`ZZ9000OS/src/zzsd-device.h`) and rebuild the firmware so the updated
-driver lands in `BOOT.bin`.
+`boot-rom/boot.bin` are generated build artifacts. `zzsd-device.h` is copied
+to the firmware source tree at `ZZ9000OS/src/zzsd-device.h`, where firmware
+packs the driver into `BOOT.bin`.
 
-## Building
+## Build the driver
 
 ```sh
 # Normal build
 bash build.sh
 
-# With full debug trace to the Zorro serial console
+# Include the Zorro serial trace
 DEBUG=1 bash build.sh
 ```
 
-The diag-area thunk is assembled separately (from `boot-rom/boot.S`).
-If you modify it, rebuild with the firmware's convenience script or
-manually with `m68k-amigaos-gcc -x assembler-with-cpp -c -m68020`.
+The script uses `m68k-amigaos-gcc` when available. Otherwise it invokes
+`../tools/amiga-docker.sh sd-boot ./build.sh`.
