@@ -258,7 +258,7 @@
 
       (set #mac (askstring
          (prompt "Enter your unique Ethernet MAC address (printed in your ZZ9000 manual). Only the last six hex digits need to change.")
-         (help "To change the MAC later, edit ENVARC:ZZ9K_MAC. With firmware 2.3+ it can also live as mac in ZZ9000.CFG on the SD card (ZZTop's System page); the ENV variable overrides the config file when both exist.")
+         (help "To change the MAC later, edit ENVARC:ZZ9K_MAC. With firmware 2.3+ it can also live as mac in ZZ9000.CFG on the SD card (ZZTop's Settings window); the ENV variable overrides the config file when both exist.")
          (default "68:82:f2:01:02:00")))
 
       (textfile
@@ -389,7 +389,7 @@
          (infos)
          (dest #docs-dest))
 
-      (message "ZZ9000AX audio installed.\n\nUse ZZTop's Audio page to adjust balance and sound settings with matched firmware.\n\nThe old ZZ9K_MIX_LEVELS and ZZ9000AX-NOLPF environment variables are no longer used. No environment settings are needed for normal use."
+      (message "ZZ9000AX audio installed.\n\nUse ZZTop's Audio window to adjust balance and sound settings with matched firmware.\n\nThe old ZZ9K_MIX_LEVELS and ZZ9000AX-NOLPF environment variables are no longer used. No environment settings are needed for normal use."
          (help "ENV:ZZ9K_INT2 is still supported for interrupt-conflict troubleshooting and affects both audio drivers. See ahi.guide, installed with the audio drivers, for details."))
 )
 
@@ -567,7 +567,7 @@
 
       (copyfiles
          (prompt ("Install ZZTop into %s/" #zz-drawer))
-         (help "The ZZ9000 control panel: card status, native video output and picture alignment, the audio mixer, system settings stored on the SD card, and firmware install/restore, all in one window. Needs the ReAction classes of AmigaOS 3.2 (or AmigaOS 3.5/3.9, or ClassAct on 3.1).")
+         (help "Configuration GUI with separate Scandoubler, Audio and Other Settings windows, plus hardware readback, firmware update/restore, and an About box. Open the windows from ZZTop's Settings menu; firmware update/restore and the audio debug log are in the Project menu. Native Output/Refresh, scanlines and Capture controls are in Scandoubler.")
          (source "Tools/ZZTop")
          (infos)
          (dest #zz-drawer))
@@ -576,7 +576,7 @@
 
       (copyfiles
          (prompt ("Install the ZZTop manual into %s/" #zz-drawer))
-         (help "ZZTop.guide is the control-panel manual: every page, the output/refresh table, picture alignment, the audio mixer, firmware install and restore, and how Save and Revert work. Open it with MultiView.")
+         (help "ZZTop.guide is the control-panel manual: the Scandoubler window with the output/refresh table and live calibration, the Audio window, Other Settings, firmware update and restore, and the save rules. Open it with MultiView.")
          (source "Docs/ZZTop.guide")
          (infos)
          (dest #zz-drawer))

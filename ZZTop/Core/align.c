@@ -17,7 +17,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "align.h"
-#include "ui.h"
+#include "frontend.h"
 
 #define ALIGN_ENTER_PAD 0x43
 #define ALIGN_ENTER     0x44
@@ -374,10 +374,10 @@ BOOL align_picture_run(const struct zz_vcap_io *io,
 	}
 	CloseWindow(state.window);
 	CloseScreen(state.screen);
-	if (ui_screen())
-		ScreenToFront(ui_screen());
-	if (ui_window())
-		ActivateWindow(ui_window());
+	if (fe_screen())
+		ScreenToFront(fe_screen());
+	if (fe_window())
+		ActivateWindow(fe_window());
 	if (state.accepted) {
 		*accepted = state.working.control;
 		set_message(message, message_size, "Picture alignment applied");

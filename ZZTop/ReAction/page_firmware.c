@@ -95,7 +95,6 @@ static void progress(void *ctx, ULONG done, LONG total)
 	} else {
 		ui_gauge_set(P, &g_progress, 0, "Installing...");
 	}
-	ui_service_refresh();
 }
 
 static void install(void)

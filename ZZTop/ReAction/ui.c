@@ -599,15 +599,18 @@ void ui_busy(BOOL busy)
 	}
 }
 
-void ui_wait_begin(struct ui_wait *wait, BOOL *cancel)
+/* ------------------------------------------------------------------ */
+/* Front-end services for the shared core (frontend.h)                */
+
+void fe_wait_begin(struct fe_wait *wait, BOOL *cancel)
 {
 	wait->cancel = cancel;
 	NewList(&wait->deferred);
 }
 
-int ui_wait_keep_running(void *ctx)
+int fe_wait_keep_running(void *ctx)
 {
-	struct ui_wait *wait = ctx;
+	struct fe_wait *wait = ctx;
 	struct IntuiMessage *msg;
 
 	if (!window) return !*wait->cancel;
@@ -624,7 +627,7 @@ int ui_wait_keep_running(void *ctx)
 	return !*wait->cancel;
 }
 
-void ui_wait_end(struct ui_wait *wait)
+void fe_wait_end(struct fe_wait *wait)
 {
 	struct Message *msg;
 
@@ -634,10 +637,70 @@ void ui_wait_end(struct ui_wait *wait)
 		PutMsg(window->UserPort, msg);
 }
 
-void ui_service_refresh(void)
+void fe_status(const char *fmt, ...)
 {
-	/* Smart Refresh windows keep their pixels while obscured; nothing
-	 * to do beyond letting Intuition run. Present for loop symmetry. */
+	char tmp[UI_TEXT_MAX];
+	va_list ap;
+
+	va_start(ap, fmt);
+	vsnprintf(tmp, sizeof(tmp), fmt, ap);
+	va_end(ap);
+	ui_status("%s", tmp);
+}
+
+LONG fe_ask(const char *gadgets, const char *fmt, ...)
+{
+	va_list ap;
+	LONG r;
+
+	va_start(ap, fmt);
+	r = ask_va(gadgets, fmt, ap);
+	va_end(ap);
+	return r;
+}
+
+void fe_busy(BOOL busy)
+{
+	ui_busy(busy);
+}
+
+void fe_flush(void)
+{
+	ui_flush();
+}
+
+void fe_models_changed(void)
+{
+	UWORD i;
+
+	for (i = 0; i < PAGE_COUNT; i++)
+		if (ui_pages[i]->sync) ui_pages[i]->sync();
+	ui_pending_changed();
+}
+
+void fe_pending_changed(void)
+{
+	ui_pending_changed();
+}
+
+void fe_show(enum fe_place place)
+{
+	ui_show_page(place == FE_PLACE_CAPTURE ? PAGE_CAPTURE : PAGE_SYSTEM);
+}
+
+ULONG fe_ticks(void)
+{
+	return ui_ticks();
+}
+
+struct Window *fe_window(void)
+{
+	return ui_window();
+}
+
+struct Screen *fe_screen(void)
+{
+	return ui_screen();
 }
 
 /* ------------------------------------------------------------------ */

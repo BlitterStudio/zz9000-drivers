@@ -1,0 +1,7103 @@
+/*
+ * MNT ZZ9000 Amiga Graphics Card Diagnostics (ZZTop)
+ * Copyright (C) 2016-2026, Lucie L. Hartmann <lucie@mntre.com>
+ *													MNT Research GmbH, Berlin
+ *													https://mntre.com
+ * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
+ *	(ZZTop V2 and all later versions)
+ *
+ * More Info: https://mntre.com/zz9000
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * GNU General Public License v3.0 or later
+ *
+ * https://spdx.org/licenses/GPL-3.0-or-later.html
+ */
+
+#include <exec/types.h>
+#include <intuition/intuition.h>
+#include <intuition/gadgetclass.h>
+#include <intuition/screens.h>
+#include <graphics/displayinfo.h>
+#include <graphics/modeid.h>
+#include <graphics/rastport.h>
+#include <libraries/gadtools.h>
+#include <libraries/asl.h>
+#include <devices/timer.h>
+#include <devices/inputevent.h>
+
+#include <clib/alib_protos.h>
+#include <clib/exec_protos.h>
+#include <clib/debug_protos.h>
+#include <clib/graphics_protos.h>
+#include <clib/intuition_protos.h>
+#include <clib/gadtools_protos.h>
+#include <clib/expansion_protos.h>
+
+#include <clib/timer_protos.h>
+#include <clib/asl_protos.h>
+#include <clib/dos_protos.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+
+#include "zz9000.h"
+#include "fwup_amiga.h"
+#include "zzcfg_amiga.h"
+#include "zz_vcap_live.h"
+#include "zz_vcap_client.h"
+#include "zz_vcap_geometry.h"
+#include "zz_vcap_edit.h"
+#include "zz9000_capture_calibration.h"
+#include "zz9000_sampling_calibration.h"
+#include "vcap_sampling.h"
+/* zz9k.library client surface for the firmware audio control plane
+ * (the Audio window). The staged zz9k-headers tree is synced from the
+ * SDK checkout by build-gcc.sh, like the AHI/MHI drivers. */
+#include "zz9k/library_vectors.h"
+#include "zz9k/request.h"
+#include <proto/zz9k.h>
+#include <math.h>
+
+#define ZZTOP_RELEASE "2.11"
+#define ZZTOP_DATE    "29.09.2026"
+
+static const char version[] __attribute__((used)) =
+	"$VER: ZZTop " ZZTOP_RELEASE " (" ZZTOP_DATE ")\r\n";
+
+/* Scanline mode/parity and every other native-video control live in
+ * the Scandoubler window. */
+#define MYGAD_ZORROVER     (0)
+#define MYGAD_FWVER        (1)
+#define MYGAD_TEMP         (2)
+#define MYGAD_TEMP_MINMAX  (3)
+#define MYGAD_VAUX         (4)
+#define MYGAD_VINT         (5)
+#define MYGAD_Z9AX         (6)
+#define MYGAD_STATUS       (7)
+#define MYGAD_RAWREGS      (8)
+#define MYGAD_REFRESHMODE  (9)
+#define MYGAD_BTN_TEST     (10)
+#define MYGAD_BTN_REFRESH  (11)
+#define MYGAD_TEST_RESULT  (12)
+#define MYGAD_VIDEOCAP     (13)
+#define MYGAD_BTN_UPDATE   (14)
+#define MYGAD_BTN_RESTORE  (15)
+/* Opens the Audio window; the LPF slider that used to sit on the main
+ * window moved there with the rest of the master-chain controls. */
+#define MYGAD_FW_STATUS    (16)
+#define MYGAD_BTN_AUDIO    (17)
+/* Opens the Scandoubler window: fills the free third-column slot in
+ * the first button row, directly above the Audio button. */
+#define MYGAD_BTN_SCANDOUBLER (18)
+#define MYGAD_COUNT        (19)
+
+/* Settings window gadgets (own id space, own window): everything
+ * except native video. Output/refresh, scanlines/parity and capture
+ * calibration moved to the Scandoubler window. */
+#define SGAD_INT2          (0)
+#define SGAD_MAC           (1)
+#define SGAD_HDF           (2)
+#define SGAD_OFFSCREEN     (3)
+#define SGAD_OVERLAY       (4)
+#define SGAD_FAST_RAM      (5)
+#define SGAD_FAST_RAM_STATE (6)
+#define SGAD_FAST_RAM_SAVE_HELP (7)
+#define SGAD_FAST_RAM_MANUAL_HELP (8)
+#define SGAD_CFG_STATUS    (9)
+#define SGAD_BTN_SAVE      (10)
+#define SGAD_BTN_RELOAD    (11)
+#define SGAD_COUNT         (12)
+
+/* Scandoubler window gadgets (own id space, own window). */
+#define SDGAD_OUTPUT       (0)
+#define SDGAD_REFRESH      (1)
+#define SDGAD_DESC         (2)
+#define SDGAD_SCANMODE     (3)
+#define SDGAD_PARITY       (4)
+#define SDGAD_CAPTURE      (5)
+#define SDGAD_STATUS       (6)
+#define SDGAD_BTN_SAVE     (7)
+#define SDGAD_BTN_RELOAD   (8)
+#define SDGAD_COUNT        (9)
+
+/* Advanced native-video window gadgets. One Reset to Auto button
+ * clears every manual override (crop, window, phase); each value field
+ * is independently manual - editing it makes just that field explicit. */
+#define AGAD_VCAP_SAMPLE   (0)
+#define AGAD_VCAP_PHASE    (1)
+#define AGAD_BTN_PHASE_FINE_MINUS (2)
+#define AGAD_BTN_PHASE_FINE_PLUS  (3)
+#define AGAD_BTN_PHASE_COARSE_MINUS (4)
+#define AGAD_BTN_PHASE_COARSE_PLUS  (5)
+#define AGAD_PHASE_EYE     (6)
+#define AGAD_VCAP_CROP_H   (7)
+#define AGAD_VCAP_CROP_V   (8)
+#define AGAD_VCAP_WIDTH    (9)
+#define AGAD_VCAP_HEIGHT   (10)
+#define AGAD_BTN_AUTO      (11)
+#define AGAD_BTN_CALIBRATE (12)
+#define AGAD_BTN_SAMPLING_CALIBRATE (13)
+#define AGAD_STATUS        (14)
+#define AGAD_BTN_DONE      (15)
+#define AGAD_BTN_CANCEL    (16)
+#define AGAD_COUNT         (17)
+
+/* Audio window gadgets (own id space, own window). */
+#define AUDGAD_SCENE        (0)
+#define AUDGAD_BTN_EDIT     (1)
+#define AUDGAD_OUT_PEAK     (2)
+#define AUDGAD_OUT_COUNTS   (3)
+#define AUDGAD_IN_PEAK      (4)
+#define AUDGAD_IN_COUNTS    (5)
+#define AUDGAD_GAIN_RED     (6)
+#define AUDGAD_BASE_PAULA   (7)
+#define AUDGAD_BASE_AX      (8)
+#define AUDGAD_CEIL_PAULA   (9)
+#define AUDGAD_CEIL_AX      (10)
+#define AUDGAD_STATUS       (11)
+#define AUDGAD_BTN_SAVE     (12)
+#define AUDGAD_BTN_RENAME   (13)
+#define AUDGAD_BTN_BALANCE  (14)
+#define AUDGAD_LEVEL        (15)
+#define AUDGAD_COUNT        (16)
+
+/* Scene-editor window gadgets (sub-window of the Audio window). */
+#define SEGAD_LPF           (0)
+#define SEGAD_PREFACTOR     (1)
+#define SEGAD_VOLUME        (2)
+#define SEGAD_PAN           (3)
+#define SEGAD_EQ_BASE       (4)  /* SEGAD_EQ_BASE + 0..9 = bands 1..10 */
+#define SEGAD_STATUS        (14)
+#define SEGAD_BTN_DONE      (15)
+#define SEGAD_COUNT         (16)
+
+/* Scene-rename dialog gadgets (sub-window of the Audio window). */
+#define RNGAD_NAME          (0)
+#define RNGAD_BTN_OK        (1)
+#define RNGAD_BTN_CANCEL    (2)
+#define RNGAD_COUNT         (3)
+
+#define VCAP_RAWKEY_KEYPAD_ENTER 0x43
+#define VCAP_RAWKEY_RETURN       0x44
+#define VCAP_RAWKEY_ESCAPE       0x45
+#define VCAP_RAWKEY_UP           0x4c
+#define VCAP_RAWKEY_DOWN         0x4d
+#define VCAP_RAWKEY_RIGHT        0x4e
+#define VCAP_RAWKEY_LEFT         0x4f
+#define VCAP_APPLY_TIMEOUT_TICKS 100
+
+/* Menu userdata values: stable handles for the MENUPICK dispatcher and
+ * zztop_menu_item_by_id(). Items now span the Project and Settings
+ * titles; positions shift with layout, ids must not. */
+#define MENU_ID_SETTINGS   (1)
+#define MENU_ID_QUIT       (2)
+#define MENU_ID_FWUPDATE   (3)
+#define MENU_ID_FWRESTORE  (4)
+#define MENU_ID_AUDIOLOG   (5)
+#define MENU_ID_SCANDOUBLER (6)
+#define MENU_ID_AUDIO      (7)
+#define MENU_ID_ABOUT      (8)
+
+#define LABEL_ZORROVER     "Zorro Version"
+#define LABEL_FWVER        "Firmware ABI"
+#define LABEL_TEMP         "Die \260C"
+#define LABEL_TEMP_MINMAX  "Die Min/Max \260C"
+#define LABEL_VAUX         "VCCAUX V"
+#define LABEL_VINT         "VCCINT V"
+#define LABEL_Z9AX         "ZZ9000AX"
+#define LABEL_STATUS       "Status"
+#define LABEL_RAWREGS      "Raw Regs"
+#define LABEL_VIDEOCAP     "VideoCap"
+#define LABEL_SCANLINES    "Scanlines"
+#define LABEL_PARITY       "Parity"
+#define LABEL_REFRESHMODE  "Auto Refresh"
+#define LABEL_SD_OUTPUT    "Output"
+#define LABEL_SD_REFRESH   "Refresh"
+#define LABEL_VCAP_SAMPLE  "Capture Sample"
+#define LABEL_VCAP_PHASE   "Sampling Phase"
+#define LABEL_VCAP_EYE     "Last phase sweep"
+#define LABEL_VCAP_SIZE    "Capture W / H"
+#define LABEL_VCAP_CROP    "Crop H / V"
+#define LABEL_VCAP_BTN_AUTO   "Reset to Auto"
+#define LABEL_VCAP_BTN_ALIGN  "Align picture..."
+#define LABEL_VCAP_BTN_PHASE  "Find phase..."
+#define LABEL_SD_CAPTURE   "Capture..."
+#define LABEL_INT2         "Interrupt"
+#define LABEL_OFFSCREEN    "Offscreen BMs"
+#define LABEL_OVERLAY      "Video overlay"
+#define LABEL_FAST_RAM     "Fast RAM"
+#define LABEL_MAC          "MAC Address"
+#define LABEL_HDF          "SD HDF Image"
+#define LABEL_BTN_SAVE     "Save"
+#define LABEL_BTN_BALANCE  "Balanced"
+#define LABEL_BTN_RELOAD   "Reload"
+#define LABEL_TEST_RESULT  "Result"
+#define LABEL_BTN_TEST     "Reg Probe"
+#define LABEL_BTN_REFRESH  "Refresh"
+#define LABEL_BTN_UPDATE   "Update Firmware"
+#define LABEL_BTN_RESTORE  "Restore Backup"
+#define LABEL_FW_STATUS    "Firmware Op"
+#define LABEL_BTN_AUDIO    "Audio..."
+#define LABEL_BTN_SCANDOUBLER "Scandoubler..."
+#define LABEL_AUDIO_SCENE  "Scene"
+#define LABEL_BTN_EDITSCN  "Edit..."
+#define LABEL_BTN_RENAME   "Rename..."
+#define LABEL_AUD_OUT_PEAK "Out Peak L/R"
+#define LABEL_AUD_OUT_CNT  "Out Clip/Urun"
+#define LABEL_AUD_IN_PEAK  "In Peak L/R"
+#define LABEL_AUD_IN_CNT   "In Clip/Over"
+#define LABEL_AUD_GR       "Gain Red"
+#define LABEL_AUD_PAULA    "Paula Level"
+#define LABEL_AUD_AX       "AX Level"
+#define LABEL_AUD_CEIL_PAULA "Paula Ceiling"
+#define LABEL_AUD_CEIL_AX    "AX Ceiling"
+#define LABEL_AUD_DONE     "Done"
+#define LABEL_AUD_PREF     "Prefactor"
+#define LABEL_AUD_VOL      "Volume"
+#define LABEL_AUD_PAN      "Pan"
+/* Shared master-chain output filter. It is not AX-only; Paula
+ * hears it too. */
+#define LABEL_AUD_LPF      "Output Lowpass"
+
+/* Firmware scene-name cap: 8 staged chunks of two chars each. */
+#define ZZTOP_AUDIO_NAME_CHARS   16
+#define ZZTOP_AUDIO_NAME_CHUNKS  8
+
+#define SAMPLE_FWVER       "ABI 255.255"
+#define SAMPLE_TEMP        "999.9"
+#define SAMPLE_TEMP_MINMAX "999.9 / 999.9"
+#define SAMPLE_VOLTAGE     "99.99"
+#define SAMPLE_Z9AX        "Not present"
+#define SAMPLE_STATUS      "AX:Y USB:ffff SD:ffff B:ffff"
+#define SAMPLE_RAWREGS     "S:ffff P:ffff T:ffff A:ffff"
+#define SAMPLE_VIDEOCAP    "Lines:1023  Max:3/3  Min:3/3"
+#define SAMPLE_TEST_RESULT "No timer.device"
+#define SAMPLE_FW_STATUS   "Updating... 100% (9999 KB)"
+
+struct Gadget *gads[MYGAD_COUNT];
+
+#define ZZTOP_REG_SD_STATUS       (0xBC)
+#define ZZTOP_REG_SD_BOOT_STATUS  (0xC4)
+#define ZZTOP_REG_SCANLINE_MODE   (0x100C)
+#define ZZTOP_REG_SCANLINE_PARITY (0x100E)
+
+/* REG_ZZ_VIDEOCAP_STATS is advertised by ZZ_FW_CAP_VIDEOCAP_STATS.
+ *   [9:0]  live cap_ymax (lines per detected field, max 1023)
+ *   [15:10] reserved (always 0) */
+#define VCAP_LINES_MASK         (0x3FF)
+
+#define SCANLINE_MODE_COUNT 4
+#define REFRESH_MODE_COUNT  3
+#define ZZTOP_PROBE_READS 8
+
+static STRPTR parity_labels[] = {
+	(STRPTR)"Odd dark",
+	(STRPTR)"Even dark",
+	NULL
+};
+
+static STRPTR scanline_labels[] = {
+	(STRPTR)"Off",
+	(STRPTR)"Classic",
+	(STRPTR)"Soft",
+	(STRPTR)"Gradient",
+	NULL
+};
+
+static STRPTR refresh_labels[] = {
+	(STRPTR)"Manual",
+	(STRPTR)"1 sec",
+	(STRPTR)"5 sec",
+	NULL
+};
+
+struct TextAttr Topaz80 = { (STRPTR)"topaz.font", 8, 0, 0, };
+
+struct ZZTopLayout {
+	WORD margin_x;
+	WORD margin_y;
+	WORD label_gap;
+	WORD gadget_left;
+	WORD gadget_width;
+	WORD gadget_height;
+	WORD row_step;
+	WORD section_gap;
+	WORD control_step;
+	WORD button_width;
+	WORD button_col2;
+	WORD button_col3;
+	WORD button_top;
+	WORD fw_button_top;
+	WORD fw_status_top;
+	WORD window_width;
+	WORD window_height;
+	UWORD topborder;
+	const struct TextAttr *text_attr;
+};
+
+static CONST_STRPTR zztop_label_samples[] = {
+	(CONST_STRPTR)LABEL_ZORROVER,
+	(CONST_STRPTR)LABEL_FWVER,
+	(CONST_STRPTR)LABEL_TEMP,
+	(CONST_STRPTR)LABEL_TEMP_MINMAX,
+	(CONST_STRPTR)LABEL_VAUX,
+	(CONST_STRPTR)LABEL_VINT,
+	(CONST_STRPTR)LABEL_Z9AX,
+	(CONST_STRPTR)LABEL_STATUS,
+	(CONST_STRPTR)LABEL_RAWREGS,
+	(CONST_STRPTR)LABEL_VIDEOCAP,
+	(CONST_STRPTR)LABEL_SCANLINES,
+	(CONST_STRPTR)LABEL_PARITY,
+	(CONST_STRPTR)LABEL_REFRESHMODE,
+	(CONST_STRPTR)LABEL_TEST_RESULT,
+	(CONST_STRPTR)LABEL_FW_STATUS,
+	NULL
+};
+
+static CONST_STRPTR zztop_value_samples[] = {
+	(CONST_STRPTR)SAMPLE_FWVER,
+	(CONST_STRPTR)SAMPLE_TEMP,
+	(CONST_STRPTR)SAMPLE_TEMP_MINMAX,
+	(CONST_STRPTR)SAMPLE_VOLTAGE,
+	(CONST_STRPTR)SAMPLE_Z9AX,
+	(CONST_STRPTR)SAMPLE_STATUS,
+	(CONST_STRPTR)SAMPLE_RAWREGS,
+	(CONST_STRPTR)SAMPLE_VIDEOCAP,
+	(CONST_STRPTR)SAMPLE_TEST_RESULT,
+	(CONST_STRPTR)"Gradient",
+	(CONST_STRPTR)"Even dark",
+	(CONST_STRPTR)"Manual",
+	(CONST_STRPTR)SAMPLE_FW_STATUS,
+	NULL
+};
+
+static CONST_STRPTR zztop_button_samples[] = {
+	(CONST_STRPTR)LABEL_BTN_TEST,
+	(CONST_STRPTR)LABEL_BTN_RESTORE,
+	(CONST_STRPTR)LABEL_BTN_AUDIO,
+	(CONST_STRPTR)LABEL_BTN_SCANDOUBLER,
+	(CONST_STRPTR)LABEL_BTN_UPDATE,
+	NULL
+};
+
+struct Library* IntuitionBase;
+struct Library* GfxBase;
+struct Library* GadToolsBase;
+struct Library* AslBase;
+/* zz9k.library base for the proto inline calls; opened once at startup
+ * (optional, like asl.library) for the Audio control-plane window. */
+struct Library* ZZ9KBase = NULL;
+
+struct ConfigDev* zz_cd;
+volatile UBYTE* zz_regs;
+int zorro_version = 0;
+uint16_t refresh_mode = 0;
+double t_min = 0;
+double t_max = 0;
+
+char txt_buf[64];
+
+struct timerequest * timerio;
+struct MsgPort *timerport;
+struct Library *TimerBase;
+BOOL timer_pending = FALSE;
+char readout_bufs[MYGAD_COUNT][64];
+/* Shared with the Settings/Scandoubler/Audio windows (Settings menu and
+ * main-window buttons). */
+static struct Screen *zztop_screen;
+static void *zztop_vi;
+static struct ZZTopLayout zztop_layout;
+static struct Menu *zztop_menustrip;
+
+static struct NewMenu zztop_newmenus[] = {
+	{ NM_TITLE, (STRPTR)"Project", NULL, 0, 0, NULL },
+	/* Firmware actions are also buttons near the bottom of the window.
+	 * Duplicated here so they stay reachable on a short screen (PAL
+	 * HighRes) where the button row can be below the visible area. */
+	{ NM_ITEM,  (STRPTR)"Update Firmware...", (STRPTR)"U", 0, 0, (APTR)MENU_ID_FWUPDATE },
+	{ NM_ITEM,  (STRPTR)"Restore Backup...",  (STRPTR)"R", 0, 0, (APTR)MENU_ID_FWRESTORE },
+	/* 'L' for Log: plain 'A' opens the Audio window (Settings menu). */
+	{ NM_ITEM,  (STRPTR)"Audio Debug Log", (STRPTR)"L", CHECKIT, 0, (APTR)MENU_ID_AUDIOLOG },
+	{ NM_ITEM,  NM_BARLABEL,           NULL, 0, 0, NULL },
+	{ NM_ITEM,  (STRPTR)"About...", (STRPTR)"?", 0, 0, (APTR)MENU_ID_ABOUT },
+	{ NM_ITEM,  (STRPTR)"Quit",     (STRPTR)"Q", 0, 0, (APTR)MENU_ID_QUIT },
+	/* The configuration windows, most specific first: Scandoubler and
+	 * Audio own their domains, Other Settings holds the rest. */
+	{ NM_TITLE, (STRPTR)"Settings", NULL, 0, 0, NULL },
+	{ NM_ITEM,  (STRPTR)"Scandoubler...", (STRPTR)"C", 0, 0, (APTR)MENU_ID_SCANDOUBLER },
+	/* Audio shares the main-window button's guard: the window opens
+	 * only when the AX codec and the control-plane capability are
+	 * present (audio_window checks and explains otherwise). */
+	{ NM_ITEM,  (STRPTR)"Audio...", (STRPTR)"A", 0, 0, (APTR)MENU_ID_AUDIO },
+	{ NM_ITEM,  (STRPTR)"Other Settings...", (STRPTR)"O", 0, 0, (APTR)MENU_ID_SETTINGS },
+	{ NM_END,   NULL,                  NULL, 0, 0, NULL }
+};
+
+/* First item carrying this userdata across every menu title, or NULL.
+ * Menu-item positions are layout details; userdata ids are the stable
+ * handle. */
+static struct MenuItem *zztop_menu_item_by_id(UWORD menu_id)
+{
+	struct Menu *menu;
+
+	if (!zztop_menustrip) return NULL;
+	for (menu = zztop_menustrip; menu; menu = menu->NextMenu) {
+		struct MenuItem *item;
+		for (item = menu->FirstItem; item; item = item->NextItem) {
+			if ((ULONG)GTMENUITEM_USERDATA(item) == (ULONG)menu_id)
+				return item;
+		}
+	}
+	return NULL;
+}
+
+static WORD zztop_max_word(WORD a, WORD b)
+{
+	return (a > b) ? a : b;
+}
+
+static WORD zztop_text_width(struct RastPort *rp, CONST_STRPTR text, WORD fallback_char_width)
+{
+	ULONG len;
+
+	if (!text) return 0;
+
+	len = strlen((const char *)text);
+	if (rp && rp->Font) return TextLength(rp, text, len);
+
+	return (WORD)(len * fallback_char_width);
+}
+
+static WORD zztop_max_text_width(struct RastPort *rp, CONST_STRPTR *texts, WORD fallback_char_width)
+{
+	WORD width = 0;
+
+	while (*texts) {
+		width = zztop_max_word(width, zztop_text_width(rp, *texts, fallback_char_width));
+		texts++;
+	}
+
+	return width;
+}
+
+static void zztop_store_text_display(UWORD gadget_id, const char *text)
+{
+	if (gadget_id >= MYGAD_COUNT) return;
+
+	snprintf(readout_bufs[gadget_id], sizeof(readout_bufs[gadget_id]),
+		"%s", text ? text : "");
+}
+
+static void zztop_set_text_display(struct Window *win, UWORD gadget_id, const char *text)
+{
+	if (gadget_id >= MYGAD_COUNT || !gads[gadget_id]) return;
+
+	zztop_store_text_display(gadget_id, text);
+	GT_SetGadgetAttrs(gads[gadget_id], win, NULL,
+		GTTX_Text, readout_bufs[gadget_id],
+		TAG_END);
+}
+
+/* Height a window may occupy on this screen, excluding its own title bar.
+ * WA_InnerHeight is measured below that bar, so the comparison has to be
+ * against the same thing the caller passes. */
+static WORD zztop_usable_height(struct Screen *screen)
+{
+	WORD h = screen ? screen->Height : 256;
+	WORD bar = screen ? (WORD)(screen->BarHeight + 1) : 11;
+
+	return (WORD)(h - bar);
+}
+
+/* All the vertical spacing in one place, in two flavours. `compact` keeps
+ * gadget_height (GadTools needs it for a usable cycle/string gadget) and
+ * takes the reduction out of the padding between things. */
+static void zztop_set_vertical_metrics(struct ZZTopLayout *layout, WORD font_y,
+	BOOL compact)
+{
+	layout->margin_y = compact
+		? zztop_max_word(6, font_y - 2)
+		: zztop_max_word(20, font_y + 12);
+	layout->gadget_height = zztop_max_word(14, font_y + 6);
+	layout->row_step = layout->gadget_height + (compact
+		? zztop_max_word(2, font_y / 4)
+		: zztop_max_word(6, font_y / 2));
+	layout->section_gap = compact
+		? zztop_max_word(2, font_y / 4)
+		: zztop_max_word(5, font_y / 2);
+	layout->control_step = layout->row_step + layout->section_gap;
+}
+
+/* Walk the main window's rows and derive its height. Split out so the
+ * compact retry can re-run it without duplicating the row list. */
+static void zztop_place_rows(struct ZZTopLayout *layout)
+{
+	WORD y = layout->topborder + layout->margin_y;
+
+	y += layout->row_step * 10;
+	y += layout->section_gap;
+	y += layout->control_step;
+	y += layout->section_gap;
+	y += layout->row_step;
+	y += layout->section_gap;
+	layout->button_top = y;
+	/* Second button row (firmware update/restore) + a status line below it. */
+	layout->fw_button_top = layout->button_top + layout->row_step;
+	layout->fw_status_top = layout->fw_button_top + layout->row_step;
+	/* Gadget coordinates are window-relative and start below the title
+	 * bar, so the content spans topborder..bottom. This value is passed as
+	 * WA_InnerHeight, which excludes that bar - leaving topborder in would
+	 * add exactly that much dead space under the last row. */
+	layout->window_height = layout->fw_status_top + layout->gadget_height
+		+ (layout->margin_y / 2) - layout->topborder;
+}
+
+static void zztop_init_layout(struct ZZTopLayout *layout, struct Screen *screen)
+{
+	struct RastPort *rp = screen ? &screen->RastPort : NULL;
+	const struct TextAttr *text_attr = (screen && screen->Font) ? screen->Font : &Topaz80;
+	WORD font_x = (rp && rp->TxWidth) ? rp->TxWidth : 8;
+	WORD font_y = (rp && rp->TxHeight) ? rp->TxHeight : text_attr->ta_YSize;
+	WORD label_width;
+	WORD value_width;
+	WORD button_text_width;
+	WORD text_padding;
+	WORD button_gap;
+	WORD button_window_width;
+
+	if (font_x < 1) font_x = 8;
+	if (font_y < 1) font_y = 8;
+
+	layout->text_attr = text_attr;
+	layout->topborder = screen ? (UWORD)(screen->WBorTop + font_y + 1) : (UWORD)(font_y + 2);
+	layout->margin_x = zztop_max_word(20, font_x * 2 + 4);
+	layout->label_gap = zztop_max_word(16, font_x * 2);
+	zztop_set_vertical_metrics(layout, font_y, FALSE);
+
+	text_padding = zztop_max_word(32, font_x * 4);
+	label_width = zztop_max_text_width(rp, zztop_label_samples, font_x);
+	value_width = zztop_max_text_width(rp, zztop_value_samples, font_x);
+	button_text_width = zztop_max_text_width(rp, zztop_button_samples, font_x);
+
+	layout->gadget_left = layout->margin_x + label_width + layout->label_gap;
+	layout->gadget_width = zztop_max_word(240, value_width + text_padding);
+	layout->button_width = zztop_max_word(110, button_text_width + text_padding);
+
+	button_gap = zztop_max_word(16, font_x * 3);
+	/* Second and third button columns sit one full button + gap right of
+	 * the previous, so wider labels never overlap the left column. */
+	layout->button_col2 = layout->margin_x + layout->button_width + button_gap;
+	layout->button_col3 = layout->button_col2 + layout->button_width + button_gap;
+	button_window_width = layout->margin_x + layout->button_width +
+		button_gap + layout->button_width + button_gap +
+		layout->button_width + layout->margin_x;
+	layout->window_width = zztop_max_word(
+		layout->gadget_left + layout->gadget_width + layout->margin_x,
+		button_window_width);
+
+	zztop_place_rows(layout);
+
+	/* PAL HighRes (640x256) is a real target: it is what you get with no
+	 * startup-sequence, or when the RTG driver has not come up. The roomy
+	 * spacing above does not fit there, so fall back to compact metrics
+	 * rather than opening a window taller than the screen. Large screens
+	 * keep the comfortable layout. */
+	if (screen && layout->window_height > zztop_usable_height(screen)) {
+		zztop_set_vertical_metrics(layout, font_y, TRUE);
+		zztop_place_rows(layout);
+	}
+}
+
+void errorMessage(const char* error)
+{
+	struct EasyStruct requester = {
+		sizeof(struct EasyStruct),
+		0,
+		(UBYTE *)"ZZTop",
+		NULL,
+		(UBYTE *)"OK"
+	};
+
+	if (!error) return;
+
+	if (IntuitionBase) {
+		requester.es_TextFormat = (UBYTE *)error;
+		EasyRequestArgs(NULL, &requester, NULL, NULL);
+	} else {
+		printf("Error: %s\n", error);
+	}
+}
+
+/* Project > About...: the same EasyRequest idiom as errorMessage(), so
+ * it needs no extra setup on any screen depth. */
+static void zztop_about(struct Window *win)
+{
+	struct EasyStruct about = {
+		sizeof(struct EasyStruct),
+		0,
+		(UBYTE *)"About ZZTop",
+		(UBYTE *)"ZZTop " ZZTOP_RELEASE " (" ZZTOP_DATE ")\n\n"
+			"Control centre for the MNT ZZ9000\n"
+			"(C) 2016-2026 MNT Research GmbH\n"
+			"(C) 2026 Dimitris Panokostas\n"
+			"https://mntre.com/zz9000",
+		(UBYTE *)"OK"
+	};
+
+	EasyRequestArgs(win, &about, NULL, NULL);
+}
+
+uint16_t zz_get_reg16(uint32_t offset)
+{
+	return *((volatile uint16_t*)(zz_regs+offset));
+}
+
+void zz_set_reg(uint32_t offset, uint16_t value)
+{
+	*((volatile uint16_t*)(zz_regs+offset)) = value;
+}
+
+double zz_get_temperature(void)
+{
+	double temp = (double)(zz_get_reg16(REG_ZZ_TEMPERATURE));
+	return temp/10.0;
+}
+
+double zz_get_voltage_aux(void)
+{
+	double vaux = (double)(zz_get_reg16(REG_ZZ_VOLTAGE_AUX));
+	return vaux/100.0;
+}
+
+double zz_get_voltage_int(void)
+{
+	double vint = (double)(zz_get_reg16(REG_ZZ_VOLTAGE_INT));
+	return vint/100.0;
+}
+
+uint32_t zz_get_ax_present(void)
+{
+	return zz_get_reg16(REG_ZZ_AUDIO_CONFIG) & 1;
+}
+
+/*
+ * Scanlines V2 register map (FPGA firmware >= 2.0.0 with scanlines-v2
+ * bitstream):
+ *   0x100C = scanline_width / mode (0=off, 1=classic, 2=soft, 3=gradient)
+ *   0x100E = scanline_parity (0=odd dark, 1=even dark)
+ *
+ * The V1-era 0x1008 / 0x100A intensity registers still decode in the
+ * V2 bitstream (now as scanline_intensity / scanline_intensity2) but
+ * the V2 modes don't consult them, so they are effectively no-ops under
+ * this tool.
+ */
+void zz_set_scanline_mode(uint16_t mode)
+{
+	zz_set_reg(ZZTOP_REG_SCANLINE_MODE, mode);
+}
+
+uint16_t zz_get_scanline_mode(void)
+{
+	return zz_get_reg16(ZZTOP_REG_SCANLINE_MODE) & 0x3;
+}
+
+void zz_set_scanline_parity(uint16_t parity)
+{
+	zz_set_reg(ZZTOP_REG_SCANLINE_PARITY, parity & 0x1);
+}
+
+uint16_t zz_get_scanline_parity(void)
+{
+	return zz_get_reg16(ZZTOP_REG_SCANLINE_PARITY) & 0x1;
+}
+
+uint16_t zztop_refresh_seconds(void)
+{
+	if (refresh_mode == 1) return 1;
+	if (refresh_mode == 2) return 5;
+	return 0;
+}
+
+BOOL zztop_open_timer(void)
+{
+	if (TimerBase) return TRUE;
+
+	if (!(timerport = CreateMsgPort())) return FALSE;
+
+	timerio = (struct timerequest *)CreateIORequest(timerport, sizeof(struct timerequest));
+	if (!timerio) {
+		DeleteMsgPort(timerport);
+		timerport = NULL;
+		return FALSE;
+	}
+
+	if (OpenDevice((STRPTR)TIMERNAME, UNIT_MICROHZ, (struct IORequest *)timerio, 0) != 0) {
+		DeleteIORequest((struct IORequest *)timerio);
+		DeleteMsgPort(timerport);
+		timerio = NULL;
+		timerport = NULL;
+		return FALSE;
+	}
+
+	TimerBase = (struct Library *)timerio->tr_node.io_Device;
+	return TRUE;
+}
+
+void zztop_cancel_timer(void)
+{
+	if (!TimerBase || !timer_pending) return;
+
+	if (!CheckIO((struct IORequest *)timerio)) {
+		AbortIO((struct IORequest *)timerio);
+	}
+	WaitIO((struct IORequest *)timerio);
+	timer_pending = FALSE;
+}
+
+void zztop_close_timer(void)
+{
+	zztop_cancel_timer();
+
+	if (TimerBase) {
+		CloseDevice((struct IORequest *)timerio);
+		TimerBase = NULL;
+	}
+	if (timerio) {
+		DeleteIORequest((struct IORequest *)timerio);
+		timerio = NULL;
+	}
+	if (timerport) {
+		DeleteMsgPort(timerport);
+		timerport = NULL;
+	}
+}
+
+void zztop_schedule_timer(void)
+{
+	uint16_t secs = zztop_refresh_seconds();
+
+	if (!TimerBase || timer_pending || secs == 0) return;
+
+	timerio->tr_node.io_Command = TR_ADDREQUEST;
+	timerio->tr_time.tv_secs = secs;
+	timerio->tr_time.tv_micro = 0;
+	SendIO((struct IORequest *)timerio);
+	timer_pending = TRUE;
+}
+
+BOOL zztop_restart_timer(void)
+{
+	if (zztop_refresh_seconds() == 0) {
+		zztop_close_timer();
+		return TRUE;
+	}
+
+	if (!TimerBase) {
+		if (!zztop_open_timer()) return FALSE;
+	}
+
+	zztop_cancel_timer();
+	zztop_schedule_timer();
+	return TRUE;
+}
+
+double t_old=0;
+void refresh_zz_info(struct Window* win)
+{
+	uint16_t fwrev = zz_get_reg16(REG_ZZ_FW_VERSION);
+	uint16_t raw_temp = zz_get_reg16(REG_ZZ_TEMPERATURE);
+	uint16_t raw_vaux = zz_get_reg16(REG_ZZ_VOLTAGE_AUX);
+	uint16_t raw_usb = zz_get_reg16(REG_ZZ_USB_STATUS);
+	uint16_t raw_sd = zz_get_reg16(ZZTOP_REG_SD_STATUS);
+	uint16_t raw_sd_boot = zz_get_reg16(ZZTOP_REG_SD_BOOT_STATUS);
+	uint16_t raw_scanline = zz_get_reg16(ZZTOP_REG_SCANLINE_MODE);
+	uint16_t raw_parity = zz_get_reg16(ZZTOP_REG_SCANLINE_PARITY);
+	uint16_t fw_capabilities = zz_get_reg16(REG_ZZ_FW_CAPABILITIES);
+
+	int fwrev_major = fwrev>>8;
+	int fwrev_minor = fwrev&0xff;
+	double t = zz_get_temperature();
+	double vaux = zz_get_voltage_aux();
+	double vint = zz_get_voltage_int();
+	int z9ax_present = zz_get_ax_present();
+
+	double t_filt;
+	if (t_old==0)
+		t_filt=t;
+	else
+		t_filt=0.1*t+0.9*t_old;
+	t_old=t_filt;
+
+	if (t_min == 0 || t < t_min) t_min = t;
+	if (t_max == 0 || t > t_max) t_max = t;
+
+	GT_SetGadgetAttrs(gads[MYGAD_ZORROVER], win, NULL, GTNM_Number, zorro_version, TAG_END);
+
+	snprintf(txt_buf, 20, "ABI %d.%d", fwrev_major, fwrev_minor);
+	zztop_set_text_display(win, MYGAD_FWVER, txt_buf);
+
+	snprintf(txt_buf, 20, "%.1f", t_filt);
+	zztop_set_text_display(win, MYGAD_TEMP, txt_buf);
+
+	snprintf(txt_buf, 20, "%.1f / %.1f", t_min, t_max);
+	zztop_set_text_display(win, MYGAD_TEMP_MINMAX, txt_buf);
+
+	snprintf(txt_buf, 20, "%.2f", vaux);
+	zztop_set_text_display(win, MYGAD_VAUX, txt_buf);
+
+	snprintf(txt_buf, 20, "%.2f", vint);
+	zztop_set_text_display(win, MYGAD_VINT, txt_buf);
+
+	if (z9ax_present) {
+		zztop_set_text_display(win, MYGAD_Z9AX, "Present");
+	} else {
+		zztop_set_text_display(win, MYGAD_Z9AX, "Not present");
+	}
+
+	snprintf(txt_buf, 64, "AX:%c USB:%04x SD:%04x B:%04x",
+		z9ax_present ? 'Y' : 'N', raw_usb, raw_sd, raw_sd_boot);
+	zztop_set_text_display(win, MYGAD_STATUS, txt_buf);
+
+	snprintf(txt_buf, 64, "S:%04x P:%04x T:%04x A:%04x",
+		raw_scanline, raw_parity, raw_temp, raw_vaux);
+	zztop_set_text_display(win, MYGAD_RAWREGS, txt_buf);
+
+	/* REG_ZZ_VIDEOCAP_STATS is meaningful only when its capability bit
+	 * advertises the live-line-count ABI. Older firmware leaves stale bus
+	 * data at 0x4e, so do not present it as a diagnostic. */
+	if (fw_capabilities & ZZ_FW_CAP_VIDEOCAP_STATS) {
+		uint16_t lines = zz_get_reg16(REG_ZZ_VIDEOCAP_STATS) &
+			VCAP_LINES_MASK;
+
+		snprintf(txt_buf, 64, "Lines:%u  Max:n/a  Min:n/a", lines);
+		zztop_set_text_display(win, MYGAD_VIDEOCAP, txt_buf);
+	} else {
+		zztop_set_text_display(win, MYGAD_VIDEOCAP, "-");
+	}
+}
+
+ULONG zz_perform_register_probe(void)
+{
+	uint16_t fw = zz_get_reg16(REG_ZZ_FW_VERSION);
+	uint16_t hw = zz_get_reg16(REG_ZZ_HW_VERSION);
+	ULONG errors = 0;
+
+	for (int i = 0; i < ZZTOP_PROBE_READS; i++) {
+		if (zz_get_reg16(REG_ZZ_FW_VERSION) != fw) errors++;
+		if (zz_get_reg16(REG_ZZ_HW_VERSION) != hw) errors++;
+	}
+
+	if (fw == 0 || fw == 0xffff || hw == 0xffff) errors++;
+
+	return errors;
+}
+
+static int fw_confirm(const char *text)
+{
+	struct EasyStruct es = {
+		sizeof(struct EasyStruct), 0,
+		(UBYTE *)"ZZTop Firmware",
+		(UBYTE *)text,
+		(UBYTE *)"Proceed|Cancel"
+	};
+	return (int)EasyRequestArgs(NULL, &es, NULL, NULL);
+}
+
+static int fw_pick_file(char *out, int outsz)
+{
+	struct TagItem tags[] = {
+		{ ASLFR_TitleText,      (ULONG)"Select firmware file to upload" },
+		{ ASLFR_DoPatterns,     TRUE },
+		{ ASLFR_InitialPattern, (ULONG)"#?.(bin|rom|img)" },
+		{ TAG_END,              0 }
+	};
+	struct FileRequester *fr;
+	int ok = 0;
+
+	if (!AslBase) {
+		errorMessage("asl.library 37+ is required for the file requester.");
+		return 0;
+	}
+	fr = (struct FileRequester *)AllocAslRequest(ASL_FileRequest, tags);
+	if (!fr) return 0;
+	if (AslRequest(fr, NULL)) {
+		strncpy(out, (const char *)fr->fr_Drawer, outsz - 1);
+		out[outsz - 1] = '\0';
+		AddPart((STRPTR)out, fr->fr_File, (ULONG)outsz);
+		ok = 1;
+	}
+	FreeAslRequest(fr);
+	return ok;
+}
+
+static void fw_progress(void *ctx, ULONG done, LONG total)
+{
+	struct Window *win = (struct Window *)ctx;
+	static char buf[48];
+
+	if (total > 0) {
+		ULONG pct = (ULONG)(((ULONG)done * 100UL) / (ULONG)total);
+		if (pct > 100) pct = 100;
+		snprintf(buf, sizeof(buf), "Updating... %lu%% (%lu KB)",
+			(unsigned long)pct, (unsigned long)(done / 1024));
+	} else {
+		snprintf(buf, sizeof(buf), "Updating... %lu KB",
+			(unsigned long)(done / 1024));
+	}
+	zztop_set_text_display(win, MYGAD_FW_STATUS, buf);
+}
+
+static void do_fw_update(struct Window *win)
+{
+	/* File-scope static scratch, matching the Settings/Scandoubler/Audio
+	 * window idiom: this handler nests the ASL file requester and
+	 * EasyRequest on a Workbench-launched stack (the icon's stack field
+	 * is the only stack a WB launch gets), and 656 bytes of locals in
+	 * this frame smashed it — Guru 8000 0004 on firmware upload. */
+	static char path[256];
+	static char msg[400];
+	UWORD st;
+
+	if (!fwup_probe_board((ULONG)zz_regs)) {
+		errorMessage("This firmware does not support the file-push protocol.\n"
+			"Update BOOT.bin to a firmware build with FWUP support first.");
+		return;
+	}
+	if (!fw_pick_file(path, sizeof(path)))
+		return;
+
+	/* Confirm with the filename only, never the full path: EasyRequest
+	 * never wraps, and long drawers wrecked the confirmation requester
+	 * even with the old 40-column wrap (#95 plus the 2026-09
+	 * very-long-path report). The ASL picker this file was just chosen
+	 * from already showed the full path. */
+	snprintf(msg, sizeof(msg),
+		"Upload %s to the ZZ9000 as BOOT.bin?\n\n"
+		"Power-cycle the Amiga afterwards to boot the new firmware.",
+		FilePart((CONST_STRPTR)path));
+	if (!fw_confirm(msg))
+		return;
+
+	zztop_set_text_display(win, MYGAD_FW_STATUS, "Updating...");
+	st = fwup_send_file((ULONG)zz_regs, path, "BOOT.bin", fw_progress, win);
+	if (st == FWUP_OK) {
+		zztop_set_text_display(win, MYGAD_FW_STATUS, "Updated - power-cycle to boot");
+		errorMessage("Firmware uploaded as BOOT.bin.\nPower-cycle the Amiga to boot it.");
+	} else {
+		snprintf(msg, sizeof(msg), "Firmware update failed:\n%s (0x%04x)",
+			fwup_strerror(st), (unsigned)st);
+		zztop_set_text_display(win, MYGAD_FW_STATUS, "Update failed");
+		errorMessage(msg);
+	}
+}
+
+static void do_fw_restore(struct Window *win)
+{
+	static char msg[256];
+	UWORD st;
+
+	if (!fwup_probe_board((ULONG)zz_regs)) {
+		errorMessage("This firmware does not support the file-push protocol.");
+		return;
+	}
+	if (!fw_confirm("Restore the backup firmware (BOOT.bak) as the active BOOT.bin?\n\n"
+			"The current BOOT.bin is discarded and no backup remains.\n"
+			"Power-cycle the Amiga afterwards."))
+		return;
+
+	zztop_set_text_display(win, MYGAD_FW_STATUS, "Restoring...");
+	st = fwup_restore_board((ULONG)zz_regs, "BOOT.bin");
+	if (st == FWUP_OK) {
+		zztop_set_text_display(win, MYGAD_FW_STATUS, "Restored - power-cycle to boot");
+		errorMessage("Backup restored as BOOT.bin.\nPower-cycle the Amiga to boot it.");
+	} else {
+		snprintf(msg, sizeof(msg), "Firmware restore failed:\n%s (0x%04x)",
+			fwup_strerror(st), (unsigned)st);
+		zztop_set_text_display(win, MYGAD_FW_STATUS, "Restore failed");
+		errorMessage(msg);
+	}
+}
+
+/* ------------------------------------------------------------------ */
+/* Settings and Scandoubler windows: both edit ZZ9000.CFG on the SD   */
+/* card (issue #33). Values load from the raw file (not the cold-boot */
+/* query, so externally saved or edited values survive Reload); Save  */
+/* regenerates the whole file and pushes it over the FWUP path.       */
+/*                                                                    */
+/* Save ownership is split by section: the Scandoubler window owns    */
+/* native video (output/refresh, scanlines/parity, capture            */
+/* sampling/framing/crop/calibration) and the Settings window owns    */
+/* everything else (interrupt, MAC, HDF, offscreen bitmaps, video     */
+/* overlay). Each window re-reads the raw file when it opens, so a    */
+/* Save from one never clobbers unsaved edits staged in the other.    */
+/* ------------------------------------------------------------------ */
+
+static STRPTR vcapsample_labels[] = {
+	(STRPTR)"Average (recommended)",
+	(STRPTR)"Even (diagnostic)",
+	(STRPTR)"Odd (diagnostic)",
+	NULL
+};
+
+
+/* Feature kill-switches: index == the config value, so 1 is enabled -
+ * which is also what ZZ9000.card assumes when the key is absent. */
+static STRPTR enable_labels[] = {
+	(STRPTR)"Disabled",
+	(STRPTR)"Enabled",
+	NULL
+};
+
+/* Explicit INT6/INT2 choice: index == the config `int2` value. */
+static STRPTR interrupt_labels[] = {
+	(STRPTR)"INT6 (default)",
+	(STRPTR)"INT2",
+	NULL
+};
+
+static struct Gadget *sgads[SGAD_COUNT];
+static struct zzcfg_values settings_vals;
+static char settings_status_buf[64];
+static char settings_fast_ram_status_buf[64];
+#define FAST_RAM_SAVE_HELP    "Save: next reboot"
+#define FAST_RAM_MANUAL_HELP  "Any change: next reboot"
+static char settings_cfg_text[ZZCFG_MAX_SIZE];
+static BOOL settings_fast_ram_available;
+static UWORD settings_fast_ram_outcome;
+/* ZZ9000.CFG needs firmware ABI 2.3+. On older firmware the window
+ * still opens for the live scanline controls; the config-file fields
+ * and Save/Reload are disabled. */
+static BOOL settings_have_cfg;
+
+enum vcap_apply_result {
+	VCAP_APPLY_CANCELLED = -3,
+	VCAP_APPLY_ERROR = -2,
+	VCAP_APPLY_CONFLICT = -1,
+	VCAP_APPLY_TIMEOUT = 0,
+	VCAP_APPLY_OK = 1
+};
+
+struct settings_live_session {
+	BOOL supported;
+	struct zz_vcap_snapshot current;
+	struct zz_vcap_anchors anchors;
+	struct zz_vcap_control preview_control;
+	BOOL preview_valid;
+	BOOL phase_anchor_valid, phase_touched;
+	int phase_anchor;
+	BOOL geometry_anchor_valid, geometry_touched;
+	struct zz_vcap_geometry_state geometry_anchor;
+	enum zz_vcap_result restore_result;
+};
+
+/* Shared context for the Settings and Scandoubler config windows.
+ * Both are modal, so one context stack object serves either. The
+ * Settings window leaves `live` zeroed (unsupported): live native
+ * video control, including its close/restore gate, belongs to the
+ * Scandoubler window only. */
+struct zztop_cfg_ctx {
+	struct Screen *sc;
+	void *vi;
+	const struct ZZTopLayout *mainlayout;
+	UWORD fw_capabilities;
+	struct settings_live_session live;
+};
+
+static uint16_t settings_vcap_read16(void *ctx, uint32_t offset)
+{
+	(void)ctx;
+	return zz_get_reg16(offset);
+}
+
+static void settings_vcap_write16(void *ctx, uint32_t offset, uint16_t value)
+{
+	(void)ctx;
+	zz_set_reg(offset, value);
+}
+
+static void settings_vcap_delay(void *ctx, unsigned ticks)
+{
+	(void)ctx;
+	Delay(ticks);
+}
+
+static const struct zz_vcap_io settings_vcap_io = {
+	NULL, settings_vcap_read16, settings_vcap_write16, settings_vcap_delay,
+	NULL, NULL
+};
+
+static ULONG vcap_read32(ULONG offset)
+{
+	return zz_vcap_read32(&settings_vcap_io, offset);
+}
+
+static BOOL vcap_read_stable_status(ULONG *status)
+{
+	ULONG first = vcap_read32(ZZ_VCAP_LIVE_STATUS);
+	ULONG second = vcap_read32(ZZ_VCAP_LIVE_STATUS);
+
+	if (first != second) return FALSE;
+	*status = first;
+	return TRUE;
+}
+
+static BOOL vcap_capture_snapshot(struct zz_vcap_snapshot *snapshot)
+{
+	int tries;
+
+	for (tries = 0; tries < 8; tries++) {
+		ULONG before = vcap_read32(ZZ_VCAP_LIVE_STATUS);
+		ULONG raw = vcap_read32(ZZ_VCAP_LIVE_APPLIED_RAW);
+		ULONG effective = vcap_read32(ZZ_VCAP_LIVE_EFFECTIVE_CROP);
+		ULONG after = vcap_read32(ZZ_VCAP_LIVE_STATUS);
+
+		if (zz_vcap_snapshot_status_valid(before, after)) {
+			snapshot->status = after;
+			snapshot->raw = raw;
+			zz_vcap_effective_unpack(effective, &snapshot->effective_h,
+				&snapshot->effective_v);
+			return TRUE;
+		}
+	}
+	return FALSE;
+}
+
+static BOOL vcap_begin_apply(ULONG raw, UBYTE *expected_sequence)
+{
+	ULONG status_raw;
+	struct zz_vcap_status status;
+
+	if (!vcap_read_stable_status(&status_raw)) return FALSE;
+	zz_vcap_status_unpack(status_raw, &status);
+	if (!status.applied_valid || status.busy ||
+		status.request_sequence != status.applied_sequence)
+		return FALSE;
+
+	*expected_sequence = zz_vcap_next_sequence(status.request_sequence);
+	zz_set_reg(ZZ_VCAP_LIVE_STAGED_RAW_HI, (UWORD)(raw >> 16));
+	zz_set_reg(ZZ_VCAP_LIVE_STAGED_RAW_LO, (UWORD)raw);
+	zz_set_reg(ZZ_VCAP_LIVE_COMMIT, ZZ_VCAP_LIVE_COMMIT_TOKEN);
+	return TRUE;
+}
+
+static int vcap_poll_apply(UBYTE expected_sequence, ULONG expected_raw,
+	UWORD ticks, struct zz_vcap_snapshot *applied, const struct zz_vcap_io *control)
+{
+	UWORD elapsed;
+
+	for (elapsed = 0; elapsed < ticks; elapsed++) {
+		ULONG status;
+
+		if (control && control->keep_running && !control->keep_running(control->control_ctx))
+			return VCAP_APPLY_CANCELLED;
+		if (vcap_read_stable_status(&status)) {
+			if (zz_vcap_request_complete(status, expected_sequence)) {
+				int request_result;
+
+				if (!vcap_capture_snapshot(applied))
+					return VCAP_APPLY_ERROR;
+				request_result = zz_vcap_request_result(status,
+					expected_sequence, applied->raw, expected_raw);
+				if (request_result == ZZ_VCAP_REQUEST_CONFLICT)
+					return VCAP_APPLY_CONFLICT;
+				return VCAP_APPLY_OK;
+			}
+		}
+		Delay(1);
+	}
+	return VCAP_APPLY_TIMEOUT;
+}
+
+static int vcap_apply_raw(ULONG raw, struct zz_vcap_snapshot *applied,
+	const struct zz_vcap_io *control)
+{
+	UBYTE expected;
+
+	if (control && control->keep_running && !control->keep_running(control->control_ctx))
+		return VCAP_APPLY_CANCELLED;
+	if (!vcap_begin_apply(raw, &expected)) return VCAP_APPLY_ERROR;
+	return vcap_poll_apply(expected, raw, VCAP_APPLY_TIMEOUT_TICKS, applied, control);
+}
+
+/* ---- live capture-phase control ----
+ *
+ * The MMCM fine-phase engine is reached through the direct-register
+ * window at 0x1240..0x124e; the domain (C28 or legacy E7M) comes from
+ * its capability word. Targets are signed steps in the domain's own
+ * units; 0 is the routed default. */
+static enum zz_vcap_phase_domain settings_phase_domain =
+	ZZ_VCAP_PHASE_NONE;
+
+static enum zz_vcap_result settings_phase_read(int *phase)
+{
+	struct zz_vcap_phase_state state;
+	enum zz_vcap_result result = zz_vcap_phase_read(&settings_vcap_io, &state);
+
+	if (result != ZZ_VCAP_OK) return result;
+	result = zz_vcap_phase_check(&settings_vcap_io, state.applied);
+	if (result == ZZ_VCAP_OK) *phase = state.applied;
+	return result;
+}
+
+static enum zz_vcap_result settings_phase_apply(int phase, BOOL restoring)
+{
+	return zz_vcap_phase_apply(&settings_vcap_io, phase, restoring);
+}
+
+static BOOL settings_geometry_supported(void)
+{
+	return zz_vcap_geometry_supported(&settings_vcap_io);
+}
+
+static enum zz_vcap_result settings_geometry_apply(UWORD width, UWORD height,
+	BOOL restoring)
+{
+	return zz_vcap_geometry_apply(&settings_vcap_io, width, height, restoring);
+}
+
+/* Nominal automatic source-window fallback before live geometry readback is
+ * available. Confirmed geometry uses captured words/source rows, not HDMI
+ * output pixels; zero in the request retains per-axis Automatic. */
+static void settings_capture_window_seed(UWORD profile, ULONG applied_raw,
+	ULONG status_raw, UWORD *width, UWORD *height)
+{
+	UWORD pal_mode = 0, legacy_full = 0, legacy_vsync = 0;
+	struct zz_vcap_status live_status;
+	int full = (applied_raw & 0x4U) != 0;
+
+	zzcfg_profile_to_legacy(profile, &pal_mode, &legacy_full,
+		&legacy_vsync);
+	*width = full ? 1280 : (pal_mode ? 720 : 800);
+	zz_vcap_status_unpack(status_raw, &live_status);
+	*height = (live_status.standard_valid && live_status.ntsc) ?
+		200 : 256;
+}
+
+static void settings_live_init(struct settings_live_session *session,
+	UWORD firmware_revision, UWORD firmware_capabilities)
+{
+	ULONG capability;
+
+	memset(session, 0, sizeof(*session));
+	capability = vcap_read32(ZZ_VCAP_LIVE_CAPABILITY);
+	session->supported = zz_vcap_live_supported(firmware_revision,
+		firmware_capabilities, capability);
+	zz_vcap_anchors_init(&session->anchors);
+}
+
+static BOOL settings_live_refresh(struct settings_live_session *session)
+{
+	struct zz_vcap_snapshot snapshot;
+
+	/* Each hardware domain owns its anchor; crop support is not a phase gate. */
+	if (!session->phase_anchor_valid &&
+		settings_phase_read(&session->phase_anchor) == ZZ_VCAP_OK)
+		session->phase_anchor_valid = TRUE;
+	if (!session->geometry_anchor_valid &&
+		zz_vcap_geometry_read(&settings_vcap_io, &session->geometry_anchor) == ZZ_VCAP_OK &&
+		(session->geometry_anchor.status & ZZ_VCAP_GEOMETRY_STATUS_APPLIED_VALID) &&
+		!(session->geometry_anchor.status & ZZ_VCAP_GEOMETRY_STATUS_PENDING) &&
+		session->geometry_anchor.request_serial == session->geometry_anchor.applied_serial)
+		session->geometry_anchor_valid = TRUE;
+	if (!session->supported || !vcap_capture_snapshot(&snapshot)) return FALSE;
+	session->current = snapshot;
+	if (!session->anchors.valid[ZZ_VCAP_ANCHOR_SETTINGS])
+		zz_vcap_anchor_store(&session->anchors, ZZ_VCAP_ANCHOR_SETTINGS, &snapshot);
+	return TRUE;
+}
+
+static BOOL settings_live_restore(struct settings_live_session *session,
+	UWORD owner)
+{
+	struct zz_vcap_snapshot anchor;
+	struct zz_vcap_snapshot applied;
+	int result;
+
+	session->restore_result = ZZ_VCAP_OK;
+	if (session->supported && zz_vcap_anchor_load(&session->anchors, owner, &anchor) &&
+		!(settings_live_refresh(session) && session->current.raw == anchor.raw)) {
+		result = vcap_apply_raw(anchor.raw, &applied, NULL);
+		if (result != VCAP_APPLY_OK) {
+			session->restore_result = result == VCAP_APPLY_TIMEOUT ?
+				ZZ_VCAP_TIMEOUT : ZZ_VCAP_STATE_CHANGED;
+			return FALSE;
+		}
+		session->current = applied;
+	}
+	/* Advanced and calibration restore their own immutable local phase/window
+	 * anchors. The outer Settings anchor owns accepted, not-yet-saved edits. */
+	if (owner == ZZ_VCAP_ANCHOR_SETTINGS) {
+		if (session->phase_touched) {
+			session->restore_result = session->phase_anchor_valid ?
+				settings_phase_apply(session->phase_anchor, TRUE) : ZZ_VCAP_STATE_CHANGED;
+			if (session->restore_result != ZZ_VCAP_OK) return FALSE;
+			session->phase_touched = FALSE;
+		}
+		if (session->geometry_touched) {
+			session->restore_result = session->geometry_anchor_valid ? settings_geometry_apply(
+				session->geometry_anchor.requested_width,
+				session->geometry_anchor.requested_height, TRUE) : ZZ_VCAP_STATE_CHANGED;
+			if (session->restore_result != ZZ_VCAP_OK) return FALSE;
+			session->geometry_touched = FALSE;
+		}
+	}
+	return TRUE;
+}
+
+static void settings_live_accept(struct settings_live_session *session)
+{
+	/* Save was gated on these exact applied targets. Rebase to the accepted
+	 * values, not a second potentially racing read after the flash write. */
+	if (session->phase_touched) {
+		session->phase_anchor = settings_phase_domain == ZZ_VCAP_PHASE_C28 ?
+			(settings_vals.videocap_c28_phase_present ? settings_vals.videocap_c28_phase : 0) :
+			(settings_vals.videocap_phase_present ? settings_vals.videocap_phase : 0);
+		session->phase_anchor_valid = TRUE;
+		session->phase_touched = FALSE;
+	}
+	if (session->geometry_touched) {
+		session->geometry_anchor.requested_width = settings_vals.videocap_width_present ? settings_vals.videocap_width : 0;
+		session->geometry_anchor.requested_height = settings_vals.videocap_height_present ? settings_vals.videocap_height : 0;
+		session->geometry_anchor_valid = TRUE;
+		session->geometry_touched = FALSE;
+	}
+}
+
+static void settings_path_for(struct zz_vcap_path *path, UWORD profile,
+	UWORD sample)
+{
+	UWORD pal_mode, full_width, vsync;
+
+	zzcfg_profile_to_legacy(profile, &pal_mode,
+		&full_width, &vsync);
+	path->sample = sample;
+	path->full_width = full_width;
+}
+
+static BOOL settings_current_path_matches(
+	const struct settings_live_session *session, UWORD profile, UWORD sample)
+{
+	struct zz_vcap_control control;
+	struct zz_vcap_path staged;
+	struct zz_vcap_path applied;
+
+	if (!zz_vcap_control_unpack(session->current.raw, &control))
+		return FALSE;
+	settings_path_for(&staged, profile, sample);
+	applied.sample = control.sample;
+	applied.full_width = control.full_width;
+	return zz_vcap_path_equal(&staged, &applied);
+}
+
+static BOOL settings_profile_matches(struct settings_live_session *session,
+	UWORD profile, UWORD sample)
+{
+	return settings_live_refresh(session) &&
+		settings_current_path_matches(session, profile, sample);
+}
+
+static BOOL settings_path_matches(struct settings_live_session *session,
+	UWORD sample)
+{
+	return settings_profile_matches(session,
+		settings_vals.videocap_profile, sample);
+}
+
+static BOOL settings_custom_framing(void)
+{
+	return settings_vals.videocap_crop_h_present ||
+		settings_vals.videocap_crop_v_present;
+}
+
+static BOOL settings_custom_save_allowed(struct settings_live_session *session)
+{
+	session->restore_result = ZZ_VCAP_OK;
+	if (session->phase_touched) {
+		int target = settings_phase_domain == ZZ_VCAP_PHASE_C28 ?
+			(settings_vals.videocap_c28_phase_present ? settings_vals.videocap_c28_phase : 0) :
+			(settings_vals.videocap_phase_present ? settings_vals.videocap_phase : 0);
+		session->restore_result = zz_vcap_phase_check(&settings_vcap_io, target);
+		if (session->restore_result != ZZ_VCAP_OK) return FALSE;
+	}
+	if (session->geometry_touched) {
+		session->restore_result = zz_vcap_geometry_check(&settings_vcap_io,
+			settings_vals.videocap_width_present ? settings_vals.videocap_width : 0,
+			settings_vals.videocap_height_present ? settings_vals.videocap_height : 0);
+		if (session->restore_result != ZZ_VCAP_OK) return FALSE;
+	}
+	return !session->supported || !settings_custom_framing() ||
+		settings_path_matches(session, settings_vals.videocap_sample);
+}
+
+enum vcap_pending_action {
+	VCAP_PENDING_NONE = 0,
+	VCAP_PENDING_ADJUST,
+	VCAP_PENDING_ACCEPT,
+	VCAP_PENDING_RESTORE
+};
+
+struct vcap_calibration {
+	struct Screen *screen;
+	struct Window *window;
+	struct zz_vcap_snapshot entry;
+	struct zz_vcap_snapshot current;
+	struct zz_vcap_working working;
+	struct zz_vcap_working pending_working;
+	ULONG pending_raw;
+	UBYTE pending_sequence;
+	UWORD pending_action;
+	BOOL cancel_requested;
+	BOOL accepted;
+	BOOL done;
+	char message[96];
+};
+
+static void vcap_draw_line(struct RastPort *rp, WORD x1, WORD y1,
+	WORD x2, WORD y2, UWORD pen)
+{
+	SetAPen(rp, pen);
+	Move(rp, x1, y1);
+	Draw(rp, x2, y2);
+}
+
+static void vcap_draw_calibration(struct vcap_calibration *calibration)
+{
+	struct RastPort *rp = calibration->window->RPort;
+	WORD width = calibration->screen->Width;
+	WORD height = calibration->screen->Height;
+	WORD safe_x = width / 10;
+	WORD safe_y = height / 10;
+	char line[96];
+	const char *legend =
+		"Arrows adjust  Shift+Arrows coarse  Enter accept  Esc cancel";
+
+	SetDrMd(rp, JAM1);
+	SetRast(rp, 0);
+	/* Outer edge, a conservative safe-area box, and an unobscured centre
+	 * cross make both overscan loss and framing asymmetry obvious. */
+	vcap_draw_line(rp, 0, 0, width - 1, 0, 2);
+	vcap_draw_line(rp, width - 1, 0, width - 1, height - 1, 2);
+	vcap_draw_line(rp, width - 1, height - 1, 0, height - 1, 2);
+	vcap_draw_line(rp, 0, height - 1, 0, 0, 2);
+	vcap_draw_line(rp, safe_x, safe_y, width - safe_x - 1, safe_y, 3);
+	vcap_draw_line(rp, width - safe_x - 1, safe_y,
+		width - safe_x - 1, height - safe_y - 1, 3);
+	vcap_draw_line(rp, width - safe_x - 1, height - safe_y - 1,
+		safe_x, height - safe_y - 1, 3);
+	vcap_draw_line(rp, safe_x, height - safe_y - 1, safe_x, safe_y, 3);
+	vcap_draw_line(rp, width / 2 - 24, height / 2,
+		width / 2 + 24, height / 2, 1);
+	vcap_draw_line(rp, width / 2, height / 2 - 24,
+		width / 2, height / 2 + 24, 1);
+
+	SetAPen(rp, 1);
+	snprintf(line, sizeof(line), "Live Custom H:%u  V:%u",
+		(unsigned)calibration->working.crop_h,
+		(unsigned)calibration->working.crop_v);
+	Move(rp, 8, 12);
+	Text(rp, (CONST_STRPTR)line, strlen(line));
+	Move(rp, 8, 24);
+	Text(rp, (CONST_STRPTR)calibration->message,
+		strlen(calibration->message));
+	Move(rp, 8, height - 8);
+	Text(rp, (CONST_STRPTR)legend, strlen(legend));
+}
+
+static void vcap_calibration_start_apply(struct vcap_calibration *calibration,
+	const struct zz_vcap_working *candidate, UWORD action)
+{
+	ULONG raw = action == VCAP_PENDING_RESTORE ? calibration->entry.raw :
+		zz_vcap_control_pack(&candidate->control);
+	if (raw == calibration->current.raw) {
+		if (action == VCAP_PENDING_ACCEPT) {
+			calibration->working = *candidate;
+			calibration->accepted = TRUE;
+			calibration->done = TRUE;
+		} else if (action == VCAP_PENDING_RESTORE) {
+			calibration->done = TRUE;
+		}
+		return;
+	}
+	/* The existing modal loop reconciles one poll at a time. Never block
+	 * that loop for a frame timeout before it can consume Escape. */
+	if (vcap_begin_apply(raw, &calibration->pending_sequence)) {
+		calibration->pending_raw = raw;
+		calibration->pending_action = action;
+		if (candidate) calibration->pending_working = *candidate;
+		snprintf(calibration->message, sizeof(calibration->message),
+			"Waiting for native frame ACK; Esc queues entry restore");
+	} else {
+		snprintf(calibration->message, sizeof(calibration->message),
+			"Request not accepted; retry or Esc to restore");
+	}
+}
+
+static void vcap_calibration_reconcile(struct vcap_calibration *calibration)
+{
+	struct zz_vcap_snapshot applied;
+	struct zz_vcap_status status;
+	ULONG status_raw;
+	int result;
+
+	if (calibration->pending_action == VCAP_PENDING_NONE) return;
+	result = vcap_poll_apply(calibration->pending_sequence,
+		calibration->pending_raw, 1, &applied, NULL);
+	if (result == VCAP_APPLY_CONFLICT) {
+		UWORD conflict_action = calibration->pending_action;
+
+		calibration->current = applied;
+		calibration->pending_action = VCAP_PENDING_NONE;
+		if (calibration->cancel_requested ||
+			conflict_action == VCAP_PENDING_RESTORE)
+			vcap_calibration_start_apply(calibration, NULL,
+				VCAP_PENDING_RESTORE);
+		else
+			snprintf(calibration->message, sizeof(calibration->message),
+				"Another writer won the request; press the key again");
+		return;
+	}
+	if (result != VCAP_APPLY_OK) {
+		/* A valid live request can lose an idle-arbiter race to a firmware
+		 * or legacy operation-16 event. Rejected means that payload never
+		 * became pending, so the last acknowledged state is still exact. */
+		if (vcap_read_stable_status(&status_raw)) {
+			zz_vcap_status_unpack(status_raw, &status);
+			if (status.rejected && !status.busy &&
+				status.request_sequence == status.applied_sequence &&
+				status.request_sequence != calibration->pending_sequence) {
+				UWORD rejected_action = calibration->pending_action;
+
+				calibration->pending_action = VCAP_PENDING_NONE;
+				if (calibration->cancel_requested ||
+					rejected_action == VCAP_PENDING_RESTORE)
+					vcap_calibration_start_apply(calibration, NULL,
+						VCAP_PENDING_RESTORE);
+				else
+					snprintf(calibration->message,
+						sizeof(calibration->message),
+						"Request lost an arbiter race; press the key again");
+			}
+		}
+		return;
+	}
+
+	calibration->current = applied;
+	if (calibration->pending_action == VCAP_PENDING_RESTORE) {
+		calibration->pending_action = VCAP_PENDING_NONE;
+		calibration->done = TRUE;
+		return;
+	}
+	calibration->working = calibration->pending_working;
+	result = calibration->pending_action;
+	calibration->pending_action = VCAP_PENDING_NONE;
+	if (calibration->cancel_requested) {
+		vcap_calibration_start_apply(calibration, NULL,
+			VCAP_PENDING_RESTORE);
+	} else if (result == VCAP_PENDING_ACCEPT) {
+		calibration->accepted = TRUE;
+		calibration->done = TRUE;
+	} else {
+		snprintf(calibration->message, sizeof(calibration->message),
+			"Applied at capture-frame boundary");
+	}
+}
+
+static void vcap_calibration_cancel(struct vcap_calibration *calibration)
+{
+	calibration->cancel_requested = TRUE;
+	if (calibration->pending_action != VCAP_PENDING_NONE) {
+		snprintf(calibration->message, sizeof(calibration->message),
+			"Cancel pending; waiting to restore the entry state");
+		return;
+	}
+	vcap_calibration_start_apply(calibration, NULL, VCAP_PENDING_RESTORE);
+}
+
+static void vcap_calibration_key(struct vcap_calibration *calibration,
+	UWORD code, UWORD qualifier)
+{
+	struct zz_vcap_working candidate;
+	UWORD move;
+
+	if (code & IECODE_UP_PREFIX) return;
+	if (calibration->done) {
+		if (calibration->accepted && code == VCAP_RAWKEY_ESCAPE) {
+			calibration->done = FALSE;
+			calibration->accepted = FALSE;
+			vcap_calibration_cancel(calibration);
+		}
+		return;
+	}
+	if (code == VCAP_RAWKEY_ESCAPE) {
+		vcap_calibration_cancel(calibration);
+		return;
+	}
+	if (calibration->pending_action != VCAP_PENDING_NONE ||
+		calibration->cancel_requested)
+		return;
+
+	if (code == VCAP_RAWKEY_RETURN || code == VCAP_RAWKEY_KEYPAD_ENTER) {
+		candidate = calibration->working;
+		zz_vcap_accept(&candidate);
+		vcap_calibration_start_apply(calibration, &candidate,
+			VCAP_PENDING_ACCEPT);
+		return;
+	}
+	switch (code) {
+	case VCAP_RAWKEY_LEFT:  move = ZZ_VCAP_MOVE_LEFT; break;
+	case VCAP_RAWKEY_RIGHT: move = ZZ_VCAP_MOVE_RIGHT; break;
+	case VCAP_RAWKEY_UP:    move = ZZ_VCAP_MOVE_UP; break;
+	case VCAP_RAWKEY_DOWN:  move = ZZ_VCAP_MOVE_DOWN; break;
+	default: return;
+	}
+
+	candidate = calibration->working;
+	if (!zz_vcap_adjust(&candidate, move,
+		(qualifier & (IEQUALIFIER_LSHIFT | IEQUALIFIER_RSHIFT)) != 0)) {
+		snprintf(calibration->message, sizeof(calibration->message),
+			"At 0..4095 limit; no hardware request sent");
+		return;
+	}
+	vcap_calibration_start_apply(calibration, &candidate,
+		VCAP_PENDING_ADJUST);
+}
+
+/* PAL.monitor and NTSC.monitor are optional virtual monitors. If native
+ * frames are active, preserve their detected standard. If RTG Workbench has
+ * left the native input idle, bootstrap from default.monitor instead of the
+ * protocol's necessarily stale last-detected standard. HIRES_KEY cannot
+ * select an RTG monitor. */
+static ULONG vcap_calibration_display_id(UWORD detected_standard,
+	UWORD *display_standard, ULONG *mode_error)
+{
+	struct DisplayInfo display_info;
+	ULONG display_id;
+	ULONG error;
+	ULONG default_error = ModeNotAvailable(HIRES_KEY);
+	UWORD default_standard = ZZ_VCAP_STANDARD_UNKNOWN;
+
+	memset(&display_info, 0, sizeof(display_info));
+	if (default_error == 0 &&
+		GetDisplayInfoData(NULL, (UBYTE *)&display_info,
+			sizeof(display_info), DTAG_DISP, HIRES_KEY) != 0 &&
+		(display_info.PropertyFlags & DIPF_IS_FOREIGN) == 0) {
+		default_standard =
+			(display_info.PropertyFlags & DIPF_IS_PAL) ?
+			ZZ_VCAP_STANDARD_PAL : ZZ_VCAP_STANDARD_NTSC;
+	}
+
+	if (detected_standard == ZZ_VCAP_STANDARD_UNKNOWN) {
+		if (default_standard == ZZ_VCAP_STANDARD_UNKNOWN) {
+			*mode_error = default_error;
+			return (ULONG)INVALID_ID;
+		}
+		*display_standard = default_standard;
+		*mode_error = 0;
+		return HIRES_KEY;
+	}
+
+	display_id = detected_standard == ZZ_VCAP_STANDARD_NTSC ?
+		(NTSC_MONITOR_ID | HIRES_KEY) : (PAL_MONITOR_ID | HIRES_KEY);
+	error = ModeNotAvailable(display_id);
+	if (error == 0) {
+		*display_standard = detected_standard;
+		*mode_error = 0;
+		return display_id;
+	}
+	if (default_standard == detected_standard) {
+		*display_standard = default_standard;
+		*mode_error = 0;
+		return HIRES_KEY;
+	}
+
+	*mode_error = error;
+	return (ULONG)INVALID_ID;
+}
+
+static BOOL vcap_screen_is_foreign(struct Screen *screen)
+{
+	struct DisplayInfo display_info;
+	ULONG display_id;
+
+	if (!screen) return FALSE;
+	display_id = GetVPModeID(&screen->ViewPort);
+	if (display_id == (ULONG)INVALID_ID) return FALSE;
+	memset(&display_info, 0, sizeof(display_info));
+	return GetDisplayInfoData(NULL, (UBYTE *)&display_info,
+		sizeof(display_info), DTAG_DISP, display_id) != 0 &&
+		(display_info.PropertyFlags & DIPF_IS_FOREIGN) != 0;
+}
+
+static int vcap_calibration_run(struct Screen *return_screen,
+	struct Window *return_window, struct settings_live_session *session,
+	struct zz_vcap_control *accepted_control, char *failure,
+	UWORD failure_size)
+{
+	static struct ColorSpec colors[] = {
+		{ 0, 0, 0, 0 }, { 1, 15, 15, 15 },
+		{ 2, 15, 3, 3 }, { 3, 3, 8, 15 }, { -1, 0, 0, 0 }
+	};
+	struct vcap_calibration calibration;
+	ULONG display_id;
+	ULONG mode_error;
+	ULONG screen_error = 0;
+	struct IntuiMessage *message;
+	char last_message[96];
+	UWORD last_h;
+	UWORD last_v;
+	UWORD detected_standard;
+	UWORD display_standard;
+	UWORD lines;
+	BOOL caller_is_foreign;
+	BOOL want_ntsc;
+
+	memset(&calibration, 0, sizeof(calibration));
+	if (!settings_live_refresh(session)) {
+		snprintf(failure, failure_size,
+			"Live calibration state became unavailable");
+		return -1;
+	}
+	calibration.entry = session->current;
+	calibration.current = session->current;
+	zz_vcap_anchor_store(&session->anchors, ZZ_VCAP_ANCHOR_CALIBRATION,
+		&calibration.entry);
+	if (!zz_vcap_control_unpack(calibration.entry.raw,
+		&calibration.working.control)) {
+		snprintf(failure, failure_size,
+			"Live calibration control word is invalid");
+		return -1;
+	}
+	calibration.working.crop_h = calibration.entry.effective_h;
+	calibration.working.crop_v = calibration.entry.effective_v;
+	snprintf(calibration.message, sizeof(calibration.message),
+		"Adjust until the boxes are centred");
+	/* With capability bit 9 this is the live line count; older firmware
+	 * falls back to a non-zero REVISION. In either case standard selection
+	 * below trusts the live status word's standard_valid/ntsc; 0x4e only
+	 * gates the calibration path. */
+	lines = zz_get_reg16(REG_ZZ_VIDEOCAP_STATS) & VCAP_LINES_MASK;
+	caller_is_foreign = vcap_screen_is_foreign(return_screen);
+	detected_standard = zz_vcap_calibration_standard(
+		calibration.entry.status, lines, caller_is_foreign);
+	display_id = vcap_calibration_display_id(detected_standard,
+		&display_standard, &mode_error);
+	if (display_id == (ULONG)INVALID_ID) {
+		if (detected_standard == ZZ_VCAP_STANDARD_UNKNOWN)
+			snprintf(failure, failure_size,
+				"Native default Hires unavailable (mode error %lu)",
+				(unsigned long)mode_error);
+		else
+			snprintf(failure, failure_size,
+				"Native %s Hires unavailable (error %lu, %s, lines %u)",
+				detected_standard == ZZ_VCAP_STANDARD_NTSC ?
+				"NTSC" : "PAL", (unsigned long)mode_error,
+				caller_is_foreign ? "RTG" : "native", (unsigned)lines);
+		return -2;
+	}
+	want_ntsc = display_standard == ZZ_VCAP_STANDARD_NTSC;
+
+	calibration.screen = OpenScreenTags(NULL,
+		SA_Type, CUSTOMSCREEN, SA_DisplayID, display_id,
+		SA_Depth, 2, SA_Overscan, OSCAN_TEXT, SA_Colors, colors,
+		SA_SysFont, 0, SA_Quiet, TRUE, SA_ShowTitle, FALSE,
+		SA_Behind, TRUE, SA_AutoScroll, FALSE,
+		SA_ErrorCode, &screen_error, TAG_END);
+	if (!calibration.screen) {
+		snprintf(failure, failure_size,
+			"Native %s screen open failed (Intuition error %lu)",
+			want_ntsc ? "NTSC" : "PAL", (unsigned long)screen_error);
+		return -3;
+	}
+	calibration.window = OpenWindowTags(NULL,
+		WA_CustomScreen, calibration.screen,
+		WA_Left, 0, WA_Top, 0,
+		WA_Width, calibration.screen->Width,
+		WA_Height, calibration.screen->Height,
+		WA_Borderless, TRUE, WA_Backdrop, TRUE, WA_RMBTrap, TRUE,
+		WA_NoCareRefresh, TRUE, WA_Activate, FALSE,
+		WA_RptQueue, 16, WA_IDCMP, IDCMP_RAWKEY, TAG_END);
+	if (!calibration.window) {
+		CloseScreen(calibration.screen);
+		snprintf(failure, failure_size,
+			"Native calibration window could not be opened");
+		return -4;
+	}
+
+	vcap_draw_calibration(&calibration);
+	snprintf(last_message, sizeof(last_message), "%s", calibration.message);
+	last_h = calibration.working.crop_h;
+	last_v = calibration.working.crop_v;
+	ScreenToFront(calibration.screen);
+	ActivateWindow(calibration.window);
+	while (!calibration.done) {
+		ULONG signal = 1UL << calibration.window->UserPort->mp_SigBit;
+
+		if (calibration.pending_action == VCAP_PENDING_NONE)
+			Wait(signal);
+		else
+			Delay(1);
+		while ((message = (struct IntuiMessage *)
+			GetMsg(calibration.window->UserPort))) {
+			ULONG message_class = message->Class;
+			UWORD code = message->Code;
+			UWORD qualifier = message->Qualifier;
+
+			ReplyMsg((struct Message *)message);
+			if (message_class == IDCMP_RAWKEY)
+				vcap_calibration_key(&calibration, code, qualifier);
+		}
+		vcap_calibration_reconcile(&calibration);
+		if (last_h != calibration.working.crop_h ||
+			last_v != calibration.working.crop_v ||
+			strcmp(last_message, calibration.message) != 0) {
+			vcap_draw_calibration(&calibration);
+			last_h = calibration.working.crop_h;
+			last_v = calibration.working.crop_v;
+			snprintf(last_message, sizeof(last_message), "%s",
+				calibration.message);
+		}
+	}
+
+	while ((message = (struct IntuiMessage *)
+		GetMsg(calibration.window->UserPort)))
+		ReplyMsg((struct Message *)message);
+	CloseWindow(calibration.window);
+	CloseScreen(calibration.screen);
+	ScreenToFront(return_screen);
+	ActivateWindow(return_window);
+
+	session->current = calibration.current;
+	if (!calibration.accepted) return 0;
+	*accepted_control = calibration.working.control;
+	zz_vcap_anchor_store(&session->anchors, ZZ_VCAP_ANCHOR_PREVIEW,
+		&calibration.current);
+	session->preview_control = calibration.working.control;
+	session->preview_valid = TRUE;
+	return 1;
+}
+
+static CONST_STRPTR settings_label_samples[] = {
+	(CONST_STRPTR)LABEL_INT2,
+	(CONST_STRPTR)LABEL_MAC,
+	(CONST_STRPTR)LABEL_HDF,
+	(CONST_STRPTR)LABEL_OFFSCREEN,
+	(CONST_STRPTR)LABEL_OVERLAY,
+	(CONST_STRPTR)LABEL_FAST_RAM,
+	NULL
+};
+
+/* Sized from the widest cycle/string content only; the status line
+ * spans the full row instead, so long messages don't inflate the
+ * control column (and with it the whole window). The 24-char floor
+ * keeps the MAC/HDF string gadgets wide enough to edit without
+ * opening the column to the old (video-cycle-sized) width. */
+static CONST_STRPTR settings_value_samples[] = {
+	(CONST_STRPTR)"INT6 (default)",
+	(CONST_STRPTR)"aa:bb:cc:dd:ee:ff",
+	NULL
+};
+
+static CONST_STRPTR settings_button_samples[] = {
+	(CONST_STRPTR)LABEL_BTN_SAVE,
+	(CONST_STRPTR)LABEL_BTN_RELOAD,
+	NULL
+};
+
+/* Status-line plumbing shared by both config windows: each has its own
+ * buffer and TEXT gadget, same no-self-copy rule as before. */
+static void cfg_status_set(struct Window *win, struct Gadget *status_gad,
+	char *buf, const char *text)
+{
+	/* callers may pass buf itself - don't self-copy */
+	if (text != buf) snprintf(buf, 64, "%s", text);
+	if (win && status_gad) {
+		GT_SetGadgetAttrs(status_gad, win, NULL,
+			GTTX_Text, buf, TAG_END);
+	}
+}
+
+static void settings_set_status(struct Window *win, const char *text)
+{
+	cfg_status_set(win, sgads[SGAD_CFG_STATUS], settings_status_buf, text);
+}
+
+static const char *settings_fast_ram_outcome_reason(UWORD outcome)
+{
+	switch (outcome) {
+		case ZZ_CFG_FAST_RAM_OUTCOME_OFF: return "off";
+		case ZZ_CFG_FAST_RAM_OUTCOME_ABSENT: return "not set";
+		case ZZ_CFG_FAST_RAM_OUTCOME_INVALID: return "invalid";
+		case ZZ_CFG_FAST_RAM_OUTCOME_TRUNCATED: return "truncated";
+		case ZZ_CFG_FAST_RAM_OUTCOME_MEDIA_ERR: return "SD error";
+		case ZZ_CFG_FAST_RAM_OUTCOME_TIMEOUT: return "timeout";
+		default: return "gate";
+	}
+}
+
+static void settings_fast_ram_refresh_state(void)
+{
+	UWORD outcome = ZZ_CFG_FAST_RAM_OUTCOME_PENDING;
+	enum zzcfg_fast_ram_state state;
+
+	settings_fast_ram_outcome = outcome;
+	settings_fast_ram_available = FALSE;
+	if (!settings_have_cfg) {
+		snprintf(settings_fast_ram_status_buf,
+			sizeof(settings_fast_ram_status_buf),
+			"Effective: unavailable (no config support)");
+		return;
+	}
+
+	state = zzcfg_fast_ram_effective_state((ULONG)zz_regs, &outcome);
+	settings_fast_ram_outcome = outcome;
+	if (state == ZZCFG_FAST_RAM_UNAVAILABLE) {
+		snprintf(settings_fast_ram_status_buf,
+			sizeof(settings_fast_ram_status_buf),
+			"Effective: unavailable on this firmware");
+		return;
+	}
+
+	settings_fast_ram_available = TRUE;
+	if (state == ZZCFG_FAST_RAM_ENABLED) {
+		snprintf(settings_fast_ram_status_buf,
+			sizeof(settings_fast_ram_status_buf), "Effective: enabled%s",
+			outcome == ZZ_CFG_FAST_RAM_OUTCOME_BAK_ON ? " (backup)" : "");
+	} else if (state == ZZCFG_FAST_RAM_WITHHELD) {
+		snprintf(settings_fast_ram_status_buf,
+			sizeof(settings_fast_ram_status_buf),
+			"Effective: on, withheld (%s)",
+			settings_fast_ram_outcome_reason(outcome));
+	} else {
+		snprintf(settings_fast_ram_status_buf,
+			sizeof(settings_fast_ram_status_buf),
+			"Effective: disabled (%s)",
+			settings_fast_ram_outcome_reason(outcome));
+	}
+}
+
+/* The raw file seeds both editor windows, but the boot outcome can withhold
+ * Fast RAM for corruption that the readable snapshot does not reproduce. */
+static void settings_fast_ram_apply_boot_outcome(struct zzcfg_values *sv)
+{
+	UWORD outcome = ZZ_CFG_FAST_RAM_OUTCOME_PENDING;
+
+	zzcfg_fast_ram_effective_state((ULONG)zz_regs, &outcome);
+	zzcfg_fast_ram_invalidate_withheld(sv, outcome);
+}
+
+static int settings_parse_mac(const char *s)
+{
+	int i;
+
+	for (i = 0; i < 6; i++) {
+		int j;
+		for (j = 0; j < 2; j++) {
+			char c = s[i * 3 + j];
+			if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+					(c >= 'A' && c <= 'F')))
+				return 0;
+		}
+		if (i < 5 && s[i * 3 + 2] != ':' && s[i * 3 + 2] != '-')
+			return 0;
+	}
+	return s[ZZCFG_MAC_CHARS] == '\0';
+}
+
+static int settings_parse_u12(const char *s, UWORD *out)
+{
+	ULONG value = 0;
+
+	if (!s || !*s) return 0;
+	while (*s) {
+		if (*s < '0' || *s > '9') return 0;
+		value = value * 10 + (ULONG)(*s - '0');
+		if (value > 4095) return 0;
+		s++;
+	}
+	*out = (UWORD)value;
+	return 1;
+}
+
+/* Capture-window bounds: unsigned decimal; the width's range and
+ * 16-alignment and the height's 100..1024 are enforced by the caller
+ * with the firmware's exact rules. */
+static int settings_parse_window_field(const char *s, UWORD *out)
+{
+	ULONG value = 0;
+
+	if (!s || !*s) return 0;
+	while (*s) {
+		if (*s < '0' || *s > '9') return 0;
+		value = value * 10 + (ULONG)(*s - '0');
+		if (value > 65535) return 0;
+		s++;
+	}
+	*out = (UWORD)value;
+	return 1;
+}
+
+/* Signed decimal phase steps; the range is checked against the
+ * detected domain by the caller (the two unit systems never
+ * convert into each other). */
+static int settings_parse_phase_field(const char *s, int *out)
+{
+	LONG value = 0;
+	int negative = 0;
+	int digits = 0;
+
+	if (!s || !*s) return 0;
+	if (*s == '-') {
+		negative = 1;
+		s++;
+	} else if (*s == '+') {
+		s++;
+	}
+	while (*s) {
+		if (*s < '0' || *s > '9') return 0;
+		value = value * 10 + (LONG)(*s - '0');
+		if (value > 99999) return 0;
+		digits = 1;
+		s++;
+	}
+	if (!digits) return 0;
+	*out = negative ? -(int)value : (int)value;
+	return 1;
+}
+
+static int settings_env_exists(const char *path)
+{
+	BPTR f = Open((CONST_STRPTR)path, MODE_OLDFILE);
+	if (!f) return 0;
+	Close(f);
+	return 1;
+}
+
+static int settings_env_read_mac(char *out, int outsz)
+{
+	BPTR f = Open((CONST_STRPTR)"ENV:ZZ9K_MAC", MODE_OLDFILE);
+	LONG n;
+
+	if (!f) return 0;
+	n = Read(f, out, outsz - 1);
+	Close(f);
+	if (n < ZZCFG_MAC_CHARS) return 0;
+	out[ZZCFG_MAC_CHARS] = '\0';
+	return settings_parse_mac(out);
+}
+
+/* The drivers apply ENV: variables over the config file, so the
+ * owning window shows the effective values: pre-filling its editor
+ * from ENV both matches what the system actually does and turns Save
+ * into the migration path (values land in ZZ9000.CFG, then the ENV
+ * variables can go). Split by owner so neither window rewrites the
+ * other's section with ENV values it does not display. Each returns
+ * 1 if any of its overrides is active, for the status line. */
+
+/* Native-video overrides (Scandoubler window): ZZ9000-VCAP-800x600
+ * and the nonstandard-vsync switches select a legacy capture path. */
+static int settings_apply_env_native(struct zzcfg_values *sv)
+{
+	UWORD pal_mode, full, vsync;
+	int native_override = 0;
+
+	zzcfg_profile_to_legacy(sv->videocap_profile, &pal_mode, &full, &vsync);
+	if (settings_env_exists("ENV:ZZ9000-VCAP-800x600")) {
+		pal_mode = 0;
+		full = 0;
+		native_override = 1;
+	}
+	if (settings_env_exists("ENV:ZZ9000-NS-VSYNC")) {
+		vsync = 1;
+		native_override = 1;
+	} else if (settings_env_exists("ENV:ZZ9000-NS-VSYNC-NTSC")) {
+		vsync = 2;
+		native_override = 1;
+	}
+	/* Native-video ENV overrides intentionally select a legacy profile;
+	 * the conversion goes through the lossy legacy tuple either way. */
+	if (native_override)
+		sv->videocap_profile =
+			zzcfg_profile_from_legacy(pal_mode, full, vsync);
+	return native_override;
+}
+
+/* MAC/INT2 overrides (Settings window). */
+static int settings_apply_env_general(struct zzcfg_values *sv)
+{
+	char envmac[ZZCFG_MAC_CHARS + 3];
+	int any = 0;
+
+	if (settings_env_exists("ENV:ZZ9K_INT2")) {
+		sv->int2 = 1;
+		any = 1;
+	}
+	if (settings_env_read_mac(envmac, sizeof(envmac))) {
+		strcpy(sv->mac, envmac);
+		any = 1;
+	}
+	return any;
+}
+
+/* ENV variables each window offers to clean up after a successful
+ * save: only the ones its own section migrated into the file. */
+static const char *settings_env_names_general[] = {
+	"ZZ9K_MAC", "ZZ9K_INT2", NULL
+};
+static const char *settings_env_names_native[] = {
+	"ZZ9000-VCAP-800x600", "ZZ9000-NS-VSYNC",
+	"ZZ9000-NS-VSYNC-NTSC", NULL
+};
+
+/* After a save the config file holds the effective values, so offer
+ * to delete the ENV: variables that would keep overriding it. */
+static void settings_offer_env_cleanup(const char *const *env_names)
+{
+	char path[40];
+	char msg[400];
+	int i, any = 0;
+
+	snprintf(msg, sizeof(msg),
+		"These ENV: variables override the saved ZZ9000.CFG "
+		"whenever the drivers load:\n");
+	for (i = 0; env_names[i]; i++) {
+		snprintf(path, sizeof(path), "ENV:%s", env_names[i]);
+		if (settings_env_exists(path)) {
+			any = 1;
+			snprintf(path, sizeof(path), "\n  %s", env_names[i]);
+			strncat(msg, path, sizeof(msg) - strlen(msg) - 1);
+		}
+	}
+	if (!any) return;
+
+	strncat(msg, "\n\nDelete them (ENV: and ENVARC:) so the config "
+		"file takes effect?", sizeof(msg) - strlen(msg) - 1);
+
+	{
+		struct EasyStruct es = {
+			sizeof(struct EasyStruct), 0,
+			(UBYTE *)"ZZ9000 Settings",
+			(UBYTE *)msg,
+			(UBYTE *)"Delete|Keep"
+		};
+		if (!EasyRequestArgs(NULL, &es, NULL, NULL)) return;
+	}
+
+	for (i = 0; env_names[i]; i++) {
+		snprintf(path, sizeof(path), "ENV:%s", env_names[i]);
+		DeleteFile((STRPTR)path);
+		snprintf(path, sizeof(path), "ENVARC:%s", env_names[i]);
+		DeleteFile((STRPTR)path);
+	}
+}
+
+/* Shared editor seed for both config windows: board/live defaults,
+ * then the raw SD file over them. The raw file - not the firmware's
+ * cold-boot parse (REG_ZZ_CONFIG_KEY) - is the editor's source of
+ * truth: the query would revert values saved or externally edited
+ * since boot on every Reload, and a subsequent Save would write those
+ * stale values back. Returns the raw read status for the status line;
+ * *rawlen is valid on ZZ_CFG_FILE_OK. */
+static UWORD settings_reload_from_card(struct zzcfg_values *sv,
+	UWORD fw_capabilities, UWORD *rawlen)
+{
+	UWORD st;
+
+	*rawlen = 0;
+	memset(sv, 0, sizeof(*sv));
+	sv->videocap_profile = ZZCFG_VCAP_FULL_60;
+	sv->use_videocap_profile_key =
+		(fw_capabilities & ZZ_FW_CAP_VIDEOCAP_PROFILE) != 0;
+	sv->firmware_capabilities = fw_capabilities;
+	sv->videocap_crop_h = ZZCFG_VIDEOCAP_CROP_H_COMPAT;
+	sv->videocap_crop_v = ZZCFG_VIDEOCAP_CROP_V_COMPAT;
+	/* Scanlines default to the live FPGA state - the config applied it
+	 * at cold boot and this tool/ZZScanlines may have changed it since. */
+	sv->scanline_mode = zz_get_scanline_mode();
+	sv->scanline_parity = zz_get_scanline_parity();
+	/* ZZ9000.card enables both of these when the key is absent, so the
+	 * editor must default to on as well. Save writes every supported key,
+	 * so a zeroed default here would disable off-screen bitmaps and PIP
+	 * for anyone who merely opened the window and pressed Save. */
+	sv->offscreen_bitmaps = 1;
+	sv->video_overlay = 1;
+
+	/* Pre-2.3 firmware has no config-file interface at all: skip the
+	 * mailbox read (and its timeout) and leave the defaults in place;
+	 * callers report the scanlines-only state themselves. */
+	st = ZZ_CFG_FILE_IDLE;
+	if (settings_have_cfg) {
+		st = zzcfg_read_raw((ULONG)zz_regs, settings_cfg_text,
+			sizeof(settings_cfg_text), rawlen);
+		if (st == ZZ_CFG_FILE_OK)
+			zzcfg_parse_text(settings_cfg_text, *rawlen, sv);
+		settings_fast_ram_apply_boot_outcome(sv);
+	}
+	return st;
+}
+
+/* General Settings preserves parsed native values and their absence.
+ * Native ENV overrides belong to Scandoubler; the shared generator
+ * still sanitizes an explicitly stored unsupported centered profile. */
+static void settings_populate(struct Window *win, UWORD fw_capabilities)
+{
+	struct zzcfg_values *sv = &settings_vals;
+	UWORD st, rawlen = 0;
+
+	st = settings_reload_from_card(sv, fw_capabilities, &rawlen);
+
+	if (!settings_have_cfg) {
+		snprintf(settings_status_buf, sizeof(settings_status_buf),
+			"Config needs FW 2.3+ (scanlines: Scandoubler window)");
+	} else if (st == ZZ_CFG_FILE_OK) {
+		if (settings_apply_env_general(sv))
+			snprintf(settings_status_buf, sizeof(settings_status_buf),
+				"%u bytes on card + ENV: MAC/INT2", (unsigned)rawlen);
+		else
+			snprintf(settings_status_buf, sizeof(settings_status_buf),
+				"ZZ9000.CFG: %u bytes on card", (unsigned)rawlen);
+	} else if (st == ZZ_CFG_FILE_NO_FILE) {
+		if (settings_apply_env_general(sv))
+			snprintf(settings_status_buf, sizeof(settings_status_buf),
+				"No file yet - showing ENV settings");
+		else
+			snprintf(settings_status_buf, sizeof(settings_status_buf),
+				"No ZZ9000.CFG on card yet");
+	} else if (st == ZZ_CFG_FILE_IDLE) {
+		snprintf(settings_status_buf, sizeof(settings_status_buf),
+			"Firmware lacks config support");
+	} else {
+		snprintf(settings_status_buf, sizeof(settings_status_buf),
+			"Config read failed (SD error)");
+	}
+	settings_fast_ram_refresh_state();
+	
+
+
+	if (!win) return;
+
+	GT_SetGadgetAttrs(sgads[SGAD_INT2], win, NULL,
+		GTCY_Active, sv->int2 ? 1 : 0, TAG_END);
+	GT_SetGadgetAttrs(sgads[SGAD_MAC], win, NULL,
+		GTST_String, sv->mac, TAG_END);
+	GT_SetGadgetAttrs(sgads[SGAD_HDF], win, NULL,
+		GTST_String, (STRPTR)zzcfg_hdf_gadget_text(sv->hdf), TAG_END);
+	GT_SetGadgetAttrs(sgads[SGAD_OFFSCREEN], win, NULL,
+		GTCY_Active, sv->offscreen_bitmaps ? 1 : 0, TAG_END);
+	GT_SetGadgetAttrs(sgads[SGAD_OVERLAY], win, NULL,
+		GTCY_Active, sv->video_overlay ? 1 : 0, TAG_END);
+	GT_SetGadgetAttrs(sgads[SGAD_FAST_RAM], win, NULL,
+		GTCY_Active, sv->fast_ram ? 1 : 0,
+		GA_Disabled, settings_fast_ram_available ? FALSE : TRUE, TAG_END);
+	GT_SetGadgetAttrs(sgads[SGAD_FAST_RAM_STATE], win, NULL,
+		GTTX_Text, settings_fast_ram_status_buf, TAG_END);
+	settings_set_status(win, settings_status_buf);
+}
+
+/* Shared save tail: write the model, offer to drop the ENV overrides
+ * this window's section migrated, and read back for confirmation that
+ * the write landed. Gating (and which sections the caller validated)
+ * stays with the caller. */
+static BOOL settings_save_to_card(struct Window *win,
+	struct Gadget *status_gad, char *status_buf,
+	const char *const *env_cleanup_names)
+{
+	UWORD st;
+
+	cfg_status_set(win, status_gad, status_buf, "Saving...");
+	st = zzcfg_save((ULONG)zz_regs, &settings_vals);
+	if (st == FWUP_OK) {
+		UWORD rawlen = 0;
+
+		settings_offer_env_cleanup(env_cleanup_names);
+
+		if (zzcfg_read_raw((ULONG)zz_regs, settings_cfg_text,
+				sizeof(settings_cfg_text), &rawlen) == ZZ_CFG_FILE_OK) {
+			snprintf(status_buf, 64, "Saved (%u bytes) - power-cycle",
+				(unsigned)rawlen);
+			cfg_status_set(win, status_gad, status_buf, status_buf);
+		} else {
+			cfg_status_set(win, status_gad, status_buf,
+				"Saved - power-cycle to apply");
+		}
+		return TRUE;
+	}
+	snprintf(status_buf, 64, "Save failed: %s", fwup_strerror(st));
+	cfg_status_set(win, status_gad, status_buf, status_buf);
+	return FALSE;
+}
+
+static BOOL settings_save(struct Window *win)
+{
+	struct zzcfg_values *sv = &settings_vals;
+	struct StringInfo *si;
+
+	if (!settings_have_cfg) {
+		settings_set_status(win, "Config needs firmware 2.3+");
+		return FALSE;
+	}
+
+	si = (struct StringInfo *)sgads[SGAD_MAC]->SpecialInfo;
+	snprintf(sv->mac, sizeof(sv->mac), "%s", (const char *)si->Buffer);
+	si = (struct StringInfo *)sgads[SGAD_HDF]->SpecialInfo;
+	zzcfg_hdf_from_gadget(sv->hdf, sizeof(sv->hdf),
+		(const char *)si->Buffer);
+
+	if (sv->mac[0] && !settings_parse_mac(sv->mac)) {
+		settings_set_status(win, "Bad MAC - use aa:bb:cc:dd:ee:ff");
+		return FALSE;
+	}
+	/* Firmware hdf rules, not the FWUP name rules: they differ (no
+	 * leading '.', 63-char cap), and the firmware silently ignores a
+	 * name it rejects at the next cold boot. */
+	if (sv->hdf[0] && !zzcfg_hdf_name_valid(sv->hdf)) {
+		settings_set_status(win, "Bad HDF name (flat root file)");
+		return FALSE;
+	}
+
+	return settings_save_to_card(win, sgads[SGAD_CFG_STATUS],
+		settings_status_buf, settings_env_names_general);
+}
+
+static struct Gadget *settings_create_gadgets(struct Gadget **glistptr,
+	void *vi, const struct ZZTopLayout *mainlayout, UWORD fw_capabilities,
+	WORD *out_w, WORD *out_h)
+{
+	struct NewGadget ng;
+	struct Gadget *gad;
+	struct ZZTopLayout l = *mainlayout;
+	WORD label_width, value_width, button_width, y, i;
+	WORD content_right, button_gap;
+
+	(void)fw_capabilities; /* no capability-conditional rows here */
+
+	/* Same font metrics as the main window, own column widths (the
+	 * main window's are sized for its wider content, e.g. the
+	 * "Update Firmware" button). */
+	{
+		struct RastPort *rp = zztop_screen ? &zztop_screen->RastPort : NULL;
+		label_width = zztop_max_text_width(rp, settings_label_samples, 8);
+		value_width = zztop_max_text_width(rp, settings_value_samples, 8);
+		button_width = zztop_max_word(90,
+			zztop_max_text_width(rp, settings_button_samples, 8) + 32);
+	}
+	l.gadget_left = l.margin_x + label_width + l.label_gap;
+	l.gadget_width = zztop_max_word(192, value_width + 48);
+	content_right = l.gadget_left + l.gadget_width;
+	button_gap = 16;
+
+	gad = CreateContext(glistptr);
+
+	for (i = 0; i < SGAD_COUNT; i++) sgads[i] = NULL;
+
+	y = l.topborder + l.margin_y;
+
+	ng.ng_LeftEdge   = l.gadget_left;
+	ng.ng_TopEdge    = y;
+	ng.ng_Width      = l.gadget_width;
+	ng.ng_Height     = l.gadget_height;
+	ng.ng_TextAttr   = l.text_attr;
+	ng.ng_VisualInfo = vi;
+	ng.ng_Flags      = PLACETEXT_LEFT;
+
+	ng.ng_GadgetID   = SGAD_INT2;
+	ng.ng_GadgetText = (STRPTR)LABEL_INT2;
+	sgads[SGAD_INT2] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+		GTCY_Labels, interrupt_labels, GTCY_Active, 0, TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge    = y;
+	ng.ng_GadgetID   = SGAD_MAC;
+	ng.ng_GadgetText = (STRPTR)LABEL_MAC;
+	/* MaxChars includes the trailing NUL (intuition StringInfo), so add
+	 * one or a full 17-char MAC could not be typed. */
+	sgads[SGAD_MAC] = gad = CreateGadget(STRING_KIND, gad, &ng,
+		GTST_MaxChars, ZZCFG_MAC_CHARS + 1, GTST_String, "", TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge    = y;
+	ng.ng_GadgetID   = SGAD_HDF;
+	ng.ng_GadgetText = (STRPTR)LABEL_HDF;
+	sgads[SGAD_HDF] = gad = CreateGadget(STRING_KIND, gad, &ng,
+		GTST_MaxChars, ZZCFG_HDF_CHARS + 1, GTST_String, "", TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge    = y;
+	ng.ng_GadgetID   = SGAD_OFFSCREEN;
+	ng.ng_GadgetText = (STRPTR)LABEL_OFFSCREEN;
+	sgads[SGAD_OFFSCREEN] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+		GTCY_Labels, enable_labels, GTCY_Active, 1, TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge    = y;
+	ng.ng_GadgetID   = SGAD_OVERLAY;
+	ng.ng_GadgetText = (STRPTR)LABEL_OVERLAY;
+	sgads[SGAD_OVERLAY] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+		GTCY_Labels, enable_labels, GTCY_Active, 1, TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge    = y;
+	ng.ng_GadgetID   = SGAD_FAST_RAM;
+	ng.ng_GadgetText = (STRPTR)LABEL_FAST_RAM;
+	sgads[SGAD_FAST_RAM] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+		GTCY_Labels, enable_labels, GTCY_Active, 0, TAG_END);
+	y += l.row_step;
+
+	/* Show the boot decision separately from the staged preference: a
+	 * configured-on value can be withheld by firmware's fail-closed gate. */
+	ng.ng_LeftEdge   = l.margin_x;
+	ng.ng_TopEdge    = y;
+	ng.ng_Width      = content_right - l.margin_x;
+	ng.ng_GadgetID   = SGAD_FAST_RAM_STATE;
+	ng.ng_GadgetText = NULL;
+	sgads[SGAD_FAST_RAM_STATE] = gad = CreateGadget(TEXT_KIND, gad, &ng,
+		GTTX_Text, settings_fast_ram_status_buf, GTTX_Border, TRUE, TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge    = y;
+	ng.ng_GadgetID   = SGAD_FAST_RAM_SAVE_HELP;
+	sgads[SGAD_FAST_RAM_SAVE_HELP] = gad = CreateGadget(TEXT_KIND, gad, &ng,
+		GTTX_Text, (CONST_STRPTR)FAST_RAM_SAVE_HELP, GTTX_Border, TRUE, TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge    = y;
+	ng.ng_GadgetID   = SGAD_FAST_RAM_MANUAL_HELP;
+	sgads[SGAD_FAST_RAM_MANUAL_HELP] = gad = CreateGadget(TEXT_KIND, gad, &ng,
+		GTTX_Text, (CONST_STRPTR)FAST_RAM_MANUAL_HELP, GTTX_Border, TRUE, TAG_END);
+	y += l.row_step + l.section_gap;
+
+	/* The status line spans the whole row (no side label) so messages
+	 * get the label column's width too instead of widening the window. */
+	ng.ng_TopEdge    = y;
+	ng.ng_GadgetID   = SGAD_CFG_STATUS;
+	ng.ng_GadgetText = NULL;
+	sgads[SGAD_CFG_STATUS] = gad = CreateGadget(TEXT_KIND, gad, &ng,
+		GTTX_Text, settings_status_buf, GTTX_Border, TRUE, TAG_END);
+	y += l.row_step + l.section_gap;
+
+	ng.ng_TopEdge    = y;
+	ng.ng_Width      = button_width;
+	ng.ng_GadgetID   = SGAD_BTN_SAVE;
+	ng.ng_GadgetText = (STRPTR)LABEL_BTN_SAVE;
+	ng.ng_Flags      = PLACETEXT_IN;
+	sgads[SGAD_BTN_SAVE] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		TAG_END);
+
+	ng.ng_LeftEdge   = l.margin_x + button_width + button_gap;
+	ng.ng_GadgetID   = SGAD_BTN_RELOAD;
+	ng.ng_GadgetText = (STRPTR)LABEL_BTN_RELOAD;
+	sgads[SGAD_BTN_RELOAD] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		TAG_END);
+	y += l.row_step;
+
+	*out_w = zztop_max_word(content_right + l.margin_x,
+		l.margin_x + button_width + button_gap + button_width + l.margin_x);
+	/* Same WA_InnerHeight convention as the main window: gadget positions
+	 * include the title bar, the inner height does not. */
+	*out_h = y + l.gadget_height + (l.margin_y / 2) - l.topborder;
+
+	for (i = 0; i < SGAD_COUNT; i++) {
+		if (!sgads[i]) return NULL;
+	}
+
+	return gad;
+}
+
+/* Only explicitly edited fields are staged. Live display seeding is not a
+ * persistence operation; Automatic is tracked independently for every axis. */
+static BOOL settings_video_advanced_candidate(struct Window *win,
+	struct Gadget **agads, UWORD sample, const struct zz_vcap_edit *edit,
+	const struct zzcfg_values *base,
+	char *status, UWORD status_size, struct zzcfg_values *candidate,
+	BOOL *changed)
+{
+	struct StringInfo *hsi =
+		(struct StringInfo *)agads[AGAD_VCAP_CROP_H]->SpecialInfo;
+	struct StringInfo *vsi =
+		(struct StringInfo *)agads[AGAD_VCAP_CROP_V]->SpecialInfo;
+	struct StringInfo *wsi =
+		(struct StringInfo *)agads[AGAD_VCAP_WIDTH]->SpecialInfo;
+	struct StringInfo *htsi =
+		(struct StringInfo *)agads[AGAD_VCAP_HEIGHT]->SpecialInfo;
+	struct StringInfo *psi =
+		(struct StringInfo *)agads[AGAD_VCAP_PHASE]->SpecialInfo;
+	UWORD crop_h = 0, crop_v = 0, width = 0, height = 0;
+	int phase = 0;
+
+	if (hsi->Buffer[0] && !settings_parse_u12((const char *)hsi->Buffer, &crop_h)) {
+		snprintf(status, status_size, "Bad Crop H - use 0..4095");
+		GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL,
+			GTTX_Text, status, TAG_END);
+		return FALSE;
+	}
+	if (vsi->Buffer[0] && !settings_parse_u12((const char *)vsi->Buffer, &crop_v)) {
+		snprintf(status, status_size, "Bad Crop V - use 0..4095");
+		GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL,
+			GTTX_Text, status, TAG_END);
+		return FALSE;
+	}
+	if (wsi->Buffer[0] != '\0' &&
+			!settings_parse_window_field((const char *)wsi->Buffer,
+			&width)) {
+		snprintf(status, status_size,
+			"Bad Width - use 256..1280 in steps of 16");
+		GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL,
+			GTTX_Text, status, TAG_END);
+		return FALSE;
+	}
+	if (wsi->Buffer[0] == '\0') width = 0;
+	if (width != 0 && (width < 256 || width > 1280 || (width & 15) != 0)) {
+		snprintf(status, status_size,
+			"Bad Width - use 256..1280 in steps of 16");
+		GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL,
+			GTTX_Text, status, TAG_END);
+		return FALSE;
+	}
+	if (htsi->Buffer[0] != '\0' &&
+			(!settings_parse_window_field((const char *)htsi->Buffer,
+			&height) || height < 100 || height > 1024)) {
+		snprintf(status, status_size, "Bad Height - use 100..1024");
+		GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL,
+			GTTX_Text, status, TAG_END);
+		return FALSE;
+	}
+	if (htsi->Buffer[0] == '\0') height = 0;
+	if (settings_phase_domain != ZZ_VCAP_PHASE_NONE &&
+			psi->Buffer[0] != '\0' &&
+			(!settings_parse_phase_field((const char *)psi->Buffer,
+			&phase) ||
+			!zz_vcap_phase_valid(phase, settings_phase_domain))) {
+		snprintf(status, status_size,
+			"Bad Phase - signed steps in this clock's range");
+		GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL,
+			GTTX_Text, status, TAG_END);
+		return FALSE;
+	}
+
+	*changed = zz_vcap_edit_stage(edit, base, settings_phase_domain, sample,
+		crop_h, crop_v, width, height, phase, candidate);
+	return TRUE;
+}
+
+static void settings_control_from_values(const struct zzcfg_values *values,
+	struct zz_vcap_control *control)
+{
+	struct zz_vcap_path path;
+
+	settings_path_for(&path, values->videocap_profile,
+		values->videocap_sample);
+	control->sample = path.sample;
+	control->full_width = path.full_width;
+	control->crop_h = values->videocap_crop_h_present ? values->videocap_crop_h : 0;
+	control->crop_v = values->videocap_crop_v_present ? values->videocap_crop_v : 0;
+	control->crop_h_present = values->videocap_crop_h_present;
+	control->crop_v_present = values->videocap_crop_v_present;
+}
+
+enum vcap_calibration_availability {
+	VCAP_CALIBRATION_UNKNOWN = -1,
+	VCAP_CALIBRATION_UNSUPPORTED = 0,
+	VCAP_CALIBRATION_WAITING,
+	VCAP_CALIBRATION_PATH_MISMATCH,
+	VCAP_CALIBRATION_READY
+};
+
+static enum vcap_calibration_availability
+settings_video_calibration_availability(
+	struct settings_live_session *session, UWORD sample, char *status,
+	UWORD status_size)
+{
+	if (!session->supported) {
+		snprintf(status, status_size,
+			"Align picture needs firmware 2.8 live control and protocol-1 bitstream");
+		return VCAP_CALIBRATION_UNSUPPORTED;
+	}
+	if (!settings_live_refresh(session)) {
+		snprintf(status, status_size,
+			"Align picture waiting for stable native video frames");
+		return VCAP_CALIBRATION_WAITING;
+	}
+	if (!settings_current_path_matches(session,
+		settings_vals.videocap_profile, sample)) {
+		snprintf(status, status_size,
+			"Staged path differs; Save + reboot or restore it");
+		return VCAP_CALIBRATION_PATH_MISMATCH;
+	}
+	{
+		struct zz_vcap_status live_status;
+		int phase;
+		/* The ready line is a short action summary. A disabled Find phase
+		 * names its missing gate instead of inviting it. */
+		zz_vcap_status_unpack(session->current.status, &live_status);
+		if (settings_phase_domain != ZZ_VCAP_PHASE_C28)
+			snprintf(status, status_size,
+				"Auto: reset all; Align: crop; Phase sweep requires C28");
+		else if (live_status.standard_valid &&
+				vcap_read32(ZZ_CAPTURE_METADATA_CAP_REG) == ZZ_CAPTURE_METADATA_CAP &&
+				settings_phase_read(&phase) == ZZ_VCAP_OK)
+			snprintf(status, status_size,
+				"Auto: reset all; Align: crop; Find phase: sweep");
+		else if (vcap_read32(ZZ_CAPTURE_METADATA_CAP_REG) != ZZ_CAPTURE_METADATA_CAP)
+			snprintf(status, status_size,
+				"Find phase needs frozen-field metadata");
+		else
+			snprintf(status, status_size,
+				"Find phase needs verified C28 input");
+	}
+	return VCAP_CALIBRATION_READY;
+}
+
+/* Capture sampling phase and capture origin are calibration/diagnostic
+ * controls, not independent output-mode choices. They stay in this
+ * small secondary window below the Scandoubler window's Capture...
+ * button so the main scandoubler rows describe outcomes instead of
+ * implementation details. Values are committed to settings_vals only
+ * by Done; the Scandoubler window's Save button still writes the card. */
+/* The eye is the last measured C28 sweep, never a continuous measurement. */
+static unsigned char vcap_sampling_quality[ZZ_CAPTURE_BINS];
+static BOOL vcap_sampling_quality_valid;
+
+static void vcap_sampling_eye_text(char *text, UWORD text_size, int phase,
+	BOOL find_phase_ready)
+{
+	unsigned i, marker;
+	if (text_size < ZZ_CAPTURE_BINS + 1) return;
+	if (settings_phase_domain != ZZ_VCAP_PHASE_C28) {
+		snprintf(text, text_size, "Phase sweep is C28-only");
+		return;
+	}
+	if (!vcap_sampling_quality_valid) {
+		/* Never invite a disabled action: name the missing gate instead. */
+		if (!find_phase_ready) {
+			if (vcap_read32(ZZ_CAPTURE_METADATA_CAP_REG) != ZZ_CAPTURE_METADATA_CAP)
+				snprintf(text, text_size, "Needs frozen metadata");
+			else
+				snprintf(text, text_size, "Needs verified C28");
+		} else
+			snprintf(text, text_size, "Run Find phase...");
+		return;
+	}
+	/* Four measured bins per glyph keep the whole sweep visible on a 640px
+	 * native Workbench. '=' is all clean, '+' mixed, '.' all dirty. */
+	marker = zz_sampling_phase_bin(phase) / 4;
+	for (i = 0; i < ZZ_CAPTURE_BINS / 4; ++i) {
+		unsigned n = vcap_sampling_quality[i * 4] + vcap_sampling_quality[i * 4 + 1] +
+			vcap_sampling_quality[i * 4 + 2] + vcap_sampling_quality[i * 4 + 3];
+		text[i] = n == 4 ? '=' : n ? '+' : '.';
+	}
+	text[marker] = '|';
+	text[ZZ_CAPTURE_BINS / 4] = '\0';
+}
+
+static BOOL settings_sampling_calibration_ready(
+	enum vcap_calibration_availability availability,
+	const struct settings_live_session *session)
+{
+	struct zz_vcap_status status;
+	int phase;
+	zz_vcap_status_unpack(session->current.status, &status);
+	return availability == VCAP_CALIBRATION_READY && status.standard_valid &&
+		settings_phase_domain == ZZ_VCAP_PHASE_C28 &&
+		vcap_read32(ZZ_CAPTURE_METADATA_CAP_REG) == ZZ_CAPTURE_METADATA_CAP &&
+		settings_phase_read(&phase) == ZZ_VCAP_OK;
+}
+
+static void settings_sampling_invalidate(struct Window *window,
+	struct Gadget **agads, char *text, UWORD text_size, BOOL find_phase_ready)
+{
+	if (!vcap_sampling_quality_valid) return;
+	vcap_sampling_quality_valid = FALSE;
+	vcap_sampling_eye_text(text, text_size, 0, find_phase_ready);
+	GT_SetGadgetAttrs(agads[AGAD_PHASE_EYE], window, NULL, GTTX_Text, text, TAG_END);
+}
+
+/* Service Close/Cancel and refresh while a bounded command is in flight.
+ * Defer raw messages: GadTools filtering/reply must happen exactly once. */
+struct settings_vcap_wait {
+	struct Window *window;
+	BOOL *cancel;
+	struct List deferred;
+};
+
+static int settings_vcap_keep_running(void *ctx)
+{
+	struct settings_vcap_wait *wait = ctx;
+	struct IntuiMessage *message;
+	while ((message = (struct IntuiMessage *)GetMsg(wait->window->UserPort))) {
+		if (message->Class == IDCMP_CLOSEWINDOW ||
+			(message->Class == IDCMP_GADGETUP && message->IAddress &&
+			 ((struct Gadget *)message->IAddress)->GadgetID == AGAD_BTN_CANCEL)) {
+			*wait->cancel = TRUE;
+			ReplyMsg((struct Message *)message);
+		} else if (message->Class == IDCMP_REFRESHWINDOW) {
+			GT_BeginRefresh(wait->window);
+			GT_EndRefresh(wait->window, TRUE);
+			ReplyMsg((struct Message *)message);
+		} else {
+			AddTail(&wait->deferred, (struct Node *)message);
+		}
+	}
+	return !*wait->cancel;
+}
+
+static void settings_vcap_wait_begin(struct settings_vcap_wait *wait,
+	struct Window *window, BOOL *cancel, struct zz_vcap_io *io)
+{
+	wait->window = window;
+	wait->cancel = cancel;
+	NewList(&wait->deferred);
+	*io = settings_vcap_io;
+	io->control_ctx = wait;
+	io->keep_running = settings_vcap_keep_running;
+}
+
+static void settings_vcap_wait_end(struct settings_vcap_wait *wait)
+{
+	struct Message *message;
+	while ((message = (struct Message *)RemHead(&wait->deferred)))
+		PutMsg(wait->window->UserPort, message);
+}
+
+static int settings_capture_crop_command(struct Window *window, BOOL *cancel,
+	ULONG raw, struct zz_vcap_snapshot *applied)
+{
+	struct settings_vcap_wait wait;
+	struct zz_vcap_io io;
+	int result;
+	settings_vcap_wait_begin(&wait, window, cancel, &io);
+	result = vcap_apply_raw(raw, applied, &io);
+	settings_vcap_wait_end(&wait);
+	return result;
+}
+
+static enum zz_vcap_result settings_capture_phase_command(struct Window *window,
+	BOOL *cancel, int phase)
+{
+	struct settings_vcap_wait wait;
+	struct zz_vcap_io io;
+	enum zz_vcap_result result;
+	settings_vcap_wait_begin(&wait, window, cancel, &io);
+	result = zz_vcap_phase_apply(&io, phase, 0);
+	settings_vcap_wait_end(&wait);
+	return result;
+}
+
+static enum zz_vcap_result settings_capture_geometry_command(struct Window *window,
+	BOOL *cancel, UWORD width, UWORD height)
+{
+	struct settings_vcap_wait wait;
+	struct zz_vcap_io io;
+	enum zz_vcap_result result;
+	settings_vcap_wait_begin(&wait, window, cancel, &io);
+	result = zz_vcap_geometry_apply(&io, width, height, 0);
+	settings_vcap_wait_end(&wait);
+	return result;
+}
+
+static BOOL scandoubler_capture_window(struct Screen *mysc, void *vi,
+	const struct ZZTopLayout *mainlayout,
+	struct settings_live_session *live_session)
+{
+	static CONST_STRPTR label_samples[] = {
+		(CONST_STRPTR)LABEL_VCAP_SAMPLE,
+		(CONST_STRPTR)LABEL_VCAP_PHASE,
+		(CONST_STRPTR)LABEL_VCAP_EYE,
+		(CONST_STRPTR)LABEL_VCAP_CROP,
+		(CONST_STRPTR)LABEL_VCAP_SIZE,
+		NULL
+	};
+	static CONST_STRPTR value_samples[] = {
+		(CONST_STRPTR)"Average (recommended)",
+		(CONST_STRPTR)"Even (diagnostic)",
+		(CONST_STRPTR)"-255",
+		NULL
+	};
+	static CONST_STRPTR action_samples[] = {
+		(CONST_STRPTR)LABEL_VCAP_BTN_AUTO,
+		(CONST_STRPTR)LABEL_VCAP_BTN_ALIGN,
+		(CONST_STRPTR)LABEL_VCAP_BTN_PHASE,
+		(CONST_STRPTR)"Done",
+		(CONST_STRPTR)"Cancel",
+		NULL
+	};
+	struct ZZTopLayout l = *mainlayout;
+	struct NewGadget ng;
+	struct Gadget *glist = NULL;
+	struct Gadget *gad;
+	struct Gadget *agads[AGAD_COUNT];
+	struct Window *win;
+	struct IntuiMessage *imsg;
+	struct RastPort *rp;
+	const struct zzcfg_values staged_entry = settings_vals;
+	UWORD display_crop_h = staged_entry.videocap_crop_h;
+	UWORD display_crop_v = staged_entry.videocap_crop_v;
+	UWORD display_width = staged_entry.videocap_width;
+	UWORD display_height = staged_entry.videocap_height;
+	struct zz_vcap_edit edit;
+	struct zzcfg_values candidate_values;
+	struct zz_vcap_control candidate_control;
+	struct zz_vcap_control accepted_control;
+	UWORD sample = settings_vals.videocap_sample;
+	ULONG imsg_class;
+	UWORD imsg_code;
+	WORD label_width, value_width, y, content_right;
+	WORD half_width, half_gap, button_width, button_gap;
+	WORD w, h;
+	BOOL done = FALSE;
+	BOOL changed = FALSE;
+	BOOL phase_entry_valid = FALSE, geometry_entry_valid = FALSE;
+	BOOL cancel = FALSE;
+	BOOL phase_edited = FALSE;
+	BOOL geometry_edited = FALSE;
+	BOOL phase_confirmed = TRUE, geometry_confirmed = TRUE;
+	const BOOL phase_was_touched = live_session->phase_touched;
+	const BOOL geometry_was_touched = live_session->geometry_touched;
+	int seeded_ntsc = -1;
+	BOOL geometry_supported, geometry_unacknowledged;
+	int entry_phase = 0;
+	UWORD entry_width = 0, entry_height = 0;
+	struct zz_vcap_geometry_state geometry_state;
+	char crop_h_buf[6];
+	char crop_v_buf[6];
+	char width_buf[8];
+	char height_buf[8];
+	char phase_buf[7];
+	char phase_eye_buf[ZZ_CAPTURE_BINS + 1];
+	char status[128] = "Checking live calibration support...";
+	enum vcap_calibration_availability availability =
+		VCAP_CALIBRATION_UNKNOWN;
+	int i;
+
+	BOOL live_refreshed;
+	BOOL sampling_ready = FALSE;
+	enum zz_vcap_result previous_phase_result = ZZ_VCAP_INVALID;
+
+	zz_vcap_anchor_clear(&live_session->anchors, ZZ_VCAP_ANCHOR_ADVANCED);
+	zz_vcap_anchor_clear(&live_session->anchors, ZZ_VCAP_ANCHOR_PREVIEW);
+	live_session->preview_valid = FALSE;
+	live_refreshed = settings_live_refresh(live_session);
+	if (live_refreshed)
+		zz_vcap_anchor_store(&live_session->anchors, ZZ_VCAP_ANCHOR_ADVANCED,
+			&live_session->current);
+
+	/* The phase engine is build-specific: its capability word names the
+	 * domain (C28 or legacy E7M) and with it the unit system of the
+	 * phase field. No engine, no editable phase. */
+	settings_phase_domain = zz_vcap_phase_domain(
+		vcap_read32(ZZ_CAPTURE_CAP_REG));
+	zz_vcap_edit_init(&edit, &staged_entry, settings_phase_domain);
+	vcap_sampling_quality_valid = FALSE;
+	phase_entry_valid = settings_phase_read(&entry_phase) == ZZ_VCAP_OK;
+	/* Display live crop, but keep staged_entry immutable for Done/Cancel. */
+	if (live_refreshed) {
+		display_crop_h = live_session->current.effective_h;
+		display_crop_v = live_session->current.effective_v;
+	}
+	geometry_supported = settings_geometry_supported();
+	geometry_unacknowledged = !geometry_supported &&
+		(zz_get_reg16(REG_ZZ_FW_CAPABILITIES) & ZZ_FW_CAP_VIDEOCAP_GEOMETRY) != 0;
+	if (geometry_supported &&
+		zz_vcap_geometry_read(&settings_vcap_io, &geometry_state) == ZZ_VCAP_OK &&
+		(geometry_state.status & ZZ_VCAP_GEOMETRY_STATUS_APPLIED_VALID) &&
+		!(geometry_state.status & ZZ_VCAP_GEOMETRY_STATUS_PENDING) &&
+		geometry_state.request_serial == geometry_state.applied_serial) {
+		geometry_entry_valid = TRUE;
+		entry_width = geometry_state.requested_width;
+		entry_height = geometry_state.requested_height;
+		display_width = entry_width ? entry_width : geometry_state.applied_width;
+		display_height = entry_height ? entry_height : geometry_state.applied_height;
+	} else if (live_refreshed) {
+		settings_capture_window_seed(staged_entry.videocap_profile,
+			live_session->current.raw, live_session->current.status,
+			&display_width, &display_height);
+	}
+	{
+		struct zz_vcap_status open_status;
+
+		zz_vcap_status_unpack(live_session->current.status,
+			&open_status);
+		if (open_status.standard_valid)
+			seeded_ntsc = open_status.ntsc ? 1 : 0;
+	}
+	rp = zztop_screen ? &zztop_screen->RastPort : NULL;
+	label_width = zztop_max_text_width(rp, label_samples, 8);
+	value_width = zztop_max_text_width(rp, value_samples, 8);
+	l.gadget_left = l.margin_x + label_width + l.label_gap;
+	l.gadget_width = zztop_max_word(184, value_width + 48);
+	half_gap = 8;
+	button_gap = 16;
+	/* The action row (two buttons plus gap) and the full-width sweep
+	 * button must fit the control column, so the column is sized from
+	 * the action text with the other windows' padding convention. */
+	button_width = zztop_max_word(90,
+		zztop_max_text_width(rp, action_samples, 8) + 32);
+	l.gadget_width = zztop_max_word(l.gadget_width,
+		2 * button_width + button_gap);
+	content_right = l.gadget_left + l.gadget_width;
+	half_width = (l.gadget_width - half_gap) / 2;
+
+	snprintf(crop_h_buf, sizeof(crop_h_buf), "%u",
+		(unsigned)display_crop_h);
+	snprintf(crop_v_buf, sizeof(crop_v_buf), "%u",
+		(unsigned)display_crop_v);
+	/* Every field opens showing the CURRENT values (live registers when
+	 * the CFG has no explicit key). Clearing a Window field back to
+	 * empty means Automatic again. */
+	snprintf(width_buf, sizeof(width_buf), "%u",
+		(unsigned)display_width);
+	snprintf(height_buf, sizeof(height_buf), "%u",
+		(unsigned)display_height);
+	snprintf(phase_buf, sizeof(phase_buf), "%d", entry_phase);
+	vcap_sampling_eye_text(phase_eye_buf, sizeof(phase_eye_buf), entry_phase, FALSE);
+
+	gad = CreateContext(&glist);
+	for (i = 0; i < AGAD_COUNT; i++) agads[i] = NULL;
+	y = l.topborder + l.margin_y;
+
+	ng.ng_LeftEdge = l.gadget_left;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = l.gadget_width;
+	ng.ng_Height = l.gadget_height;
+	ng.ng_TextAttr = l.text_attr;
+	ng.ng_VisualInfo = vi;
+	ng.ng_Flags = PLACETEXT_LEFT;
+	ng.ng_GadgetID = AGAD_VCAP_SAMPLE;
+	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_SAMPLE;
+	agads[AGAD_VCAP_SAMPLE] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+		GTCY_Labels, vcapsample_labels, GTCY_Active, sample, TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge = y;
+	ng.ng_GadgetID = AGAD_VCAP_PHASE;
+	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_PHASE;
+	agads[AGAD_VCAP_PHASE] = gad = CreateGadget(STRING_KIND, gad, &ng,
+		GTST_MaxChars, 6, GTST_String, phase_buf,
+		GA_Disabled, !phase_entry_valid,
+		TAG_END);
+	y += l.row_step;
+
+	/* Coarse nudges span one sweep bin so the eye marker can move by
+	 * meaningful calibration-sized increments without hiding fine control. */
+	ng.ng_LeftEdge = l.gadget_left;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = (l.gadget_width - 24) / 4;
+	ng.ng_GadgetID = AGAD_BTN_PHASE_FINE_MINUS;
+	ng.ng_GadgetText = (STRPTR)"-1";
+	ng.ng_Flags = PLACETEXT_IN;
+	agads[AGAD_BTN_PHASE_FINE_MINUS] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		GA_Disabled, !phase_entry_valid, TAG_END);
+	ng.ng_LeftEdge += ng.ng_Width + 8;
+	ng.ng_GadgetID = AGAD_BTN_PHASE_FINE_PLUS;
+	ng.ng_GadgetText = (STRPTR)"+1";
+	agads[AGAD_BTN_PHASE_FINE_PLUS] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		GA_Disabled, !phase_entry_valid, TAG_END);
+	ng.ng_LeftEdge += ng.ng_Width + 8;
+	ng.ng_GadgetID = AGAD_BTN_PHASE_COARSE_MINUS;
+	ng.ng_GadgetText = (STRPTR)"-28";
+	agads[AGAD_BTN_PHASE_COARSE_MINUS] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		GA_Disabled, !phase_entry_valid, TAG_END);
+	ng.ng_LeftEdge += ng.ng_Width + 8;
+	ng.ng_GadgetID = AGAD_BTN_PHASE_COARSE_PLUS;
+	ng.ng_GadgetText = (STRPTR)"+28";
+	agads[AGAD_BTN_PHASE_COARSE_PLUS] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		GA_Disabled, !phase_entry_valid, TAG_END);
+	y += l.row_step;
+
+	ng.ng_LeftEdge = l.gadget_left;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = l.gadget_width;
+	ng.ng_GadgetID = AGAD_PHASE_EYE;
+	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_EYE;
+	ng.ng_Flags = PLACETEXT_LEFT;
+	agads[AGAD_PHASE_EYE] = gad = CreateGadget(TEXT_KIND, gad, &ng,
+		GTTX_Text, phase_eye_buf, GTTX_Border, TRUE, TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge = y;
+	ng.ng_Width = half_width;
+	ng.ng_GadgetID = AGAD_VCAP_CROP_H;
+	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_CROP;
+	agads[AGAD_VCAP_CROP_H] = gad = CreateGadget(STRING_KIND, gad, &ng,
+		GTST_MaxChars, 5, GTST_String, crop_h_buf, TAG_END);
+	ng.ng_LeftEdge = l.gadget_left + half_width + half_gap;
+	ng.ng_GadgetID = AGAD_VCAP_CROP_V;
+	ng.ng_GadgetText = NULL;
+	agads[AGAD_VCAP_CROP_V] = gad = CreateGadget(STRING_KIND, gad, &ng,
+		GTST_MaxChars, 5, GTST_String, crop_v_buf, TAG_END);
+	y += l.row_step;
+
+	ng.ng_LeftEdge = l.gadget_left;
+	ng.ng_TopEdge = y;
+	ng.ng_GadgetID = AGAD_VCAP_WIDTH;
+	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_SIZE;
+	agads[AGAD_VCAP_WIDTH] = gad = CreateGadget(STRING_KIND, gad, &ng,
+		GTST_MaxChars, 5, GTST_String, width_buf,
+		GA_Disabled, !geometry_entry_valid, TAG_END);
+	ng.ng_LeftEdge = l.gadget_left + half_width + half_gap;
+	ng.ng_GadgetID = AGAD_VCAP_HEIGHT;
+	ng.ng_GadgetText = NULL;
+	agads[AGAD_VCAP_HEIGHT] = gad = CreateGadget(STRING_KIND, gad, &ng,
+		GTST_MaxChars, 5, GTST_String, height_buf,
+		GA_Disabled, !geometry_entry_valid, TAG_END);
+	y += l.row_step + l.section_gap;
+
+	ng.ng_LeftEdge = l.gadget_left;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = button_width;
+	ng.ng_GadgetID = AGAD_BTN_AUTO;
+	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_BTN_AUTO;
+	ng.ng_Flags = PLACETEXT_IN;
+	agads[AGAD_BTN_AUTO] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		TAG_END);
+	ng.ng_LeftEdge = l.gadget_left + button_width + button_gap;
+	ng.ng_Width = button_width;
+	ng.ng_GadgetID = AGAD_BTN_CALIBRATE;
+	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_BTN_ALIGN;
+	agads[AGAD_BTN_CALIBRATE] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		GA_Disabled, TRUE, TAG_END);
+	y += l.row_step;
+	ng.ng_LeftEdge = l.gadget_left;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = l.gadget_width;
+	ng.ng_GadgetID = AGAD_BTN_SAMPLING_CALIBRATE;
+	ng.ng_GadgetText = (STRPTR)LABEL_VCAP_BTN_PHASE;
+	agads[AGAD_BTN_SAMPLING_CALIBRATE] = gad = CreateGadget(BUTTON_KIND,
+		gad, &ng, GA_Disabled, TRUE, TAG_END);
+	y += l.row_step + l.section_gap;
+
+	ng.ng_LeftEdge = l.margin_x;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = content_right - l.margin_x;
+	ng.ng_GadgetID = AGAD_STATUS;
+	ng.ng_GadgetText = NULL;
+	ng.ng_Flags = PLACETEXT_LEFT;
+	agads[AGAD_STATUS] = gad = CreateGadget(TEXT_KIND, gad, &ng,
+		GTTX_Text, status, GTTX_Border, TRUE, TAG_END);
+	y += l.row_step + l.section_gap;
+
+	ng.ng_LeftEdge = l.margin_x;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = button_width;
+	ng.ng_GadgetID = AGAD_BTN_DONE;
+	ng.ng_GadgetText = (STRPTR)"Done";
+	ng.ng_Flags = PLACETEXT_IN;
+	agads[AGAD_BTN_DONE] = gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_END);
+	ng.ng_LeftEdge = l.margin_x + button_width + button_gap;
+	ng.ng_GadgetID = AGAD_BTN_CANCEL;
+	ng.ng_GadgetText = (STRPTR)"Cancel";
+	agads[AGAD_BTN_CANCEL] = gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_END);
+	y += l.row_step;
+
+	for (i = 0; i < AGAD_COUNT; i++) {
+		if (!agads[i]) {
+			if (glist) FreeGadgets(glist);
+			errorMessage("Capture: gadget creation failed");
+			return FALSE;
+		}
+	}
+
+	w = content_right + l.margin_x;
+	h = y + l.gadget_height + (l.margin_y / 2) - l.topborder;
+	win = OpenWindowTags(NULL,
+		WA_Title, settings_phase_domain == ZZ_VCAP_PHASE_C28 ?
+			"Scandoubler Capture (C28 clock)" :
+			(settings_phase_domain == ZZ_VCAP_PHASE_E7M ?
+				"Scandoubler Capture (E7M clock)" :
+				"Scandoubler Capture"),
+		WA_Gadgets, glist, WA_AutoAdjust, TRUE,
+		WA_Width, w, WA_MinWidth, w,
+		WA_InnerHeight, h, WA_MinHeight, h,
+		WA_DragBar, TRUE, WA_DepthGadget, TRUE,
+		WA_Activate, TRUE, WA_CloseGadget, TRUE,
+		WA_SizeGadget, FALSE, WA_SmartRefresh, TRUE,
+		WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
+			BUTTONIDCMP | CYCLEIDCMP | STRINGIDCMP,
+		WA_PubScreen, mysc,
+		TAG_END);
+	if (!win) {
+		FreeGadgets(glist);
+		errorMessage("Capture: OpenWindow() failed");
+		return FALSE;
+	}
+
+	GT_RefreshWindow(win, NULL);
+	while (!done) {
+		char availability_status[sizeof(status)];
+		int applied_phase = 0;
+		enum zz_vcap_result phase_result;
+		enum vcap_calibration_availability now_available =
+			settings_video_calibration_availability(live_session, sample,
+				availability_status, sizeof(availability_status));
+		BOOL now_sampling_ready;
+		phase_result = settings_phase_read(&applied_phase);
+		if (!phase_entry_valid && phase_result == ZZ_VCAP_OK) {
+			entry_phase = applied_phase;
+			phase_entry_valid = TRUE;
+			snprintf(phase_buf, sizeof(phase_buf), "%d", entry_phase);
+			GT_SetGadgetAttrs(agads[AGAD_VCAP_PHASE], win, NULL, GTST_String, phase_buf, TAG_END);
+		}
+		if (!geometry_entry_valid && geometry_supported &&
+			zz_vcap_geometry_read(&settings_vcap_io, &geometry_state) == ZZ_VCAP_OK &&
+			(geometry_state.status & ZZ_VCAP_GEOMETRY_STATUS_APPLIED_VALID) &&
+			!(geometry_state.status & ZZ_VCAP_GEOMETRY_STATUS_PENDING) &&
+			geometry_state.request_serial == geometry_state.applied_serial) {
+			geometry_entry_valid = TRUE;
+			availability = VCAP_CALIBRATION_UNKNOWN;
+			entry_width = geometry_state.requested_width;
+			entry_height = geometry_state.requested_height;
+			snprintf(width_buf, sizeof(width_buf), "%u", entry_width ? entry_width : geometry_state.applied_width);
+			snprintf(height_buf, sizeof(height_buf), "%u", entry_height ? entry_height : geometry_state.applied_height);
+			GT_SetGadgetAttrs(agads[AGAD_VCAP_WIDTH], win, NULL, GTST_String, width_buf, GA_Disabled, FALSE, TAG_END);
+			GT_SetGadgetAttrs(agads[AGAD_VCAP_HEIGHT], win, NULL, GTST_String, height_buf, GA_Disabled, FALSE, TAG_END);
+		}
+		now_sampling_ready = phase_entry_valid && phase_result == ZZ_VCAP_OK &&
+			settings_sampling_calibration_ready(now_available, live_session);
+		if (now_available == VCAP_CALIBRATION_READY &&
+			!live_session->anchors.valid[ZZ_VCAP_ANCHOR_ADVANCED])
+			zz_vcap_anchor_store(&live_session->anchors, ZZ_VCAP_ANCHOR_ADVANCED, &live_session->current);
+		if (now_available != availability || now_sampling_ready != sampling_ready ||
+			phase_result != previous_phase_result) {
+			availability = now_available;
+			sampling_ready = now_sampling_ready;
+			previous_phase_result = phase_result;
+			GT_SetGadgetAttrs(agads[AGAD_BTN_CALIBRATE], win, NULL, GA_Disabled, availability != VCAP_CALIBRATION_READY, TAG_END);
+			GT_SetGadgetAttrs(agads[AGAD_BTN_SAMPLING_CALIBRATE], win, NULL, GA_Disabled, !sampling_ready, TAG_END);
+			GT_SetGadgetAttrs(agads[AGAD_BTN_AUTO], win, NULL, GA_Disabled,
+				availability != VCAP_CALIBRATION_READY ||
+				(settings_phase_domain != ZZ_VCAP_PHASE_NONE && phase_result != ZZ_VCAP_OK) ||
+				(geometry_supported && !geometry_entry_valid) ||
+				geometry_unacknowledged, TAG_END);
+			for (i = AGAD_BTN_PHASE_FINE_MINUS; i <= AGAD_BTN_PHASE_COARSE_PLUS; ++i)
+				GT_SetGadgetAttrs(agads[i], win, NULL, GA_Disabled, !phase_entry_valid || phase_result != ZZ_VCAP_OK, TAG_END);
+			GT_SetGadgetAttrs(agads[AGAD_VCAP_PHASE], win, NULL, GA_Disabled, !phase_entry_valid || phase_result != ZZ_VCAP_OK, TAG_END);
+			if (phase_result != ZZ_VCAP_OK)
+				snprintf(status, sizeof(status), "Phase unavailable: %s", zz_vcap_result_text(phase_result));
+			else if (geometry_unacknowledged && availability == VCAP_CALIBRATION_READY)
+				snprintf(status, sizeof(status), "Window/Reset to Auto need geometry-ACK firmware");
+			else
+				snprintf(status, sizeof(status), "%s", availability_status);
+			if (!vcap_sampling_quality_valid) {
+				/* The idle eye guidance names the Find phase gate; keep it
+				 * in sync with the button state. */
+				vcap_sampling_eye_text(phase_eye_buf, sizeof(phase_eye_buf), 0, sampling_ready);
+				GT_SetGadgetAttrs(agads[AGAD_PHASE_EYE], win, NULL, GTTX_Text, phase_eye_buf, TAG_END);
+			}
+			GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL, GTTX_Text, status, TAG_END);
+		}
+		/* The input standard can change while the window is open -
+		 * typically the RTG-era blank placeholder (often NTSC-class
+		 * on a PAL machine) giving way to a real native screen. As
+		 * long as the Window fields were not edited, re-seed them
+		 * (and absent crops) from the new input so the display keeps
+		 * showing CURRENT values. */
+		{
+			struct zz_vcap_status loop_status;
+
+			zz_vcap_status_unpack(live_session->current.status,
+				&loop_status);
+			if (loop_status.standard_valid &&
+				(loop_status.ntsc ? 1 : 0) != seeded_ntsc) {
+				UWORD seed_width = 0, seed_height = 0;
+				BOOL was_unknown = seeded_ntsc == -1;
+
+				seeded_ntsc = loop_status.ntsc ? 1 : 0;
+				settings_capture_window_seed(
+					staged_entry.videocap_profile,
+					live_session->current.raw,
+					live_session->current.status,
+					&seed_width, &seed_height);
+				if (geometry_entry_valid &&
+					zz_vcap_geometry_read(&settings_vcap_io, &geometry_state) == ZZ_VCAP_OK &&
+					(geometry_state.status & ZZ_VCAP_GEOMETRY_STATUS_APPLIED_VALID) &&
+					!(geometry_state.status & ZZ_VCAP_GEOMETRY_STATUS_PENDING) &&
+					geometry_state.request_serial == geometry_state.applied_serial) {
+					seed_width = geometry_state.requested_width ? geometry_state.requested_width : geometry_state.applied_width;
+					seed_height = geometry_state.requested_height ? geometry_state.requested_height : geometry_state.applied_height;
+				}
+				if (!(edit.edited & ZZ_VCAP_EDIT_WIDTH)) {
+
+					snprintf(width_buf, sizeof(width_buf), "%u",
+						(unsigned)seed_width);
+					GT_SetGadgetAttrs(agads[AGAD_VCAP_WIDTH],
+						win, NULL, GTST_String, width_buf,
+						TAG_END);
+				}
+				if (!(edit.edited & ZZ_VCAP_EDIT_HEIGHT)) {
+
+					snprintf(height_buf, sizeof(height_buf), "%u",
+						(unsigned)seed_height);
+					GT_SetGadgetAttrs(agads[AGAD_VCAP_HEIGHT],
+						win, NULL, GTST_String, height_buf,
+						TAG_END);
+				}
+				if (!(edit.edited & ZZ_VCAP_EDIT_CROP_H)) {
+					snprintf(crop_h_buf, sizeof(crop_h_buf), "%u",
+						(unsigned)live_session->current.effective_h);
+					GT_SetGadgetAttrs(agads[AGAD_VCAP_CROP_H],
+						win, NULL, GTST_String, crop_h_buf,
+						TAG_END);
+				}
+				if (!(edit.edited & ZZ_VCAP_EDIT_CROP_V)) {
+					snprintf(crop_v_buf, sizeof(crop_v_buf), "%u",
+						(unsigned)live_session->current.effective_v);
+					GT_SetGadgetAttrs(agads[AGAD_VCAP_CROP_V],
+						win, NULL, GTST_String, crop_v_buf,
+						TAG_END);
+				}
+				settings_sampling_invalidate(win, agads, phase_eye_buf, sizeof(phase_eye_buf), sampling_ready);
+				if (!was_unknown)
+					snprintf(status, sizeof(status),
+						"Input changed to %s - unedited values reseeded",
+						seeded_ntsc ? "NTSC" : "PAL");
+			}
+		}
+		Delay(2);
+		while ((imsg = GT_GetIMsg(win->UserPort))) {
+			if (done) {
+				GT_ReplyIMsg(imsg);
+				continue;
+			}
+			gad = (struct Gadget *)imsg->IAddress;
+			imsg_class = imsg->Class;
+			imsg_code = imsg->Code;
+			GT_ReplyIMsg(imsg);
+
+			if (imsg_class == IDCMP_CLOSEWINDOW) {
+				cancel = TRUE;
+			} else if (imsg_class == IDCMP_REFRESHWINDOW) {
+				GT_BeginRefresh(win);
+				GT_EndRefresh(win, TRUE);
+			} else if (imsg_class == IDCMP_GADGETUP && gad) {
+				if (cancel) continue;
+				if (gad->GadgetID == AGAD_VCAP_SAMPLE) {
+					sample = imsg_code;
+					settings_sampling_invalidate(win, agads, phase_eye_buf, sizeof(phase_eye_buf), sampling_ready);
+					availability = VCAP_CALIBRATION_UNKNOWN;
+				} else if (gad->GadgetID == AGAD_VCAP_CROP_H ||
+					gad->GadgetID == AGAD_VCAP_CROP_V) {
+					struct StringInfo *field = (struct StringInfo *)gad->SpecialInfo;
+					zz_vcap_edit_set(&edit, gad->GadgetID == AGAD_VCAP_CROP_H ?
+						ZZ_VCAP_EDIT_CROP_H : ZZ_VCAP_EDIT_CROP_V, field->Buffer[0] != '\0');
+				} else if (gad->GadgetID == AGAD_VCAP_PHASE ||
+					gad->GadgetID == AGAD_BTN_PHASE_FINE_MINUS ||
+					gad->GadgetID == AGAD_BTN_PHASE_FINE_PLUS ||
+					gad->GadgetID == AGAD_BTN_PHASE_COARSE_MINUS ||
+					gad->GadgetID == AGAD_BTN_PHASE_COARSE_PLUS) {
+					const char *text = (const char *)((struct StringInfo *)agads[AGAD_VCAP_PHASE]->SpecialInfo)->Buffer;
+					int phase = 0, delta = 0;
+					enum zz_vcap_result result = ZZ_VCAP_INVALID;
+					if ((!text[0] || settings_parse_phase_field(text, &phase)) &&
+						zz_vcap_phase_valid(phase, settings_phase_domain) && phase_entry_valid) {
+						if (gad->GadgetID != AGAD_VCAP_PHASE)
+							delta = gad->GadgetID == AGAD_BTN_PHASE_FINE_MINUS ? -1 :
+								gad->GadgetID == AGAD_BTN_PHASE_FINE_PLUS ? 1 :
+								gad->GadgetID == AGAD_BTN_PHASE_COARSE_MINUS ?
+								-(int)ZZ_CAPTURE_BIN_STEPS : (int)ZZ_CAPTURE_BIN_STEPS;
+						phase = zz_vcap_phase_step(phase, delta, settings_phase_domain);
+						zz_vcap_edit_set(&edit, ZZ_VCAP_EDIT_PHASE,
+							gad->GadgetID != AGAD_VCAP_PHASE || text[0] != '\0');
+						phase_edited = TRUE;
+						live_session->phase_touched = TRUE;
+						snprintf(phase_buf, sizeof(phase_buf), "%d", phase);
+						GT_SetGadgetAttrs(agads[AGAD_VCAP_PHASE], win, NULL,
+							GTST_String, phase_buf, TAG_END);
+						snprintf(status, sizeof(status), "Phase %d pending acknowledgement", phase);
+						GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL, GTTX_Text, status, TAG_END);
+						result = settings_capture_phase_command(win, &cancel, phase);
+						phase_confirmed = result == ZZ_VCAP_OK;
+						if (result == ZZ_VCAP_OK) {
+							vcap_sampling_eye_text(phase_eye_buf, sizeof(phase_eye_buf), phase, sampling_ready);
+							GT_SetGadgetAttrs(agads[AGAD_PHASE_EYE], win, NULL,
+								GTTX_Text, phase_eye_buf, TAG_END);
+						}
+					}
+					if (result == ZZ_VCAP_OK)
+						snprintf(status, sizeof(status), "Phase %d applied; Done stages", phase);
+					else
+						snprintf(status, sizeof(status), "Phase not confirmed: %s", zz_vcap_result_text(result));
+					GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL, GTTX_Text, status, TAG_END);
+				} else if (gad->GadgetID == AGAD_VCAP_WIDTH || gad->GadgetID == AGAD_VCAP_HEIGHT) {
+					const char *wtext = (const char *)((struct StringInfo *)agads[AGAD_VCAP_WIDTH]->SpecialInfo)->Buffer;
+					const char *htext = (const char *)((struct StringInfo *)agads[AGAD_VCAP_HEIGHT]->SpecialInfo)->Buffer;
+					UWORD width = 0, height = 0;
+					enum zz_vcap_result result = ZZ_VCAP_INVALID;
+					if (geometry_entry_valid &&
+						(!wtext[0] || (settings_parse_window_field(wtext, &width) &&
+							width >= 256 && width <= 1280 && !(width & 15))) &&
+						(!htext[0] || (settings_parse_window_field(htext, &height) &&
+							height >= 100 && height <= 1024))) {
+						zz_vcap_edit_set(&edit, gad->GadgetID == AGAD_VCAP_WIDTH ?
+							ZZ_VCAP_EDIT_WIDTH : ZZ_VCAP_EDIT_HEIGHT,
+							gad->GadgetID == AGAD_VCAP_WIDTH ? wtext[0] != '\0' : htext[0] != '\0');
+						if (!(edit.present & ZZ_VCAP_EDIT_WIDTH)) width = 0;
+						if (!(edit.present & ZZ_VCAP_EDIT_HEIGHT)) height = 0;
+						geometry_edited = TRUE;
+						live_session->geometry_touched = TRUE;
+						snprintf(status, sizeof(status), "Window %ux%u pending native vblank", width, height);
+						GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL, GTTX_Text, status, TAG_END);
+						result = settings_capture_geometry_command(win, &cancel, width, height);
+					}
+					if (result == ZZ_VCAP_OK) result = zz_vcap_geometry_read(&settings_vcap_io, &geometry_state);
+					geometry_confirmed = result == ZZ_VCAP_OK;
+					if (geometry_confirmed)
+						snprintf(status, sizeof(status), "Request %ux%u; applied %ux%u", width, height,
+							geometry_state.applied_width, geometry_state.applied_height);
+					else
+						snprintf(status, sizeof(status), "Window not confirmed: %s", zz_vcap_result_text(result));
+					GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL, GTTX_Text, status, TAG_END);
+				} else if (gad->GadgetID == AGAD_BTN_AUTO) {
+					struct zz_vcap_control auto_control;
+					struct zz_vcap_path path;
+					struct zz_vcap_snapshot applied;
+					int crop_result;
+					enum zz_vcap_result phase_result = ZZ_VCAP_OK, geometry_result = ZZ_VCAP_OK;
+					if (!live_session->supported || geometry_unacknowledged) {
+						snprintf(status, sizeof(status), "%s", geometry_unacknowledged ?
+							"Reset to Auto needs geometry-ACK firmware" : "Reset to Auto needs live-control firmware");
+						GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL, GTTX_Text, status, TAG_END);
+						continue;
+					}
+					settings_path_for(&path, settings_vals.videocap_profile, sample);
+					auto_control.sample = path.sample;
+					auto_control.full_width = path.full_width;
+					auto_control.crop_h = auto_control.crop_v = 0;
+					auto_control.crop_h_present = auto_control.crop_v_present = 0;
+					snprintf(status, sizeof(status), "Reset to Auto pending acknowledgement");
+					GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL, GTTX_Text, status, TAG_END);
+					crop_result = settings_capture_crop_command(win, &cancel, zz_vcap_control_pack(&auto_control), &applied);
+					if (!cancel && settings_phase_domain != ZZ_VCAP_PHASE_NONE) {
+						if (phase_entry_valid) {
+							phase_edited = TRUE;
+							live_session->phase_touched = TRUE;
+							phase_result = settings_capture_phase_command(win, &cancel, 0);
+						} else phase_result = ZZ_VCAP_CLOCK_UNQUALIFIED;
+					}
+					if (!cancel && geometry_supported) {
+						if (geometry_entry_valid) {
+							geometry_edited = TRUE;
+							live_session->geometry_touched = TRUE;
+							geometry_result = settings_capture_geometry_command(win, &cancel, 0, 0);
+						} else geometry_result = ZZ_VCAP_BUSY;
+					}
+					phase_confirmed = phase_result == ZZ_VCAP_OK;
+					geometry_confirmed = geometry_result == ZZ_VCAP_OK;
+					if (crop_result == VCAP_APPLY_OK && phase_result == ZZ_VCAP_OK &&
+						geometry_result == ZZ_VCAP_OK && !cancel) {
+						UWORD seed_width = 0, seed_height = 0;
+						zz_vcap_edit_automatic(&edit);
+						live_session->current = applied;
+						live_session->preview_control = auto_control;
+						live_session->preview_valid = TRUE;
+						vcap_sampling_quality_valid = FALSE;
+						snprintf(crop_h_buf, sizeof(crop_h_buf), "%u", applied.effective_h);
+						snprintf(crop_v_buf, sizeof(crop_v_buf), "%u", applied.effective_v);
+						settings_capture_window_seed(settings_vals.videocap_profile,
+							applied.raw, applied.status, &seed_width, &seed_height);
+						if (geometry_supported && zz_vcap_geometry_read(&settings_vcap_io, &geometry_state) == ZZ_VCAP_OK) {
+							seed_width = geometry_state.applied_width;
+							seed_height = geometry_state.applied_height;
+						}
+						snprintf(width_buf, sizeof(width_buf), "%u", seed_width);
+						snprintf(height_buf, sizeof(height_buf), "%u", seed_height);
+						snprintf(phase_buf, sizeof(phase_buf), "0");
+						GT_SetGadgetAttrs(agads[AGAD_VCAP_CROP_H], win, NULL, GTST_String, crop_h_buf, TAG_END);
+						GT_SetGadgetAttrs(agads[AGAD_VCAP_CROP_V], win, NULL, GTST_String, crop_v_buf, TAG_END);
+						GT_SetGadgetAttrs(agads[AGAD_VCAP_WIDTH], win, NULL, GTST_String, width_buf, TAG_END);
+						GT_SetGadgetAttrs(agads[AGAD_VCAP_HEIGHT], win, NULL, GTST_String, height_buf, TAG_END);
+						GT_SetGadgetAttrs(agads[AGAD_VCAP_PHASE], win, NULL, GTST_String, phase_buf, TAG_END);
+						vcap_sampling_eye_text(phase_eye_buf, sizeof(phase_eye_buf), 0, sampling_ready);
+						GT_SetGadgetAttrs(agads[AGAD_PHASE_EYE], win, NULL, GTTX_Text, phase_eye_buf, TAG_END);
+						snprintf(status, sizeof(status), "Reset to Auto applied; Done stages, Save persists");
+					} else if (crop_result != VCAP_APPLY_OK)
+						snprintf(status, sizeof(status), "Reset to Auto crop: %s; retry or Cancel",
+							crop_result == VCAP_APPLY_CANCELLED ? "cancelled" :
+							crop_result == VCAP_APPLY_TIMEOUT ? "native-frame timeout" :
+							crop_result == VCAP_APPLY_CONFLICT ? "competing writer" : "request not accepted");
+					else
+						snprintf(status, sizeof(status), "Reset to Auto incomplete: %s; retry or Cancel",
+							zz_vcap_result_text(phase_result != ZZ_VCAP_OK ? phase_result : geometry_result));
+					GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL, GTTX_Text, status, TAG_END);
+				} else if (gad->GadgetID == AGAD_BTN_CALIBRATE && availability == VCAP_CALIBRATION_READY) {
+					int result = vcap_calibration_run(mysc, win, live_session, &accepted_control, status, sizeof(status));
+					if (result == 1) {
+						sample = accepted_control.sample;
+						zz_vcap_edit_set(&edit, ZZ_VCAP_EDIT_CROP_H, accepted_control.crop_h_present);
+						zz_vcap_edit_set(&edit, ZZ_VCAP_EDIT_CROP_V, accepted_control.crop_v_present);
+						settings_sampling_invalidate(win, agads, phase_eye_buf, sizeof(phase_eye_buf), sampling_ready);
+						snprintf(crop_h_buf, sizeof(crop_h_buf), "%u", accepted_control.crop_h);
+						snprintf(crop_v_buf, sizeof(crop_v_buf), "%u", accepted_control.crop_v);
+						GT_SetGadgetAttrs(agads[AGAD_VCAP_SAMPLE], win, NULL, GTCY_Active, sample, TAG_END);
+						GT_SetGadgetAttrs(agads[AGAD_VCAP_CROP_H], win, NULL, GTST_String, crop_h_buf, TAG_END);
+						GT_SetGadgetAttrs(agads[AGAD_VCAP_CROP_V], win, NULL, GTST_String, crop_v_buf, TAG_END);
+						snprintf(status, sizeof(status), "Preview accepted; Done stages, Cancel restores");
+					}
+					GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL, GTTX_Text, status, TAG_END);
+				} else if (gad->GadgetID == AGAD_BTN_SAMPLING_CALIBRATE && sampling_ready) {
+					struct zz_vcap_status source;
+					int child_entry = 0, chosen_phase = 0, result = -1, lace = 0;
+					enum zz_vcap_result phase_result = settings_phase_read(&child_entry);
+					zz_vcap_status_unpack(live_session->current.status, &source);
+					/* A native caller supplies its field mode; RTG has none, so
+					 * deliberately request a progressive native test pattern. */
+					if (mysc) {
+						struct DisplayInfo info = {0};
+						ULONG id = GetVPModeID(&mysc->ViewPort);
+						if (id != (ULONG)INVALID_ID && GetDisplayInfoData(NULL,
+							(UBYTE *)&info, sizeof(info), DTAG_DISP, id) != 0 &&
+							!(info.PropertyFlags & DIPF_IS_FOREIGN))
+							lace = (info.PropertyFlags & DIPF_IS_LACE) != 0;
+					}
+					if (phase_result == ZZ_VCAP_OK)
+						result = vcap_sampling_run(&settings_vcap_io, source.ntsc, lace, child_entry,
+							&chosen_phase, vcap_sampling_quality, status, sizeof(status));
+					else snprintf(status, sizeof(status), "Sampling unavailable: %s", zz_vcap_result_text(phase_result));
+					if (result == 1) {
+						phase_edited = TRUE;
+						phase_confirmed = TRUE;
+						live_session->phase_touched = TRUE;
+						zz_vcap_edit_set(&edit, ZZ_VCAP_EDIT_PHASE, 1);
+						vcap_sampling_quality_valid = TRUE;
+						snprintf(phase_buf, sizeof(phase_buf), "%d", chosen_phase);
+						vcap_sampling_eye_text(phase_eye_buf, sizeof(phase_eye_buf), chosen_phase, sampling_ready);
+						GT_SetGadgetAttrs(agads[AGAD_VCAP_PHASE], win, NULL, GTST_String, phase_buf, TAG_END);
+						GT_SetGadgetAttrs(agads[AGAD_PHASE_EYE], win, NULL, GTTX_Text, phase_eye_buf, TAG_END);
+						snprintf(status, sizeof(status), "Phase %d applied; Done stages, Cancel restores", chosen_phase);
+					} else if (result == -2) {
+						phase_edited = TRUE;
+						phase_confirmed = FALSE;
+						live_session->phase_touched = TRUE;
+						vcap_sampling_quality_valid = FALSE;
+					}
+					GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL, GTTX_Text, status, TAG_END);
+				} else if (gad->GadgetID == AGAD_BTN_CANCEL) {
+					cancel = TRUE;
+				} else if (gad->GadgetID == AGAD_BTN_DONE) {
+					if (settings_video_advanced_candidate(win, agads, sample, &edit, &staged_entry,
+						status, sizeof(status), &candidate_values, &changed)) {
+						enum zz_vcap_result result = phase_confirmed && geometry_confirmed ? ZZ_VCAP_OK : ZZ_VCAP_STATE_CHANGED;
+						int phase = 0;
+						const char *text = (const char *)((struct StringInfo *)agads[AGAD_VCAP_PHASE]->SpecialInfo)->Buffer;
+						if (result == ZZ_VCAP_OK && phase_edited) {
+							if (text[0]) settings_parse_phase_field(text, &phase);
+							result = zz_vcap_phase_check(&settings_vcap_io, phase);
+						}
+						if (result == ZZ_VCAP_OK && geometry_edited)
+							result = zz_vcap_geometry_check(&settings_vcap_io,
+								candidate_values.videocap_width_present ? candidate_values.videocap_width : 0,
+								candidate_values.videocap_height_present ? candidate_values.videocap_height : 0);
+						settings_control_from_values(&candidate_values, &candidate_control);
+						if (result != ZZ_VCAP_OK) {
+							changed = FALSE;
+							snprintf(status, sizeof(status), "Cannot stage unconfirmed command: %s", zz_vcap_result_text(result));
+						} else if ((!live_session->preview_valid ||
+							!zz_vcap_control_equal(&candidate_control, &live_session->preview_control)) &&
+							!settings_live_restore(live_session, ZZ_VCAP_ANCHOR_ADVANCED)) {
+							changed = FALSE;
+							snprintf(status, sizeof(status), "Preview restore failed; retry or Cancel");
+						} else {
+							settings_vals = candidate_values;
+							live_session->preview_valid = live_session->preview_valid &&
+								zz_vcap_control_equal(&candidate_control, &live_session->preview_control);
+							done = TRUE;
+						}
+						GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL, GTTX_Text, status, TAG_END);
+					}
+				}
+			}
+		}
+		if (cancel) {
+			BOOL restored = settings_live_restore(live_session, ZZ_VCAP_ANCHOR_ADVANCED);
+			enum zz_vcap_result result = ZZ_VCAP_OK, geometry_result = ZZ_VCAP_OK;
+			live_session->preview_valid = FALSE;
+			if (phase_edited) {
+				result = settings_phase_apply(entry_phase, TRUE);
+				phase_confirmed = result == ZZ_VCAP_OK;
+			}
+			if (geometry_edited) {
+				geometry_result = settings_geometry_apply(entry_width, entry_height, TRUE);
+				geometry_confirmed = geometry_result == ZZ_VCAP_OK;
+			}
+			if (restored && result == ZZ_VCAP_OK && geometry_result == ZZ_VCAP_OK) {
+				live_session->phase_touched = phase_was_touched;
+				live_session->geometry_touched = geometry_was_touched;
+				live_session->preview_valid = FALSE;
+				changed = FALSE;
+				done = TRUE;
+			} else {
+				cancel = FALSE;
+				changed = FALSE;
+				snprintf(status, sizeof(status), "Restore failed; live state unknown: %s",
+					!restored ? "crop acknowledgement" : zz_vcap_result_text(result != ZZ_VCAP_OK ? result : geometry_result));
+				GT_SetGadgetAttrs(agads[AGAD_STATUS], win, NULL, GTTX_Text, status, TAG_END);
+			}
+		}
+	}
+
+	CloseWindow(win);
+	FreeGadgets(glist);
+	return changed;
+}
+
+/* ---- Scandoubler window ----
+ *
+ * Native video only: output/refresh as two dependent selectors over
+ * the shared profile model, an honest one-line description of the
+ * selected pair, live scanlines/parity, and the capture calibration
+ * path one level down. Saving here preserves every non-video key
+ * exactly as parsed from the card. */
+
+static struct Gadget *sdgads[SDGAD_COUNT];
+static char sd_status_buf[64];
+static char sd_desc_buf[96];
+
+/* Cycle entries are enum values behind a per-session map: cycle index
+ * order must never be assumed to match enum order. */
+static STRPTR sd_output_labels[ZZCFG_VCAP_OUTPUT_COUNT] = {
+	(STRPTR)"1280x1024 - full detail",
+	(STRPTR)"1920x1080 - centered",
+	(STRPTR)"800x600 / 720x480 - filtered",
+	(STRPTR)"720x576 / 720x480 - filtered"
+};
+
+static STRPTR sd_refresh_labels[ZZCFG_VCAP_REFRESH_COUNT] = {
+	(STRPTR)"50Hz",
+	(STRPTR)"60Hz",
+	(STRPTR)"Match Amiga",
+	(STRPTR)"50Hz PAL,60Hz NTSC",
+	(STRPTR)"PAL Amiga clock",
+	(STRPTR)"NTSC Amiga clock"
+};
+
+static UWORD sd_output_map[ZZCFG_VCAP_OUTPUT_COUNT];
+static UWORD sd_output_count;
+static STRPTR sd_output_active[ZZCFG_VCAP_OUTPUT_COUNT + 1];
+
+static UWORD sd_refresh_map[ZZCFG_VCAP_REFRESH_COUNT];
+static UWORD sd_refresh_count;
+static STRPTR sd_refresh_active[ZZCFG_VCAP_REFRESH_COUNT + 1];
+
+
+static void sd_set_status(struct Window *win, const char *text)
+{
+	cfg_status_set(win, sdgads[SDGAD_STATUS], sd_status_buf, text);
+}
+
+static BOOL scandoubler_update_save_gate(struct Window *win,
+	struct settings_live_session *live_session, BOOL explain);
+
+/* First refresh that pairs with this output: the visible default when
+ * the current refresh is not valid for a newly selected output. */
+static UWORD scandoubler_first_refresh(UWORD output, UWORD fw_capabilities)
+{
+	UWORD refresh;
+
+	for (refresh = 0; refresh < ZZCFG_VCAP_REFRESH_COUNT; refresh++)
+		if (zzcfg_profile_for_output_refresh(output, refresh,
+				fw_capabilities) != ZZCFG_VCAP_PROFILE_COUNT)
+			return refresh;
+	return ZZCFG_VCAP_REFRESH_COUNT; /* outputs are choices only with one */
+}
+/* An output is a choice only if some refresh combines with it into a
+ * supported profile under these capabilities. That single rule also
+ * hides Centered when the firmware/bitstream does not advertise the
+ * 1080p path - no special case needed. */
+static void scandoubler_build_output_choices(UWORD fw_capabilities)
+{
+	UWORD output, count = 0;
+
+	for (output = 0; output < ZZCFG_VCAP_OUTPUT_COUNT; output++) {
+		if (scandoubler_first_refresh(output, fw_capabilities) ==
+				ZZCFG_VCAP_REFRESH_COUNT)
+			continue;
+		sd_output_map[count] = output;
+		sd_output_active[count] = sd_output_labels[output];
+		count++;
+	}
+	sd_output_active[count] = NULL;
+	sd_output_count = count;
+}
+
+/* Refresh choices depend on the selected output: only pairs that map
+ * to a supported profile are offered. */
+static UWORD scandoubler_build_refresh_choices(UWORD output,
+	UWORD fw_capabilities)
+{
+	UWORD refresh, count = 0;
+
+	for (refresh = 0; refresh < ZZCFG_VCAP_REFRESH_COUNT; refresh++) {
+		if (zzcfg_profile_for_output_refresh(output, refresh,
+				fw_capabilities) == ZZCFG_VCAP_PROFILE_COUNT)
+			continue;
+		sd_refresh_map[count] = refresh;
+		sd_refresh_active[count] = sd_refresh_labels[refresh];
+		count++;
+	}
+	sd_refresh_active[count] = NULL;
+	sd_refresh_count = count;
+	return count;
+}
+
+/* Cycle index of an enum value inside a choice map, or -1. */
+static WORD scandoubler_choice_index(const UWORD *map, UWORD count,
+	UWORD value)
+{
+	UWORD i;
+
+	for (i = 0; i < count; i++)
+		if (map[i] == value) return (WORD)i;
+	return -1;
+}
+
+
+/* One-line description of a selected pair and its expected refresh with
+ * matching firmware. Clock approximations are rounded for display here;
+ * these values are not live measurements. */
+static void scandoubler_description(char *buf, size_t size, UWORD output,
+	UWORD refresh)
+{
+	static const char *const output_text[ZZCFG_VCAP_OUTPUT_COUNT] = {
+		"1280x1024, full SuperHires detail",
+		"1920x1080, unchanged 1280x1024, black borders",
+		"800x600 PAL / 720x480 NTSC, filtered",
+		"720x576 PAL / 720x480 NTSC, filtered"
+	};
+	const char *rate = NULL;
+
+	switch (refresh) {
+	case ZZCFG_VCAP_REFRESH_50:
+		if (output == ZZCFG_VCAP_OUTPUT_CENTERED) rate = "50.02Hz";
+		break;
+	case ZZCFG_VCAP_REFRESH_60:
+		if (output == ZZCFG_VCAP_OUTPUT_FULL) rate = "60.02Hz";
+		else if (output == ZZCFG_VCAP_OUTPUT_CENTERED) rate = "60.03Hz";
+		else if (output == ZZCFG_VCAP_OUTPUT_FILTERED_VGA)
+			rate = "60.32Hz";
+		break;
+	case ZZCFG_VCAP_REFRESH_MATCH_INPUT:
+		if (output == ZZCFG_VCAP_OUTPUT_FULL)
+			rate = "49.93/59.95Hz PAL/NTSC";
+		else if (output == ZZCFG_VCAP_OUTPUT_CENTERED)
+			/* Experimental source sync: the rate follows the Amiga
+			 * input, so quoting a fixed number would be invented. */
+			rate = "source-synced to the Amiga";
+		break;
+	case ZZCFG_VCAP_REFRESH_AUTO_50_60:
+		if (output == ZZCFG_VCAP_OUTPUT_FILTERED_SD)
+			rate = "50.20/60.32Hz PAL/NTSC";
+		break;
+	case ZZCFG_VCAP_REFRESH_PAL_CLOCK:
+		if (output == ZZCFG_VCAP_OUTPUT_FILTERED_SD)
+			rate = "49.92/59.28Hz PAL/NTSC";
+		break;
+	case ZZCFG_VCAP_REFRESH_NTSC_CLOCK:
+		if (output == ZZCFG_VCAP_OUTPUT_FILTERED_SD)
+			rate = "50.35/59.93Hz PAL/NTSC";
+		break;
+	}
+
+	if (output >= ZZCFG_VCAP_OUTPUT_COUNT) {
+		snprintf(buf, size, "%s", "");
+		return;
+	}
+	if (rate) snprintf(buf, size, "%s - %s", output_text[output], rate);
+	else snprintf(buf, size, "%s", output_text[output]);
+}
+
+/* Widest description the current capabilities can show: sizes the
+ * description row (which spans the window) without inflating the
+ * control column. */
+static WORD scandoubler_max_description_width(struct RastPort *rp,
+	UWORD fw_capabilities, WORD fallback_char_width)
+{
+	char probe[96];
+	WORD width = 0;
+	UWORD output, refresh;
+
+	for (output = 0; output < ZZCFG_VCAP_OUTPUT_COUNT; output++) {
+		for (refresh = 0; refresh < ZZCFG_VCAP_REFRESH_COUNT; refresh++) {
+			if (zzcfg_profile_for_output_refresh(output, refresh,
+					fw_capabilities) == ZZCFG_VCAP_PROFILE_COUNT)
+				continue;
+			scandoubler_description(probe, sizeof(probe), output, refresh);
+			width = zztop_max_word(width,
+				zztop_text_width(rp, (CONST_STRPTR)probe,
+					fallback_char_width));
+		}
+	}
+	return width;
+}
+
+/* Render the staged profile through the supported output/refresh choices. */
+static void scandoubler_sync_choices(struct Window *win,
+	UWORD fw_capabilities)
+{
+	UWORD output = zzcfg_profile_output(settings_vals.videocap_profile);
+	UWORD refresh = zzcfg_profile_refresh(settings_vals.videocap_profile);
+	WORD output_index = scandoubler_choice_index(sd_output_map,
+		sd_output_count, output);
+	WORD refresh_index;
+	UWORD profile;
+
+	if (output_index < 0 && sd_output_count > 0) {
+		output = sd_output_map[0];
+		output_index = 0;
+	}
+	scandoubler_build_refresh_choices(output, fw_capabilities);
+	refresh_index = scandoubler_choice_index(sd_refresh_map,
+		sd_refresh_count, refresh);
+	if (refresh_index < 0 && sd_refresh_count > 0) {
+		refresh = sd_refresh_map[0];
+		refresh_index = 0;
+	}
+	profile = zzcfg_profile_for_output_refresh(output, refresh,
+		fw_capabilities);
+	if (profile != ZZCFG_VCAP_PROFILE_COUNT)
+		settings_vals.videocap_profile = profile;
+
+	if (!win) return;
+	GT_SetGadgetAttrs(sdgads[SDGAD_OUTPUT], win, NULL,
+		GTCY_Active, output_index < 0 ? 0 : output_index, TAG_END);
+	GT_SetGadgetAttrs(sdgads[SDGAD_REFRESH], win, NULL,
+		GTCY_Labels, sd_refresh_active,
+		GTCY_Active, refresh_index < 0 ? 0 : refresh_index, TAG_END);
+	scandoubler_description(sd_desc_buf, sizeof(sd_desc_buf),
+		output, refresh);
+	GT_SetGadgetAttrs(sdgads[SDGAD_DESC], win, NULL,
+		GTTX_Text, sd_desc_buf, TAG_END);
+}
+
+/* Commit a new output/refresh selection to the model, restoring any
+ * live calibration preview first (the flow the single Settings cycle
+ * handler used). Returns FALSE while the restore is still pending;
+ * the selectors are snapped back to the staged profile then.
+ * *framing_reset (may be NULL) reports that the switch demoted Custom
+ * framing to Automatic, so the caller keeps that status message
+ * instead of overwriting it. */
+static BOOL scandoubler_stage_profile(struct Window *win,
+	struct zztop_cfg_ctx *ctx, UWORD profile, BOOL *framing_reset)
+{
+	struct settings_live_session *live = &ctx->live;
+	struct zz_vcap_path old_path, new_path;
+	UWORD old_profile;
+
+	if (framing_reset)
+		*framing_reset = FALSE;
+
+	if (live->preview_valid &&
+		!settings_profile_matches(live, profile,
+			settings_vals.videocap_sample)) {
+		if (!settings_live_restore(live, ZZ_VCAP_ANCHOR_SETTINGS)) {
+			scandoubler_sync_choices(win, ctx->fw_capabilities);
+			sd_set_status(win,
+				"Profile change waiting for live restore; retry");
+			return FALSE;
+		}
+		live->preview_valid = FALSE;
+	}
+	old_profile = settings_vals.videocap_profile;
+	settings_vals.videocap_profile = profile;
+
+	/* Switching output family (full-rate <-> filtered) changes the
+	 * capture grid, and a Custom framing pair is only valid on the
+	 * grid it was measured on. Demote framing to Automatic when THIS
+	 * switch crosses capture paths - not when the staged path merely
+	 * differs from the applied one (a pending sampling change staged
+	 * in Capture would otherwise let a plain Refresh change erase a
+	 * calibration). The staged switch itself is the fact; no live
+	 * snapshot is needed to confirm it. The crop keys drop out of
+	 * the next ZZ9000.CFG write and framing returns to the path
+	 * defaults after the power-cycle - recalibrate then. Without
+	 * live control there was never a path gate, so keep the saved
+	 * pair untouched there. */
+	settings_path_for(&old_path, old_profile,
+		settings_vals.videocap_sample);
+	settings_path_for(&new_path, profile,
+		settings_vals.videocap_sample);
+	if (live->supported && settings_custom_framing() &&
+		!zz_vcap_path_equal(&old_path, &new_path)) {
+		settings_vals.videocap_crop_h_present = 0;
+		settings_vals.videocap_crop_v_present = 0;
+		settings_vals.videocap_crop_h = 0;
+		settings_vals.videocap_crop_v = 0;
+		if (framing_reset)
+			*framing_reset = TRUE;
+		scandoubler_update_save_gate(win, live, FALSE);
+		sd_set_status(win,
+			"Framing reset to Automatic - Save, reboot, re-align picture");
+		return TRUE;
+	}
+	if (scandoubler_update_save_gate(win, live, TRUE))
+		sd_set_status(win, "Output changed - Save, then power-cycle");
+	return TRUE;
+}
+
+/* Load the model for the Scandoubler window and push everything into
+ * the gadgets. The native ENV overrides apply here (this window owns
+ * video), and an unsupported centered profile from the card visibly
+ * falls back to Full 60 as before. */
+static void scandoubler_populate(struct Window *win,
+	struct zztop_cfg_ctx *ctx)
+{
+	struct zzcfg_values *sv = &settings_vals;
+	UWORD caps = ctx->fw_capabilities;
+	UWORD st, rawlen = 0;
+	BOOL centered_fallback = FALSE;
+
+	st = settings_reload_from_card(sv, caps, &rawlen);
+	/* Save in this window owns all displayed native controls. Other
+	 * windows retain the presence flags from the raw file instead. */
+	sv->videocap_profile_present = 1;
+	sv->videocap_sample_present = 1;
+	sv->scanline_mode_present = 1;
+	sv->scanline_parity_present = 1;
+
+	if (!settings_have_cfg) {
+		snprintf(sd_status_buf, sizeof(sd_status_buf),
+			"Scanlines only (needs FW 2.3+)");
+	} else if (st == ZZ_CFG_FILE_OK) {
+		int env_native;
+
+		if (!zzcfg_profile_supported(sv->videocap_profile, caps)) {
+			sv->videocap_profile =
+				zzcfg_profile_sanitize(sv->videocap_profile, caps);
+			centered_fallback = TRUE;
+		}
+		env_native = settings_apply_env_native(sv);
+		if (centered_fallback) {
+			snprintf(sd_status_buf, sizeof(sd_status_buf),
+				"Centered 1080p needs matching firmware/bitstream; Full 60 staged");
+		} else if (env_native) {
+			snprintf(sd_status_buf, sizeof(sd_status_buf),
+				"%u bytes + ENV: video overrides", (unsigned)rawlen);
+		} else {
+			snprintf(sd_status_buf, sizeof(sd_status_buf),
+				"ZZ9000.CFG: %u bytes on card", (unsigned)rawlen);
+		}
+	} else if (st == ZZ_CFG_FILE_NO_FILE) {
+		if (settings_apply_env_native(sv))
+			snprintf(sd_status_buf, sizeof(sd_status_buf),
+				"No file yet - showing ENV settings");
+		else
+			snprintf(sd_status_buf, sizeof(sd_status_buf),
+				"No ZZ9000.CFG on card yet");
+	} else if (st == ZZ_CFG_FILE_IDLE) {
+		snprintf(sd_status_buf, sizeof(sd_status_buf),
+			"Firmware lacks config support");
+	} else {
+		snprintf(sd_status_buf, sizeof(sd_status_buf),
+			"Config read failed (SD error)");
+	}
+
+	scandoubler_build_output_choices(caps);
+	if (sv->videocap_profile >= ZZCFG_VCAP_PROFILE_COUNT)
+		sv->videocap_profile = ZZCFG_VCAP_FULL_60;
+
+	if (win) {
+		scandoubler_sync_choices(win, caps);
+		GT_SetGadgetAttrs(sdgads[SDGAD_SCANMODE], win, NULL,
+			GTCY_Active, sv->scanline_mode, TAG_END);
+		GT_SetGadgetAttrs(sdgads[SDGAD_PARITY], win, NULL,
+			GTCY_Active, sv->scanline_parity, TAG_END);
+		sd_set_status(win, sd_status_buf);
+
+		if (!settings_have_cfg) {
+			/* Live scanline controls stay usable on 2.0-2.2 firmware
+			 * (they were on the main window before); everything that
+			 * needs the config-file interface is greyed out. */
+			static const UWORD cfg_only_gadgets[] = {
+				SDGAD_OUTPUT, SDGAD_REFRESH, SDGAD_DESC,
+				SDGAD_CAPTURE, SDGAD_BTN_SAVE, SDGAD_BTN_RELOAD
+			};
+			size_t i;
+			for (i = 0; i < sizeof(cfg_only_gadgets) /
+					sizeof(cfg_only_gadgets[0]); i++) {
+				GT_SetGadgetAttrs(sdgads[cfg_only_gadgets[i]], win,
+					NULL, GA_Disabled, TRUE, TAG_END);
+			}
+		}
+		/* Seed the live-video anchor so Close/Reload can restore,
+		 * then apply the custom-crop save gate to the button state. */
+		settings_live_refresh(&ctx->live);
+		scandoubler_update_save_gate(win, &ctx->live, FALSE);
+	}
+}
+
+static BOOL scandoubler_update_save_gate(struct Window *win,
+	struct settings_live_session *live_session, BOOL explain)
+{
+	BOOL allowed = settings_have_cfg &&
+		settings_custom_save_allowed(live_session);
+
+	GT_SetGadgetAttrs(sdgads[SDGAD_BTN_SAVE], win, NULL,
+		GA_Disabled, !allowed, TAG_END);
+	if (!allowed && settings_have_cfg && explain) {
+		if (live_session->restore_result != ZZ_VCAP_OK) {
+			snprintf(sd_status_buf, sizeof(sd_status_buf), "Save blocked: %s; restore or retry",
+				zz_vcap_result_text(live_session->restore_result));
+			sd_set_status(win, sd_status_buf);
+		} else sd_set_status(win, "Custom crop belongs to another path; use Automatic");
+	}
+	return allowed;
+}
+
+static struct Gadget *scandoubler_create_gadgets(struct Gadget **glistptr,
+	void *vi, const struct ZZTopLayout *mainlayout, UWORD fw_capabilities,
+	WORD *out_w, WORD *out_h)
+{
+	static CONST_STRPTR label_samples[] = {
+		(CONST_STRPTR)LABEL_SD_OUTPUT,
+		(CONST_STRPTR)LABEL_SD_REFRESH,
+		(CONST_STRPTR)LABEL_SCANLINES,
+		(CONST_STRPTR)LABEL_PARITY,
+		NULL
+	};
+	struct NewGadget ng;
+	struct Gadget *gad;
+	struct ZZTopLayout l = *mainlayout;
+	struct RastPort *rp = zztop_screen ? &zztop_screen->RastPort : NULL;
+	CONST_STRPTR value_samples[ZZCFG_VCAP_OUTPUT_COUNT +
+		ZZCFG_VCAP_REFRESH_COUNT + 1];
+	WORD label_width, value_width, button_width, desc_width;
+	WORD content_right, button_gap, y;
+	int i, n;
+
+	/* Choices come from the same capability the handlers use, so the
+	 * created cycles never offer an entry the model would reject. */
+	scandoubler_build_output_choices(fw_capabilities);
+	scandoubler_build_refresh_choices(ZZCFG_VCAP_OUTPUT_FULL,
+		fw_capabilities);
+
+	n = 0;
+	for (i = 0; i < (int)sd_output_count; i++)
+		value_samples[n++] = sd_output_active[i];
+	for (i = 0; i < (int)sd_refresh_count; i++)
+		value_samples[n++] = sd_refresh_active[i];
+	value_samples[n] = NULL;
+
+	label_width = zztop_max_text_width(rp, label_samples, 8);
+	value_width = zztop_max_text_width(rp, value_samples, 8);
+	button_width = zztop_max_word(90,
+		zztop_max_text_width(rp, settings_button_samples, 8) + 32);
+	desc_width = scandoubler_max_description_width(rp, fw_capabilities, 8);
+
+	l.gadget_left = l.margin_x + label_width + l.label_gap;
+	l.gadget_width = zztop_max_word(184, value_width + 48);
+	content_right = zztop_max_word(l.gadget_left + l.gadget_width,
+		l.margin_x + desc_width + 8);
+	button_gap = 16;
+
+	gad = CreateContext(glistptr);
+	for (i = 0; i < SDGAD_COUNT; i++) sdgads[i] = NULL;
+
+	y = l.topborder + l.margin_y;
+
+	ng.ng_LeftEdge   = l.gadget_left;
+	ng.ng_TopEdge    = y;
+	ng.ng_Width      = l.gadget_width;
+	ng.ng_Height     = l.gadget_height;
+	ng.ng_TextAttr   = l.text_attr;
+	ng.ng_VisualInfo = vi;
+	ng.ng_Flags      = PLACETEXT_LEFT;
+
+	ng.ng_GadgetID   = SDGAD_OUTPUT;
+	ng.ng_GadgetText = (STRPTR)LABEL_SD_OUTPUT;
+	sdgads[SDGAD_OUTPUT] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+		GTCY_Labels, sd_output_active, GTCY_Active, 0, TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge    = y;
+	ng.ng_GadgetID   = SDGAD_REFRESH;
+	ng.ng_GadgetText = (STRPTR)LABEL_SD_REFRESH;
+	sdgads[SDGAD_REFRESH] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+		GTCY_Labels, sd_refresh_active, GTCY_Active, 0, TAG_END);
+	y += l.row_step;
+
+	/* Description of the selected pair spans the whole row; the window
+	 * is sized so the widest one fits without opening the control
+	 * column to it. */
+	ng.ng_LeftEdge   = l.margin_x;
+	ng.ng_TopEdge    = y;
+	ng.ng_Width      = content_right - l.margin_x;
+	ng.ng_GadgetID   = SDGAD_DESC;
+	ng.ng_GadgetText = NULL;
+	sdgads[SDGAD_DESC] = gad = CreateGadget(TEXT_KIND, gad, &ng,
+		GTTX_Text, sd_desc_buf, GTTX_Border, TRUE, TAG_END);
+	y += l.row_step + l.section_gap;
+
+	ng.ng_LeftEdge   = l.gadget_left;
+	ng.ng_TopEdge    = y;
+	ng.ng_Width      = l.gadget_width;
+	ng.ng_GadgetID   = SDGAD_SCANMODE;
+	ng.ng_GadgetText = (STRPTR)LABEL_SCANLINES;
+	sdgads[SDGAD_SCANMODE] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+		GTCY_Labels, scanline_labels, GTCY_Active, 0, TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge    = y;
+	ng.ng_GadgetID   = SDGAD_PARITY;
+	ng.ng_GadgetText = (STRPTR)LABEL_PARITY;
+	sdgads[SDGAD_PARITY] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+		GTCY_Labels, parity_labels, GTCY_Active, 0, TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge    = y;
+	ng.ng_GadgetID   = SDGAD_CAPTURE;
+	ng.ng_GadgetText = (STRPTR)LABEL_SD_CAPTURE;
+	ng.ng_Flags      = PLACETEXT_IN;
+	sdgads[SDGAD_CAPTURE] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		TAG_END);
+	ng.ng_Flags      = PLACETEXT_LEFT;
+	y += l.row_step + l.section_gap;
+
+	ng.ng_LeftEdge   = l.margin_x;
+	ng.ng_TopEdge    = y;
+	ng.ng_Width      = content_right - l.margin_x;
+	ng.ng_GadgetID   = SDGAD_STATUS;
+	ng.ng_GadgetText = NULL;
+	sdgads[SDGAD_STATUS] = gad = CreateGadget(TEXT_KIND, gad, &ng,
+		GTTX_Text, sd_status_buf, GTTX_Border, TRUE, TAG_END);
+	y += l.row_step + l.section_gap;
+
+	ng.ng_TopEdge    = y;
+	ng.ng_Width      = button_width;
+	ng.ng_GadgetID   = SDGAD_BTN_SAVE;
+	ng.ng_GadgetText = (STRPTR)LABEL_BTN_SAVE;
+	ng.ng_Flags      = PLACETEXT_IN;
+	sdgads[SDGAD_BTN_SAVE] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		TAG_END);
+
+	ng.ng_LeftEdge   = l.margin_x + button_width + button_gap;
+	ng.ng_GadgetID   = SDGAD_BTN_RELOAD;
+	ng.ng_GadgetText = (STRPTR)LABEL_BTN_RELOAD;
+	sdgads[SDGAD_BTN_RELOAD] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		TAG_END);
+	y += l.row_step;
+
+	*out_w = zztop_max_word(content_right + l.margin_x,
+		l.margin_x + button_width + button_gap + button_width + l.margin_x);
+	/* Same WA_InnerHeight convention as the main window: gadget
+	 * positions include the title bar, the inner height does not. */
+	*out_h = y + l.gadget_height + (l.margin_y / 2) - l.topborder;
+
+	for (i = 0; i < SDGAD_COUNT; i++) {
+		if (!sdgads[i]) return NULL;
+	}
+
+	return gad;
+}
+
+static BOOL scandoubler_gadget_up(struct Window *win, struct Gadget *gad,
+	UWORD code, struct zztop_cfg_ctx *ctx)
+{
+	struct settings_live_session *live = &ctx->live;
+
+	switch (gad->GadgetID) {
+	case SDGAD_OUTPUT: {
+		UWORD new_output, new_refresh, profile;
+		BOOL kept_refresh, framing_reset;
+
+		if (code >= sd_output_count) break;
+		new_output = sd_output_map[code];
+		if (new_output ==
+				zzcfg_profile_output(settings_vals.videocap_profile)) break;
+		/* Keep the refresh when the pair exists; otherwise visibly
+		 * fall to the first valid refresh for the new output. */
+		new_refresh = zzcfg_profile_refresh(settings_vals.videocap_profile);
+		kept_refresh = TRUE;
+		profile = zzcfg_profile_for_output_refresh(new_output, new_refresh,
+			ctx->fw_capabilities);
+		if (profile == ZZCFG_VCAP_PROFILE_COUNT) {
+			new_refresh = scandoubler_first_refresh(new_output,
+				ctx->fw_capabilities);
+			kept_refresh = FALSE;
+			profile = zzcfg_profile_for_output_refresh(new_output,
+				new_refresh, ctx->fw_capabilities);
+		}
+		if (profile == ZZCFG_VCAP_PROFILE_COUNT) break;
+		if (!scandoubler_stage_profile(win, ctx, profile,
+				&framing_reset)) break;
+		scandoubler_sync_choices(win, ctx->fw_capabilities);
+		if (!kept_refresh && !framing_reset)
+			sd_set_status(win,
+				"Refresh follows the new output - Save, then power-cycle");
+		break;
+	}
+	case SDGAD_REFRESH: {
+		UWORD new_refresh, profile;
+
+		if (code >= sd_refresh_count) break;
+		new_refresh = sd_refresh_map[code];
+		if (new_refresh ==
+				zzcfg_profile_refresh(settings_vals.videocap_profile)) break;
+		profile = zzcfg_profile_for_output_refresh(
+			zzcfg_profile_output(settings_vals.videocap_profile), new_refresh,
+			ctx->fw_capabilities);
+		if (!scandoubler_stage_profile(win, ctx, profile, NULL)) break;
+		scandoubler_sync_choices(win, ctx->fw_capabilities);
+		break;
+	}
+	case SDGAD_SCANMODE:
+		/* live, like the old main-window control */
+		settings_vals.scanline_mode = code;
+		zz_set_scanline_mode(code);
+		break;
+	case SDGAD_PARITY:
+		settings_vals.scanline_parity = code;
+		zz_set_scanline_parity(code);
+		break;
+	case SDGAD_CAPTURE:
+		if (scandoubler_capture_window(ctx->sc, ctx->vi, ctx->mainlayout,
+				live))
+			sd_set_status(win, "Capture staged - Save to persist");
+		scandoubler_update_save_gate(win, live, TRUE);
+		break;
+	case SDGAD_BTN_SAVE:
+		if (!settings_have_cfg) {
+			sd_set_status(win, "Config needs firmware 2.3+");
+		} else if (!settings_custom_save_allowed(live)) {
+			scandoubler_update_save_gate(win, live, TRUE);
+		} else if (settings_save_to_card(win, sdgads[SDGAD_STATUS],
+				sd_status_buf, settings_env_names_native)) {
+			if (live->preview_valid) {
+				settings_live_refresh(live);
+				zz_vcap_anchor_store(&live->anchors,
+					ZZ_VCAP_ANCHOR_SETTINGS, &live->current);
+			} else if (settings_live_refresh(live)) {
+				zz_vcap_anchor_store(&live->anchors,
+					ZZ_VCAP_ANCHOR_SETTINGS, &live->current);
+			}
+			live->preview_valid = FALSE;
+			settings_live_accept(live);
+		}
+		break;
+	case SDGAD_BTN_RELOAD:
+		if (settings_live_restore(live, ZZ_VCAP_ANCHOR_SETTINGS)) {
+			live->preview_valid = FALSE;
+			scandoubler_populate(win, ctx);
+			scandoubler_update_save_gate(win, live, FALSE);
+		} else {
+			snprintf(sd_status_buf, sizeof(sd_status_buf), "Reload restore failed: %s",
+				zz_vcap_result_text(live->restore_result));
+			sd_set_status(win, sd_status_buf);
+		}
+		break;
+	}
+	return FALSE;
+}
+
+static BOOL scandoubler_allow_close(struct Window *win,
+	struct zztop_cfg_ctx *ctx)
+{
+	if (settings_live_restore(&ctx->live, ZZ_VCAP_ANCHOR_SETTINGS))
+		return TRUE;
+	snprintf(sd_status_buf, sizeof(sd_status_buf), "Close restore failed: %s; state unknown",
+		zz_vcap_result_text(ctx->live.restore_result));
+	sd_set_status(win, sd_status_buf);
+	return FALSE;
+}
+
+/* ---- Shared config-window shell ----
+ *
+ * Settings and Scandoubler are both fixed-size modal GadTools windows
+ * with a status line and a Save/Reload row. The shell owns the
+ * open/dispatch/close mechanics once; each window supplies its rows
+ * and semantics through these callbacks. */
+struct zztop_cfg_ops {
+	const char *title;
+	struct Gadget *(*create_gadgets)(struct Gadget **glistptr, void *vi,
+		const struct ZZTopLayout *mainlayout, UWORD fw_capabilities,
+		WORD *out_w, WORD *out_h);
+	void (*populate)(struct Window *win, struct zztop_cfg_ctx *ctx);
+	BOOL (*gadget_up)(struct Window *win, struct Gadget *gad, UWORD code,
+		struct zztop_cfg_ctx *ctx);
+	BOOL (*allow_close)(struct Window *win, struct zztop_cfg_ctx *ctx);
+};
+
+static void zztop_cfg_window_run(const struct zztop_cfg_ops *ops,
+	struct zztop_cfg_ctx *ctx)
+{
+	struct Window *win;
+	struct Gadget *glist = NULL;
+	struct IntuiMessage *imsg;
+	struct Gadget *gad;
+	ULONG imsgClass;
+	UWORD imsgCode;
+	BOOL done = FALSE;
+	WORD w = 0, h = 0;
+
+	if (NULL == ops->create_gadgets(&glist, ctx->vi, ctx->mainlayout,
+			ctx->fw_capabilities, &w, &h)) {
+		char err[80];
+
+		if (glist) FreeGadgets(glist);
+		snprintf(err, sizeof(err), "%s: gadget creation failed",
+			ops->title);
+		errorMessage(err);
+		return;
+	}
+
+	win = OpenWindowTags(NULL,
+		WA_Title,        (STRPTR)ops->title,
+		WA_Gadgets,      glist,   WA_AutoAdjust,    TRUE,
+		WA_Width,        w,       WA_MinWidth,      w,
+		WA_InnerHeight,  h,       WA_MinHeight,     h,
+		WA_DragBar,      TRUE,    WA_DepthGadget,   TRUE,
+		WA_Activate,     TRUE,    WA_CloseGadget,   TRUE,
+		WA_SizeGadget,   FALSE,   WA_SmartRefresh, TRUE,
+		WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
+			BUTTONIDCMP | CYCLEIDCMP | STRINGIDCMP,
+		WA_PubScreen, ctx->sc,
+		TAG_END);
+	if (!win) {
+		char err[80];
+
+		FreeGadgets(glist);
+		snprintf(err, sizeof(err), "%s: OpenWindow() failed", ops->title);
+		errorMessage(err);
+		return;
+	}
+
+	if (ops->populate) ops->populate(win, ctx);
+	GT_RefreshWindow(win, NULL);
+
+	while (!done) {
+		Wait(1UL << win->UserPort->mp_SigBit);
+
+		while ((!done) && (imsg = GT_GetIMsg(win->UserPort))) {
+			gad = (struct Gadget *)imsg->IAddress;
+			imsgClass = imsg->Class;
+			imsgCode = imsg->Code;
+			GT_ReplyIMsg(imsg);
+
+			switch (imsgClass) {
+				case IDCMP_GADGETUP:
+					if (gad && ops->gadget_up)
+						done = ops->gadget_up(win, gad, imsgCode, ctx);
+					break;
+				case IDCMP_CLOSEWINDOW:
+					if (!ops->allow_close ||
+						ops->allow_close(win, ctx))
+						done = TRUE;
+					break;
+				case IDCMP_REFRESHWINDOW:
+					GT_BeginRefresh(win);
+					GT_EndRefresh(win, TRUE);
+					break;
+			}
+		}
+	}
+
+	CloseWindow(win);
+	FreeGadgets(glist);
+}
+
+/* ---- Settings window entry (generic, non-video config) ---- */
+
+static void settings_window_populate(struct Window *win,
+	struct zztop_cfg_ctx *ctx)
+{
+	settings_populate(win, ctx->fw_capabilities);
+	if (!settings_have_cfg) {
+		/* No live controls remain in this window on pre-2.3 firmware
+		 * (scanlines moved to the Scandoubler window), so the whole
+		 * editor is greyed out with an explanatory status line. */
+		UWORD i;
+		for (i = 0; i < SGAD_COUNT; i++)
+			GT_SetGadgetAttrs(sgads[i], win, NULL,
+				GA_Disabled, TRUE, TAG_END);
+	}
+}
+
+static BOOL settings_gadget_up(struct Window *win, struct Gadget *gad,
+	UWORD code, struct zztop_cfg_ctx *ctx)
+{
+	switch (gad->GadgetID) {
+		case SGAD_INT2:
+			settings_vals.int2 = code;
+			break;
+		case SGAD_OFFSCREEN:
+			settings_vals.offscreen_bitmaps = code;
+			break;
+		case SGAD_OVERLAY:
+			settings_vals.video_overlay = code;
+			break;
+		case SGAD_FAST_RAM:
+			settings_vals.fast_ram = code;
+			settings_vals.fast_ram_present = 1;
+			settings_vals.fast_ram_invalid = 0;
+			break;
+		case SGAD_BTN_SAVE:
+			settings_save(win);
+			break;
+		case SGAD_BTN_RELOAD:
+			/* No live video session is owned here, so Reload is a
+			 * plain re-read of the card. */
+			settings_populate(win, ctx->fw_capabilities);
+			break;
+	}
+	return FALSE;
+}
+
+static const struct zztop_cfg_ops settings_cfg_ops = {
+	"ZZ9000 Settings (SD card)",
+	settings_create_gadgets,
+	settings_window_populate,
+	settings_gadget_up,
+	NULL /* closes unconditionally */
+};
+
+static VOID settings_window(struct Screen *mysc, void *vi,
+	const struct ZZTopLayout *mainlayout)
+{
+	struct zztop_cfg_ctx ctx;
+
+	ctx.sc = mysc;
+	ctx.vi = vi;
+	ctx.mainlayout = mainlayout;
+	ctx.fw_capabilities = zz_get_reg16(REG_ZZ_FW_CAPABILITIES);
+	/* Zeroed session = unsupported: this window never performs (or
+	 * waits on) a live native-video restore. */
+	memset(&ctx.live, 0, sizeof(ctx.live));
+	settings_have_cfg = (zz_get_reg16(REG_ZZ_FW_VERSION) >= 0x0203);
+
+	zztop_cfg_window_run(&settings_cfg_ops, &ctx);
+}
+
+/* ---- Scandoubler window entry ---- */
+
+static const struct zztop_cfg_ops scandoubler_cfg_ops = {
+	"ZZ9000 Scandoubler",
+	scandoubler_create_gadgets,
+	scandoubler_populate,
+	scandoubler_gadget_up,
+	scandoubler_allow_close
+};
+
+static VOID scandoubler_window(struct Screen *mysc, void *vi,
+	const struct ZZTopLayout *mainlayout)
+{
+	struct zztop_cfg_ctx ctx;
+	UWORD fw_version = zz_get_reg16(REG_ZZ_FW_VERSION);
+
+	ctx.sc = mysc;
+	ctx.vi = vi;
+	ctx.mainlayout = mainlayout;
+	ctx.fw_capabilities = zz_get_reg16(REG_ZZ_FW_CAPABILITIES);
+	settings_have_cfg = (fw_version >= 0x0203);
+	settings_live_init(&ctx.live, fw_version, ctx.fw_capabilities);
+
+	zztop_cfg_window_run(&scandoubler_cfg_ops, &ctx);
+}
+
+/* ---- Audio control plane (the Audio window, plan R13/R18) ----
+ *
+ * ZZTop is a client of the firmware-authoritative control plane over
+ * zz9k.library, exactly like the AHI/MHI drivers: scene selection and
+ * editing, the operator baseline, metering and saving are mailbox
+ * opcodes. The master-chain register path this tool used for its LPF
+ * slider is gone -- every write commits through the staged scene-write
+ * opcode (R2/R4), so the firmware stays the single arbiter.
+ */
+
+#define ZZTOP_AUDIO_METER_PERIOD_SECS 1
+#define ZZTOP_AUDIO_LPF_MIN 1
+#define ZZTOP_AUDIO_LPF_MAX 23900
+#define ZZTOP_AUDIO_RANGE_MAX 100
+#define ZZTOP_AUDIO_LEVEL_MAX 255
+#define ZZTOP_AUDIO_CEILING_MIN 1
+#define ZZTOP_AUDIO_CEILING_MAX 4095
+
+
+static BOOL audio_control_capped = FALSE;
+static BOOL audio_metering_capped = FALSE;
+
+static BOOL zztop_audio_surface_available(void)
+{
+	/* R18 grey-out idiom: the button always exists, but the window
+	 * behind it needs the AX codec and a firmware that advertises
+	 * ZZ9K_CAP_AUDIO_CONTROL (R16). Until the hardware verification
+	 * session advertises the capability (KTD6), every matched set
+	 * shows the disabled button -- discoverable, not hidden. */
+	return (zz_get_ax_present() != 0) && audio_control_capped;
+}
+
+/* ---- Audio debug logging (Project menu toggle) ----
+ * Every control-plane mailbox call, its reply, and the decoded
+ * readbacks land in T:zztop-audio.log and on the serial debug port
+ * (KPrintF; visible in Sashimi). Session-scoped: toggling off closes
+ * the file, toggling on starts a fresh one. */
+static int audio_log_on;
+static BPTR audio_log_fh;
+
+static void audio_log(const char *fmt, ...)
+{
+	static char buf[200];
+	va_list ap;
+
+	if (!audio_log_on)
+		return;
+	va_start(ap, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, ap);
+	va_end(ap);
+	if (audio_log_fh)
+		Write(audio_log_fh, buf, strlen(buf));
+	KPrintF((CONST_STRPTR)"ZZTop %s", buf);
+}
+
+static void audio_log_toggle(struct Window *win)
+{
+	struct MenuItem *item;
+
+	if (audio_log_on) {
+		audio_log_on = FALSE;
+		if (audio_log_fh) {
+			Close(audio_log_fh);
+			audio_log_fh = (BPTR)0;
+		}
+		KPrintF((CONST_STRPTR)"ZZTop audio log OFF\n");
+	} else {
+		audio_log_fh = Open((CONST_STRPTR)"T:zztop-audio.log",
+			MODE_NEWFILE);
+		audio_log_on = 1;
+		audio_log("log opened (fh=%ld)\n",
+			(long)(audio_log_fh ? 1 : 0));
+	}
+	/* Flip the menu checkmark so the toggle state is visible. Found by
+	 * userdata, not item number: items moved to the Settings menu and
+	 * positions shift whenever titles or items change. */
+	if (win && zztop_menustrip) {
+		item = zztop_menu_item_by_id(MENU_ID_AUDIOLOG);
+		if (item) {
+			if (audio_log_on)
+				item->Flags |= CHECKED;
+			else
+				item->Flags &= ~CHECKED;
+		}
+	}
+}
+
+/* One mailbox round-trip: build the typed request, send it, wait for
+ * the completion. Runs from the GUI event loop (no Forbid held), so
+ * blocking on the completion is the same trade the Settings window
+ * makes for its SD-card reads. */
+static int audio_mb_call(uint16_t opcode, const void *payload,
+	uint16_t payload_len, ZZ9KMailboxEntry *reply)
+{
+	ZZ9KRequest request;
+	const uint32_t *rw = (const uint32_t *)payload;
+	const uint32_t *pw = (const uint32_t *)reply->payload.inline_data;
+	int status;
+
+	zz9k_request_init(&request, opcode);
+	request.entry.payload_len = payload_len;
+	memcpy(request.entry.payload.inline_data, payload, payload_len);
+	status = ZZ9KCall(&request, reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+	audio_log("op=%04x st=%d req=%08lx,%08lx,%08lx rsp=%08lx,%08lx,%08lx\n",
+		(unsigned)opcode, status,
+		(unsigned long)zz9k_get_be32((const uint8_t *)&rw[0]),
+		(unsigned long)zz9k_get_be32((const uint8_t *)&rw[1]),
+		(unsigned long)zz9k_get_be32((const uint8_t *)&rw[2]),
+		(unsigned long)zz9k_get_be32((const uint8_t *)&pw[0]),
+		(unsigned long)zz9k_get_be32((const uint8_t *)&pw[1]),
+		(unsigned long)zz9k_get_be32((const uint8_t *)&pw[2]));
+	return status;
+}
+
+struct zztop_audio_state {
+	UWORD active_scene;
+	UWORD scene_count;
+	uint32_t baseline; /* ABI packed pair: ch1 = Paula, ch2 = AX */
+	uint32_t trim;     /* last applied mixer legs, same packing */
+	uint32_t ceiling;  /* derived AX-equivalent policy boundary */
+	UWORD ceiling_paula;
+	UWORD ceiling_ax;
+	UWORD trim_bounded;
+	uint32_t save_status; /* ABI save word: QUEUED while saving, else
+	                       * the last settled outcome */
+};
+
+/* Non-blocking save statuses ride the same staged-header refresh;
+ * value-faithful fallbacks keep ZZTop building against either header
+ * generation. */
+#ifndef ZZ9K_AUDIO_SCENE_SAVE_QUEUED
+#define ZZ9K_AUDIO_SCENE_SAVE_QUEUED 3U
+#endif
+#ifndef ZZ9K_AUDIO_SCENE_SAVE_BUSY
+#define ZZ9K_AUDIO_SCENE_SAVE_BUSY 4U
+#endif
+
+/* save_status is the append-only tail word (offset 44) of the
+ * CONTROL_STATE_GET reply; reading it from the raw bytes works against
+ * either header generation for the same reason. */
+#define ZZTOP_CONTROL_STATE_SAVE_STATUS_OFF 44
+
+struct zztop_audio_meter {
+	uint32_t identity;
+	uint32_t clip_count;
+	uint32_t underrun_count;
+	uint32_t overrun_count;
+	uint32_t gain_reduction_events;
+	uint32_t peak_hold_ch1;
+	uint32_t peak_hold_ch2;
+};
+
+static BOOL audio_control_state_get(struct zztop_audio_state *out);
+
+static int audio_scene_select_call(UWORD scene)
+{
+	ZZ9KAudioSceneSelectPayload payload;
+	ZZ9KMailboxEntry reply;
+
+	memset(&payload, 0, sizeof(payload));
+	zz9k_put_be32(payload.scene, scene);
+	if (audio_mb_call(ZZ9K_OP_AUDIO_SCENE_SELECT, &payload,
+			sizeof(payload), &reply) == ZZ9K_STATUS_OK) {
+		struct zztop_audio_state st;
+		if (audio_control_state_get(&st))
+			audio_log("select %u ok; fw scene=%u base=%u/%u trim=%u/%u\n",
+				(unsigned)scene + 1U, (unsigned)st.active_scene + 1U,
+				(unsigned)ZZ9K_AUDIO_BALANCE_CH1(st.baseline),
+				(unsigned)ZZ9K_AUDIO_BALANCE_CH2(st.baseline),
+				(unsigned)ZZ9K_AUDIO_BALANCE_CH1(st.trim),
+				(unsigned)ZZ9K_AUDIO_BALANCE_CH2(st.trim));
+		return ZZ9K_STATUS_OK;
+	}
+	return ZZ9K_STATUS_TIMEOUT;
+}
+
+/* Scene-name parameter (value = two chars: bits 15..8 first, 7..0
+ * second; 0x0000 terminates). The ABI constant rides the staged-header
+ * refresh from the SDK checkout; keep a value-faithful fallback so
+ * ZZTop builds against either header generation. */
+#ifndef ZZ9K_AUDIO_SCENE_PARAM_NAME
+#define ZZ9K_AUDIO_SCENE_PARAM_NAME 16U
+#endif
+#ifndef ZZ9K_AUDIO_SCENE_PARAM_CALIBRATION
+#define ZZ9K_AUDIO_SCENE_PARAM_CALIBRATION 17U
+#define ZZ9K_AUDIO_CALIBRATION_PACK(paula, ax) \
+	((uint32_t)((uint32_t)(UWORD)(paula) | \
+	 ((uint32_t)(UWORD)(ax) << 16)))
+#endif
+
+/* One staged SCENE_WRITE with explicit flags: the rename path stages
+ * several chunks before asking for the commit (see below); everything
+ * else commits immediately. */
+static int audio_scene_write_stage(UWORD scene, uint32_t param,
+	uint32_t value, uint32_t flags)
+{
+	ZZ9KAudioSceneWritePayload payload;
+	ZZ9KMailboxEntry reply;
+
+	memset(&payload, 0, sizeof(payload));
+	zz9k_put_be32(payload.scene, scene);
+	zz9k_put_be32(payload.param, param);
+	zz9k_put_be32(payload.value, value);
+	zz9k_put_be32(payload.flags, flags);
+	audio_log("write scene=%u param=%u val=%u flags=%lx\n",
+		(unsigned)scene + 1U, (unsigned)param, (unsigned)value,
+		(unsigned long)flags);
+	return audio_mb_call(ZZ9K_OP_AUDIO_SCENE_WRITE, &payload,
+		sizeof(payload), &reply);
+}
+
+/* One staged parameter plus COMMIT (F3/KTD7): the firmware accumulates
+ * the stage and commits the group atomically through its fade path, so
+ * a release never writes a half master-chain. */
+static int audio_scene_write_commit(UWORD scene, uint32_t param,
+	uint32_t value)
+{
+	return audio_scene_write_stage(scene, param, value,
+		ZZ9K_AUDIO_SCENE_WRITE_FLAG_COMMIT);
+}
+
+/* Scene rename over the staged-write path. The name is eight two-char
+ * chunks, zero-padded to the full eight so every send has the same
+ * shape. A commit consumes the staging draft, and the first NAME chunk
+ * of a fresh draft reopens the name accumulator -- so COMMIT must ride
+ * on the LAST chunk only (committing per chunk would collapse the name
+ * to its final two characters). The leading 0x0000 guard chunk closes
+ * whatever partial name an earlier failed burst left staged, making
+ * retries self-healing. A name-only commit is zero DSP writes, so the
+ * burst applies instantly. Returns the final (committing) call's
+ * status; ZZ9K_STATUS_TIMEOUT means applied-or-coalesced as usual. */
+static int audio_scene_rename_call(UWORD scene, const char *name)
+{
+	size_t len = strlen(name);
+	int st = ZZ9K_STATUS_OK;
+	int i;
+
+	for (i = 0; i <= ZZTOP_AUDIO_NAME_CHUNKS; i++) {
+		uint32_t chunk = 0;
+		uint32_t flags = 0;
+
+		if (i > 0) {
+			size_t p = 2 * (size_t)(i - 1);
+
+			if (p < len)
+				chunk |= (uint32_t)(uint8_t)name[p] << 8;
+			if (p + 1 < len)
+				chunk |= (uint32_t)(uint8_t)name[p + 1];
+		}
+		if (i == ZZTOP_AUDIO_NAME_CHUNKS)
+			flags = ZZ9K_AUDIO_SCENE_WRITE_FLAG_COMMIT;
+		st = audio_scene_write_stage(scene,
+			ZZ9K_AUDIO_SCENE_PARAM_NAME, chunk, flags);
+		if (st != ZZ9K_STATUS_OK && st != ZZ9K_STATUS_TIMEOUT)
+			return st; /* hard error: partial chunks stay staged */
+	}
+	return st;
+}
+
+static BOOL audio_control_state_get(struct zztop_audio_state *out)
+{
+	ZZ9KAudioControlStateGetPayload payload;
+	ZZ9KAudioControlStateResultPayload result;
+	ZZ9KMailboxEntry reply;
+
+	memset(&payload, 0, sizeof(payload));
+	if (audio_mb_call(ZZ9K_OP_AUDIO_CONTROL_STATE_GET, &payload,
+			sizeof(payload), &reply) != ZZ9K_STATUS_OK)
+		return FALSE;
+	/* The reply payload is byte storage; copy it out before reading
+	 * typed fields (the SDK reply-extraction convention). */
+	memcpy(&result, reply.payload.inline_data, sizeof(result));
+	out->active_scene = (UWORD)zz9k_get_be32(result.active_scene);
+	out->scene_count = (UWORD)zz9k_get_be32(result.scene_count);
+	out->baseline = zz9k_get_be32(result.baseline);
+	out->trim = zz9k_get_be32(result.trim);
+	out->trim_bounded = (UWORD)zz9k_get_be32(result.flags);
+	out->ceiling = zz9k_get_be32(result.ceiling);
+	out->ceiling_paula = (UWORD)zz9k_get_be32(result.ceiling_paula);
+	out->ceiling_ax = (UWORD)zz9k_get_be32(result.ceiling_ax);
+	out->save_status = zz9k_get_be32(
+		&reply.payload.inline_data[ZZTOP_CONTROL_STATE_SAVE_STATUS_OFF]);
+	return TRUE;
+}
+
+/* One framed meter snapshot (R9). The HOLD_RESET request flag opts into
+ * read-and-clear peak-hold, so each poll shows the peak since the
+ * previous one without leaving a stale hold for anyone else (R8); a
+ * reply that is not a complete single frame is refused rather than
+ * half-displayed. */
+static BOOL audio_meter_read(uint32_t direction,
+	struct zztop_audio_meter *out)
+{
+	ZZ9KAudioMeterReadPayload payload;
+	ZZ9KAudioMeterResultPayload result;
+	ZZ9KMailboxEntry reply;
+
+	memset(&payload, 0, sizeof(payload));
+	zz9k_put_be32(payload.direction, direction);
+	zz9k_put_be32(payload.flags, ZZ9K_AUDIO_METER_RESULT_HOLD_RESET);
+	if (audio_mb_call(ZZ9K_OP_AUDIO_METER_READ, &payload,
+			sizeof(payload), &reply) != ZZ9K_STATUS_OK)
+		return FALSE;
+	memcpy(&result, reply.payload.inline_data, sizeof(result));
+	if (zz9k_get_be32(result.direction) != direction)
+		return FALSE;
+	if (zz9k_get_be32(result.frame_count) != 1U ||
+			zz9k_get_be32(result.frame) != 0U)
+		return FALSE; /* torn or a future multi-frame layout */
+	out->identity = zz9k_get_be32(result.identity);
+	out->clip_count = zz9k_get_be32(result.clip_count);
+	out->underrun_count = zz9k_get_be32(result.underrun_count);
+	out->overrun_count = zz9k_get_be32(result.overrun_count);
+	out->gain_reduction_events = zz9k_get_be32(result.gain_reduction_events);
+	out->peak_hold_ch1 = zz9k_get_be32(result.peak_hold_ch1);
+	out->peak_hold_ch2 = zz9k_get_be32(result.peak_hold_ch2);
+	audio_log("meter dir=%u peak=%u/%u clip=%u und=%u ovr=%u gr=%u id=%u\n",
+		(unsigned)direction, (unsigned)out->peak_hold_ch1,
+		(unsigned)out->peak_hold_ch2, (unsigned)out->clip_count,
+		(unsigned)out->underrun_count, (unsigned)out->overrun_count,
+		(unsigned)out->gain_reduction_events, (unsigned)out->identity);
+	return TRUE;
+}
+
+static BOOL audio_scene_save_call(UWORD scene, uint32_t *save_status)
+{
+	ZZ9KAudioSceneSavePayload payload;
+	ZZ9KAudioSceneSaveResultPayload result;
+	ZZ9KMailboxEntry reply;
+
+	memset(&payload, 0, sizeof(payload));
+	zz9k_put_be32(payload.scene, scene);
+	if (audio_mb_call(ZZ9K_OP_AUDIO_SCENE_SAVE, &payload,
+			sizeof(payload), &reply) != ZZ9K_STATUS_OK)
+		return FALSE;
+	memcpy(&result, reply.payload.inline_data, sizeof(result));
+	*save_status = zz9k_get_be32(result.status);
+	return TRUE;
+}
+
+/* Editor seed state. The control-plane ABI is append-only and has no
+ * scene-read opcode, so the editor seeds from the last saved
+ * ZZ9000.CFG (what a reboot restores) overlaid with this session's
+ * edits; the live firmware state stays the authority, and because each
+ * staged write carries exactly the touched parameter, display drift
+ * can never corrupt firmware state. */
+struct zztop_audio_scene_ui {
+	UWORD lpf;
+	UWORD eq[10];
+	UWORD prefactor;
+	UWORD volume;
+	UWORD pan;
+	/* Operator-assigned label; "Scene N" until the first rename.
+	 * NUL-terminated, printable ASCII, firmware cap 16 chars. */
+	char name[ZZTOP_AUDIO_NAME_CHARS + 1];
+};
+
+/* Mirror of the firmware's built-in scene defaults (audio_scene.c):
+ * display seed only. Same slot count as ZZCFG_AUDIO_SCENES. */
+static const struct zztop_audio_scene_ui zztop_audio_scene_defaults[8] = {
+	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 50, 100, 50, "" },
+	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 50, 80, 50, "" },
+	{ 16000, { 55, 55, 50, 50, 50, 50, 50, 50, 50, 50 }, 50, 75, 50, "" },
+	{ 18000, { 50, 50, 50, 50, 50, 50, 55, 55, 50, 50 }, 50, 75, 50, "" },
+	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 60, 70, 50, "" },
+	{ 12000, { 45, 45, 50, 50, 50, 50, 50, 50, 45, 45 }, 50, 90, 50, "" },
+	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 55, 75, 50, "" },
+	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 50, 60, 50, "" },
+};
+
+static struct zztop_audio_scene_ui audio_scenes[ZZCFG_AUDIO_SCENES];
+static UWORD audio_baseline_paula;
+static UWORD audio_baseline_ax;
+static UWORD audio_ceiling_paula;
+static UWORD audio_ceiling_ax;
+/* Operator balance preset: measured Paula/AHI parity -- Paula at 3/4
+ * of its clean ceiling, AX exactly 2x Paula capped by the AX clean
+ * ceiling and the leg max (36/72 at the 48/80 calibration). Matches
+ * the limiter firmware's boot default for cards with no saved
+ * baseline. */
+static void audio_balanced_levels(UWORD *paula, UWORD *ax)
+{
+	ULONG balanced_paula =
+		((ULONG)audio_ceiling_paula * 3UL) / 4UL;
+	ULONG balanced_ax = balanced_paula * 2UL;
+
+	if (balanced_ax > (ULONG)audio_ceiling_ax)
+		balanced_ax = audio_ceiling_ax;
+	if (balanced_paula > ZZTOP_AUDIO_LEVEL_MAX)
+		balanced_paula = ZZTOP_AUDIO_LEVEL_MAX;
+	if (balanced_ax > ZZTOP_AUDIO_LEVEL_MAX)
+		balanced_ax = ZZTOP_AUDIO_LEVEL_MAX;
+	*paula = (UWORD)balanced_paula;
+	*ax = (UWORD)balanced_ax;
+}
+static BOOL audio_ui_seeded = FALSE;
+
+/* Firmware's last reported AX-equivalent boundary. The Audio window
+ * does not accept edits until its first state read supplies one. */
+static uint32_t audio_boundary;
+
+/* Paula's per-leg weight in AX-equivalent units, the same
+ * ceiling_ax/ceiling_paula ratio the firmware's boundary math uses. */
+static ULONG audio_weighted_level(UWORD paula, UWORD ax)
+{
+	ULONG den = audio_ceiling_paula ? (ULONG)audio_ceiling_paula : 1UL;
+
+	return ((ULONG)paula * (ULONG)audio_ceiling_ax) / den +
+		(ULONG)ax;
+}
+
+/* Savable slider maximum per leg: the clean ceiling, the 255 ABI leg
+ * max, and the boundary share the other leg's current level leaves
+ * free. A live level above the computed maximum keeps the maximum at
+ * the level so the display never clamps below firmware truth (the
+ * firmware's stage-time validation stays the authority). */
+static UWORD audio_baseline_max_paula(void)
+{
+	ULONG max = audio_ceiling_paula;
+	ULONG free_weighted;
+
+	if (audio_ceiling_ax == 0UL)
+		return 0;
+	free_weighted = audio_boundary;
+	if (free_weighted > (ULONG)audio_baseline_ax)
+		free_weighted -= audio_baseline_ax;
+	else
+		free_weighted = 0;
+	free_weighted = free_weighted *
+		(ULONG)audio_ceiling_paula / (ULONG)audio_ceiling_ax;
+	if (free_weighted < max)
+		max = free_weighted;
+	if (max > ZZTOP_AUDIO_LEVEL_MAX)
+		max = ZZTOP_AUDIO_LEVEL_MAX;
+	if (max < (ULONG)audio_baseline_paula &&
+			audio_baseline_paula <= ZZTOP_AUDIO_LEVEL_MAX)
+		max = audio_baseline_paula;
+	return (UWORD)max;
+}
+
+static UWORD audio_baseline_max_ax(void)
+{
+	ULONG max = audio_ceiling_ax;
+	ULONG free_weighted;
+	ULONG paula_weighted;
+
+	if (audio_ceiling_ax == 0UL || audio_ceiling_paula == 0UL)
+		return 0;
+	paula_weighted = audio_weighted_level(audio_baseline_paula, 0);
+	free_weighted = audio_boundary;
+	if (free_weighted > paula_weighted)
+		free_weighted -= paula_weighted;
+	else
+		free_weighted = 0;
+	if (free_weighted < max)
+		max = free_weighted;
+	if (max > ZZTOP_AUDIO_LEVEL_MAX)
+		max = ZZTOP_AUDIO_LEVEL_MAX;
+	if (max < (ULONG)audio_baseline_ax &&
+			audio_baseline_ax <= ZZTOP_AUDIO_LEVEL_MAX)
+		max = audio_baseline_ax;
+	return (UWORD)max;
+}
+/* Unsaved-changes contract (R15): edits persist in firmware RAM, so
+ * "dirty" is card-wide state that outlives the window; only a
+ * successful SCENE_SAVE (or a reboot) clears it. */
+static BOOL audio_dirty = FALSE;
+/* A QUEUED non-blocking save is in flight in firmware; the 1 s tick
+ * settles it through the control-state report's save_status. The
+ * generation pair preserves edits made after the firmware serialized
+ * the queued snapshot. */
+static BOOL audio_save_pending = FALSE;
+static ULONG audio_edit_generation;
+static ULONG audio_save_generation;
+/* One calibration write may still be in flight after a mailbox timeout.
+ * Keep the reported boundary and the editable controls together until
+ * a complete state read confirms the requested ceiling pair. */
+static BOOL audio_calibration_pending = FALSE;
+static UWORD audio_calibration_target_paula;
+static UWORD audio_calibration_target_ax;
+
+static void audio_mark_dirty(void)
+{
+	audio_dirty = TRUE;
+	audio_edit_generation++;
+}
+
+static void audio_scene_default_name(char *buf, size_t size, UWORD scene)
+{
+	snprintf(buf, size, "Scene %u", (unsigned)(scene + 1));
+}
+
+/* Reduce operator input to what the firmware accepts: printable
+ * ASCII, trailing spaces trimmed, at most 16 chars. An empty result
+ * makes the caller fall back to the default label. */
+static void audio_scene_name_clean(const char *in, char *out, size_t size)
+{
+	size_t n = 0;
+
+	while (*in && n + 1 < size) {
+		if (*in >= 0x20 && *in <= 0x7e)
+			out[n++] = *in;
+		in++;
+	}
+	out[n] = '\0';
+	while (n > 0 && out[n - 1] == ' ')
+		out[--n] = '\0';
+}
+
+#ifdef ZZCFG_AUDIO_SCENE_NM_CHUNKS
+/* Unpack the CFG's packed name chunks (audio_sceneN_nm1..8) into buf.
+ * Returns FALSE when the file carries no name keys so the caller
+ * keeps the default label; anything non-printable ends the name, so a
+ * hand-edited file cannot seed a bad string. */
+static BOOL audio_scene_name_from_cfg(const struct zzcfg_values *sv,
+	UWORD scene, char *buf)
+{
+	UWORD mask = sv->audio_scene_mask[scene];
+	int n = 0;
+	int k;
+
+	for (k = 0; k < ZZTOP_AUDIO_NAME_CHUNKS &&
+			k < (int)ZZCFG_AUDIO_SCENE_NM_CHUNKS; k++) {
+		UWORD chunk = sv->audio_scene_nm[scene][k];
+		char c1, c2;
+
+		if (!(mask & (UWORD)(1u << (8 + k))) || chunk == 0)
+			break; /* absent key or terminator chunk */
+		c1 = (char)(chunk >> 8);
+		if (c1 < 0x20 || c1 > 0x7e)
+			break;
+		c2 = (char)(chunk & 0xff);
+		buf[n++] = c1;
+		if (c2 == 0)
+			break; /* odd-length name, zero-padded tail */
+		if (c2 < 0x20 || c2 > 0x7e)
+			break;
+		buf[n++] = c2;
+	}
+	buf[n] = '\0';
+	return n > 0;
+}
+#endif
+
+static void audio_editor_defaults(void)
+{
+	int i;
+
+	memcpy(audio_scenes, zztop_audio_scene_defaults,
+		sizeof(audio_scenes));
+	audio_baseline_paula = 36;
+	audio_baseline_ax = 72;
+	audio_ceiling_paula = 48;
+	audio_ceiling_ax = 80;
+	for (i = 0; i < ZZCFG_AUDIO_SCENES; i++)
+		audio_scene_default_name(audio_scenes[i].name,
+			sizeof(audio_scenes[i].name), (UWORD)i);
+}
+
+static BOOL audio_seed_editor_state(void)
+{
+	struct zzcfg_values sv;
+	UWORD rawlen = 0;
+	UWORD read_status;
+	int i, k;
+
+
+	/* Overlay the saved CFG exactly like the firmware's cold-boot fold
+	 * (R10): absent keys keep the built-in defaults. settings_cfg_text
+	 * is shared scratch -- the windows are modal, so the Settings
+	 * window is never mid-read while this runs. */
+	if (zz_get_reg16(REG_ZZ_FW_VERSION) < 0x0203)
+		return FALSE; /* no config-file interface to read */
+	read_status = zzcfg_read_raw((ULONG)zz_regs, settings_cfg_text,
+		ZZCFG_MAX_SIZE, &rawlen);
+	audio_log("cfg read st=%u len=%u\n",
+		(unsigned)read_status, (unsigned)rawlen);
+	if (read_status != ZZ_CFG_FILE_OK)
+		return FALSE;
+	audio_editor_defaults();
+
+	memset(&sv, 0, sizeof(sv));
+	zzcfg_parse_text(settings_cfg_text, rawlen, &sv);
+	audio_log("cfg parsed base=%u present=%u active=%u present=%u "
+		"s0mask=%04x nm1=%u\n",
+		(unsigned)sv.audio_baseline,
+		(unsigned)sv.audio_baseline_present,
+		(unsigned)sv.audio_active,
+		(unsigned)sv.audio_active_present,
+		(unsigned)sv.audio_scene_mask[0],
+		(unsigned)sv.audio_scene_nm[0][0]);
+	for (i = 0; i < ZZCFG_AUDIO_SCENES; i++) {
+		UWORD mask = sv.audio_scene_mask[i];
+
+		if (mask & (UWORD)(1u << 0))
+			audio_scenes[i].lpf = sv.audio_scene_lpf[i];
+		for (k = 0; k < 5; k++) {
+			if (mask & (UWORD)(1u << (1 + k))) {
+				UWORD packed = sv.audio_scene_eq[i][k];
+
+				audio_scenes[i].eq[2 * k] = packed / 128;
+				audio_scenes[i].eq[2 * k + 1] = packed % 128;
+			}
+		}
+		if (mask & (UWORD)(1u << 6)) {
+			audio_scenes[i].prefactor = sv.audio_scene_out[i] / 128;
+			audio_scenes[i].volume = sv.audio_scene_out[i] % 128;
+		}
+		if (mask & (UWORD)(1u << 7))
+			audio_scenes[i].pan = sv.audio_scene_pan[i];
+#ifdef ZZCFG_AUDIO_SCENE_NM_CHUNKS
+		{
+			char nm[ZZTOP_AUDIO_NAME_CHARS + 1];
+
+			if (audio_scene_name_from_cfg(&sv, (UWORD)i, nm))
+				snprintf(audio_scenes[i].name,
+					sizeof(audio_scenes[i].name), "%s", nm);
+		}
+#endif
+	}
+	if (sv.audio_baseline_present) {
+		audio_baseline_paula = sv.audio_baseline >> 8;
+		audio_baseline_ax = sv.audio_baseline & 0xff;
+	}
+	if (sv.audio_ceiling_paula_present &&
+			sv.audio_ceiling_ax_present) {
+		audio_ceiling_paula = sv.audio_ceiling_paula;
+		audio_ceiling_ax = sv.audio_ceiling_ax;
+	}
+	if (audio_ceiling_paula < ZZTOP_AUDIO_CEILING_MIN ||
+			audio_ceiling_paula > ZZTOP_AUDIO_CEILING_MAX)
+		audio_ceiling_paula = 48;
+	if (audio_ceiling_ax < ZZTOP_AUDIO_CEILING_MIN ||
+			audio_ceiling_ax > ZZTOP_AUDIO_CEILING_MAX)
+		audio_ceiling_ax = 80;
+	if (!sv.audio_baseline_present)
+		audio_balanced_levels(&audio_baseline_paula, &audio_baseline_ax);
+
+	/* Clamp to the ranges the firmware enforces on write, so a hand
+	 * edited file seeds usable slider positions. */
+	for (i = 0; i < ZZCFG_AUDIO_SCENES; i++) {
+		if (audio_scenes[i].lpf < ZZTOP_AUDIO_LPF_MIN)
+			audio_scenes[i].lpf = ZZTOP_AUDIO_LPF_MIN;
+		if (audio_scenes[i].lpf > ZZTOP_AUDIO_LPF_MAX)
+			audio_scenes[i].lpf = ZZTOP_AUDIO_LPF_MAX;
+		if (audio_scenes[i].prefactor > ZZTOP_AUDIO_RANGE_MAX)
+			audio_scenes[i].prefactor = ZZTOP_AUDIO_RANGE_MAX;
+		if (audio_scenes[i].volume > ZZTOP_AUDIO_RANGE_MAX)
+			audio_scenes[i].volume = ZZTOP_AUDIO_RANGE_MAX;
+		if (audio_scenes[i].pan > ZZTOP_AUDIO_RANGE_MAX)
+			audio_scenes[i].pan = ZZTOP_AUDIO_RANGE_MAX;
+		for (k = 0; k < 10; k++)
+			if (audio_scenes[i].eq[k] > ZZTOP_AUDIO_RANGE_MAX)
+				audio_scenes[i].eq[k] = ZZTOP_AUDIO_RANGE_MAX;
+	}
+	return TRUE;
+}
+
+static struct Gadget *audgads[AUDGAD_COUNT];
+static char audio_status_buf[96];
+static void audio_scene_cycle_refresh(struct Window *win, UWORD scene);
+
+static void audio_set_status(struct Window *win, const char *text)
+{
+	/* callers may pass audio_status_buf itself - don't self-copy */
+	if (text != audio_status_buf) {
+		snprintf(audio_status_buf, sizeof(audio_status_buf), "%s", text);
+	}
+	if (win && audgads[AUDGAD_STATUS]) {
+		GT_SetGadgetAttrs(audgads[AUDGAD_STATUS], win, NULL,
+			GTTX_Text, audio_status_buf, TAG_END);
+	}
+}
+
+static char audio_level_buf[40];
+
+/* Compose the level/boundary readout: the baseline pair's weighted
+ * AX-equivalent level against the firmware's enforced boundary. */
+static const char *audio_level_text(void)
+{
+	snprintf(audio_level_buf, sizeof(audio_level_buf), "Level %lu/%lu",
+		(unsigned long)audio_weighted_level(audio_baseline_paula,
+			audio_baseline_ax),
+		(unsigned long)audio_boundary);
+	return audio_level_buf;
+}
+
+/* Adopt a firmware-reported boundary. Zero is "not reported", not a
+ * command to forget the last limiter boundary. */
+static void audio_note_boundary(uint32_t reported)
+{
+	if (reported != 0UL)
+		audio_boundary = reported;
+}
+
+
+/* Max and Level in one call, Max first, and never below the requested
+ * level. A Max-only update lets gadtools clamp the knob and post a
+ * new level, which then writes that clamp back as the baseline. */
+static void audio_set_baseline_slider(struct Window *win, UWORD id,
+	UWORD level, UWORD max)
+{
+	if (max < level)
+		max = level;
+	GT_SetGadgetAttrs(audgads[id], win, NULL,
+		GTSL_Max, (ULONG)max,
+		GTSL_Level, (ULONG)level,
+		TAG_END);
+}
+
+/* skip_id is the baseline slider whose input handler is active, or
+ * AUDGAD_COUNT when neither is. Setting Max or Level on the active
+ * slider reenters gadtools and collapses the knob. */
+static void audio_update_baseline_bounds(struct Window *win,
+	UWORD skip_id)
+{
+	if (win == NULL)
+		return;
+	if (skip_id != AUDGAD_BASE_PAULA)
+		audio_set_baseline_slider(win, AUDGAD_BASE_PAULA,
+			audio_baseline_paula, audio_baseline_max_paula());
+	if (skip_id != AUDGAD_BASE_AX)
+		audio_set_baseline_slider(win, AUDGAD_BASE_AX,
+			audio_baseline_ax, audio_baseline_max_ax());
+	if (audgads[AUDGAD_LEVEL])
+		GT_SetGadgetAttrs(audgads[AUDGAD_LEVEL], win, NULL,
+			GTTX_Text, (STRPTR)audio_level_text(), TAG_END);
+}
+
+static void audio_reload_saved_state(struct Window *win, UWORD scene)
+{
+	if (audio_seed_editor_state()) {
+		audio_scene_cycle_refresh(win, scene);
+		GT_SetGadgetAttrs(audgads[AUDGAD_CEIL_PAULA], win, NULL,
+			GTIN_Number, audio_ceiling_paula, TAG_END);
+		GT_SetGadgetAttrs(audgads[AUDGAD_CEIL_AX], win, NULL,
+			GTIN_Number, audio_ceiling_ax, TAG_END);
+		audio_update_baseline_bounds(win, AUDGAD_COUNT);
+		audio_set_status(win,
+			"Saved - survives power-cycle; controls show saved values");
+	} else {
+		audio_set_status(win,
+			"Saved - readback unavailable; current values kept");
+	}
+}
+
+static void audio_update_save_gate(struct Window *win)
+{
+	GT_SetGadgetAttrs(audgads[AUDGAD_BTN_SAVE], win, NULL,
+		GA_Disabled, !audio_dirty || audio_save_pending ||
+			audio_calibration_pending, TAG_END);
+}
+
+static void audio_set_controls_enabled(struct Window *win, BOOL enabled)
+{
+	static const UWORD ids[] = {
+		AUDGAD_SCENE, AUDGAD_BTN_EDIT, AUDGAD_BTN_RENAME,
+		AUDGAD_BASE_PAULA, AUDGAD_BASE_AX,
+		AUDGAD_CEIL_PAULA, AUDGAD_CEIL_AX, AUDGAD_BTN_BALANCE
+	};
+	unsigned i;
+
+	for (i = 0; i < sizeof(ids) / sizeof(ids[0]); i++)
+		GT_SetGadgetAttrs(audgads[ids[i]], win, NULL,
+			GA_Disabled, !enabled, TAG_END);
+	if (!enabled)
+		GT_SetGadgetAttrs(audgads[AUDGAD_LEVEL], win, NULL,
+			GTTX_Text, (STRPTR)"Level awaiting firmware", TAG_END);
+	audio_update_save_gate(win);
+}
+
+static void audio_calibration_settle(struct Window *win)
+{
+	struct zztop_audio_state st;
+
+	if (!audio_calibration_pending || !audio_control_state_get(&st) ||
+			!st.ceiling ||
+			st.ceiling_paula != audio_calibration_target_paula ||
+			st.ceiling_ax != audio_calibration_target_ax)
+		return;
+	/* One firmware snapshot owns the baseline, calibration and
+	 * boundary; never combine a local edit with a previous boundary. */
+	audio_baseline_paula = (UWORD)ZZ9K_AUDIO_BALANCE_CH1(st.baseline);
+	audio_baseline_ax = (UWORD)ZZ9K_AUDIO_BALANCE_CH2(st.baseline);
+	audio_ceiling_paula = st.ceiling_paula;
+	audio_ceiling_ax = st.ceiling_ax;
+	audio_note_boundary(st.ceiling);
+	GT_SetGadgetAttrs(audgads[AUDGAD_CEIL_PAULA], win, NULL,
+		GTIN_Number, audio_ceiling_paula, TAG_END);
+	GT_SetGadgetAttrs(audgads[AUDGAD_CEIL_AX], win, NULL,
+		GTIN_Number, audio_ceiling_ax, TAG_END);
+	audio_calibration_pending = FALSE;
+	audio_update_baseline_bounds(win, AUDGAD_COUNT);
+	audio_set_controls_enabled(win, TRUE);
+	audio_set_status(win,
+		(audio_baseline_paula > audio_ceiling_paula ||
+		 audio_baseline_ax > audio_ceiling_ax)
+		? "Baseline exceeds new ceiling; adjust levels before Save"
+		: "Calibration committed - Save to persist");
+}
+
+/* Settle a pending non-blocking save: the firmware machine steps in
+ * its service loop, so the outcome arrives through the control-state
+ * report. Called from the 1 s meter/poll tick; a still-QUEUED status
+ * (or a transient read failure) keeps the pending state and retries
+ * on the next tick. */
+static void audio_save_settle(struct Window *win)
+{
+	struct zztop_audio_state st;
+	uint32_t save_status;
+
+	if (!audio_save_pending)
+		return;
+	if (!audio_control_state_get(&st))
+		return;
+	audio_note_boundary(st.ceiling);
+	save_status = st.save_status;
+	if (save_status == ZZ9K_AUDIO_SCENE_SAVE_QUEUED)
+		return; /* the machine is still running */
+
+	audio_save_pending = FALSE;
+	if (save_status == ZZ9K_AUDIO_SCENE_SAVE_OK) {
+		if (audio_edit_generation == audio_save_generation) {
+			audio_dirty = FALSE;
+			/* A fresh read may update the local model. On failure,
+			 * keep the committed live values instead of replacing
+			 * them with defaults. */
+			audio_reload_saved_state(win,
+				st.active_scene < ZZCFG_AUDIO_SCENES ?
+				(UWORD)st.active_scene : 0);
+		} else {
+			audio_set_status(win,
+				"Saved snapshot; newer edits still need Save");
+		}
+	} else if (save_status == ZZ9K_AUDIO_SCENE_SAVE_REJECTED) {
+		audio_set_status(win,
+			"Save rejected: level over boundary");
+	} else {
+		audio_set_status(win, "Save failed: SD card write error");
+	}
+	audio_update_save_gate(win);
+}
+
+static const char *audio_identity_name(uint32_t identity)
+{
+	switch (identity) {
+	case ZZ9K_AUDIO_METER_IDENTITY_AHI:
+		return "AHI";
+	case ZZ9K_AUDIO_METER_IDENTITY_MEDIA:
+		return "MHI";
+	case ZZ9K_AUDIO_METER_IDENTITY_SDK_STREAM:
+		return "SDK";
+	default:
+		return "legacy";
+	}
+}
+
+/* Peaks are unsigned 16.16 with 0x10000 = digital full scale; show
+ * dBFS like every other meter the operator has used. */
+static void audio_format_peak(char *buf, size_t size, uint32_t peak)
+{
+	double db;
+
+	if (peak == 0) {
+		snprintf(buf, size, "-oo");
+		return;
+	}
+	db = 20.0 * log10((double)peak / 65536.0);
+	if (db <= -99.9) {
+		snprintf(buf, size, "-oo");
+		return;
+	}
+	snprintf(buf, size, "%.1f", db);
+}
+
+/* Gain-reduction latch (R7/R8): the indicator is re-evaluated only by
+ * a meter read and holds its state between reads; a fresh event also
+ * echoes into the status line, where it survives until the next
+ * operator action overwrites it. */
+static char audio_peak_bufs[2][24];
+static char audio_counts_bufs[2][32];
+static char audio_gr_buf[24];
+static uint32_t audio_gr_seen[2];
+static BOOL audio_gr_seen_valid[2];
+
+static void audio_refresh_meters(struct Window *win)
+{
+	static const uint32_t directions[2] = {
+		ZZ9K_AUDIO_METER_DIRECTION_OUTPUT,
+		ZZ9K_AUDIO_METER_DIRECTION_CAPTURE
+	};
+	static const UWORD peak_gads[2] = { AUDGAD_OUT_PEAK, AUDGAD_IN_PEAK };
+	static const UWORD counts_gads[2] = {
+		AUDGAD_OUT_COUNTS, AUDGAD_IN_COUNTS
+	};
+	uint32_t gr_new = 0;
+	int d;
+
+	for (d = 0; d < 2; d++) {
+		struct zztop_audio_meter m;
+		char lbuf[12], rbuf[12];
+
+		if (!audio_meter_read(directions[d], &m)) {
+			snprintf(audio_peak_bufs[d], sizeof(audio_peak_bufs[d]),
+				"- / - dB");
+			snprintf(audio_counts_bufs[d], sizeof(audio_counts_bufs[d]),
+				"n/a");
+			continue;
+		}
+
+		audio_format_peak(lbuf, sizeof(lbuf), m.peak_hold_ch1);
+		audio_format_peak(rbuf, sizeof(rbuf), m.peak_hold_ch2);
+		snprintf(audio_peak_bufs[d], sizeof(audio_peak_bufs[d]),
+			"%s / %s dB", lbuf, rbuf);
+		snprintf(audio_counts_bufs[d], sizeof(audio_counts_bufs[d]),
+			"%lu / %lu  %s",
+			(unsigned long)m.clip_count,
+			(unsigned long)(d == 0 ? m.underrun_count
+				: m.overrun_count),
+			audio_identity_name(m.identity));
+
+		/* Counters are cumulative and saturating (R8), so a lower
+		 * value than the previous read means saturation, not a
+		 * reset; count it as one fresh event instead of wrapping. */
+		if (!audio_gr_seen_valid[d]) {
+			/* First read after the window opened: baseline the
+			 * counter so only events watched by this operator
+			 * light the indicator. */
+			audio_gr_seen_valid[d] = TRUE;
+		} else if (m.gain_reduction_events >= audio_gr_seen[d]) {
+			gr_new += m.gain_reduction_events - audio_gr_seen[d];
+		} else if (m.gain_reduction_events > 0) {
+			gr_new++;
+		}
+		audio_gr_seen[d] = m.gain_reduction_events;
+	}
+
+	if (gr_new > 0) {
+		snprintf(audio_gr_buf, sizeof(audio_gr_buf), "%lu new",
+			(unsigned long)gr_new);
+		audio_set_status(win,
+			"Gain reduction: scene policy lowered the level");
+	} else {
+		snprintf(audio_gr_buf, sizeof(audio_gr_buf), "none");
+	}
+
+	if (win) {
+		for (d = 0; d < 2; d++) {
+			GT_SetGadgetAttrs(audgads[peak_gads[d]], win, NULL,
+				GTTX_Text, audio_peak_bufs[d], TAG_END);
+			GT_SetGadgetAttrs(audgads[counts_gads[d]], win, NULL,
+				GTTX_Text, audio_counts_bufs[d], TAG_END);
+		}
+		GT_SetGadgetAttrs(audgads[AUDGAD_GAIN_RED], win, NULL,
+			GTTX_Text, audio_gr_buf, TAG_END);
+	}
+}
+
+static void audio_arm_meter_timer(struct timerequest *io)
+{
+	io->tr_node.io_Command = TR_ADDREQUEST;
+	io->tr_time.tv_secs = ZZTOP_AUDIO_METER_PERIOD_SECS;
+	io->tr_time.tv_micro = 0;
+	SendIO((struct IORequest *)io);
+}
+
+/* Meter gadgets show n/a when the firmware does not advertise the
+ * metering capability; the audio window still serves the control plane
+ * (and the non-blocking save poll rides the same tick). */
+static void audio_meters_unavailable(struct Window *win)
+{
+	snprintf(audio_peak_bufs[0], sizeof(audio_peak_bufs[0]), "n/a");
+	snprintf(audio_counts_bufs[0], sizeof(audio_counts_bufs[0]), "n/a");
+	snprintf(audio_peak_bufs[1], sizeof(audio_peak_bufs[1]), "n/a");
+	snprintf(audio_counts_bufs[1], sizeof(audio_counts_bufs[1]), "n/a");
+	snprintf(audio_gr_buf, sizeof(audio_gr_buf), "n/a");
+	GT_SetGadgetAttrs(audgads[AUDGAD_OUT_PEAK], win, NULL,
+		GTTX_Text, audio_peak_bufs[0], TAG_END);
+	GT_SetGadgetAttrs(audgads[AUDGAD_OUT_COUNTS], win, NULL,
+		GTTX_Text, audio_counts_bufs[0], TAG_END);
+	GT_SetGadgetAttrs(audgads[AUDGAD_IN_PEAK], win, NULL,
+		GTTX_Text, audio_peak_bufs[1], TAG_END);
+	GT_SetGadgetAttrs(audgads[AUDGAD_IN_COUNTS], win, NULL,
+		GTTX_Text, audio_counts_bufs[1], TAG_END);
+	GT_SetGadgetAttrs(audgads[AUDGAD_GAIN_RED], win, NULL,
+		GTTX_Text, audio_gr_buf, TAG_END);
+}
+
+static STRPTR audio_scene_labels[ZZCFG_AUDIO_SCENES + 1];
+
+static void audio_scene_labels_bind(void)
+{
+	int i;
+
+	for (i = 0; i < ZZCFG_AUDIO_SCENES; i++)
+		audio_scene_labels[i] = (STRPTR)audio_scenes[i].name;
+	audio_scene_labels[ZZCFG_AUDIO_SCENES] = NULL;
+}
+
+static void audio_scene_cycle_refresh(struct Window *win, UWORD scene)
+{
+
+	if (win && audgads[AUDGAD_SCENE]) {
+		GT_SetGadgetAttrs(audgads[AUDGAD_SCENE], win, NULL,
+			GTCY_Labels, audio_scene_labels,
+			GTCY_Active, scene, TAG_END);
+	}
+}
+
+static CONST_STRPTR audio_label_samples[] = {
+	(CONST_STRPTR)LABEL_AUDIO_SCENE,
+	(CONST_STRPTR)LABEL_AUD_OUT_PEAK,
+	(CONST_STRPTR)LABEL_AUD_OUT_CNT,
+	(CONST_STRPTR)LABEL_AUD_IN_PEAK,
+	(CONST_STRPTR)LABEL_AUD_IN_CNT,
+	(CONST_STRPTR)LABEL_AUD_GR,
+	(CONST_STRPTR)LABEL_AUD_PAULA,
+	(CONST_STRPTR)LABEL_AUD_AX,
+	(CONST_STRPTR)LABEL_AUD_CEIL_PAULA,
+	(CONST_STRPTR)LABEL_AUD_CEIL_AX,
+	NULL
+};
+
+static CONST_STRPTR audio_value_samples[] = {
+	(CONST_STRPTR)"Scene 8",
+	(CONST_STRPTR)"-12.0 / -12.0 dB",
+	(CONST_STRPTR)"65535 / 65535  legacy",
+	(CONST_STRPTR)"32767 new",
+	(CONST_STRPTR)"255",
+	NULL
+};
+
+static CONST_STRPTR audio_button_samples[] = {
+	(CONST_STRPTR)LABEL_BTN_EDITSCN,
+	(CONST_STRPTR)LABEL_BTN_SAVE,
+	(CONST_STRPTR)LABEL_BTN_BALANCE,
+	NULL
+};
+
+static struct Gadget *audio_create_text(struct Gadget *gad,
+	struct NewGadget *ng, UWORD gadget_id, STRPTR label,
+	const char *initial)
+{
+	ng->ng_GadgetID = gadget_id;
+	ng->ng_GadgetText = label;
+
+	return CreateGadget(TEXT_KIND, gad, ng,
+		GTTX_Text, (STRPTR)initial,
+		GTTX_Border, TRUE,
+		TAG_END);
+}
+
+static struct Gadget *audio_create_gadgets(struct Gadget **glistptr,
+	void *vi, const struct ZZTopLayout *mainlayout, UWORD scene,
+	WORD *out_w, WORD *out_h)
+{
+	struct ZZTopLayout l = *mainlayout;
+	struct NewGadget ng;
+	struct Gadget *gad;
+	WORD label_width, value_width, button_width, content_right, y, i;
+
+	/* Same font metrics as the main window, own column widths. */
+	{
+		struct RastPort *rp = zztop_screen ? &zztop_screen->RastPort : NULL;
+
+		label_width = zztop_max_text_width(rp, audio_label_samples, 8);
+		value_width = zztop_max_text_width(rp, audio_value_samples, 8);
+		button_width = zztop_max_word(90,
+			zztop_max_text_width(rp, audio_button_samples, 8) + 32);
+	}
+	l.gadget_left = l.margin_x + label_width + l.label_gap;
+	l.gadget_width = zztop_max_word(200, value_width + 48);
+	content_right = l.gadget_left + l.gadget_width;
+
+	gad = CreateContext(glistptr);
+	for (i = 0; i < AUDGAD_COUNT; i++) audgads[i] = NULL;
+
+	y = l.topborder + l.margin_y;
+
+	ng.ng_LeftEdge = l.gadget_left;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = l.gadget_width;
+	ng.ng_Height = l.gadget_height;
+	ng.ng_TextAttr = l.text_attr;
+	ng.ng_VisualInfo = vi;
+	ng.ng_Flags = PLACETEXT_LEFT;
+
+	ng.ng_GadgetID = AUDGAD_SCENE;
+	ng.ng_GadgetText = (STRPTR)LABEL_AUDIO_SCENE;
+	audgads[AUDGAD_SCENE] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+		GTCY_Labels, audio_scene_labels, GTCY_Active, scene, TAG_END);
+	y += l.row_step;
+
+	/* Edit and Rename share the gadget column (AGAD Done/Cancel
+	 * precedent); the text gadgets below inherit ng_LeftEdge/ng_Width,
+	 * so restore both after the half-width pair. */
+	ng.ng_TopEdge = y;
+	ng.ng_Width = (l.gadget_width - 16) / 2;
+	ng.ng_GadgetID = AUDGAD_BTN_EDIT;
+	ng.ng_GadgetText = (STRPTR)LABEL_BTN_EDITSCN;
+	ng.ng_Flags = PLACETEXT_IN;
+	audgads[AUDGAD_BTN_EDIT] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		TAG_END);
+	ng.ng_LeftEdge = l.gadget_left + ng.ng_Width + 16;
+	ng.ng_GadgetID = AUDGAD_BTN_RENAME;
+	ng.ng_GadgetText = (STRPTR)LABEL_BTN_RENAME;
+	audgads[AUDGAD_BTN_RENAME] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		TAG_END);
+	ng.ng_LeftEdge = l.gadget_left;
+	ng.ng_Width = l.gadget_width;
+	ng.ng_Flags = PLACETEXT_LEFT;
+	y += l.row_step + l.section_gap;
+
+	ng.ng_TopEdge = y;
+	audgads[AUDGAD_OUT_PEAK] = gad = audio_create_text(gad, &ng,
+		AUDGAD_OUT_PEAK, (STRPTR)LABEL_AUD_OUT_PEAK, "- / - dB");
+	y += l.row_step;
+
+	ng.ng_TopEdge = y;
+	audgads[AUDGAD_OUT_COUNTS] = gad = audio_create_text(gad, &ng,
+		AUDGAD_OUT_COUNTS, (STRPTR)LABEL_AUD_OUT_CNT, "- / -");
+	y += l.row_step;
+
+	ng.ng_TopEdge = y;
+	audgads[AUDGAD_IN_PEAK] = gad = audio_create_text(gad, &ng,
+		AUDGAD_IN_PEAK, (STRPTR)LABEL_AUD_IN_PEAK, "- / - dB");
+	y += l.row_step;
+
+	ng.ng_TopEdge = y;
+	audgads[AUDGAD_IN_COUNTS] = gad = audio_create_text(gad, &ng,
+		AUDGAD_IN_COUNTS, (STRPTR)LABEL_AUD_IN_CNT, "- / -");
+	y += l.row_step;
+
+	ng.ng_TopEdge = y;
+	audgads[AUDGAD_GAIN_RED] = gad = audio_create_text(gad, &ng,
+		AUDGAD_GAIN_RED, (STRPTR)LABEL_AUD_GR, "-");
+	y += l.row_step + l.section_gap;
+
+	/* Operator baseline balance (R17), replacing ZZ9K_MIX_LEVELS: a
+	 * packed 0..255 pair written through the scene-write path. The
+	 * level text sits right of the slider, so keep the reserve. */
+	ng.ng_TopEdge = y;
+	ng.ng_Width = l.gadget_width - 56;
+	ng.ng_GadgetID = AUDGAD_BASE_PAULA;
+	ng.ng_GadgetText = (STRPTR)LABEL_AUD_PAULA;
+	audgads[AUDGAD_BASE_PAULA] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
+		GTSL_Min, 0, GTSL_Max, (ULONG)audio_baseline_max_paula(),
+		GTSL_Level, audio_baseline_paula,
+		GA_RelVerify, TRUE,
+		GTSL_LevelFormat, (STRPTR)"%ld", GTSL_MaxLevelLen, 4,
+		GTSL_LevelPlace, PLACETEXT_RIGHT,
+		TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge = y;
+	ng.ng_GadgetID = AUDGAD_BASE_AX;
+	ng.ng_GadgetText = (STRPTR)LABEL_AUD_AX;
+	audgads[AUDGAD_BASE_AX] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
+		GTSL_Min, 0, GTSL_Max, (ULONG)audio_baseline_max_ax(),
+		GTSL_Level, audio_baseline_ax,
+		GA_RelVerify, TRUE,
+		GTSL_LevelFormat, (STRPTR)"%ld", GTSL_MaxLevelLen, 4,
+		GTSL_LevelPlace, PLACETEXT_RIGHT,
+		TAG_END);
+	y += l.row_step + l.section_gap;
+
+	ng.ng_Width = l.gadget_width;
+	ng.ng_TopEdge = y;
+	ng.ng_GadgetID = AUDGAD_CEIL_PAULA;
+	ng.ng_GadgetText = (STRPTR)LABEL_AUD_CEIL_PAULA;
+	audgads[AUDGAD_CEIL_PAULA] = gad = CreateGadget(
+		INTEGER_KIND, gad, &ng,
+		GTIN_Number, audio_ceiling_paula,
+		GTIN_MaxChars, 4,
+		TAG_END);
+	y += l.row_step;
+
+	ng.ng_TopEdge = y;
+	ng.ng_GadgetID = AUDGAD_CEIL_AX;
+	ng.ng_GadgetText = (STRPTR)LABEL_AUD_CEIL_AX;
+	audgads[AUDGAD_CEIL_AX] = gad = CreateGadget(
+		INTEGER_KIND, gad, &ng,
+		GTIN_Number, audio_ceiling_ax,
+		GTIN_MaxChars, 4,
+		TAG_END);
+	y += l.row_step + l.section_gap;
+
+	/* Status line spans the whole row (no side label) so messages get
+	 * the label column's width too instead of widening the window. */
+	ng.ng_LeftEdge = l.margin_x;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = content_right - l.margin_x;
+	ng.ng_GadgetID = AUDGAD_STATUS;
+	ng.ng_GadgetText = NULL;
+	audgads[AUDGAD_STATUS] = gad = CreateGadget(TEXT_KIND, gad, &ng,
+		GTTX_Text, audio_status_buf, GTTX_Border, TRUE, TAG_END);
+	y += l.row_step + l.section_gap;
+
+	ng.ng_LeftEdge = l.margin_x;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = button_width;
+	ng.ng_GadgetID = AUDGAD_BTN_SAVE;
+	ng.ng_GadgetText = (STRPTR)LABEL_BTN_SAVE;
+	ng.ng_Flags = PLACETEXT_IN;
+	audgads[AUDGAD_BTN_SAVE] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		GA_Disabled, TRUE, TAG_END);
+
+	/* One-click equal-loudness balance: measured Paula/AHI parity --
+	 * Paula at 3/4 of its clean ceiling, AX exactly 2x Paula capped
+	 * by the AX clean ceiling and the leg max (36/72 at the 48/80
+	 * calibration). The ceilings are hardware measurements, not
+	 * preferences -- deliberately not touched here. */
+	ng.ng_LeftEdge = l.margin_x + button_width + l.label_gap - 6;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = button_width;
+	ng.ng_GadgetID = AUDGAD_BTN_BALANCE;
+	ng.ng_GadgetText = (STRPTR)LABEL_BTN_BALANCE;
+	ng.ng_Flags = PLACETEXT_IN;
+	audgads[AUDGAD_BTN_BALANCE] = gad = CreateGadget(BUTTON_KIND, gad,
+		&ng, TAG_END);
+
+	/* Live level vs enforced boundary readout, beside the action
+	 * buttons: shows why the sliders stop where they do. */
+	ng.ng_LeftEdge = l.margin_x + 2 * button_width + l.label_gap;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = content_right - ng.ng_LeftEdge;
+	ng.ng_GadgetID = AUDGAD_LEVEL;
+	ng.ng_GadgetText = NULL;
+	audgads[AUDGAD_LEVEL] = gad = CreateGadget(TEXT_KIND, gad, &ng,
+		GTTX_Text, (STRPTR)audio_level_text(), GTTX_Border, TRUE,
+		TAG_END);
+	y += l.row_step;
+
+	*out_w = content_right + l.margin_x;
+	/* Same WA_InnerHeight convention as the main window. */
+	*out_h = y + l.gadget_height + (l.margin_y / 2) - l.topborder;
+
+	for (i = 0; i < AUDGAD_COUNT; i++) {
+		if (!audgads[i]) return NULL;
+	}
+
+	return gad;
+}
+
+static BOOL audio_scene_editor_window(struct Screen *mysc, void *vi,
+	const struct ZZTopLayout *mainlayout, UWORD scene);
+
+static int audio_scene_rename_window(struct Screen *mysc, void *vi,
+	const struct ZZTopLayout *mainlayout, UWORD scene);
+
+enum audio_rename_result {
+	AUDIO_RENAME_CANCELLED = 0,
+	AUDIO_RENAME_COMMITTED,
+	AUDIO_RENAME_COMMITTING, /* final commit timed out: probably done */
+	AUDIO_RENAME_FAILED
+};
+
+static VOID audio_window(struct Screen *mysc, void *vi,
+	const struct ZZTopLayout *mainlayout)
+{
+	struct Window *win;
+	struct Gadget *glist = NULL;
+	struct IntuiMessage *imsg;
+	struct Gadget *gad;
+	struct MsgPort *meter_port = NULL;
+	struct timerequest *meter_io = NULL;
+	BOOL meter_dev_open = FALSE;
+	BOOL meter_pending = FALSE;
+	BOOL done = FALSE;
+	ULONG imsgClass;
+	UWORD imsgCode;
+	struct zztop_audio_state state;
+	UWORD scene = 0;
+	UWORD baseline_drag = AUDGAD_COUNT;
+	WORD w = 0, h = 0;
+
+	if (!zztop_audio_surface_available()) {
+		errorMessage("Audio: AX codec or control-plane capability absent");
+		return;
+	}
+
+	if (!audio_ui_seeded) {
+		if (audio_seed_editor_state())
+			audio_ui_seeded = TRUE;
+		else
+			audio_editor_defaults();
+	}
+	/* CFG seeds scene definitions, but only live state can size the
+	 * baseline sliders and report the running boundary. */
+	if (!audio_control_state_get(&state) || state.ceiling == 0UL ||
+			state.ceiling_paula == 0 || state.ceiling_ax == 0) {
+		errorMessage("Audio: control state unavailable - retry");
+		return;
+	}
+	/* If both CFG and live state failed, leave seeding retryable.
+	 * Once the window can open, keep its unsaved scene edits in RAM. */
+	audio_ui_seeded = TRUE;
+	if (state.active_scene < ZZCFG_AUDIO_SCENES)
+		scene = state.active_scene;
+	audio_baseline_paula =
+		(UWORD)ZZ9K_AUDIO_BALANCE_CH1(state.baseline);
+	audio_baseline_ax =
+		(UWORD)ZZ9K_AUDIO_BALANCE_CH2(state.baseline);
+	audio_ceiling_paula = state.ceiling_paula;
+	audio_ceiling_ax = state.ceiling_ax;
+	audio_note_boundary(state.ceiling);
+	audio_scene_labels_bind();
+
+	if (NULL == audio_create_gadgets(&glist, vi, mainlayout, scene,
+			&w, &h)) {
+		if (glist) FreeGadgets(glist);
+		errorMessage("Audio: gadget creation failed");
+		return;
+	}
+
+	win = OpenWindowTags(NULL,
+		WA_Title,        "Audio",
+		WA_Gadgets,      glist,   WA_AutoAdjust,    TRUE,
+		WA_Width,        w,       WA_MinWidth,      w,
+		WA_InnerHeight,  h,       WA_MinHeight,     h,
+		WA_DragBar,      TRUE,    WA_DepthGadget,   TRUE,
+		WA_Activate,     TRUE,    WA_CloseGadget,   TRUE,
+		WA_SizeGadget,   FALSE,   WA_SmartRefresh, TRUE,
+		WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
+			BUTTONIDCMP | CYCLEIDCMP | SLIDERIDCMP,
+		WA_PubScreen, mysc,
+		TAG_END);
+	if (!win) {
+		FreeGadgets(glist);
+		errorMessage("Audio: OpenWindow() failed");
+		return;
+	}
+
+	audio_update_save_gate(win);
+	audio_set_status(win, audio_dirty
+		? "Unsaved changes - Save to persist"
+		: "Edits apply live; reboot reverts to the last Save");
+	audio_update_baseline_bounds(win, AUDGAD_COUNT);
+
+	/* Own timer request, not the shared timerio: the main window may
+	 * have a refresh pending on it, and a timerequest cannot be shared
+	 * between two outstanding operations. The 1 s tick refreshes the
+	 * meters (metering cap) and settles a pending non-blocking save
+	 * (control cap), so it runs when either capability is present. */
+	if (audio_metering_capped || audio_control_capped) {
+		meter_port = CreateMsgPort();
+		if (meter_port) {
+			meter_io = (struct timerequest *)CreateIORequest(meter_port,
+				sizeof(struct timerequest));
+			if (meter_io && OpenDevice((STRPTR)TIMERNAME, UNIT_MICROHZ,
+					(struct IORequest *)meter_io, 0) == 0) {
+				meter_dev_open = TRUE;
+			}
+		}
+		if (audio_metering_capped) {
+			audio_gr_seen_valid[0] = FALSE;
+			audio_gr_seen_valid[1] = FALSE;
+			audio_refresh_meters(win);
+		} else {
+			audio_meters_unavailable(win);
+		}
+		if (meter_dev_open) {
+			audio_arm_meter_timer(meter_io);
+			meter_pending = TRUE;
+		}
+	} else {
+		audio_meters_unavailable(win);
+	}
+
+	GT_RefreshWindow(win, NULL);
+
+	while (!done) {
+		ULONG user_sig = 1UL << win->UserPort->mp_SigBit;
+		ULONG meter_sig = meter_port ? (1UL << meter_port->mp_SigBit) : 0;
+		ULONG signals = Wait(user_sig | meter_sig);
+
+		if (meter_sig && (signals & meter_sig) && meter_pending &&
+			CheckIO((struct IORequest *)meter_io)) {
+			WaitIO((struct IORequest *)meter_io);
+			meter_pending = FALSE;
+			if (audio_metering_capped)
+				audio_refresh_meters(win);
+			audio_calibration_settle(win);
+			if (!audio_calibration_pending)
+				audio_save_settle(win);
+			audio_arm_meter_timer(meter_io);
+			meter_pending = TRUE;
+		}
+
+		while ((!done) && (imsg = GT_GetIMsg(win->UserPort))) {
+			gad = (struct Gadget *)imsg->IAddress;
+			imsgClass = imsg->Class;
+			imsgCode = imsg->Code;
+			GT_ReplyIMsg(imsg);
+			audio_log("audio msg class=%08lx id=%ld code=%ld\n",
+				(unsigned long)imsgClass,
+				gad ? (long)gad->GadgetID : -1L,
+				(long)imsgCode);
+			if (imsgClass == IDCMP_GADGETUP && gad &&
+					baseline_drag == gad->GadgetID)
+				baseline_drag = AUDGAD_COUNT;
+
+			switch (imsgClass) {
+				case IDCMP_MOUSEMOVE:
+					/* Apply live changes without rewriting the active
+					 * slider. GA_RelVerify supplies GADGETUP to
+					 * refresh its Max/Level after release. */
+					if (gad && (gad->GadgetID == AUDGAD_BASE_PAULA ||
+							gad->GadgetID == AUDGAD_BASE_AX)) {
+						baseline_drag = gad->GadgetID;
+						imsgClass = IDCMP_GADGETUP;
+					} else
+						break;
+					/* FALLTHRU */
+				case IDCMP_GADGETUP:
+					if (!gad || audio_calibration_pending) break;
+					switch (gad->GadgetID) {
+						case AUDGAD_SCENE:
+							if (imsgCode < ZZCFG_AUDIO_SCENES &&
+								audio_scene_select_call(imsgCode) ==
+									ZZ9K_STATUS_OK) {
+								scene = imsgCode;
+								audio_mark_dirty();
+								audio_set_status(win,
+									"Scene switched - Save to persist across reboot");
+							} else {
+								GT_SetGadgetAttrs(audgads[AUDGAD_SCENE],
+									win, NULL, GTCY_Active, scene, TAG_END);
+								audio_set_status(win,
+									"Scene switch failed (busy) - retry");
+							}
+							audio_update_save_gate(win);
+							break;
+						case AUDGAD_BTN_EDIT:
+							if (audio_scene_editor_window(mysc, vi,
+								mainlayout, scene)) {
+								audio_set_status(win,
+									"Scene edited - Save to persist across reboot");
+							}
+							audio_update_save_gate(win);
+							break;
+						case AUDGAD_BTN_RENAME:
+							switch (audio_scene_rename_window(mysc, vi,
+								mainlayout, scene)) {
+							case AUDIO_RENAME_COMMITTED: {
+								char msg[96];
+
+								audio_scene_cycle_refresh(win, scene);
+								snprintf(msg, sizeof(msg),
+									"Scene %u renamed to %s - Save to persist",
+									(unsigned)(scene + 1),
+									audio_scenes[scene].name);
+								audio_set_status(win, msg);
+								break;
+							}
+							case AUDIO_RENAME_COMMITTING:
+								audio_scene_cycle_refresh(win, scene);
+								audio_set_status(win,
+									"Rename committing - Save to persist");
+								break;
+							case AUDIO_RENAME_FAILED:
+								audio_set_status(win,
+									"Rename failed (busy) - retry");
+								break;
+							default:
+								break; /* cancelled: keep the status quo */
+							}
+							audio_update_save_gate(win);
+							break;
+						case AUDGAD_BASE_PAULA:
+						case AUDGAD_BASE_AX: {
+							UWORD old_paula = audio_baseline_paula;
+							UWORD old_ax = audio_baseline_ax;
+							UWORD new_paula = old_paula;
+							UWORD new_ax = old_ax;
+
+							if (gad->GadgetID == AUDGAD_BASE_PAULA)
+								new_paula = (UWORD)imsgCode;
+							else
+								new_ax = (UWORD)imsgCode;
+							{
+								int bst = audio_scene_write_commit(scene,
+									ZZ9K_AUDIO_SCENE_PARAM_BASELINE,
+									ZZ9K_AUDIO_BALANCE_PACK(new_paula,
+										new_ax));
+								if (bst == ZZ9K_STATUS_OK ||
+										bst == ZZ9K_STATUS_TIMEOUT) {
+									/* Timeout = machine mid-step, reply slow;
+									 * the write applied or coalesced. Keep
+									 * the user's value; no snap-back. */
+									audio_baseline_paula = new_paula;
+									audio_baseline_ax = new_ax;
+									audio_mark_dirty();
+									audio_set_status(win,
+										(bst == ZZ9K_STATUS_OK)
+										?	"Baseline committed - Save to persist"
+										:	"Baseline committing - Save to persist");
+								audio_update_baseline_bounds(win,
+									baseline_drag);
+								} else {
+									/* Hard error: restore. */
+									GT_SetGadgetAttrs(gad, win, NULL,
+										GTSL_Level, (gad->GadgetID ==
+											AUDGAD_BASE_PAULA) ? old_paula
+											: old_ax, TAG_END);
+									audio_scene_write_commit(scene,
+										ZZ9K_AUDIO_SCENE_PARAM_BASELINE,
+										ZZ9K_AUDIO_BALANCE_PACK(
+											old_paula, old_ax));
+									audio_set_status(win,
+										"Baseline write failed - retry");
+								}
+							}
+							audio_update_save_gate(win);
+							break;
+						}
+						case AUDGAD_CEIL_PAULA:
+						case AUDGAD_CEIL_AX: {
+							UWORD old_paula = audio_ceiling_paula;
+							UWORD old_ax = audio_ceiling_ax;
+							UWORD new_paula = old_paula;
+							UWORD new_ax = old_ax;
+							LONG entered =
+								((struct StringInfo *)gad->SpecialInfo)->LongInt;
+							int cst;
+
+							if (entered < ZZTOP_AUDIO_CEILING_MIN ||
+									entered > ZZTOP_AUDIO_CEILING_MAX) {
+								GT_SetGadgetAttrs(gad, win, NULL,
+									GTIN_Number,
+									(gad->GadgetID == AUDGAD_CEIL_PAULA)
+									? old_paula : old_ax, TAG_END);
+								audio_set_status(win,
+									"Calibration must be 1..4095");
+								break;
+							}
+							if (gad->GadgetID == AUDGAD_CEIL_PAULA)
+								new_paula = (UWORD)entered;
+							else
+								new_ax = (UWORD)entered;
+							cst = audio_scene_write_commit(scene,
+								ZZ9K_AUDIO_SCENE_PARAM_CALIBRATION,
+								ZZ9K_AUDIO_CALIBRATION_PACK(
+									new_paula, new_ax));
+							if (cst == ZZ9K_STATUS_OK ||
+									cst == ZZ9K_STATUS_TIMEOUT) {
+								audio_calibration_target_paula = new_paula;
+								audio_calibration_target_ax = new_ax;
+								audio_calibration_pending = TRUE;
+								audio_mark_dirty();
+								audio_set_controls_enabled(win, FALSE);
+								audio_set_status(win, meter_dev_open
+									? "Calibration awaiting firmware state..."
+									: "Calibration pending - reopen Audio to refresh");
+								audio_calibration_settle(win);
+							} else {
+								GT_SetGadgetAttrs(gad, win, NULL,
+									GTIN_Number, (gad->GadgetID ==
+										AUDGAD_CEIL_PAULA) ? old_paula :
+										old_ax, TAG_END);
+								audio_scene_write_commit(scene,
+									ZZ9K_AUDIO_SCENE_PARAM_CALIBRATION,
+									ZZ9K_AUDIO_CALIBRATION_PACK(
+										old_paula, old_ax));
+								audio_set_status(win,
+									"Calibration write failed - retry");
+							}
+							audio_update_save_gate(win);
+							break;
+						}
+						case AUDGAD_BTN_BALANCE: {
+							UWORD bal_paula;
+							UWORD bal_ax;
+							int bst;
+
+							audio_balanced_levels(&bal_paula,
+								&bal_ax);
+							bst = audio_scene_write_commit(
+								scene,
+								ZZ9K_AUDIO_SCENE_PARAM_BASELINE,
+								ZZ9K_AUDIO_BALANCE_PACK(bal_paula,
+									bal_ax));
+							if (bst == ZZ9K_STATUS_OK ||
+									bst == ZZ9K_STATUS_TIMEOUT) {
+								audio_baseline_paula = bal_paula;
+								audio_baseline_ax = bal_ax;
+								audio_mark_dirty();
+								audio_set_status(win,
+									(bst == ZZ9K_STATUS_OK)
+									?	"Balance committed - Save to persist"
+									:	"Balance committing...");
+								audio_update_baseline_bounds(win,
+									AUDGAD_COUNT);
+							} else {
+								audio_set_status(win,
+									"Balance failed - retry");
+							}
+							audio_update_save_gate(win);
+							break;
+						}
+						case AUDGAD_BTN_SAVE: {
+							uint32_t save_status;
+
+							if (!audio_scene_save_call(scene,
+									&save_status)) {
+								audio_set_status(win,
+									"Save failed: no firmware reply");
+								break;
+							}
+							if (save_status ==
+									ZZ9K_AUDIO_SCENE_SAVE_QUEUED) {
+								/* The firmware serialized this
+								 * generation before returning.
+								 * Later edits remain dirty when
+								 * this snapshot settles. */
+								audio_save_generation =
+									audio_edit_generation;
+								audio_save_pending = TRUE;
+								audio_set_status(win, "Saving...");
+							} else if (save_status ==
+									ZZ9K_AUDIO_SCENE_SAVE_BUSY) {
+								/* This request was refused; do not
+								 * treat somebody else's in-flight
+								 * snapshot as saving our edits. */
+								audio_set_status(win,
+									"Save busy - retry");
+							} else if (save_status ==
+									ZZ9K_AUDIO_SCENE_SAVE_OK) {
+								audio_dirty = FALSE;
+								audio_reload_saved_state(win, scene);
+							} else if (save_status ==
+									ZZ9K_AUDIO_SCENE_SAVE_REJECTED) {
+								audio_set_status(win,
+									"Save rejected: level over boundary");
+							} else {
+								audio_set_status(win,
+									"Save failed: SD card write error");
+							}
+							audio_update_save_gate(win);
+							break;
+						}
+					}
+					break;
+				case IDCMP_CLOSEWINDOW:
+					/* Closing does not discard unsaved edits: they
+					 * persist in firmware RAM until the card is
+					 * power-cycled back to the last Save (R15). */
+					done = TRUE;
+					break;
+				case IDCMP_REFRESHWINDOW:
+					GT_BeginRefresh(win);
+					GT_EndRefresh(win, TRUE);
+					break;
+			}
+		}
+	}
+
+	if (meter_pending) {
+		if (!CheckIO((struct IORequest *)meter_io))
+			AbortIO((struct IORequest *)meter_io);
+		WaitIO((struct IORequest *)meter_io);
+	}
+	if (meter_dev_open)
+		CloseDevice((struct IORequest *)meter_io);
+	if (meter_io)
+		DeleteIORequest((struct IORequest *)meter_io);
+	if (meter_port)
+		DeleteMsgPort(meter_port);
+
+	audio_calibration_pending = FALSE;
+	CloseWindow(win);
+	FreeGadgets(glist);
+}
+
+/* Scene editor: one scene's master-chain sliders. Coalesce intermediate
+ * MOUSEMOVE values; GA_RelVerify commits the final level on release,
+ * with a short timer for live preview and a close-window flush. */
+#define ZZTOP_AUDIO_DRAG_COALESCE_USECS 100000
+
+static BOOL audio_editor_lookup(struct zztop_audio_scene_ui *sc,
+	UWORD id, UWORD **field, uint32_t *param, const char **name)
+{
+	*field = NULL;
+	*name = NULL;
+	*param = 0;
+	if (id == SEGAD_LPF) {
+		*field = &sc->lpf;
+		*param = ZZ9K_AUDIO_SCENE_PARAM_LPF;
+		*name = "Output lowpass";
+	} else if (id == SEGAD_PREFACTOR) {
+		*field = &sc->prefactor;
+		*param = ZZ9K_AUDIO_SCENE_PARAM_PREFACTOR;
+		*name = "Prefactor";
+	} else if (id == SEGAD_VOLUME) {
+		*field = &sc->volume;
+		*param = ZZ9K_AUDIO_SCENE_PARAM_VOLUME;
+		*name = "Volume";
+	} else if (id == SEGAD_PAN) {
+		*field = &sc->pan;
+		*param = ZZ9K_AUDIO_SCENE_PARAM_PAN;
+		*name = "Pan";
+	} else if (id >= SEGAD_EQ_BASE && id < SEGAD_EQ_BASE + 10) {
+		*field = &sc->eq[id - SEGAD_EQ_BASE];
+		*param = ZZ9K_AUDIO_SCENE_PARAM_EQ_BAND_1 + (id - SEGAD_EQ_BASE);
+		*name = "EQ band";
+	}
+	return *field != NULL;
+}
+
+/* One staged commit. The editor seed comes from saved CFG, not live
+ * LPF/EQ state, so even a value equal to the displayed one may need
+ * writing. Hard errors restore the last accepted display value;
+ * timeouts keep the request pending as in the baseline path. */
+static void audio_editor_commit_value(struct Window *win,
+	struct Gadget **segads, struct zztop_audio_scene_ui *sc,
+	UWORD scene, UWORD id, UWORD value, BOOL *edited, char *status,
+	size_t status_sz)
+{
+	UWORD *field;
+	uint32_t param;
+	const char *name;
+	UWORD old;
+	int cst;
+
+	if (!audio_editor_lookup(sc, id, &field, &param, &name))
+		return;
+	old = *field;
+	cst = audio_scene_write_commit(scene, param, value);
+	if (cst == ZZ9K_STATUS_OK) {
+		*field = value;
+		audio_mark_dirty();
+		*edited = TRUE;
+		snprintf(status, status_sz,
+			"%s committed to %s - Save to persist", name, sc->name);
+	} else if (cst == ZZ9K_STATUS_TIMEOUT) {
+		*field = value;
+		audio_mark_dirty();
+		*edited = TRUE;
+		snprintf(status, status_sz,
+			"%s committing - Save to persist", name);
+	} else if (audio_scene_write_commit(scene, param, old) ==
+			ZZ9K_STATUS_OK) {
+		GT_SetGadgetAttrs(segads[id], win, NULL,
+			GTSL_Level, old, TAG_END);
+		snprintf(status, status_sz, "%s commit failed - retry", name);
+	} else {
+		GT_SetGadgetAttrs(segads[id], win, NULL,
+			GTSL_Level, old, TAG_END);
+		audio_mark_dirty();
+		snprintf(status, status_sz,
+			"%s commit failed; firmware may hold the attempted value - Save",
+			name);
+	}
+	GT_SetGadgetAttrs(segads[SEGAD_STATUS], win, NULL,
+		GTTX_Text, status, TAG_END);
+}
+static BOOL audio_scene_editor_window(struct Screen *mysc, void *vi,
+	const struct ZZTopLayout *mainlayout, UWORD scene)
+{
+	static CONST_STRPTR label_samples[] = {
+		(CONST_STRPTR)LABEL_AUD_LPF,
+		(CONST_STRPTR)LABEL_AUD_PREF,
+		(CONST_STRPTR)LABEL_AUD_VOL,
+		(CONST_STRPTR)LABEL_AUD_PAN,
+		NULL
+	};
+	static CONST_STRPTR eq_label_samples[] = {
+		(CONST_STRPTR)"EQ 1",
+		(CONST_STRPTR)"EQ 10",
+		NULL
+	};
+	static char status[96];
+	static char eq_labels[10][8] = {
+		"EQ 1", "EQ 2", "EQ 3", "EQ 4", "EQ 5",
+		"EQ 6", "EQ 7", "EQ 8", "EQ 9", "EQ 10"
+	};
+	struct ZZTopLayout l = *mainlayout;
+	struct NewGadget ng;
+	struct Gadget *glist = NULL;
+	struct Gadget *gad;
+	struct Gadget *segads[SEGAD_COUNT];
+	struct Window *win;
+	struct IntuiMessage *imsg;
+	struct zztop_audio_scene_ui *sc = &audio_scenes[scene];
+	ULONG imsg_class;
+	UWORD imsg_code;
+	WORD label_width, eq_label_width, left, eq_left, slider_width;
+	WORD eq_slider_width, level_reserve, eq_level_reserve, col_gap;
+	WORD content_right, button_width, y, w, h, i;
+	BOOL done = FALSE;
+	BOOL edited = FALSE;
+	struct MsgPort *drag_port = NULL;
+	struct timerequest *drag_io = NULL;
+	BOOL drag_dev = FALSE;
+	BOOL drag_timer = FALSE;
+	BOOL drag_pending = FALSE;
+	UWORD drag_id = 0;
+	UWORD drag_value = 0;
+	char title[32];
+
+	/* The window carries the operator-assigned name (or the default
+	 * label) so the operator always sees which scene is edited. */
+	snprintf(title, sizeof(title), "Editing %s", sc->name);
+	snprintf(status, sizeof(status),
+		"Editing %s - changes apply live; Save to persist", sc->name);
+
+	label_width = zztop_max_text_width(
+		zztop_screen ? &zztop_screen->RastPort : NULL, label_samples, 8);
+	eq_label_width = zztop_max_text_width(
+		zztop_screen ? &zztop_screen->RastPort : NULL, eq_label_samples, 8);
+	slider_width = 150;
+	eq_slider_width = 110;
+	level_reserve = 56;  /* "%ld Hz" plus padding */
+	eq_level_reserve = 32;
+	col_gap = 24;
+	button_width = 88;
+
+	left = l.margin_x + label_width + l.label_gap;
+	eq_left = left + slider_width + level_reserve + col_gap +
+		eq_label_width + l.label_gap;
+	content_right = eq_left + eq_slider_width + eq_level_reserve;
+
+	gad = CreateContext(&glist);
+	for (i = 0; i < SEGAD_COUNT; i++) segads[i] = NULL;
+
+	ng.ng_TextAttr = l.text_attr;
+	ng.ng_VisualInfo = vi;
+	ng.ng_Flags = PLACETEXT_LEFT;
+	ng.ng_Height = l.gadget_height;
+	ng.ng_GadgetText = (STRPTR)LABEL_AUD_LPF;
+
+	y = l.topborder + l.margin_y;
+
+	/* Left column: the non-EQ master chain. */
+	ng.ng_LeftEdge = left;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = slider_width;
+	ng.ng_GadgetID = SEGAD_LPF;
+	segads[SEGAD_LPF] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
+		GTSL_Min, ZZTOP_AUDIO_LPF_MIN, GTSL_Max, ZZTOP_AUDIO_LPF_MAX,
+		GTSL_Level, sc->lpf,
+		GA_RelVerify, TRUE,
+		GTSL_LevelFormat, (STRPTR)"%ld Hz", GTSL_MaxLevelLen, 8,
+		GTSL_LevelPlace, PLACETEXT_RIGHT,
+		TAG_END);
+
+	ng.ng_TopEdge = y + l.row_step;
+	ng.ng_GadgetID = SEGAD_PREFACTOR;
+	ng.ng_GadgetText = (STRPTR)LABEL_AUD_PREF;
+	segads[SEGAD_PREFACTOR] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
+		GTSL_Min, 0, GTSL_Max, ZZTOP_AUDIO_RANGE_MAX,
+		GTSL_Level, sc->prefactor,
+		GA_RelVerify, TRUE,
+		GTSL_LevelFormat, (STRPTR)"%ld", GTSL_MaxLevelLen, 4,
+		GTSL_LevelPlace, PLACETEXT_RIGHT,
+		TAG_END);
+
+	ng.ng_TopEdge = y + 2 * l.row_step;
+	ng.ng_GadgetID = SEGAD_VOLUME;
+	ng.ng_GadgetText = (STRPTR)LABEL_AUD_VOL;
+	segads[SEGAD_VOLUME] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
+		GTSL_Min, 0, GTSL_Max, ZZTOP_AUDIO_RANGE_MAX,
+		GTSL_Level, sc->volume,
+		GA_RelVerify, TRUE,
+		GTSL_LevelFormat, (STRPTR)"%ld", GTSL_MaxLevelLen, 4,
+		GTSL_LevelPlace, PLACETEXT_RIGHT,
+		TAG_END);
+
+	ng.ng_TopEdge = y + 3 * l.row_step;
+	ng.ng_GadgetID = SEGAD_PAN;
+	ng.ng_GadgetText = (STRPTR)LABEL_AUD_PAN;
+	segads[SEGAD_PAN] = gad = CreateGadget(SLIDER_KIND, gad, &ng,
+		GTSL_Min, 0, GTSL_Max, ZZTOP_AUDIO_RANGE_MAX,
+		GTSL_Level, sc->pan,
+		GA_RelVerify, TRUE,
+		GTSL_LevelFormat, (STRPTR)"%ld", GTSL_MaxLevelLen, 4,
+		GTSL_LevelPlace, PLACETEXT_RIGHT,
+		TAG_END);
+
+	/* Right column: the ten EQ bands, stacked at row pitch so the
+	 * window stays usable on short screens. */
+	for (i = 0; i < 10; i++) {
+		ng.ng_LeftEdge = eq_left;
+		ng.ng_TopEdge = y + (WORD)i * l.row_step;
+		ng.ng_Width = eq_slider_width;
+		ng.ng_GadgetID = SEGAD_EQ_BASE + i;
+		ng.ng_GadgetText = (STRPTR)eq_labels[i];
+		segads[SEGAD_EQ_BASE + i] = gad = CreateGadget(SLIDER_KIND, gad,
+			&ng,
+			GTSL_Min, 0, GTSL_Max, ZZTOP_AUDIO_RANGE_MAX,
+			GTSL_Level, sc->eq[i],
+			GA_RelVerify, TRUE,
+			GTSL_LevelFormat, (STRPTR)"%ld", GTSL_MaxLevelLen, 4,
+			GTSL_LevelPlace, PLACETEXT_RIGHT,
+			TAG_END);
+	}
+	y += 10 * l.row_step + l.section_gap;
+
+	ng.ng_LeftEdge = l.margin_x;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = content_right - l.margin_x;
+	ng.ng_GadgetID = SEGAD_STATUS;
+	ng.ng_GadgetText = NULL;
+	segads[SEGAD_STATUS] = gad = CreateGadget(TEXT_KIND, gad, &ng,
+		GTTX_Text, status, GTTX_Border, TRUE, TAG_END);
+	y += l.row_step + l.section_gap;
+
+	ng.ng_TopEdge = y;
+	ng.ng_Width = button_width;
+	ng.ng_GadgetID = SEGAD_BTN_DONE;
+	ng.ng_GadgetText = (STRPTR)LABEL_AUD_DONE;
+	ng.ng_Flags = PLACETEXT_IN;
+	segads[SEGAD_BTN_DONE] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		TAG_END);
+	y += l.row_step;
+
+	for (i = 0; i < SEGAD_COUNT; i++) {
+		if (!segads[i]) {
+			if (glist) FreeGadgets(glist);
+			errorMessage("Audio Scene Editor: gadget creation failed");
+			return FALSE;
+		}
+	}
+
+	w = content_right + l.margin_x;
+	h = y + l.gadget_height + (l.margin_y / 2) - l.topborder;
+	win = OpenWindowTags(NULL,
+		WA_Title, title,
+		WA_Gadgets, glist, WA_AutoAdjust, TRUE,
+		WA_Width, w, WA_MinWidth, w,
+		WA_InnerHeight, h, WA_MinHeight, h,
+		WA_DragBar, TRUE, WA_DepthGadget, TRUE,
+		WA_Activate, TRUE, WA_CloseGadget, TRUE,
+		WA_SizeGadget, FALSE, WA_SmartRefresh, TRUE,
+		WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
+			BUTTONIDCMP | SLIDERIDCMP,
+		WA_PubScreen, mysc,
+		TAG_END);
+	if (!win) {
+		FreeGadgets(glist);
+		errorMessage("Audio Scene Editor: OpenWindow() failed");
+		return FALSE;
+	}
+
+	drag_port = CreateMsgPort();
+	if (drag_port) {
+		drag_io = (struct timerequest *)CreateIORequest(drag_port,
+			sizeof(struct timerequest));
+		if (drag_io && OpenDevice((STRPTR)TIMERNAME, UNIT_MICROHZ,
+				(struct IORequest *)drag_io, 0) == 0)
+			drag_dev = TRUE;
+	}
+
+	GT_RefreshWindow(win, NULL);
+	while (!done) {
+		ULONG win_sig = 1UL << win->UserPort->mp_SigBit;
+		ULONG drag_sig = drag_port ? (1UL << drag_port->mp_SigBit) : 0;
+		ULONG signals = Wait(win_sig | drag_sig);
+
+		while ((!done) && (imsg = GT_GetIMsg(win->UserPort))) {
+			gad = (struct Gadget *)imsg->IAddress;
+			imsg_class = imsg->Class;
+			imsg_code = imsg->Code;
+			GT_ReplyIMsg(imsg);
+			audio_log("editor msg class=%08lx id=%ld code=%ld\n",
+				(unsigned long)imsg_class,
+				gad ? (long)gad->GadgetID : -1L,
+				(long)imsg_code);
+			if (imsg_class == IDCMP_CLOSEWINDOW ||
+					(imsg_class == IDCMP_GADGETUP && gad &&
+					 gad->GadgetID == SEGAD_BTN_DONE)) {
+				done = TRUE;
+			} else if (imsg_class == IDCMP_REFRESHWINDOW) {
+				GT_BeginRefresh(win);
+				GT_EndRefresh(win, TRUE);
+			} else if ((imsg_class == IDCMP_GADGETUP ||
+					imsg_class == IDCMP_MOUSEMOVE) && gad) {
+				UWORD id = gad->GadgetID;
+				UWORD *field;
+				uint32_t param;
+				const char *name;
+
+				if (!audio_editor_lookup(sc, id, &field, &param,
+						&name))
+					continue;
+				if (imsg_class == IDCMP_GADGETUP) {
+					if (drag_pending && drag_id != id)
+						audio_editor_commit_value(win, segads, sc,
+							scene, drag_id, drag_value, &edited,
+							status, sizeof(status));
+					drag_pending = FALSE;
+					audio_editor_commit_value(win, segads, sc, scene,
+						id, imsg_code, &edited, status,
+						sizeof(status));
+					continue;
+				}
+				/* MOUSEMOVE: stash. LPF applies only on release:
+				 * safeload makes one coefficient change atomic but
+				 * cannot smooth its filter-state discontinuity.
+				 * Other controls retain the bounded live preview. */
+				if (drag_pending && drag_id != id) {
+					audio_editor_commit_value(win, segads, sc,
+						scene, drag_id, drag_value, &edited,
+						status, sizeof(status));
+				}
+				drag_id = id;
+				drag_value = imsg_code;
+				drag_pending = TRUE;
+				if (!drag_dev) {
+					if (id != SEGAD_LPF) {
+						audio_editor_commit_value(win, segads, sc,
+							scene, drag_id, drag_value, &edited,
+							status, sizeof(status));
+						drag_pending = FALSE;
+					}
+				} else if (id != SEGAD_LPF && !drag_timer) {
+					drag_io->tr_node.io_Command = TR_ADDREQUEST;
+					drag_io->tr_time.tv_secs = 0;
+					drag_io->tr_time.tv_micro =
+						ZZTOP_AUDIO_DRAG_COALESCE_USECS;
+					SendIO((struct IORequest *)drag_io);
+					drag_timer = TRUE;
+				}
+			}
+		}
+
+		if (drag_sig && (signals & drag_sig) && drag_timer &&
+				CheckIO((struct IORequest *)drag_io)) {
+			WaitIO((struct IORequest *)drag_io);
+			drag_timer = FALSE;
+			/* An older slider may have armed this timer before an
+			 * LPF drag began. Only release/close may commit LPF. */
+			if (drag_pending && drag_id != SEGAD_LPF) {
+				audio_editor_commit_value(win, segads, sc, scene,
+					drag_id, drag_value, &edited, status,
+					sizeof(status));
+				drag_pending = FALSE;
+			}
+		}
+	}
+
+	if (drag_pending)
+		audio_editor_commit_value(win, segads, sc, scene,
+			drag_id, drag_value, &edited, status, sizeof(status));
+	if (drag_timer) {
+		if (!CheckIO((struct IORequest *)drag_io))
+			AbortIO((struct IORequest *)drag_io);
+		WaitIO((struct IORequest *)drag_io);
+	}
+	if (drag_dev)
+		CloseDevice((struct IORequest *)drag_io);
+	if (drag_io)
+		DeleteIORequest((struct IORequest *)drag_io);
+	if (drag_port)
+		DeleteMsgPort(drag_port);
+
+	CloseWindow(win);
+	FreeGadgets(glist);
+	return edited;
+}
+
+/* Scene rename (sub-window, the editor's idiom): one string gadget
+ * pre-filled with the scene's name, OK/Cancel, Return = OK, Esc or
+ * the close gadget = Cancel. OK sends the whole name as one staged
+ * chunk burst and only then touches the editor seed, so a failed
+ * burst leaves the displayed name truthful. The name reaches
+ * ZZ9000.CFG through the usual Save. */
+static int audio_scene_rename_window(struct Screen *mysc, void *vi,
+	const struct ZZTopLayout *mainlayout, UWORD scene)
+{
+	static CONST_STRPTR label_samples[] = {
+		(CONST_STRPTR)LABEL_AUDIO_SCENE,
+		NULL
+	};
+	static CONST_STRPTR value_samples[] = {
+		(CONST_STRPTR)"WWWWWWWWWWWWWWWW",
+		NULL
+	};
+	struct ZZTopLayout l = *mainlayout;
+	struct NewGadget ng;
+	struct Gadget *glist = NULL;
+	struct Gadget *gad;
+	struct Gadget *rngads[RNGAD_COUNT];
+	struct Window *win;
+	struct IntuiMessage *imsg;
+	struct StringInfo *si;
+	struct zztop_audio_scene_ui *sc = &audio_scenes[scene];
+	ULONG imsg_class;
+	UWORD imsg_code;
+	WORD label_width, value_width, button_width, button_gap, y, w, h, i;
+	BOOL done = FALSE;
+	char entry[ZZTOP_AUDIO_NAME_CHARS + 1];
+	int result = AUDIO_RENAME_CANCELLED;
+
+	label_width = zztop_max_text_width(
+		zztop_screen ? &zztop_screen->RastPort : NULL, label_samples, 8);
+	value_width = zztop_max_text_width(
+		zztop_screen ? &zztop_screen->RastPort : NULL, value_samples, 8);
+	l.gadget_left = l.margin_x + label_width + l.label_gap;
+	l.gadget_width = zztop_max_word(152, value_width + 24);
+	button_width = 88;
+	button_gap = 16;
+
+	gad = CreateContext(&glist);
+	for (i = 0; i < RNGAD_COUNT; i++) rngads[i] = NULL;
+	y = l.topborder + l.margin_y;
+
+	ng.ng_LeftEdge = l.gadget_left;
+	ng.ng_TopEdge = y;
+	ng.ng_Width = l.gadget_width;
+	ng.ng_Height = l.gadget_height;
+	ng.ng_TextAttr = l.text_attr;
+	ng.ng_VisualInfo = vi;
+	ng.ng_Flags = PLACETEXT_LEFT;
+	ng.ng_GadgetID = RNGAD_NAME;
+	ng.ng_GadgetText = (STRPTR)LABEL_AUDIO_SCENE;
+	/* MaxChars includes the trailing NUL (settings MAC precedent). */
+	rngads[RNGAD_NAME] = gad = CreateGadget(STRING_KIND, gad, &ng,
+		GTST_MaxChars, ZZTOP_AUDIO_NAME_CHARS + 1,
+		GTST_String, sc->name,
+		TAG_END);
+	y += l.row_step + l.section_gap;
+
+	ng.ng_TopEdge = y;
+	ng.ng_Width = button_width;
+	ng.ng_GadgetID = RNGAD_BTN_OK;
+	ng.ng_GadgetText = (STRPTR)"OK";
+	ng.ng_Flags = PLACETEXT_IN;
+	rngads[RNGAD_BTN_OK] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		TAG_END);
+	ng.ng_LeftEdge = l.gadget_left + button_width + button_gap;
+	ng.ng_GadgetID = RNGAD_BTN_CANCEL;
+	ng.ng_GadgetText = (STRPTR)"Cancel";
+	rngads[RNGAD_BTN_CANCEL] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+		TAG_END);
+	y += l.row_step;
+
+	for (i = 0; i < RNGAD_COUNT; i++) {
+		if (!rngads[i]) {
+			if (glist) FreeGadgets(glist);
+			errorMessage("Rename Scene: gadget creation failed");
+			return AUDIO_RENAME_CANCELLED;
+		}
+	}
+
+	w = zztop_max_word(l.gadget_left + l.gadget_width + l.margin_x,
+		l.gadget_left + 2 * button_width + button_gap + l.margin_x);
+	h = y + l.gadget_height + (l.margin_y / 2) - l.topborder;
+	win = OpenWindowTags(NULL,
+		WA_Title, "Rename Scene",
+		WA_Gadgets, glist, WA_AutoAdjust, TRUE,
+		WA_Width, w, WA_MinWidth, w,
+		WA_InnerHeight, h, WA_MinHeight, h,
+		WA_DragBar, TRUE, WA_DepthGadget, TRUE,
+		WA_Activate, TRUE, WA_CloseGadget, TRUE,
+		WA_SizeGadget, FALSE, WA_SmartRefresh, TRUE,
+		WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
+			IDCMP_RAWKEY | BUTTONIDCMP | STRINGIDCMP,
+		WA_PubScreen, mysc,
+		TAG_END);
+	if (!win) {
+		FreeGadgets(glist);
+		errorMessage("Rename Scene: OpenWindow() failed");
+		return AUDIO_RENAME_CANCELLED;
+	}
+
+	ActivateGadget(rngads[RNGAD_NAME], win, NULL);
+	GT_RefreshWindow(win, NULL);
+	while (!done) {
+		Wait(1UL << win->UserPort->mp_SigBit);
+
+		while ((!done) && (imsg = GT_GetIMsg(win->UserPort))) {
+			BOOL accept = FALSE;
+
+			gad = (struct Gadget *)imsg->IAddress;
+			imsg_class = imsg->Class;
+			imsg_code = imsg->Code;
+			GT_ReplyIMsg(imsg);
+			audio_log("rename msg class=%08lx code=%ld\n",
+				(unsigned long)imsg_class, (long)imsg_code);
+
+			if (imsg_class == IDCMP_CLOSEWINDOW) {
+				done = TRUE;
+			} else if (imsg_class == IDCMP_REFRESHWINDOW) {
+				GT_BeginRefresh(win);
+				GT_EndRefresh(win, TRUE);
+			} else if (imsg_class == IDCMP_RAWKEY &&
+				imsg_code == VCAP_RAWKEY_ESCAPE) {
+				done = TRUE;
+			} else if (imsg_class == IDCMP_RAWKEY &&
+				(imsg_code == VCAP_RAWKEY_RETURN ||
+					imsg_code == VCAP_RAWKEY_KEYPAD_ENTER)) {
+				accept = TRUE;
+			} else if (imsg_class == IDCMP_GADGETUP && gad) {
+				if (gad->GadgetID == RNGAD_BTN_CANCEL) {
+					done = TRUE;
+				} else if (gad->GadgetID == RNGAD_BTN_OK ||
+					gad->GadgetID == RNGAD_NAME) {
+					/* Return in the string gadget releases it. */
+					accept = TRUE;
+				}
+			}
+
+			if (accept) {
+				int st;
+
+				si = (struct StringInfo *)
+					rngads[RNGAD_NAME]->SpecialInfo;
+				audio_scene_name_clean((const char *)si->Buffer,
+					entry, sizeof(entry));
+				if (!entry[0])
+					audio_scene_default_name(entry, sizeof(entry),
+						scene);
+				st = audio_scene_rename_call(scene, entry);
+				if (st == ZZ9K_STATUS_OK ||
+						st == ZZ9K_STATUS_TIMEOUT) {
+					/* Timeout = commit machine mid-step: the name
+					 * applied or coalesced; keep it, no snap-back. */
+					snprintf(sc->name, sizeof(sc->name), "%s", entry);
+					audio_mark_dirty();
+					result = (st == ZZ9K_STATUS_OK)
+						? AUDIO_RENAME_COMMITTED
+						: AUDIO_RENAME_COMMITTING;
+				} else {
+					/* Hard error: re-send the previous name so the
+					 * partial chunks cannot ride a later commit. */
+					audio_scene_rename_call(scene, sc->name);
+					result = AUDIO_RENAME_FAILED;
+				}
+				done = TRUE;
+			}
+		}
+	}
+
+	CloseWindow(win);
+	FreeGadgets(glist);
+	return result;
+}
+
+VOID handleGadgetEvent(struct Window *win, struct Gadget *gad, ULONG code)
+{
+	if (!gad) return;
+
+	switch (gad->GadgetID)
+	{
+		case MYGAD_BTN_REFRESH: {
+			refresh_zz_info(win);
+			break;
+		}
+		case MYGAD_BTN_TEST: {
+			ULONG errors;
+
+			zztop_set_text_display(win, MYGAD_TEST_RESULT, "Reading...");
+			errors = zz_perform_register_probe();
+			if (errors == 0) {
+				zztop_set_text_display(win, MYGAD_TEST_RESULT, "OK read-only");
+			} else {
+				snprintf(txt_buf, 20, "%lu read errs", (unsigned long)errors);
+				zztop_set_text_display(win, MYGAD_TEST_RESULT, txt_buf);
+			}
+			refresh_zz_info(win);
+			break;
+		}
+		case MYGAD_BTN_UPDATE: {
+			do_fw_update(win);
+			break;
+		}
+		case MYGAD_BTN_RESTORE: {
+			do_fw_restore(win);
+			break;
+		}
+		case MYGAD_BTN_AUDIO: {
+			/* R13: every audio control lives behind this window; the
+			 * main window is otherwise unchanged. */
+			audio_window(zztop_screen, zztop_vi, &zztop_layout);
+			break;
+		}
+		case MYGAD_BTN_SCANDOUBLER: {
+			scandoubler_window(zztop_screen, zztop_vi, &zztop_layout);
+			break;
+		}
+		case MYGAD_REFRESHMODE: {
+			refresh_mode = (refresh_mode + 1) % REFRESH_MODE_COUNT;
+			if (!zztop_restart_timer()) {
+				refresh_mode = 0;
+				zztop_set_text_display(win, MYGAD_TEST_RESULT, "No timer.device");
+			}
+			GT_SetGadgetAttrs(gads[MYGAD_REFRESHMODE], win, NULL,
+				GTCY_Active, refresh_mode, TAG_END);
+			break;
+		}
+	}
+}
+
+static struct Gadget *createTextReadoutGadget(struct Gadget *gad, struct NewGadget *ng,
+	UWORD gadget_id, STRPTR label, const char *initial)
+{
+	if (gadget_id >= MYGAD_COUNT) return NULL;
+
+	zztop_store_text_display(gadget_id, initial);
+	ng->ng_GadgetID = gadget_id;
+	ng->ng_GadgetText = label;
+
+	return CreateGadget(TEXT_KIND, gad, ng,
+		GTTX_Text, readout_bufs[gadget_id],
+		GTTX_Border, TRUE,
+		TAG_END);
+}
+
+struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, const struct ZZTopLayout *layout)
+{
+	struct NewGadget ng;
+	struct Gadget *gad;
+	WORD y;
+
+	gad = CreateContext(glistptr);
+
+	y = layout->topborder + layout->margin_y;
+
+	ng.ng_LeftEdge	 = layout->gadget_left;
+	ng.ng_TopEdge		 = y;
+	ng.ng_Width			 = layout->gadget_width;
+	ng.ng_Height		 = layout->gadget_height;
+	ng.ng_GadgetText = (STRPTR)LABEL_ZORROVER;
+	ng.ng_TextAttr	 = layout->text_attr;
+	ng.ng_VisualInfo = vi;
+	ng.ng_GadgetID	 = MYGAD_ZORROVER;
+	ng.ng_Flags			 = PLACETEXT_LEFT;
+
+	gads[MYGAD_ZORROVER] = gad = CreateGadget(NUMBER_KIND, gad, &ng,
+											GTNM_Number, 0,
+											GTNM_Border, TRUE,
+											TAG_END);
+	y += layout->row_step;
+
+	ng.ng_TopEdge	= y;
+	gads[MYGAD_FWVER] = gad = createTextReadoutGadget(gad, &ng,
+		MYGAD_FWVER, (STRPTR)LABEL_FWVER, "");
+	y += layout->row_step;
+
+	ng.ng_TopEdge	= y;
+	gads[MYGAD_TEMP] = gad = createTextReadoutGadget(gad, &ng,
+		MYGAD_TEMP, (STRPTR)LABEL_TEMP, "");
+	y += layout->row_step;
+
+	ng.ng_TopEdge	= y;
+	gads[MYGAD_TEMP_MINMAX] = gad = createTextReadoutGadget(gad, &ng,
+		MYGAD_TEMP_MINMAX, (STRPTR)LABEL_TEMP_MINMAX, "");
+	y += layout->row_step;
+
+	ng.ng_TopEdge	= y;
+	gads[MYGAD_VAUX] = gad = createTextReadoutGadget(gad, &ng,
+		MYGAD_VAUX, (STRPTR)LABEL_VAUX, "");
+	y += layout->row_step;
+
+	ng.ng_TopEdge	= y;
+	gads[MYGAD_VINT] = gad = createTextReadoutGadget(gad, &ng,
+		MYGAD_VINT, (STRPTR)LABEL_VINT, "");
+	y += layout->row_step;
+
+	ng.ng_TopEdge	= y;
+	gads[MYGAD_Z9AX] = gad = createTextReadoutGadget(gad, &ng,
+		MYGAD_Z9AX, (STRPTR)LABEL_Z9AX, "");
+	y += layout->row_step;
+
+	ng.ng_TopEdge	= y;
+	gads[MYGAD_STATUS] = gad = createTextReadoutGadget(gad, &ng,
+		MYGAD_STATUS, (STRPTR)LABEL_STATUS, "");
+	y += layout->row_step;
+
+	ng.ng_TopEdge	= y;
+	gads[MYGAD_RAWREGS] = gad = createTextReadoutGadget(gad, &ng,
+		MYGAD_RAWREGS, (STRPTR)LABEL_RAWREGS, "");
+	y += layout->row_step;
+
+	ng.ng_TopEdge	= y;
+	gads[MYGAD_VIDEOCAP] = gad = createTextReadoutGadget(gad, &ng,
+		MYGAD_VIDEOCAP, (STRPTR)LABEL_VIDEOCAP, "");
+	y += layout->row_step + layout->section_gap;
+
+	ng.ng_TopEdge	= y;
+	ng.ng_GadgetID	= MYGAD_REFRESHMODE;
+	ng.ng_GadgetText = (STRPTR)LABEL_REFRESHMODE;
+
+	gads[MYGAD_REFRESHMODE] = gad = CreateGadget(CYCLE_KIND, gad, &ng,
+											GTCY_Labels, refresh_labels,
+											GTCY_Active, refresh_mode,
+											TAG_END);
+	y += layout->control_step + layout->section_gap;
+
+	ng.ng_TopEdge	= y;
+	gads[MYGAD_TEST_RESULT] = gad = createTextReadoutGadget(gad, &ng,
+		MYGAD_TEST_RESULT, (STRPTR)LABEL_TEST_RESULT, "Not run");
+
+	ng.ng_LeftEdge	 = layout->margin_x;
+	ng.ng_TopEdge		 = layout->button_top;
+	ng.ng_Width			 = layout->button_width;
+	ng.ng_GadgetText = (STRPTR)LABEL_BTN_TEST;
+	ng.ng_GadgetID	 = MYGAD_BTN_TEST;
+	ng.ng_Flags			 = PLACETEXT_IN;
+
+	gads[MYGAD_BTN_TEST] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+											TAG_END);
+
+	ng.ng_LeftEdge	= layout->button_col2;
+	ng.ng_GadgetID	 = MYGAD_BTN_REFRESH;
+	ng.ng_GadgetText = (STRPTR)LABEL_BTN_REFRESH;
+
+	gads[MYGAD_BTN_REFRESH] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+											TAG_END);
+
+	/* Opens the Scandoubler window (issue #97): fills the free third
+	 * column of the first row, directly above the Audio button - no
+	 * extra window height. Also reachable from the Settings menu when
+	 * the button row is clipped on short screens. */
+	ng.ng_LeftEdge	= layout->button_col3;
+	ng.ng_GadgetID	 = MYGAD_BTN_SCANDOUBLER;
+	ng.ng_GadgetText = (STRPTR)LABEL_BTN_SCANDOUBLER;
+
+	gads[MYGAD_BTN_SCANDOUBLER] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+											TAG_END);
+
+	/* Firmware update / restore (issue #26): a second button row mirroring
+	 * the Test/Refresh row, plus a status line below it. */
+	ng.ng_LeftEdge	 = layout->margin_x;
+	ng.ng_TopEdge		 = layout->fw_button_top;
+	ng.ng_Width			 = layout->button_width;
+	ng.ng_GadgetText = (STRPTR)LABEL_BTN_UPDATE;
+	ng.ng_GadgetID	 = MYGAD_BTN_UPDATE;
+	ng.ng_Flags			 = PLACETEXT_IN;
+	gads[MYGAD_BTN_UPDATE] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+											TAG_END);
+
+	ng.ng_LeftEdge	 = layout->button_col2;
+	ng.ng_GadgetID	 = MYGAD_BTN_RESTORE;
+	ng.ng_GadgetText = (STRPTR)LABEL_BTN_RESTORE;
+	gads[MYGAD_BTN_RESTORE] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+											TAG_END);
+
+	/* R13/R18: opens the Audio window; greyed out (not hidden) when
+	 * the AX codec or the advertised audio-control capability is
+	 * absent. */
+	ng.ng_LeftEdge	= layout->button_col3;
+	ng.ng_GadgetID	 = MYGAD_BTN_AUDIO;
+	ng.ng_GadgetText = (STRPTR)LABEL_BTN_AUDIO;
+
+	gads[MYGAD_BTN_AUDIO] = gad = CreateGadget(BUTTON_KIND, gad, &ng,
+											GA_Disabled,
+											!zztop_audio_surface_available(),
+											TAG_END);
+
+	ng.ng_LeftEdge	 = layout->gadget_left;
+	ng.ng_TopEdge		 = layout->fw_status_top;
+	ng.ng_Width			 = layout->gadget_width;
+	ng.ng_Flags			 = PLACETEXT_LEFT;
+	gads[MYGAD_FW_STATUS] = gad = createTextReadoutGadget(gad, &ng,
+		MYGAD_FW_STATUS, (STRPTR)LABEL_FW_STATUS, "idle");
+
+	for (int i=0; i<MYGAD_COUNT; i++) {
+		if (!gads[i]) return NULL;
+	}
+
+	return(gad);
+}
+
+VOID process_window_events(struct Window *mywin)
+{
+	struct IntuiMessage *imsg;
+	ULONG imsgClass;
+	UWORD imsgCode;
+	struct Gadget *gad;
+	BOOL terminated = FALSE;
+	ULONG user_sig = 1U << mywin->UserPort->mp_SigBit;
+	ULONG timer_sig = 0;
+
+	while (!terminated) {
+		ULONG signals;
+
+		timer_sig = TimerBase ? (1U << timerport->mp_SigBit) : 0;
+		signals = Wait(user_sig | timer_sig);
+
+		if (timer_sig && (signals & timer_sig) && timer_pending &&
+			CheckIO((struct IORequest *)timerio)) {
+			WaitIO((struct IORequest *)timerio);
+			timer_pending = FALSE;
+			refresh_zz_info(mywin);
+			zztop_schedule_timer();
+		}
+
+		while ((!terminated) && (imsg = GT_GetIMsg(mywin->UserPort))) {
+			gad = (struct Gadget *)imsg->IAddress;
+
+			imsgClass = imsg->Class;
+			imsgCode = imsg->Code;
+
+			GT_ReplyIMsg(imsg);
+
+			switch (imsgClass) {
+				case IDCMP_GADGETDOWN:
+					break;
+				case IDCMP_GADGETUP:
+					handleGadgetEvent(mywin, gad, imsgCode);
+					break;
+				case IDCMP_VANILLAKEY:
+					//handleVanillaKey(mywin, imsgCode, slider_level);
+					break;
+				case IDCMP_MENUPICK: {
+					UWORD menuNumber = imsgCode;
+					while (menuNumber != MENUNULL && zztop_menustrip) {
+						struct MenuItem *item = ItemAddress(zztop_menustrip, menuNumber);
+						if (!item) break;
+						switch ((ULONG)GTMENUITEM_USERDATA(item)) {
+							case MENU_ID_SETTINGS:
+								settings_window(zztop_screen, zztop_vi, &zztop_layout);
+								break;
+							case MENU_ID_SCANDOUBLER:
+								scandoubler_window(zztop_screen, zztop_vi, &zztop_layout);
+								break;
+							case MENU_ID_AUDIO:
+								/* Same window and guard as the Audio
+								 * button; audio_window explains when
+								 * the surface is absent. */
+								audio_window(zztop_screen, zztop_vi, &zztop_layout);
+								break;
+							case MENU_ID_FWUPDATE:
+								do_fw_update(mywin);
+								break;
+							case MENU_ID_FWRESTORE:
+								do_fw_restore(mywin);
+								break;
+							case MENU_ID_ABOUT:
+								zztop_about(mywin);
+								break;
+							case MENU_ID_QUIT:
+								terminated = TRUE;
+								break;
+							case MENU_ID_AUDIOLOG:
+								audio_log_toggle(mywin);
+								break;
+						}
+						menuNumber = item->NextSelect;
+					}
+					break;
+				}
+				case IDCMP_CLOSEWINDOW:
+					terminated = TRUE;
+					break;
+				case IDCMP_REFRESHWINDOW:
+					/* With GadTools, the application must use GT_BeginRefresh()
+					** where it would normally have used BeginRefresh()
+					*/
+					GT_BeginRefresh(mywin);
+					GT_EndRefresh(mywin, TRUE);
+					break;
+			}
+		}
+	}
+
+	zztop_close_timer();
+	if (audio_log_on)
+		audio_log_toggle(NULL);
+}
+
+VOID gadtoolsWindow(VOID) {
+	struct Screen		*mysc;
+	struct Window		*mywin;
+	struct Gadget		*glist = NULL;
+	void						*vi;
+
+	if (NULL == (mysc = LockPubScreen(NULL)))
+		errorMessage("Couldn't lock default public screen");
+	else {
+		if (NULL == (vi = GetVisualInfo(mysc, TAG_END)))
+			errorMessage("GetVisualInfo() failed");
+		else {
+			zztop_init_layout(&zztop_layout, mysc);
+			zztop_screen = mysc;
+			zztop_vi = vi;
+
+			/* Menu strip is optional: without it the tool still works,
+			 * just without the menu-only windows. */
+			zztop_menustrip = CreateMenus(zztop_newmenus, TAG_END);
+			if (zztop_menustrip &&
+					!LayoutMenus(zztop_menustrip, vi, GTMN_NewLookMenus, TRUE, TAG_END)) {
+				FreeMenus(zztop_menustrip);
+				zztop_menustrip = NULL;
+			}
+
+			if (NULL == createAllGadgets(&glist, vi, &zztop_layout))
+				errorMessage("createAllGadgets() failed");
+			else {
+				/* Fixed-size GadTools windows use Smart Refresh so Layers
+				 * restores obscured pixels even while a modal child or
+				 * requester has suspended the parent's event loop. */
+				if (NULL == (mywin = OpenWindowTags(NULL,
+						WA_Title,			"ZZTop " ZZTOP_RELEASE,
+						WA_Gadgets,		glist,			WA_AutoAdjust,		TRUE,
+						WA_Width,				zztop_layout.window_width,			WA_MinWidth,			 zztop_layout.window_width,
+						WA_InnerHeight, zztop_layout.window_height,			WA_MinHeight,			 zztop_layout.window_height,
+						WA_DragBar,		 TRUE,			WA_DepthGadget,		TRUE,
+						WA_Activate,	 TRUE,			WA_CloseGadget,		TRUE,
+						WA_SizeGadget, FALSE,			WA_SmartRefresh, TRUE,
+						/* Renders the menu strip with the new-look pens
+						 * (black on white). GTMN_NewLookMenus at
+						 * LayoutMenus() only handles the layout half;
+						 * without this tag Intuition draws the old-style
+						 * pens - black on black on many screens. Unknown
+						 * (thus ignored) on V37, where menus stay
+						 * old-look. */
+						WA_NewLookMenus, TRUE,
+						WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
+							IDCMP_VANILLAKEY | IDCMP_MENUPICK |
+							BUTTONIDCMP | CYCLEIDCMP,
+						WA_PubScreen, mysc,
+						TAG_END))) {
+					errorMessage("OpenWindow() failed");
+				} else {
+					if (zztop_menustrip) SetMenuStrip(mywin, zztop_menustrip);
+					refresh_zz_info(mywin);
+					GT_RefreshWindow(mywin, NULL);
+					process_window_events(mywin);
+					if (zztop_menustrip) ClearMenuStrip(mywin);
+					CloseWindow(mywin);
+				}
+			}
+
+			if (zztop_menustrip) {
+				FreeMenus(zztop_menustrip);
+				zztop_menustrip = NULL;
+			}
+			if (glist) FreeGadgets(glist);
+			FreeVisualInfo(vi);
+		}
+		UnlockPubScreen(NULL, mysc);
+	}
+}
+
+int main(void) {
+	if (NULL == (IntuitionBase = OpenLibrary((CONST_STRPTR)"intuition.library", 37))) {
+		errorMessage("Requires V37 intuition.library");
+		return 0;
+	}
+
+	if (!(ExpansionBase = (struct ExpansionBase *)
+		OpenLibrary((CONST_STRPTR)"expansion.library",0L))) {
+		errorMessage("Requires expansion.library");
+		CloseLibrary(IntuitionBase);
+		return 0;
+	}
+
+	zz_cd = (struct ConfigDev*)FindConfigDev(zz_cd,0x6d6e,0x3);
+	if (zz_cd) {
+		zorro_version = 2;
+	} else {
+		zz_cd = (struct ConfigDev*)FindConfigDev(zz_cd,0x6d6e,0x4);
+		if (zz_cd) {
+			zorro_version = 3;
+		} else {
+			errorMessage("MNT ZZ9000 not found");
+		CloseLibrary((struct Library *)ExpansionBase);
+			CloseLibrary(IntuitionBase);
+			return 0;
+		}
+	}
+
+	zz_regs = (UBYTE*)zz_cd->cd_BoardAddr;
+	CloseLibrary((struct Library *)ExpansionBase);
+
+	if (NULL == (GfxBase = OpenLibrary((CONST_STRPTR)"graphics.library", 37)))
+		errorMessage("Requires V37 graphics.library");
+	else {
+		if (NULL == (GadToolsBase = OpenLibrary((CONST_STRPTR)"gadtools.library", 37)))
+			errorMessage("Requires V37 gadtools.library");
+		else {
+			/* asl.library is optional: only the firmware file requester
+			 * needs it, so a missing one just disables the Update picker
+			 * rather than blocking the tool. */
+			AslBase = OpenLibrary((CONST_STRPTR)"asl.library", 37);
+			/* zz9k.library is optional like asl.library: without it,
+			 * or without the firmware advertising the audio-control
+			 * capability, the Audio button stays disabled and every
+			 * other feature is unaffected (R16). The caps are read
+			 * once here, the way the Settings window reads the
+			 * firmware capability register at setup. */
+			ZZ9KBase = OpenLibrary((STRPTR)"zz9k.library", 0);
+			if (ZZ9KBase) {
+				ZZ9KCaps caps;
+
+				if (ZZ9KQueryCaps(&caps) == ZZ9K_STATUS_OK) {
+					audio_control_capped =
+						(caps.capability_bits & ZZ9K_CAP_AUDIO_CONTROL)
+							? TRUE : FALSE;
+					audio_metering_capped =
+						(caps.capability_bits & ZZ9K_CAP_AUDIO_METERING)
+							? TRUE : FALSE;
+				}
+			}
+			gadtoolsWindow();
+			if (ZZ9KBase) {
+				CloseLibrary(ZZ9KBase);
+				ZZ9KBase = NULL;
+			}
+			if (AslBase) CloseLibrary(AslBase);
+			CloseLibrary(GadToolsBase);
+		}
+		CloseLibrary(GfxBase);
+	}
+	CloseLibrary(IntuitionBase);
+
+	return 0;
+}

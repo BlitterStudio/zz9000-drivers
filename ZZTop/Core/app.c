@@ -23,7 +23,7 @@
 #include "board.h"
 #include "fwup_client.h"
 #include "settings.h"
-#include "ui.h"
+#include "frontend.h"
 #include "video.h"
 
 /* Upper bound, in ticks, for the firmware's asynchronous audio save
@@ -64,18 +64,14 @@ BOOL app_has_changes(void)
 {
 	struct app_pending p;
 
-	ui_flush();
+	fe_flush();
 	app_pending(&p);
 	return p.card || p.live || p.audio;
 }
 
 void app_models_changed(void)
 {
-	UWORD i;
-
-	for (i = 0; i < PAGE_COUNT; i++)
-		if (ui_pages[i]->sync) ui_pages[i]->sync();
-	ui_pending_changed();
+	fe_models_changed();
 }
 
 void app_tick(void)
@@ -105,19 +101,19 @@ static BOOL save_audio(void)
 
 	if (!audio_save_running && !guard.valid) {
 		if (!settings_guard_begin(&guard)) {
-			ui_status("Could not read ZZ9000.CFG; audio not saved");
+			fe_status("Could not read ZZ9000.CFG; audio not saved");
 			return FALSE;
 		}
 		if (!audio_save_start(msg, sizeof(msg))) {
 			guard.valid = FALSE;
-			ui_status("%s", msg);
+			fe_status("%s", msg);
 			return FALSE;
 		}
 		audio_save_running = TRUE;
 	}
 
 	if (audio_save_running) {
-		ui_status("Saving audio settings...");
+		fe_status("Saving audio settings...");
 		deadline = now_ticks() + AUDIO_SAVE_TIMEOUT_TICKS;
 		state = audio_save_poll(msg, sizeof(msg));
 		while (state == AUDIO_SAVE_RUNNING && now_ticks() < deadline) {
@@ -125,7 +121,7 @@ static BOOL save_audio(void)
 			state = audio_save_poll(msg, sizeof(msg));
 		}
 		if (state == AUDIO_SAVE_RUNNING) {
-			ui_status("Audio save still running on the card; press "
+			fe_status("Audio save still running on the card; press "
 				"Save again to finish");
 			return FALSE;
 		}
@@ -135,9 +131,9 @@ static BOOL save_audio(void)
 			 * repair it before reporting. */
 			st = settings_guard_end(&guard);
 			if (st == FWUP_OK)
-				ui_status("%s", msg);
+				fe_status("%s", msg);
 			else
-				ui_status("%s; restoring other settings failed: %s",
+				fe_status("%s; restoring other settings failed: %s",
 					msg, fwup_strerror(st));
 			return FALSE;
 		}
@@ -145,7 +141,7 @@ static BOOL save_audio(void)
 
 	st = settings_guard_end(&guard);
 	if (st != FWUP_OK) {
-		ui_status("Audio saved, but restoring other settings failed: "
+		fe_status("Audio saved, but restoring other settings failed: "
 			"%s. Press Save to retry.", fwup_strerror(st));
 		return FALSE;
 	}
@@ -160,35 +156,35 @@ BOOL app_save(void)
 	BOOL ok = TRUE;
 	UWORD reboot;
 
-	ui_flush();
+	fe_flush();
 	app_pending(&p);
 	reboot = p.reboot;
 
 	if (p.card) {
 		if (!settings_validate(&bad, msg, sizeof(msg))) {
-			ui_status("%s", msg);
+			fe_status("%s", msg);
 			if (bad == CFG_MAC || bad == CFG_HDF)
-				ui_show_page(PAGE_SYSTEM);
+				fe_show(FE_PLACE_SYSTEM);
 			return FALSE;
 		}
 		if (!video_save_check(msg, sizeof(msg))) {
-			ui_status("%s", msg);
-			ui_show_page(PAGE_CAPTURE);
+			fe_status("%s", msg);
+			fe_show(FE_PLACE_CAPTURE);
 			return FALSE;
 		}
 	}
 
-	ui_busy(TRUE);
+	fe_busy(TRUE);
 	if (p.audio) ok = save_audio();
 	if (ok && p.card) {
 		UWORD st;
 
-		ui_status("Writing ZZ9000.CFG...");
+		fe_status("Writing ZZ9000.CFG...");
 		st = settings_save();
 		if (st == FWUP_OK) {
 			video_saved();
 		} else {
-			ui_status("Saving ZZ9000.CFG failed: %s", fwup_strerror(st));
+			fe_status("Saving ZZ9000.CFG failed: %s", fwup_strerror(st));
 			ok = FALSE;
 		}
 	} else if (ok && p.audio) {
@@ -197,15 +193,15 @@ BOOL app_save(void)
 		settings_load();
 	}
 	if (ok) app_init();   /* the running state is now the saved state */
-	ui_busy(FALSE);
+	fe_busy(FALSE);
 
 	if (ok) {
 		if (reboot)
-			ui_status("Saved. Power-cycle the Amiga to apply %u "
+			fe_status("Saved. Power-cycle the Amiga to apply %u "
 				"boot-time setting%s.", (unsigned)reboot,
 				reboot == 1 ? "" : "s");
 		else
-			ui_status("Saved.");
+			fe_status("Saved.");
 	}
 	app_models_changed();
 	return ok;
@@ -216,24 +212,24 @@ BOOL app_revert(void)
 	static char msg[96];
 	BOOL ok = TRUE;
 
-	ui_flush();
-	ui_busy(TRUE);
+	fe_flush();
+	fe_busy(TRUE);
 	if (!video_revert(msg, sizeof(msg))) {
-		ui_status("%s", msg);
+		fe_status("%s", msg);
 		ok = FALSE;
 	}
 	board_set_scanline_mode(scan_mode_anchor);
 	board_set_scanline_parity(scan_parity_anchor);
 	if (ok && audio_pending() && !audio_revert(msg, sizeof(msg))) {
-		ui_status("%s", msg);
+		fe_status("%s", msg);
 		ok = FALSE;
 	}
 	if (ok) {
 		settings_load();
 		video_init();
-		ui_status("Reverted to the saved settings.");
+		fe_status("Reverted to the saved settings.");
 	}
-	ui_busy(FALSE);
+	fe_busy(FALSE);
 	app_models_changed();
 	return ok;
 }
@@ -243,14 +239,14 @@ BOOL app_quit_allowed(void)
 	struct app_pending p;
 	LONG choice;
 
-	ui_flush();
+	fe_flush();
 	app_pending(&p);
 	if (!p.card && !p.live && !p.audio) return TRUE;
 
 	if (p.live || p.audio) {
 		/* Live changes are already on the card's hardware: they can be
 		 * kept until the next reboot without saving. */
-		choice = ui_ask("Save|Keep until reboot|Discard|Cancel",
+		choice = fe_ask("Save|Keep until reboot|Discard|Cancel",
 			"You have unsaved changes.\n\n"
 			"Save writes them to the card. Keep until reboot leaves "
 			"the live changes running without saving them%s. Discard "
@@ -263,7 +259,7 @@ BOOL app_quit_allowed(void)
 		default: return FALSE;
 		}
 	}
-	choice = ui_ask("Save|Discard|Cancel",
+	choice = fe_ask("Save|Discard|Cancel",
 		"You have %u unsaved change%s.", (unsigned)p.card,
 		p.card == 1 ? "" : "s");
 	switch (choice) {

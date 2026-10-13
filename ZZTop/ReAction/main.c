@@ -77,20 +77,21 @@ int main(void)
 	GadToolsBase = OpenLibrary((CONST_STRPTR)"gadtools.library", 39);
 	UtilityBase = OpenLibrary((CONST_STRPTR)"utility.library", 39);
 	if (!GfxBase || !GadToolsBase || !UtilityBase) {
-		fail("ZZTop needs AmigaOS 3.0 or newer.");
+		fail(ZZTOP_NAME " needs AmigaOS 3.0 or newer.");
 		goto out;
 	}
 	if (!ui_open_classes(missing, sizeof(missing))) {
 		snprintf(message, sizeof(message),
-			"ZZTop needs the ReAction classes of AmigaOS 3.2, "
+			ZZTOP_NAME " needs the ReAction classes of AmigaOS 3.2, "
 			"or AmigaOS 3.5/3.9 (or ClassAct on 3.1).\n\n"
-			"Missing: %s", missing);
+			"Missing: %s\n\n"
+			"The classic ZZTop works without them.", missing);
 		fail(message);
 		goto out;
 	}
 	if (!board_find()) {
-		fail("No ZZ9000 found.\n\nZZTop controls the ZZ9000 Zorro card; "
-			"check that it is seated and configured.");
+		fail("No ZZ9000 found.\n\n" ZZTOP_NAME " controls the ZZ9000 "
+			"Zorro card; check that it is seated and configured.");
 		goto out;
 	}
 
@@ -106,7 +107,8 @@ int main(void)
 	if (ui_create())
 		ui_run();
 	else
-		fail("ZZTop could not open its window.");
+		fail(ZZTOP_NAME " could not open its window. It needs a screen "
+			"of at least 640x480; the classic ZZTop fits smaller ones.");
 	ui_destroy();
 	audio_shutdown();
 

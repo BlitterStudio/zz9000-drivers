@@ -17,7 +17,7 @@
 #include "zztop.h"
 #include "board.h"
 #include "settings.h"
-#include "ui.h"
+#include "frontend.h"
 #include "zz9k/abi.h"
 #include "zz9k/request.h"
 
@@ -1026,7 +1026,7 @@ void audio_tick(void)
 			"Calibration committed - Save to persist");
 		app_models_changed();
 	}
-	if (audio_metering_available() && (ui_ticks() % 3U) == 0) {
+	if (audio_metering_available() && (fe_ticks() % 3U) == 0) {
 		audio_read_meter(FALSE);
 		audio_read_meter(TRUE);
 	}

@@ -1,5 +1,5 @@
 /*
- * Host tests for ZZTop's ZZ9000.CFG editor model (ZZTop/Sources/settings.c):
+ * Host tests for ZZTop's ZZ9000.CFG editor model (ZZTop/Core/settings.c):
  * per-field dirty tracking, merge-on-save over a fresh card read, and the
  * guard that undoes the firmware audio Save's rewrite of non-audio keys.
  *

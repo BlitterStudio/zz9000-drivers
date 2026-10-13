@@ -12,7 +12,7 @@
 #include "align.h"
 #include "board.h"
 #include "settings.h"
-#include "ui.h"
+#include "frontend.h"
 #include "vcap_sampling.h"
 #include "video.h"
 
@@ -164,11 +164,11 @@ BOOL video_current_path_matches(void)
 /* Keep the main window responsive during a bounded protocol wait. */
 static int wait_keep_running(void *ctx)
 {
-	return ui_wait_keep_running(ctx);
+	return fe_wait_keep_running(ctx);
 }
 
 /* Attach UI wait servicing to a copy of the card I/O contract. */
-static struct zz_vcap_io wait_io(struct ui_wait *wait)
+static struct zz_vcap_io wait_io(struct fe_wait *wait)
 {
 	struct zz_vcap_io io = card_io;
 
@@ -181,14 +181,14 @@ static struct zz_vcap_io wait_io(struct ui_wait *wait)
  * in addition to the phase/geometry protocol clients. */
 /* Commit one crop-control word and wait for its acknowledged snapshot. */
 static BOOL apply_raw(ULONG raw, struct zz_vcap_snapshot *applied,
-	struct ui_wait *wait, BOOL restoring)
+	struct fe_wait *wait, BOOL restoring)
 {
 	struct zz_vcap_status status;
 	ULONG stable;
 	UBYTE sequence;
 	UWORD tick;
 
-	if (wait && !restoring && !ui_wait_keep_running(wait)) return FALSE;
+	if (wait && !restoring && !fe_wait_keep_running(wait)) return FALSE;
 	if (zz_vcap_read_stable(&card_io, ZZ_VCAP_LIVE_STATUS, &stable) !=
 			ZZ_VCAP_OK) return FALSE;
 	zz_vcap_status_unpack(stable, &status);
@@ -199,7 +199,7 @@ static BOOL apply_raw(ULONG raw, struct zz_vcap_snapshot *applied,
 	board_write16(ZZ_VCAP_LIVE_STAGED_RAW_LO, (UWORD)raw);
 	board_write16(ZZ_VCAP_LIVE_COMMIT, ZZ_VCAP_LIVE_COMMIT_TOKEN);
 	for (tick = 0; tick < VCAP_APPLY_TICKS; tick++) {
-		if (wait && !restoring && !ui_wait_keep_running(wait)) return FALSE;
+		if (wait && !restoring && !fe_wait_keep_running(wait)) return FALSE;
 		if (zz_vcap_read_stable(&card_io, ZZ_VCAP_LIVE_STATUS, &stable) ==
 				ZZ_VCAP_OK && zz_vcap_request_complete(stable, sequence)) {
 			if (!capture_snapshot(applied)) return FALSE;
@@ -214,17 +214,17 @@ static BOOL apply_raw(ULONG raw, struct zz_vcap_snapshot *applied,
 /* Apply a phase through the cancellable phase protocol. */
 static BOOL phase_apply(int phase, BOOL restoring, char *msg, UWORD size)
 {
-	struct ui_wait wait;
+	struct fe_wait wait;
 	struct zz_vcap_io io;
 	BOOL cancel = FALSE;
 	enum zz_vcap_result result;
 
-	ui_wait_begin(&wait, &cancel);
+	fe_wait_begin(&wait, &cancel);
 	io = wait_io(&wait);
-	ui_busy(TRUE);
+	fe_busy(TRUE);
 	result = zz_vcap_phase_apply(&io, phase, restoring);
-	ui_busy(FALSE);
-	ui_wait_end(&wait);
+	fe_busy(FALSE);
+	fe_wait_end(&wait);
 	if (result != ZZ_VCAP_OK) {
 		write_result(msg, size, "Phase not confirmed: ", result);
 		return FALSE;
@@ -236,17 +236,17 @@ static BOOL phase_apply(int phase, BOOL restoring, char *msg, UWORD size)
 static BOOL geometry_apply(UWORD width, UWORD height, BOOL restoring,
 	char *msg, UWORD size)
 {
-	struct ui_wait wait;
+	struct fe_wait wait;
 	struct zz_vcap_io io;
 	BOOL cancel = FALSE;
 	enum zz_vcap_result result;
 
-	ui_wait_begin(&wait, &cancel);
+	fe_wait_begin(&wait, &cancel);
 	io = wait_io(&wait);
-	ui_busy(TRUE);
+	fe_busy(TRUE);
 	result = zz_vcap_geometry_apply(&io, width, height, restoring);
-	ui_busy(FALSE);
-	ui_wait_end(&wait);
+	fe_busy(FALSE);
+	fe_wait_end(&wait);
 	if (result != ZZ_VCAP_OK) {
 		write_result(msg, size, "Capture window not confirmed: ", result);
 		return FALSE;
@@ -346,7 +346,7 @@ BOOL video_set_crop(UWORD h, BOOL hp, UWORD v, BOOL vp, char *msg, UWORD size)
 {
 	struct zz_vcap_control control;
 	struct zz_vcap_snapshot applied;
-	struct ui_wait wait;
+	struct fe_wait wait;
 	BOOL cancel = FALSE;
 
 	if (h > ZZ_VCAP_CROP_MAX || v > ZZ_VCAP_CROP_MAX) {
@@ -375,17 +375,17 @@ BOOL video_set_crop(UWORD h, BOOL hp, UWORD v, BOOL vp, char *msg, UWORD size)
 	live.crop_confirmed = FALSE;
 	live.crop_target = zz_vcap_control_pack(&control);
 	live.crop_target_valid = TRUE;
-	ui_wait_begin(&wait, &cancel);
-	ui_busy(TRUE);
+	fe_wait_begin(&wait, &cancel);
+	fe_busy(TRUE);
 	if (!apply_raw(live.crop_target, &applied, &wait, FALSE)) {
-		ui_busy(FALSE);
-		ui_wait_end(&wait);
+		fe_busy(FALSE);
+		fe_wait_end(&wait);
 		write_message(msg, size, cancel ? "Crop change cancelled" :
 			"Crop was not acknowledged by native video");
 		return FALSE;
 	}
-	ui_busy(FALSE);
-	ui_wait_end(&wait);
+	fe_busy(FALSE);
+	fe_wait_end(&wait);
 	live.current = applied;
 	live.crop_confirmed = TRUE;
 	stage_crop(h, hp, v, vp);
@@ -399,7 +399,7 @@ BOOL video_set_sample(UWORD sample, char *msg, UWORD size)
 {
 	struct zz_vcap_control control;
 	struct zz_vcap_snapshot applied;
-	struct ui_wait wait;
+	struct fe_wait wait;
 	BOOL cancel = FALSE;
 
 	if (sample > 2) {
@@ -416,17 +416,17 @@ BOOL video_set_sample(UWORD sample, char *msg, UWORD size)
 		live.crop_confirmed = FALSE;
 		live.crop_target = zz_vcap_control_pack(&control);
 		live.crop_target_valid = TRUE;
-		ui_wait_begin(&wait, &cancel);
-		ui_busy(TRUE);
+		fe_wait_begin(&wait, &cancel);
+		fe_busy(TRUE);
 		if (!apply_raw(live.crop_target, &applied, &wait, FALSE)) {
-			ui_busy(FALSE);
-		ui_wait_end(&wait);
+			fe_busy(FALSE);
+		fe_wait_end(&wait);
 			write_message(msg, size, cancel ? "Sample change cancelled" :
 				"Sample change was not acknowledged");
 			return FALSE;
 		}
-		ui_busy(FALSE);
-		ui_wait_end(&wait);
+		fe_busy(FALSE);
+		fe_wait_end(&wait);
 		live.current = applied;
 		live.crop_confirmed = TRUE;
 	}
@@ -536,7 +536,7 @@ BOOL video_reset_automatic(char *msg, UWORD size)
 {
 	struct zz_vcap_control control;
 	struct zz_vcap_snapshot applied;
-	struct ui_wait wait;
+	struct fe_wait wait;
 	BOOL cancel = FALSE;
 	enum cfg_field field;
 
@@ -565,19 +565,19 @@ BOOL video_reset_automatic(char *msg, UWORD size)
 	live.crop_confirmed = FALSE;
 	live.crop_target = zz_vcap_control_pack(&control);
 	live.crop_target_valid = TRUE;
-	ui_wait_begin(&wait, &cancel);
-	ui_busy(TRUE);
+	fe_wait_begin(&wait, &cancel);
+	fe_busy(TRUE);
 	if (!apply_raw(live.crop_target, &applied, &wait, FALSE)) {
-		ui_busy(FALSE);
-		ui_wait_end(&wait);
+		fe_busy(FALSE);
+		fe_wait_end(&wait);
 		write_message(msg, size, cancel ? "Reset to automatic cancelled" :
 			"Automatic crop was not acknowledged");
 		return FALSE;
 	}
 	live.current = applied;
 	live.crop_confirmed = TRUE;
-	ui_busy(FALSE);
-	ui_wait_end(&wait);
+	fe_busy(FALSE);
+	fe_wait_end(&wait);
 	if (live.domain != ZZ_VCAP_PHASE_NONE) {
 		live.phase_touched = TRUE;
 		live.phase_confirmed = FALSE;
@@ -652,9 +652,9 @@ BOOL video_align(char *msg, UWORD size)
 
 	if (!video_align_ready(msg, size) || !video_snapshot(&entry))
 		return FALSE;
-	ui_busy(TRUE);
+	fe_busy(TRUE);
 	if (!align_picture_run(&card_io, &entry, &control, msg, size)) {
-		ui_busy(FALSE);
+		fe_busy(FALSE);
 		if (strstr(msg, "state is unknown")) {
 			live.crop_touched = TRUE;
 			live.crop_confirmed = FALSE;
@@ -662,7 +662,7 @@ BOOL video_align(char *msg, UWORD size)
 		}
 		return FALSE;
 	}
-	ui_busy(FALSE);
+	fe_busy(FALSE);
 	live.crop_target = zz_vcap_control_pack(&control);
 	live.crop_target_valid = TRUE;
 	live.crop_touched = TRUE;
@@ -687,10 +687,10 @@ BOOL video_find_phase(char *msg, UWORD size)
 		zz_vcap_phase_read(&card_io, &phase) != ZZ_VCAP_OK || !refresh_live())
 		return FALSE;
 	zz_vcap_status_unpack(live.current.status, &status);
-	ui_busy(TRUE);
+	fe_busy(TRUE);
 	result = vcap_sampling_run(&card_io, status.ntsc, 0, phase.applied,
 		&chosen, live.sweep, msg, size);
-	ui_busy(FALSE);
+	fe_busy(FALSE);
 	if (result != 1) {
 		if (result == -2) {
 			live.phase_touched = TRUE;

@@ -51,6 +51,7 @@ if [ "$quick" -eq 0 ]; then
     check_file mhi/mhizz9000.library
     check_file sd-boot/zzsd.device
     check_exec ZZTop/ZZTop
+    check_exec ZZTop/ZZTop3
     check_exec ZZScanlines/ZZScanlines
     check_exec ZZFwUpdate/ZZFwUpdate
     check_exec net/ZZNetStats/ZZNetStats
@@ -109,6 +110,7 @@ tracked_artifacts=$(
         ZZFwUpdate/ZZFwUpdate \
         ZZScanlines/ZZScanlines \
         ZZTop/ZZTop \
+        ZZTop/ZZTop3 \
         net/ZZNetStats/ZZNetStats \
         ZZDiag/ZZDiag \
         ZZCapture/ZZCapture \

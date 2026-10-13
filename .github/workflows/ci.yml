@@ -125,14 +125,18 @@ jobs:
       # ZZTop/build-gcc.sh stages the zz9k.library client headers from a
       # zz9000-sdk checkout on the host, then re-execs itself through
       # tools/amiga-docker.sh -- like the mhi/ahi jobs -- because the
-      # Audio window is a control-plane client over the zz9k ABI.
-      - name: Build ZZTop
+      # audio pages are control-plane clients over the zz9k ABI. It builds
+      # both front ends over the shared core: ZZTop (GadTools) and ZZTop3
+      # (ReAction preview).
+      - name: Build ZZTop and ZZTop3
         run: |
           ZZTop/build-gcc.sh
       - uses: actions/upload-artifact@v7
         with:
           name: ZZTop
-          path: ZZTop/ZZTop
+          path: |
+            ZZTop/ZZTop
+            ZZTop/ZZTop3
           if-no-files-found: error
 
   zzscanlines:
@@ -441,6 +445,7 @@ jobs:
           install -Dm644 artifacts/zz9000ax.audio/zz9000ax.audio       "$INST/Devs/AHI/zz9000ax.audio"
           install -Dm644 artifacts/ZZ9000AX/ZZ9000AX                   "$INST/Devs/AudioModes/ZZ9000AX"
           install -Dm755 artifacts/ZZTop/ZZTop                         "$INST/Tools/ZZTop"
+          install -Dm755 artifacts/ZZTop/ZZTop3                        "$INST/Tools/ZZTop3"
           install -Dm755 artifacts/ZZScanlines/ZZScanlines             "$INST/Tools/ZZScanlines"
           install -Dm755 artifacts/ZZFwUpdate/ZZFwUpdate                "$INST/Tools/ZZFwUpdate"
           install -Dm755 artifacts/ZZNetStats/ZZNetStats               "$INST/Tools/ZZNetStats"
@@ -452,7 +457,7 @@ jobs:
           # Sibling names must cover the full drawer doc set so
           # cross-document links resolve inside the drawer.
           MD2GUIDE="fw-src/sdk/scripts/md2guide.py"
-          SIBLINGS="--sibling ahi.guide --sibling usb-poseidon.guide --sibling ZZCapture.guide --sibling sdk.guide --sibling amissl.guide --sibling ZZPlay.guide --sibling ZZTop.guide --sibling tools.guide"
+          SIBLINGS="--sibling ahi.guide --sibling usb-poseidon.guide --sibling ZZCapture.guide --sibling sdk.guide --sibling amissl.guide --sibling ZZPlay.guide --sibling ZZTop.guide --sibling ZZTop3.guide --sibling tools.guide"
           make_guide() {
             # shellcheck disable=SC2086
             python3 "$MD2GUIDE" --name "$2" $SIBLINGS "$1" "$INST/Docs/$2.guide"
@@ -461,6 +466,7 @@ jobs:
           make_guide usb-poseidon/README.md usb-poseidon
           make_guide ZZCapture/README.md ZZCapture
           make_guide ZZTop/README.md ZZTop
+          make_guide ZZTop/ZZTop3.md ZZTop3
           make_guide docs/cli-tools.md tools
           # Diagnostic-only MHI build; staged under Docs, never installed
           # as the production library.

@@ -14,7 +14,7 @@
  *   rendering for pages that are not on screen (a hidden page's gadgets
  *   must never draw over the visible one).
  * - Never block in a gadget handler for more than a few frames without
- *   ui_busy(); bounded hardware waits use ui_wait_begin()/ui_wait_end().
+ *   ui_busy(); bounded hardware waits use fe_wait_begin()/fe_wait_end().
  * - Text pointers handed to gadgets must outlive them: use struct ui_text
  *   for anything that changes.
  */
@@ -25,6 +25,8 @@
 #include <exec/lists.h>
 #include <intuition/classusr.h>
 #include <utility/tagitem.h>
+
+#include "frontend.h"
 
 /* Gadget ids: one block of 1000 per page, so a page owns ids
  * UI_GID(page, 0..999). Framework gadgets live below 1000. */
@@ -178,22 +180,8 @@ BOOL ui_pick_file(const char *title, const char *pattern, char *path,
  * Busy pointer plus an input-blocking requester; nests. */
 void ui_busy(BOOL busy);
 
-/* ---- bounded hardware waits ----
- * While a command polls the card, keep the window serviced: refresh is
- * handled, Close or Esc set *cancel, everything else is deferred and
- * re-queued by ui_wait_end so it is processed exactly once afterwards.
- * Pass ui_wait_keep_running/the wait as a zz_vcap_io keep_running hook. */
-struct ui_wait {
-	BOOL *cancel;
-	struct List deferred;
-};
-void ui_wait_begin(struct ui_wait *wait, BOOL *cancel);
-int ui_wait_keep_running(void *wait);
-void ui_wait_end(struct ui_wait *wait);
-
-/* Process pending window input once without blocking (for long loops
- * that already show a busy requester: only refresh is serviced). */
-void ui_service_refresh(void);
+/* Bounded hardware waits and the other core services are declared in
+ * frontend.h and implemented in ui.c. */
 
 /* ---- time ---- */
 ULONG ui_ticks(void);   /* 10 Hz counter since start */

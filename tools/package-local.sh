@@ -36,7 +36,7 @@ else
     exit 1
 fi
 md2guide=$sdk_src/scripts/md2guide.py
-SIBLINGS="--sibling ahi.guide --sibling usb-poseidon.guide --sibling ZZCapture.guide --sibling sdk.guide --sibling amissl.guide --sibling ZZPlay.guide --sibling ZZTop.guide --sibling tools.guide"
+SIBLINGS="--sibling ahi.guide --sibling usb-poseidon.guide --sibling ZZCapture.guide --sibling sdk.guide --sibling amissl.guide --sibling ZZPlay.guide --sibling ZZTop.guide --sibling ZZTop3.guide --sibling tools.guide"
 make_guide() {
     # shellcheck disable=SC2086
     "$PY" "$md2guide" --name "$2" $SIBLINGS "$repo_root/$1" "$inst/Docs/$2.guide"
@@ -51,6 +51,7 @@ install -Dm644 net/ZZ9000Net.device             "$inst/Devs/Networks/ZZ9000Net.d
 install -Dm644 ahi/driver/zz9000ax.audio        "$inst/Devs/AHI/zz9000ax.audio"
 install -Dm644 ahi/driver/ZZ9000AX              "$inst/Devs/AudioModes/ZZ9000AX"
 install -Dm755 ZZTop/ZZTop                      "$inst/Tools/ZZTop"
+install -Dm755 ZZTop/ZZTop3                     "$inst/Tools/ZZTop3"
 install -Dm755 ZZScanlines/ZZScanlines          "$inst/Tools/ZZScanlines"
 install -Dm755 ZZFwUpdate/ZZFwUpdate            "$inst/Tools/ZZFwUpdate"
 install -Dm755 net/ZZNetStats/ZZNetStats        "$inst/Tools/ZZNetStats"
@@ -61,6 +62,7 @@ make_guide ahi/README.md ahi
 make_guide usb-poseidon/README.md usb-poseidon
 make_guide ZZCapture/README.md ZZCapture
 make_guide ZZTop/README.md ZZTop
+make_guide ZZTop/ZZTop3.md ZZTop3
 make_guide docs/cli-tools.md tools
 # Diagnostic-only MHI build (feeder-vs-pump hardware isolation); staged
 # under Docs, deliberately never installed as the production library.
