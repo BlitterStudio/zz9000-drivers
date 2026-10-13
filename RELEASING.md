@@ -1,89 +1,119 @@
 # Releasing the ZZ9000 stack
 
-A user-facing release is **coordinated across two repos** that are tagged with
-the same version (`vX.Y.Z`):
+A ZZ9000 release publishes firmware ZIPs from
+[`zz9000-firmware`](https://github.com/BlitterStudio/zz9000-firmware) and an
+installer LHA from
+[`zz9000-drivers`](https://github.com/BlitterStudio/zz9000-drivers). Release
+the firmware first, pin that firmware in the drivers repository, then publish
+the drivers installer with the same `vX.Y.Z` tag.
 
-| Repo | Produces |
-|------|----------|
-| [`zz9000-firmware`](https://github.com/BlitterStudio/zz9000-firmware) | `BOOT.bin` per board variant (the SDK-service firmware), the SDK subtree at `sdk/` (`zz9k.library`, `mpega.library`, `zz9k-picture.datatype`, the OpenSSL crypto provider, CLI tools) |
-| [`zz9000-drivers`](https://github.com/BlitterStudio/zz9000-drivers) | the Amiga **installer** that bundles the drivers + SDK payloads + accelerated `amissl.library` |
-
-The drivers installer pins the SDK by **firmware commit** via
-[`sdk/SDK_REF`](sdk/SDK_REF) — the SDK sources live at `sdk/` inside the
-firmware repository since the consolidation — and builds the accelerated
-`amissl.library` from that pinned firmware's SDK subtree in CI.
+| Repository | Published artifact |
+| --- | --- |
+| `zz9000-firmware` | Firmware ZIPs, including `BOOT.bin` variants and the `sdk/` source subtree. |
+| `zz9000-drivers` | An installer LHA containing the drivers, SDK runtime payloads, and accelerated `amissl.library` builds. |
 
 ## Prerequisites
 
-- **Commit *and* tag signing are required** in all three repos
-  (`commit.gpgsign=true`, `tag.gpgsign=true`). Each `git commit`/`git tag` will
-  prompt for the GPG passphrase. If running tooling non-interactively, unlock the
-  agent first (e.g. `echo test | gpg --clearsign`), because a non-interactive
-  shell cannot answer the pinentry prompt and signing will time out.
-- The authenticated `gh` CLI for release verification.
+- Commit and tag signing are required in both repositories
+  (`commit.gpgsign=true`, `tag.gpgsign=true`). Each `git commit` and `git tag`
+  prompts for the GPG passphrase. For non-interactive tooling, unlock the
+  agent first (for example `echo test | gpg --clearsign`); a non-interactive
+  shell can't answer the pinentry prompt, so signing times out.
+- Install and authenticate the `gh` CLI for release verification.
 
-## 1. Decide the version & bump it
+## Procedure
 
-`vX.Y.Z` is the release tag for **firmware + drivers** (keep them aligned).
+1. Choose the version and prepare both repositories.
 
-| What | Where | Bump when |
-|------|-------|-----------|
-| Firmware version (what the card reports) | `zz9000-firmware` `ZZ9000_proto.sdk/ZZ9000OS/src/main.c` (`REVISION_MAJOR`/`REVISION_MINOR`) | every release |
-| SDK mailbox ABI / service versions | `sdk_mailbox.h` / `sdk_mailbox.c` | only on a protocol change (they are a compatibility contract) |
-| Driver component versions | each component's `version.h` / `*_VERSION`/`*_REVISION` / `$VER:` string | only when that component's **binary** actually changed since the last tag (`git diff --stat vX.Y.Z..HEAD`) — bumping an unchanged binary's version lies about it |
-| SDK component versions (`zz9k.library`, `mpega.library`, provider, datatype) | their source (`library_vectors.h`, `mpega_resident.c`, `zz9k_provider.c`, `zz9k_picture_datatype.c`) | independent of the release number; bump when that component changed |
+   Use `vX.Y.Z` for a normal release. Update the firmware version in
+   `ZZ9000_proto.sdk/ZZ9000OS/src/main.c` (`REVISION_MAJOR` and
+   `REVISION_MINOR`) and update the version of every changed driver binary.
+   Update release notes for any compatibility change. If the release changes
+   the Zorro 2 aperture layout, tell users to install matching firmware and
+   bitstream, `ZZ9000.card`, SDK payloads, and accelerated AmiSSL together.
 
-## 2. Release order (dependency order)
+2. Publish the firmware release.
 
-CI must be green on each master before tagging. Cut the tags in this order:
+   Merge the intended firmware changes, push the commit, and wait for its CI
+   run to pass. Create and push the tag:
 
-1. **Firmware** (carries the SDK at `sdk/`) — merge any remaining branches →
-   `master`; tag `vX.Y.Z`; push. The tag push runs CI (firmware + SDK host
-   tests + SDK m68k build + ABI mirror) and the `release` job publishes the
-   firmware ZIPs. A consolidated tag cannot publish with an unvalidated SDK.
-2. **Drivers `SDK_REF`** — set [`sdk/SDK_REF`](sdk/SDK_REF) to the firmware
-   release commit, commit, push, and wait for green drivers CI (the `sdk`
-   and `amissl` jobs rebuild against the new pin).
-3. **Drivers** — tag `vX.Y.Z`; push. The tag push runs CI and the `release`
-   job assembles + publishes the installer.
+   ```sh
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
+   ```
 
-### Version-skew note for release notes (Zorro 2)
+   The firmware workflow builds release assets on every run. For a `v*` tag,
+   it requires the complete asset set and publishes a GitHub release after its
+   required jobs finish.
 
-Current Zorro 2 bitstreams publish an aperture-relative layout in two
-generations: generation 1 (the previously supported 64 KiB host-heap layout,
-still published by older matched sets) and generation 2 (16 KiB host heap
-plus the 48 KiB Z2 audio direct-ring reservation). The RTG driver validates
-the descriptor against the 2 MiB or 4 MiB AutoConfig size, reserves the
-framebuffer, template, host, audio, and optional PIP regions, then
-acknowledges it with the descriptor's own generation token before firmware
-exposes the host heap or relocated `GFXData`. Invalid or unacknowledged
-descriptors fail closed, so template/PIP activity and SDK clients cannot
-disagree about ownership of the top aperture; a driver update alone never
-disables RTG on a generation-1 board. Descriptor-absent legacy 4 MiB
-compatibility intentionally keeps the historical fixed 64 KiB `HOST_WINDOW`
-path, but has no negotiated layout or PIP; legacy 2 MiB and unknown sizes
-reject that path.
+3. Pin the drivers repository to the tagged firmware commit.
 
-Releases ship the pieces bundled. Call out that Zorro 2 users must update the
-bitstream/firmware, `ZZ9000.card`, SDK payloads, and accelerated AmiSSL library
-together. The negotiated host heap serves audio, streamed image/DataType and
-archive clients, and AmiSSL, while the 4 MiB profile also owns one fixed
-224 KiB PIP source. The 2 MiB profile has no PIP, and no 8 MiB bitstream
-variant is shipped.
+   Resolve the commit that the firmware tag identifies, then place that
+   40-character commit ID on the only line of `sdk/SDK_REF`:
 
-## 3. CI notes
+   ```sh
+   git -C ../zz9000-firmware rev-parse vX.Y.Z^{commit}
+   ```
 
-- All three repos run CI on every branch push (plus PRs and `workflow_dispatch`),
-  with `concurrency` cancelling superseded non-tag runs.
-- The `amissl` build (adtools + OpenSSL 3 for m68k) is the slow job (~30–60 min,
-  per CPU variant); the adtools image and built libraries are cached.
-- The drivers `release` job and the firmware `release` job are gated on `v*`
-  tags and auto-generate GitHub release notes.
-- `sd-boot/zzsd.device` has a hard 7424-byte ceiling enforced by
-  `tools/check-release.sh`.
+   Commit and push the `SDK_REF` change. Wait for the drivers CI run to pass
+   before tagging the drivers repository. The `sdk` and `amissl` CI jobs build
+   from this pin, and the installer job checks out the same commit to generate
+   its AmiGuide manuals.
 
-## 4. Post-release
+   `sdk/build.sh` and `amissl/build.sh` select an SDK tree in this order:
+   `ZZ9000_SDK`, a sibling `../zz9000-firmware/sdk` checkout, then a clone at
+   `sdk/work/zz9000-firmware` checked out at `SDK_REF`. The override and
+   sibling checkout are used as-is. When building a release locally, ensure
+   either one is at the commit recorded in `sdk/SDK_REF`.
 
-- Verify the published releases: `gh release view vX.Y.Z -R BlitterStudio/<repo>`.
-- Sanity-check the installer LHA attached to the drivers release contains the
-  per-CPU `Libs/AmiSSL/<cpu>/amissl_v362.library` and the SDK payloads.
+4. Build a local installer only when it is needed for inspection.
+
+   ```sh
+   make build-all
+   amissl/build.sh
+   tools/check-release.sh
+   tools/package-local.sh vX.Y.Z
+   ```
+
+   `make build-all` builds the driver components and SDK payloads. It does not
+   build AmiSSL. `amissl/build.sh` produces the required `68020-40` and
+   `68060` libraries, while `tools/package-local.sh` stages them only when
+   present. The package command creates `zz9000-drivers-vX.Y.Z.lha` after its
+   release check passes.
+
+5. Publish the drivers installer.
+
+   After the `SDK_REF` commit has passed CI, create the same tag in the drivers
+   repository and push it:
+
+   ```sh
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
+   ```
+
+   The drivers workflow rebuilds its required artifacts for the tag. Its
+   `release` job assembles an installer on all workflow runs, but creates a
+   GitHub release only for a `refs/tags/v*` ref.
+
+6. Verify both published releases.
+
+   ```sh
+   gh release view vX.Y.Z -R BlitterStudio/zz9000-firmware
+   gh release view vX.Y.Z -R BlitterStudio/zz9000-drivers
+   ```
+
+   Inspect the drivers LHA. It must include the SDK runtime payloads and
+   `Libs/AmiSSL/68020-40/amissl_v362.library` plus
+   `Libs/AmiSSL/68060/amissl_v362.library`.
+
+## Tag and packaging rules
+
+Both workflows run for branch pushes, pull requests, manual dispatches, and
+`v*` tag pushes. A tag beginning with `v` creates a GitHub release. A tag that
+contains a hyphen is marked as a prerelease. The workflows do not enforce
+matching firmware and drivers tag names, so keep that coordination in the
+release procedure.
+
+`tools/check-release.sh` checks the complete local installer input set. It
+also rejects `sd-boot/zzsd.device` at 7,424 bytes or larger; the maximum size
+is 7,423 bytes.

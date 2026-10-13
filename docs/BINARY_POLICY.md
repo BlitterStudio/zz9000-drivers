@@ -1,20 +1,15 @@
-# Binary Artifact Policy
+# Binary artifact policy
 
-Release binaries are built by GitHub Actions from source and copied into
-the installer drawer during release assembly. The release LHA is the
-supported end-user distribution.
+The repository tracks source, build scripts, icons, templates, installer metadata, and documentation. Generated AmigaOS executables, libraries, devices, cards, archives, and the populated installer drawer are ignored. GitHub Actions builds the release artifacts from source, fills the installer drawer during release assembly, and creates the release LHA.
 
-Generated AmigaOS binaries should not be tracked in git. The source tree
-should contain source code, scripts, icons, templates, and documentation;
-CI and local builds are responsible for producing driver and tool
-payloads.
+## Build and package a local release
 
-Before tagging a release, rebuild through CI or `make build-all` and run
-`tools/check-release.sh`. That check fails if known build outputs are
-tracked, while the full check still verifies that local release artifacts
-exist.
+1. Run `make build-all` to build the standard driver and tool payloads. It also runs the RTG tests and `tools/check-release.sh --quick`.
+2. Run `make amissl` when the release includes the accelerated `amissl.library`. It is intentionally separate because it builds AmiSSL and OpenSSL with the adtools toolchain.
+3. Run `tools/package-local.sh [tag]`. It runs `tools/check-release.sh`, stages the built payloads in the installer layout, generates AmiGuide manuals, and writes `zz9000-drivers-[tag].lha`.
 
-Only keep a binary in source control when it is truly source material or
-cannot be reproduced by the repo build. Document that exception beside the
-file and in this policy. Add ignored installer slots for new tools so
-`tools/package-local.sh` cannot accidentally stage generated payloads.
+`tools/check-release.sh` checks the required source and documentation files. Without `--quick`, it also requires the standard local build outputs and rejects known generated outputs that Git tracks.
+
+## Exceptions
+
+Do not add a generated binary to Git. An exception requires a file that the repository cannot reproduce, an explanation beside that file, and an update to this policy. Add the corresponding ignored installer path when a new tool or payload is staged by release packaging.
