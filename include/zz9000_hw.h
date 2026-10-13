@@ -92,6 +92,11 @@
 #define ZZ_VCAP_GEOMETRY_STATUS_PENDING       2U
 #define ZZ_VCAP_GEOMETRY_STATUS_REJECTED      4U
 #define ZZ_FW_CAP_VIDEOCAP_STATS (1U << 9)
+/* Completed FWUP commands are mirrored as one longword at
+ * ZZ_FWUP_STATUS_MIRROR_OFFSET, the last longword of the boot ROM window
+ * (see common/fwup_client.h). */
+#define ZZ_FW_CAP_FWUP_STATUS_MIRROR (1U << 11)
+#define ZZ_FWUP_STATUS_MIRROR_OFFSET 0x7FFC
 #define ZZ_REG_AUDIO_CONFIG      0xF4
 #define ZZ_REG_AUDIO_RX_STATUS   0xF6
 #define ZZ_REG_AUDIO_TX_STATUS   0xF8
