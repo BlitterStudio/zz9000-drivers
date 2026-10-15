@@ -86,7 +86,13 @@ class RepoToolingTests(unittest.TestCase):
             self.assertIn(token, test_stub)
             self.assertNotIn(f"#define {token}", model)
 
-    def test_cfg_guard_rejects_profile_value_drift(self):
+    CFG_SOURCES = (
+        pathlib.Path("ZZ9000.CFG"),
+        pathlib.Path("docs/configuration.md"),
+        pathlib.Path("ZZ9000_proto.sdk/ZZ9000OS/src/zz_config.c"),
+    )
+
+    def cfg_firmware_root(self):
         candidates = (
             pathlib.Path(os.environ.get("ZZ9K_FIRMWARE_DIR", "")),
             ROOT.parent / "zz9000-firmware",
@@ -98,21 +104,58 @@ class RepoToolingTests(unittest.TestCase):
         )
         if firmware_root is None:
             self.skipTest("companion zz9000-firmware checkout unavailable")
+        return firmware_root
 
-        sources = (
-            pathlib.Path("ZZ9000.CFG"),
-            pathlib.Path("README.md"),
-            pathlib.Path("ZZ9000_proto.sdk/ZZ9000OS/src/zz_config.c"),
+    def copy_cfg_sources(self, firmware_root, fixture):
+        for relpath in self.CFG_SOURCES:
+            destination = fixture / relpath
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(firmware_root / relpath, destination)
+
+    def run_cfg_guard(self, fixture):
+        return subprocess.run(
+            ["sh", str(ROOT / "tools/check-cfg-keys.sh"), str(fixture)],
+            cwd=ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
         )
+
+    def test_cfg_guard_rejects_guide_key_drift(self):
+        # The guide writes the per-scene audio keys as grammar rows; a key
+        # dropped from one must still be reported for every scene.
+        firmware_root = self.cfg_firmware_root()
+        cases = (
+            (", `_eq89`", "", "audio_scene7_eq89"),
+            ("through `_nm8`", "through `_nm7`", "audio_scene0_nm8"),
+            ("| `audio_scene<N>_pan` |", "| `audio_scene_pan_gone` |",
+             "audio_scene3_pan"),
+        )
+        for old, new, missing in cases:
+            with self.subTest(missing=missing), \
+                    tempfile.TemporaryDirectory() as tmp:
+                fixture = pathlib.Path(tmp)
+                self.copy_cfg_sources(firmware_root, fixture)
+                guide = fixture / "docs/configuration.md"
+                text = guide.read_text(encoding="utf-8")
+                self.assertIn(old, text)
+                guide.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+                result = self.run_cfg_guard(fixture)
+                self.assertEqual(1, result.returncode, result.stdout)
+                self.assertIn("MISSING from the configuration guide",
+                              result.stdout)
+                self.assertIn(missing, result.stdout)
+
+    def test_cfg_guard_rejects_profile_value_drift(self):
+        firmware_root = self.cfg_firmware_root()
         marker = "#   filtered_ntsc_exact -"
 
         for label in ("missing", "extra"):
             with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
                 fixture = pathlib.Path(tmp)
-                for relpath in sources:
-                    destination = fixture / relpath
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(firmware_root / relpath, destination)
+                self.copy_cfg_sources(firmware_root, fixture)
 
                 sample = fixture / "ZZ9000.CFG"
                 text = sample.read_text(encoding="utf-8")
@@ -130,53 +173,9 @@ class RepoToolingTests(unittest.TestCase):
                     encoding="utf-8",
                 )
 
-                result = subprocess.run(
-                    ["sh", str(ROOT / "tools/check-cfg-keys.sh"), str(fixture)],
-                    cwd=ROOT,
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    check=False,
-                )
+                result = self.run_cfg_guard(fixture)
                 self.assertEqual(1, result.returncode, result.stdout)
                 self.assertIn("videocap_profile values", result.stdout)
-
-    def test_zztop_audio_calibration_is_typed_live_and_persisted(self):
-        source = self.read("ZZTop/Sources/ZZTop.c")
-        cfg_header = self.read("common/zzcfg_amiga.h")
-        cfg_source = self.read("common/zzcfg_amiga.c")
-
-        for token in (
-            "AUDGAD_CEIL_PAULA",
-            "AUDGAD_CEIL_AX",
-            "ZZ9K_AUDIO_CALIBRATION_PACK(",
-            "result.ceiling_paula",
-            "result.ceiling_ax",
-            "GTIN_Number, audio_ceiling_paula",
-            "GTIN_Number, audio_ceiling_ax",
-            "Calibration must be 1..4095",
-            "Calibration committed - Save to persist",
-        ):
-            self.assertIn(token, source)
-        helper = source[
-            source.index("static void audio_balanced_levels"):
-            source.index("static BOOL audio_ui_seeded")
-        ]
-        balance = source[
-            source.index("case AUDGAD_BTN_BALANCE"):
-            source.index("case AUDGAD_BTN_SAVE")
-        ]
-        self.assertIn("balanced_paula > ZZTOP_AUDIO_LEVEL_MAX", helper)
-        self.assertIn("balanced_ax > ZZTOP_AUDIO_LEVEL_MAX", helper)
-        self.assertIn("balanced_ax > (ULONG)audio_ceiling_ax", helper)
-        self.assertIn("balanced_paula * 2UL", helper)
-        self.assertEqual(1, balance.count("audio_balanced_levels("))
-        self.assertNotIn("(3UL * audio_ceiling", balance)
-        self.assertIn("audio_ceiling_paula_present", cfg_header)
-        self.assertIn("audio_ceiling_ax_present", cfg_header)
-        self.assertIn('"audio_ceiling_paula"', cfg_source)
-        self.assertIn('"audio_ceiling_ax"', cfg_source)
-
 
     def test_zztop_icon_grants_asl_sized_stack(self):
         """do_StackSize is the last header LONG at offset 74 (do_Type is a
@@ -193,17 +192,6 @@ class RepoToolingTests(unittest.TestCase):
             self.assertGreaterEqual(
                 struct.unpack(">l", data[74:78])[0], 16384,
                 "%s must grant at least 16 KiB of stack" % relpath)
-
-    def test_zztop_fw_confirm_shows_filename_only(self):
-        """EasyRequest never wraps; a wrapped path still wrecked the
-        upload confirmation on very long drawers (zz9000-drivers #95
-        plus the 2026-09 follow-up report). The confirmation shows only
-        the filename - the ASL picker it follows already displayed the
-        full path."""
-        source = self.read("ZZTop/Sources/ZZTop.c")
-        self.assertIn("FilePart((CONST_STRPTR)path)", source)
-        self.assertIn('"Upload %s to the ZZ9000 as BOOT.bin?', source)
-        self.assertNotIn("fw_wrap_path", source)
 
     def test_zzdiag_capture_dump_has_fixed_header_and_size_gate(self):
         text = self.read("ZZDiag/ZZDiag.c")

@@ -1,52 +1,42 @@
 # SDK runtime payloads
 
-End-user components whose sources live in the
-[zz9000-sdk](https://github.com/BlitterStudio/zz9000-sdk) repository (where
-their headers, test suite, and hardware smoke procedures are):
+The drivers release includes selected end-user components built from the [`sdk/`](https://github.com/BlitterStudio/zz9000-firmware/tree/master/sdk) subtree of the firmware repository. They require matching SDK-service firmware. `zz9k.library` is the AmigaOS gateway to that service ABI; the remaining payloads use it to access image, audio, compression, crypto, and media services.
 
-| Payload | Installs to | What it does |
+| Payload | Installer destination | Purpose |
 | --- | --- | --- |
-| `zz9k.library` | `LIBS:` | AmigaOS gateway to the SDK v2 firmware services (image/video decode, audio, compression, crypto). Requires SDK-service firmware. |
-| `mpega.library` | `LIBS:` | Drop-in MPEGA replacement that decodes MP3 on the ZZ9000's ARM cores; current SDK builds use host-window/card-only allocation flags for supported Zorro 2 audio buffers. |
-| `zz9k-picture.datatype` | `Classes/DataTypes/` | Hardware-accelerated picture datatype; JPEG/PNG descriptors are staged inactive under `Storage/DataTypes` for explicit opt-in. |
-| `zz9k-info`, `zz9k-services` | `C:` | Board/service diagnostics. |
-| `zz9k-view`, `zz9k-mp3`, `zz9k-cryptobench`, `zz9k-archive` | `C:` | Feature tools: accelerated image viewer, MP3 player, crypto-offload benchmark, and archive extractor/tester with LHA/LZH offload where firmware supports it. |
-| `ZZPlay` (+ `ZZPlay.info`) | `SYS:Utilities/ZZ9000/` | MPEG-1/P96 video and MP3 media player. Ships capitalised and with a Workbench icon, so it installs as a Workbench application rather than a CLI tool, sharing the ZZ9000 drawer with ZZTop. |
+| `zz9k.library` | `LIBS:` | AmigaOS gateway for SDK firmware services. |
+| `mpega.library` | `LIBS:` | Replacement MPEGA library that decodes MP3 on the card. |
+| `zz9k-picture.datatype` | `SYS:Classes/DataTypes/` | Hardware-accelerated picture DataType. |
+| `ZZ9000-JPEG`, `ZZ9000-PNG`, `ZZ9000-WebP`, `ZZ9000-MP3`, `ZZ9000-FLAC`, and `ZZ9000-OggVorbis` descriptors | `SYS:Storage/DataTypes/` | Inactive DataType descriptors for explicit installation. |
+| `zz9k-info`, `zz9k-services` | `C:` | Board and service diagnostics. `zz9k-services --check-release` runs the SDK release check. |
+| `zz9k-view` | `C:` | JPEG, PNG, and WebP viewer. |
+| `zz9k-mp3` | `C:` | Low-level MP3 decode and transport diagnostic. |
+| `zz9k-cryptobench` | `C:` | Crypto-offload benchmark. |
+| `zz9k-archive` | `C:` | Archive listing, test, and extraction tool, including LHA/LZH paths where firmware supports them. |
+| `ZZPlay` and `ZZPlay.info` | `SYS:Utilities/ZZ9000/` by default | Workbench media player for MPEG-1/P96 video and MP3. The installer lets you select the parent drawer. |
 
-`build.sh` pulls the SDK at the commit pinned in `SDK_REF` (or uses a
-`ZZ9000_SDK`/sibling checkout), drives the SDK's own Docker build and package
-scripts, and collects the payloads above into `sdk/out/` in installer layout.
-`tools/package-local.sh` and the CI release assembly stage them into the
-installer drawer from there.
+## Build and package
 
-To track a newer SDK: bump `SDK_REF`, rerun `sdk/build.sh`, and smoke-test per
-the SDK's `docs/zz9k-release-smoke.md`. Keep SDK bumps synchronized with any
-driver code that consumes new SDK headers or allocation flags.
+`sdk/build.sh` reads `SDK_REF` and uses `ZZ9000_SDK`, a sibling `zz9000-firmware/sdk` checkout, or a clone in `sdk/work/zz9000-firmware`. Unless `SDK_SKIP_BUILD=1`, it runs the SDK's `scripts/build-m68k-amigaos.sh` and `scripts/package-m68k-amigaos.sh --skip-build`, then copies the selected payloads to `sdk/out/` in installer layout.
+
+To use a newer SDK revision, update `SDK_REF`, rebuild with `sdk/build.sh`, and follow the SDK's [`docs/zz9k-release-smoke.md`](https://github.com/BlitterStudio/zz9000-firmware/blob/master/sdk/docs/zz9k-release-smoke.md). Keep the SDK revision synchronized with driver code that consumes SDK headers or allocation flags.
 
 ## Zorro II support
 
-Current matched firmware, bitstream, SDK payloads, and drivers negotiate an
-aperture-relative layout before the SDK maps any host-window allocation. The
-layout has two generations: generation 1 (previous matched sets, and still
-published by older FPGA/firmware pairs) provides one shared 64 KiB host heap;
-generation 2 (with the direct-ring reservation) shrinks the negotiated host
-heap to 16 KiB on the 2 MiB and 4 MiB profiles and carves the freed 48 KiB
-for the Z2 audio direct-ring grant. Both generations negotiate and
-acknowledge with their own token — a driver update alone never disables RTG
-on a generation-1 board. Plan Zorro II heap allocations against the
-generation the card actually acknowledges (`zz9k-info` reports it).
+Current generation-2 2 MiB and 4 MiB Zorro II layouts provide a shared 16 KiB CPU-visible host window. Generation 2 reserves 48 KiB of the former 64 KiB window for the audio direct-ring grant. Generation 1 used a 64 KiB host window on 2 MiB and 4 MiB layouts; descriptor-absent legacy 4 MiB stacks retain that layout. A driver update alone does not change the acknowledged generation.
 
-| Payload | Zorro II status |
-| --- | --- |
-| `mpega.library`, `mhizz9000.library`, ZZPlay standalone MP3 | Supported on 2 MiB and 4 MiB through compact staging and card-only rings. |
-| `zz9k-view`, `zz9k-picture.datatype` | Supported on 2 MiB and 4 MiB through streamed input and bounded tiles. An over-wide DataType row rejects the accelerated path rather than overrunning the heap. |
-| `zz9k-archive` | Streamed test/extract paths are supported; large LHA batch arenas retain their per-member/software fallback. |
-| Accelerated `amissl.library` | Supported on 2 MiB and 4 MiB. Provider open reserves one 32-byte probe; other exact 16-byte-aligned persistent buffers grow lazily, and a later allocation miss falls back in software for that operation. |
-| ZZPlay MPEG-1/PIP | Unsupported on 2 MiB. On 4 MiB, one aligned YUY2 frame must fit the fixed 224 KiB pool; 352x288 fits and 640x360 does not. |
-| Generic `zz9k-inflate`/`zz9k-mp3`/crypto/smoke diagnostics and plain `zz9k-jpeg <file>` output | Still use at least one legacy default shared allocation and are not Zorro II qualification tools. Use the adapted production clients or `zz9k-jpeg --fb` instead. |
+| Payload or operation | 2 MiB | 4 MiB | Current behavior |
+| --- | --- | --- | --- |
+| `mpega.library` | No | No | Its compact PCM ring is 32 KiB, followed by 16 KiB of feed staging. Neither current layout has a 32 KiB host window. |
+| ZZPlay with AHI | No | No | The compact AHI path requires a 32 KiB PCM ring and 16 KiB staging buffer. |
+| ZZPlay card-local streaming | Limited | Limited | Card-local PCM and compressed rings use up to 16 KiB of host-window staging and require an otherwise free window. |
+| `zz9k-view` JPEG, PNG, and WebP | No | No | Each viewer path requests a 32 KiB host-window staging buffer. |
+| `zz9k-picture.datatype` | Limited | Limited | Input staging is capped at 24 KiB and output tiles at 32 KiB. The accelerated path requires allocations that fit the remaining window. |
+| `zz9k-archive` streamed decode, test, and extract | Yes | Yes | Input and output share `min(48 KiB, host window)`. A 16 KiB profile starts with 8 KiB chunks and retries a failed pair allocation down to 4 KiB. |
+| Accelerated `amissl.library` | Yes | Yes | Hardware algorithms need a 32-byte host-window probe. Scratch buffers are 16-byte aligned and grow to the requested size. |
+| ZZPlay MPEG Program Stream video/PIP | No | No | Current code accepts only an acknowledged generation-1 PIP layout. A legacy 4 MiB pool of 224 KiB fits 352x288 YUY2 (202,752 bytes) and rejects 640x360 (460,800 bytes). |
+| `zz9k-inflate`, `zz9k-mp3`, crypto diagnostics, `zz9k-smoke`, and plain `zz9k-jpeg <file>` | No | No | These paths use a legacy default shared allocation. On Zorro II, use adapted clients or `zz9k-jpeg --fb`. |
 
-The host heap is shared across clients, not provided per process. Keep the
-release set matched and use `zz9k-info` to verify the acknowledged layout and
-memory counters. The full matrix and hardware-qualification status live in the
-SDK's
-[Zorro II service documentation](https://github.com/BlitterStudio/zz9000-sdk/blob/master/docs/zz9k-zorro2-services.md).
+The host window is shared across clients. Keep firmware, bitstream, SDK payloads, and drivers in one release set. Run `zz9k-info` after boot, confirm that the aperture is active and the layout is acknowledged, then inspect the host-window counters when clients run together.
+
+The SDK's [Zorro II service documentation](https://github.com/BlitterStudio/zz9000-firmware/blob/master/sdk/docs/zz9k-zorro2-services.md) contains the full support matrix and recorded hardware results.

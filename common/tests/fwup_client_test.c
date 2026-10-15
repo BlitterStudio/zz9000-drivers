@@ -27,6 +27,14 @@ static uint16_t      sim_pending_len;
 static int           sim_have_backup;
 static int           sim_fail_write;  /* next WRITE returns FWUP_ERR_WRITE */
 static char          sim_restore_target[128];
+static uint32_t      sim_mirror;      /* status mirror longword */
+static uint8_t       sim_mirror_seq;
+static int           sim_mirror_frozen;  /* mirror never advances */
+static unsigned      sim_mirror_delay;   /* mirror reads before it advances */
+static unsigned      sim_mirror_reads;
+static unsigned      sim_register_reads;
+static uint16_t      sim_mirror_pending; /* status not yet published */
+static int           sim_mirror_has_pending;
 static uint8_t       sim_buffer[FWUP_CHUNK_BYTES + 256];
 
 static void sim_reset(void) {
@@ -39,10 +47,43 @@ static void sim_reset(void) {
     sim_have_backup = 0;
     sim_fail_write = 0;
     sim_restore_target[0] = '\0';
+    sim_mirror = 0x12345678u; /* whatever the buffer held before */
+    sim_mirror_seq = 0;
+    sim_mirror_frozen = 0;
+    sim_mirror_delay = 0;
+    sim_mirror_reads = 0;
+    sim_register_reads = 0;
+    sim_mirror_has_pending = 0;
     memset(sim_buffer, 0, sizeof(sim_buffer));
 }
 
-static uint16_t sim_read_status(struct fwup_io *io) { (void)io; return sim_status; }
+static uint16_t sim_read_status(struct fwup_io *io) {
+    (void)io;
+    sim_register_reads++;
+    return sim_status;
+}
+
+static void sim_publish(uint16_t status) {
+    sim_mirror_seq++;
+    sim_mirror = ((uint32_t)FWUP_MIRROR_MAGIC << 24) |
+                 ((uint32_t)sim_mirror_seq << 16) | status;
+}
+
+/* The mirror advances once the command "finishes": after
+ * sim_mirror_delay reads, or never when frozen. */
+static uint32_t sim_read_mirror(struct fwup_io *io) {
+    (void)io;
+    sim_mirror_reads++;
+    if (sim_mirror_has_pending && !sim_mirror_frozen) {
+        if (sim_mirror_delay == 0) {
+            sim_publish(sim_mirror_pending);
+            sim_mirror_has_pending = 0;
+        } else {
+            sim_mirror_delay--;
+        }
+    }
+    return sim_mirror;
+}
 static void     sim_write_len(struct fwup_io *io, uint16_t len) { (void)io; sim_pending_len = len; }
 static uint8_t *sim_buffer_ptr(struct fwup_io *io) { (void)io; return sim_buffer; }
 
@@ -84,10 +125,18 @@ static void sim_write_cmd(struct fwup_io *io, uint16_t cmd) {
         sim_status = FWUP_ERR_UNKNOWN;
         break;
     }
+    sim_mirror_pending = sim_status;
+    sim_mirror_has_pending = 1;
 }
 
 static struct fwup_io sim_io = {
-    sim_read_status, sim_write_cmd, sim_write_len, sim_buffer_ptr, NULL
+    sim_read_status, sim_write_cmd, sim_write_len, sim_buffer_ptr, NULL,
+    NULL, NULL
+};
+
+static struct fwup_io sim_mirror_io = {
+    sim_read_status, sim_write_cmd, sim_write_len, sim_buffer_ptr, NULL,
+    sim_read_mirror, NULL
 };
 
 /* ---- tiny test harness ---- */
@@ -171,6 +220,67 @@ static void test_restore(void) {
     CHECK(fwup_restore(&sim_io, "BOOT.bin") == FWUP_ERR_NO_BACKUP, "restore reports missing backup");
 }
 
+/* With a mirror the client learns every result from it and never reads
+ * the status register, which would hold the Amiga's bus cycle while the
+ * firmware's FatFs call runs. */
+static void test_mirror_send_never_reads_register(void) {
+    static const char payload[] = "mirror payload";
+
+    printf("test_mirror_send_never_reads_register\n");
+    sim_reset();
+    sim_mirror_delay = 1000;  /* firmware busy for a while each command */
+    CHECK(fwup_open(&sim_mirror_io, "BOOT.bin") == FWUP_OK, "open OK");
+    sim_mirror_delay = 1000;
+    CHECK(fwup_write_chunk(&sim_mirror_io, payload, sizeof(payload) - 1) ==
+          FWUP_OK, "write OK");
+    sim_fail_write = 1;
+    sim_mirror_delay = 10;
+    CHECK(fwup_write_chunk(&sim_mirror_io, payload, 4) == FWUP_ERR_WRITE,
+          "write error delivered through the mirror");
+    CHECK(fwup_abort(&sim_mirror_io) == FWUP_OK, "abort OK");
+    CHECK(sim_register_reads == 0, "status register never read");
+    CHECK(sim_file_len == 0, "abort discarded the transfer");
+}
+
+/* A stale mirror value (the sequence the buffer happened to hold) is not
+ * a completion: the client keeps waiting until the sequence moves. */
+static void test_mirror_waits_for_new_sequence(void) {
+    printf("test_mirror_waits_for_new_sequence\n");
+    sim_reset();
+    sim_mirror = ((uint32_t)FWUP_MIRROR_MAGIC << 24) | (1u << 16) |
+                 FWUP_ERR_STATE;  /* a previous command's result */
+    sim_mirror_seq = 1;
+    sim_mirror_delay = 500;
+    CHECK(fwup_open(&sim_mirror_io, "BOOT.bin") == FWUP_OK,
+          "stale ERR_STATE ignored; the open's own OK returned");
+    CHECK(sim_mirror_reads > 500, "client waited for the new sequence");
+}
+
+/* Before the firmware's first completion the mirror holds ROM padding,
+ * whose byte 1 can equal the first published sequence. The first valid
+ * word must still count as the completion. */
+static void test_mirror_first_publication_after_invalid_word(void) {
+    printf("test_mirror_first_publication_after_invalid_word\n");
+    sim_reset();
+    sim_mirror = 0x12015678u;  /* invalid magic, sequence byte 1 */
+    sim_mirror_seq = 0;        /* the first completion publishes seq 1 */
+    CHECK(fwup_open(&sim_mirror_io, "BOOT.bin") == FWUP_OK, "open OK");
+    CHECK(sim_register_reads == 0, "completion taken from the mirror");
+    CHECK(sim_mirror_reads < 10, "no wait past the completion");
+}
+
+/* A mirror that never advances is a timeout. The client must not read
+ * the status register then: on hardware that read holds the bus until
+ * the ARM answers, which may be never. */
+static void test_mirror_frozen_times_out_without_register(void) {
+    printf("test_mirror_frozen_times_out_without_register\n");
+    sim_reset();
+    sim_mirror_frozen = 1;
+    CHECK(fwup_open(&sim_mirror_io, "BOOT.bin") == FWUP_STATUS_BUSY,
+          "stalled mirror reported as a timeout");
+    CHECK(sim_register_reads == 0, "register never read after the stall");
+}
+
 int main(void) {
     test_name_valid();
     test_strerror();
@@ -179,6 +289,10 @@ int main(void) {
     test_full_send();
     test_write_error();
     test_restore();
+    test_mirror_send_never_reads_register();
+    test_mirror_waits_for_new_sequence();
+    test_mirror_first_publication_after_invalid_word();
+    test_mirror_frozen_times_out_without_register();
     printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails ? 1 : 0;
 }

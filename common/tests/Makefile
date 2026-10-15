@@ -39,18 +39,26 @@ VCAP_CPPFLAGS := -Istubs -I$(COMMON_DIR) -I$(COMMON_DIR)/../include
 EDIT_CPPFLAGS := $(VCAP_CPPFLAGS) -DZZCFG_TEST_IO
 GEOMETRY_CPPFLAGS := $(VCAP_CPPFLAGS) -DZZCFG_TEST_IO
 VCAP_SAMPLING_SCREEN_SOURCES := vcap_sampling_screen_test.c \
-	../../ZZTop/Sources/vcap_sampling.c ../../common/zz_vcap_client.c \
+	../../ZZTop/Core/vcap_sampling.c ../../common/zz_vcap_client.c \
 	../../common/zz_vcap_live.c
 VCAP_SAMPLING_SCREEN_DEPS := stubs/vcap_sampling_test_platform.h \
-	../../ZZTop/Sources/vcap_sampling.h $(VCAP_CLIENT_DEPS) \
+	../../ZZTop/Core/vcap_sampling.h $(VCAP_CLIENT_DEPS) \
 	../../include/zz9000_sampling_calibration.h
 VCAP_SAMPLING_SCREEN_CPPFLAGS := -Istubs -I../../common -I../../include \
-	-I../../ZZTop/Sources -DVCAP_SAMPLING_TEST_IO
+	-I../../ZZTop/Core -DVCAP_SAMPLING_TEST_IO
 
+ZZTOP_SETTINGS_TARGET := $(BUILD_DIR)/zztop_settings_test
+ZZTOP_SETTINGS_SOURCES := zztop_settings_test.c \
+	../../ZZTop/Core/settings.c $(COMMON_DIR)/zzcfg_amiga.c \
+	$(COMMON_DIR)/fwup_client.c stubs/fwup_stub.c
+ZZTOP_SETTINGS_DEPS := stubs/zztop_settings_test_platform.h \
+	../../ZZTop/Core/settings.h ../../ZZTop/Core/board.h $(CFG_DEPS)
+ZZTOP_SETTINGS_CPPFLAGS := $(CFG_CPPFLAGS) -I../../ZZTop/Core \
+	-DZZTOP_SETTINGS_TEST
 
 .PHONY: test clean
 
-test: $(TARGET) $(CFG_TARGET) $(VCAP_TARGET) $(VCAP_CLIENT_TARGET) $(EDIT_TARGET) $(GEOMETRY_TARGET) $(CAPTURE_TARGET) $(CAPTURE_LIFECYCLE_TARGET) $(SAMPLING_CALIBRATION_TARGET) $(VCAP_SAMPLING_SCREEN_TARGET)
+test: $(TARGET) $(CFG_TARGET) $(VCAP_TARGET) $(VCAP_CLIENT_TARGET) $(EDIT_TARGET) $(GEOMETRY_TARGET) $(CAPTURE_TARGET) $(CAPTURE_LIFECYCLE_TARGET) $(SAMPLING_CALIBRATION_TARGET) $(VCAP_SAMPLING_SCREEN_TARGET) $(ZZTOP_SETTINGS_TARGET)
 	$(TARGET)
 	$(CFG_TARGET)
 	$(VCAP_TARGET)
@@ -61,6 +69,7 @@ test: $(TARGET) $(CFG_TARGET) $(VCAP_TARGET) $(VCAP_CLIENT_TARGET) $(EDIT_TARGET
 	$(CAPTURE_LIFECYCLE_TARGET)
 	$(SAMPLING_CALIBRATION_TARGET)
 	$(VCAP_SAMPLING_SCREEN_TARGET)
+	$(ZZTOP_SETTINGS_TARGET)
 
 $(TARGET): $(SOURCES) $(DEPS)
 	@mkdir -p $(BUILD_DIR)
@@ -71,6 +80,11 @@ $(TARGET): $(SOURCES) $(DEPS)
 $(CFG_TARGET): $(CFG_SOURCES) $(CFG_DEPS)
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFG_CPPFLAGS) $(CFLAGS) -w -o $@ $(CFG_SOURCES)
+
+# ZZTop's card-file model over the same simulated card and FWUP transport.
+$(ZZTOP_SETTINGS_TARGET): $(ZZTOP_SETTINGS_SOURCES) $(ZZTOP_SETTINGS_DEPS)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(ZZTOP_SETTINGS_CPPFLAGS) $(CFLAGS) -w -o $@ $(ZZTOP_SETTINGS_SOURCES)
 
 $(VCAP_TARGET): $(VCAP_SOURCES) $(VCAP_DEPS)
 	@mkdir -p $(BUILD_DIR)

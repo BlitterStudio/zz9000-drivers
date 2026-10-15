@@ -50,14 +50,27 @@
 /* Register/buffer access seam. On Amiga these do volatile MMIO at the
  * Zorro board window (fwup_amiga.c); host tests point them at a
  * simulated firmware. `read_status` returns FWUP_STATUS_BUSY until the
- * firmware finishes the last command. */
+ * firmware finishes the last command.
+ *
+ * `read_mirror` (NULL when the firmware lacks it) reads the status
+ * mirror longword at the end of the boot ROM window: FWUP_MIRROR_MAGIC in
+ * bits 31..24, a sequence the firmware advances on every completed
+ * command in bits 23..16, and that command's status in bits 15..0. The
+ * FPGA answers it from card memory, while a status register read waits
+ * for the ARM to finish its FatFs call with the Amiga's bus cycle held.
+ * A client with a mirror therefore never reads the register while a
+ * command runs. `idle` (may be NULL) yields the CPU during long waits. */
 struct fwup_io {
     uint16_t (*read_status)(struct fwup_io *io);
     void     (*write_cmd)(struct fwup_io *io, uint16_t cmd);
     void     (*write_len)(struct fwup_io *io, uint16_t len);
     uint8_t *(*buffer)(struct fwup_io *io);
     void     *ctx;
+    uint32_t (*read_mirror)(struct fwup_io *io);
+    void     (*idle)(struct fwup_io *io);
 };
+
+#define FWUP_MIRROR_MAGIC 0x46u
 
 /* Pure helpers. */
 int         fwup_name_valid(const char *name); /* 1 if [A-Za-z0-9._-]{1,64} */

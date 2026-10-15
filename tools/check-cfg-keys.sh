@@ -15,7 +15,7 @@
 #
 #   firmware  ZZ9000OS/src/zz_config.c   the parser - the source of truth
 #   firmware  ZZ9000.CFG                 the sample shipped in release ZIPs
-#   firmware  README.md                  the documented option table
+#   firmware  docs/configuration.md      the documented option tables
 #   drivers   common/zzcfg_amiga.c       ZZTop's editor model
 #
 # This compares all four and fails on any key or ordered profile-value
@@ -34,10 +34,10 @@ fw=${1:-${ZZ9K_FIRMWARE_DIR:-"$drivers_root/../zz9000-firmware"}}
 
 parser="$fw/ZZ9000_proto.sdk/ZZ9000OS/src/zz_config.c"
 sample="$fw/ZZ9000.CFG"
-readme="$fw/README.md"
+doc="$fw/docs/configuration.md"
 editor="$drivers_root/common/zzcfg_amiga.c"
 
-for f in "$parser" "$sample" "$readme" "$editor"; do
+for f in "$parser" "$sample" "$doc" "$editor"; do
     if [ ! -r "$f" ]; then
         echo "check-cfg-keys: cannot read $f" >&2
         echo "check-cfg-keys: pass the firmware checkout path or set ZZ9K_FIRMWARE_DIR" >&2
@@ -53,8 +53,9 @@ sed -n 's/.*token_eq(key, "\([a-z_0-9]*\)").*/\1/p' "$parser" | sort -u > "$work
 
 # These three keys remain accepted only to load existing hand-written files.
 # New firmware/ZZTop writes the atomic videocap_profile instead, so requiring
-# the legacy trio in the sample and README would recreate the confusing
-# independent controls the profile was introduced to remove.
+# the legacy trio in the sample would recreate the confusing independent
+# controls the profile was introduced to remove. The configuration guide
+# documents them as legacy, so it is compared against every parser key.
 cat > "$work/legacy" <<'EOF'
 nonstandard_vsync
 videocap_mode
@@ -66,7 +67,7 @@ comm -23 "$work/parser" "$work/legacy" > "$work/canonical"
 # they cannot all fit the 4 KiB sample parse budget (a larger sample would
 # have its audio tail ignored at boot). The sample documents the grammar
 # with scene 0's leading chunks; the rest are exempt from the SAMPLE
-# comparison only. README and the editor must still carry every key, and
+# comparison only. The guide and the editor must still carry every key, and
 # the exemption is keyed to the exact grammar (audio_sceneN_nmK), so a
 # missing lpf/eq/out/pan key is still caught.
 sed -e '/^audio_scene[1-7]_nm[1-8]$/d' \
@@ -76,27 +77,72 @@ sed -e '/^audio_scene[1-7]_nm[1-8]$/d' \
 # The sample documents a key as a commented-out assignment.
 sed -n 's/^#\{0,1\}\([a-z_0-9]\{1,\}\) = .*/\1/p' "$sample" | sort -u > "$work/sample"
 
-# The README lists them in a markdown table as `key`. Scope the search to the
-# configuration section: other tables in the file (the bitstream variants, for
-# one) have the same shape and would otherwise be picked up as config keys.
-sed -n '/^## Configuration File/,/^## [^C]/p' "$readme" \
-    | sed -n 's/^| `\([a-z_0-9]\{1,\}\)` |.*/\1/p' | sort -u > "$work/readme"
+# The guide lists keys in markdown tables as `key` in the first column. The
+# per-scene audio families are written as grammar rows, which expand here:
+#   `audio_scene<N>_lpf`             <N> over the row's "`N` = `A`–`B`" range
+#   `x<N>_eq01`, `_eq23`             a leading-underscore token is a suffix
+#                                    that replaces the first key's last part
+#   `x<N>_nm1` through `_nm8`        "through" is a numeric range
+# A <N> row without a range prints as BADROW and fails the comparison.
+awk -F'|' '
+/^\| `/ {
+    col = $2; vals = $3
+    nlo = -1; nhi = -1
+    if (match(vals, /`N` = `[0-9]+`[^`]*`[0-9]+`/)) {
+        r = substr(vals, RSTART, RLENGTH)
+        gsub(/[^0-9]+/, " ", r)
+        split(r, b, " ")
+        nlo = b[1] + 0; nhi = b[2] + 0
+    }
+    n = 0; c = col
+    while (match(c, /`[^`]+`/)) {
+        n++
+        tok[n] = substr(c, RSTART + 1, RLENGTH - 2)
+        gap[n] = substr(c, 1, RSTART - 1)
+        c = substr(c, RSTART + RLENGTH)
+    }
+    m = 1; key[1] = tok[1]
+    stem = tok[1]; sub(/_[a-z0-9]+$/, "", stem)
+    for (i = 2; i <= n; i++) {
+        if (tok[i] !~ /^_/) continue
+        if (gap[i] ~ /through/) {
+            prefix = key[m]; sub(/[0-9]+$/, "", prefix)
+            from = key[m]; sub(/^.*[^0-9]/, "", from)
+            to = tok[i]; sub(/^.*[^0-9]/, "", to)
+            for (k = from + 1; k <= to + 0; k++) key[++m] = prefix k
+        } else {
+            key[++m] = stem tok[i]
+        }
+    }
+    for (j = 1; j <= m; j++) {
+        if (key[j] !~ /<N>/) { print key[j]; continue }
+        if (nlo < 0) { print "BADROW:" key[j]; continue }
+        for (x = nlo; x <= nhi; x++) {
+            k2 = key[j]; sub(/<N>/, x, k2); print k2
+        }
+    }
+}' "$doc" | sort -u > "$work/doc"
 
 # ZZTop's editor matches each key by name.
 sed -n 's/.*zzcfg_str_eq_ci(key, "\([a-z_0-9]*\)").*/\1/p' "$editor" | sort -u > "$work/editor"
 
 # Keep the ordered videocap_profile schema aligned as well as the key names.
 # The parser branch order is canonical and must match the shipped sample,
-# firmware README, and the driver editor's descriptor array exactly.
+# configuration guide, and the driver editor's descriptor array exactly.
 sed -n '/if (token_eq(key, "videocap_profile")) {/,/if (token_eq(key, "videocap_mode")) {/ {
     s/.*token_eq(value, "\([a-z_0-9]*\)").*/\1/p
 }' "$parser" > "$work/profiles-parser"
 sed -n 's/^#   \([a-z_0-9][a-z_0-9]*\)[[:space:]]*- .*/\1/p' \
     "$sample" > "$work/profiles-sample"
-awk -F'`' '$2 == "videocap_profile" {
-    for (i = 4; i <= NF; i += 2)
-        if ($i ~ /^[a-z_0-9]+$/) print $i
-}' "$readme" > "$work/profiles-readme"
+# Profile values come from the accepted-values column only; the effect
+# column also names the sample default.
+awk -F'|' '$2 ~ /^ *`videocap_profile` *$/ {
+    c = $3
+    while (match(c, /`[a-z_0-9]+`/)) {
+        print substr(c, RSTART + 1, RLENGTH - 2)
+        c = substr(c, RSTART + RLENGTH)
+    }
+}' "$doc" > "$work/profiles-doc"
 sed -n '/static const struct zzcfg_profile_desc zzcfg_profiles\[\] = {/,/^};/ {
     s/^[[:space:]]*{ "\([a-z_0-9]*\)".*/\1/p
 }' "$editor" > "$work/profiles-editor"
@@ -121,7 +167,7 @@ report() {
 
 echo "check-cfg-keys: firmware parser = $(wc -l < "$work/parser" | tr -d ' ') key(s)"
 report "the sample ZZ9000.CFG" "$work/sample_expected" "$work/sample"
-report "the firmware README table" "$work/canonical" "$work/readme"
+report "the configuration guide (docs/configuration.md)" "$work/parser" "$work/doc"
 report "ZZTop's editor (zzcfg_amiga.c)" "$work/parser" "$work/editor"
 
 report_profiles() {
@@ -135,7 +181,7 @@ report_profiles() {
 }
 
 report_profiles "the sample ZZ9000.CFG" "$work/profiles-sample"
-report_profiles "the firmware README table" "$work/profiles-readme"
+report_profiles "the configuration guide (docs/configuration.md)" "$work/profiles-doc"
 report_profiles "ZZTop's editor (zzcfg_amiga.c)" "$work/profiles-editor"
 
 active_sample=$(sed -n 's/^[[:space:]]*\([a-z_0-9][a-z_0-9]*\)[[:space:]]*=.*$/\1/p' "$sample")

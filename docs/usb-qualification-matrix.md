@@ -1,11 +1,23 @@
 # ZZ9000 USB qualification matrix
 
-This matrix qualifies only matched ZZ9000 firmware and `zzusbhw.device`.
-Commercial Poseidon 4.5 and its installed classes are an immutable external
-compatibility baseline; they are not built, packaged, replaced, or patched.
-Automated evidence is not promoted into a physical-device claim.
+The evidence recorded on 31 August 2026 qualifies firmware 2.9 and
+`zzusbhw.device` 2.2 through host models, cross-builds, and package assembly.
+It does not qualify the pair on Amiga hardware or with target USB devices.
 
-## Matched build identity
+Commercial Poseidon 4.5 and its installed classes are external prerequisites.
+This repository does not build, package, replace, or patch them. Treat
+automated evidence as code and artifact evidence only.
+
+## Current qualification status
+
+| Area | Status | Recorded evidence or gap |
+|---|---|---|
+| Firmware and driver pair | Host-modelled, cross-built, and packaged | Matched 2.9/2.2 automated gates passed. |
+| Hardware and USB devices | Not qualified | No Amiga or target USB device was available for the recorded work session. |
+| Commercial Poseidon 4.5 | External baseline | The source reference at `bc56025c33345739963e65ce8253f747be9ab6bd` was clean. Installed Amiga files were unavailable for checksum capture. |
+| Direct low-speed devices | Unsupported in this release | The driver deliberately does not advertise them. |
+
+## Recorded build evidence
 
 | Field | Evidence captured 31 August 2026 |
 |---|---|
@@ -16,9 +28,8 @@ Automated evidence is not promoted into a physical-device claim.
 | Zorro III release archive | SHA-256 `d5da172745db4745136370636b5a8907088f35d688e30f53dfe68d1c7c07464e` |
 | Driver | `zzusbhw.device` 2.2; `m68k-amigaos-gcc` 6.5.0b; SHA-256 `88b4a55a1e8508bbbbca27d069cb7c51acfc1cd3aff232559c56a9d3fb3f6c45` |
 | Diagnostics | `ZZDiag` 1.12; SHA-256 `51625e885c37ba97978116e444d7196ed447e276bca3a67ca540758420679bc3` |
-| Poseidon reference | Commercial Poseidon 4.5 runtime required. Read-only source reference `bc56025c33345739963e65ce8253f747be9ab6bd` remained clean. Installed Amiga files were unavailable for checksum capture. |
 
-## Automated gates
+## Automated and artifact gates
 
 | Gate | Result | Evidence boundary |
 |---|---|---|
@@ -30,12 +41,15 @@ Automated evidence is not promoted into a physical-device claim.
 | Amiga artifacts | Pass for cross-build only | `zzusbhw.device` 2.2 and `ZZDiag` 1.12 linked in `sacredbanana/amiga-compiler:m68k-amigaos` |
 | Driver release package | Pass for assembly only | Full release input check passed and the installer LHA assembled with fresh driver, diagnostics, USB README, and this matrix |
 
-These gates validate code, wire compatibility, artifact construction, and
-bounded lifecycle models. They do not validate electrical behavior, Zorro bus
-timing, commercial-Poseidon callbacks, a particular USB descriptor set, or
-sustained traffic on an Amiga.
+These gates cover code, wire compatibility, artifact construction, and bounded
+lifecycle models. They do not cover electrical behavior, Zorro bus timing,
+commercial-Poseidon callbacks, a particular USB descriptor set, or sustained
+traffic on an Amiga.
 
-## Issue 23 device gates
+## Recorded device evidence
+
+The following issue-23 reports are historical observations. None was rerun
+with the matched 2.9/2.2 pair.
 
 | Device | Historical observation | Matched 2.9/2.2 result | Missing physical evidence |
 |---|---|---|---|
@@ -47,27 +61,26 @@ sustained traffic on an Amiga.
 | USB audio input device | Product string reported with a trailing `?`; streaming previously unavailable | Not run | Model/VID:PID, raw string bytes, control requested/actual lengths, UAC1 formats, capture/playback result |
 
 Stop after the first useful reproduction of a hard-lock-prone device. Do not
-repeat uncontrolled crash loops before the matched diagnostics are installed.
+repeat uncontrolled crash loops before installing the matched diagnostics.
 
-## Transfer and topology claims
+## Implemented scope and physical coverage
 
-| Axis | Implemented/modelled | Physical claim |
+| Area | Implemented or modelled | Physical result |
 |---|---|---|
 | Control and bulk | Exact request ownership, bounded actual length, precise errors | No matched hardware run |
 | Interrupt | Persistent endpoint, interval/split model, event-driven reap | No HID, hub, or AX88772C run |
 | Simple ISO | High-speed and split full-speed IN/OUT, explicit/ASAP frame, per-packet status | No commercial-Poseidon run |
 | Realtime ISO | Add/remove/start/stop handlers, four-batch replenishment, stop/reset fencing | No UAC1 run |
-| MIDI | Remains on descriptor-defined bulk endpoints | No concurrent MIDI/audio run |
+| MIDI | Descriptor-defined bulk endpoints | No concurrent MIDI/audio run |
 | High speed | Implemented | No matched root-port run |
 | Full speed behind high-speed hub | Single-TT/multi-TT split scheduling modelled | No physical hub run |
 | Direct low speed | Deliberately unadvertised | Unsupported in this release |
 
-Simple and realtime ISO flags are exposed only after the driver receives the
-complete firmware 2.9 protocol-v2 capability set and initializes its callback
-support. This capability advertisement is an implementation fact, not an
-audio-device qualification claim.
+The driver exposes simple and realtime ISO flags only after it receives the
+complete firmware 2.9 protocol-v2 capability set and initializes callback
+support. That advertisement does not qualify an audio device.
 
-## Profile and version-pair coverage
+## Version-pair and board-profile coverage
 
 | Configuration | Automated result | Physical result |
 |---|---|---|
@@ -80,34 +93,27 @@ audio-device qualification claim.
 | Zorro II 2 MiB | Archive assembled | Hardware unavailable |
 | A500-family profiles | Three archives assembled | Hardware unavailable |
 
-## Required hardware qualification
+## Hardware qualification requirements
 
-No real Amiga or target USB device was available in this work session.
-Therefore none of the following release gates has passed:
+Do not describe this release as hardware-qualified until every row is
+recorded. The recorded work session did not pass any of these gates.
 
-- 100 attach/enumerate/use/detach cycles for every issue-23 device.
-- 24-hour keyboard, mouse, AX88772C, mass-storage concurrency.
-- 60-minute capture and playback for every advertised UAC1 format while MIDI,
-  HID, and storage remain active.
-- Error injection and disconnect during enumeration, queued, in-flight,
-  completion, stream-stop, and reset states.
-- Single-TT and multi-TT hub runs with address, port, think time, and speed
-  recorded.
-- New/new and both mixed-version pairings on the same Poseidon 4.5 install.
-- Zorro III first, then no-fast-RAM, Zorro II, 2 MiB, and A500-family physical
-  profiles.
-- Before/after checksums of installed `poseidon.library`, class files, and
-  configuration.
-
-Until those rows are recorded, describe the release as host-modelled,
-cross-built, and packaged—not hardware-qualified.
+| Required gate | Required record |
+|---|---|
+| Device cycling | 100 attach/enumerate/use/detach cycles for every issue-23 device |
+| Concurrency soak | 24-hour keyboard, mouse, AX88772C, and mass-storage concurrency |
+| Audio and MIDI soak | 60-minute capture and playback for every advertised UAC1 format while MIDI, HID, and storage remain active |
+| Failure handling | Error injection and disconnect during enumeration, queued, in-flight, completion, stream-stop, and reset states |
+| Hub coverage | Single-TT and multi-TT hub runs with address, port, think time, and speed recorded |
+| Version-pair coverage | New/new and both mixed-version pairings on the same Poseidon 4.5 install |
+| Board-profile coverage | Zorro III first, then no-fast-RAM, Zorro II, 2 MiB, and A500-family physical profiles |
+| Poseidon installation integrity | Before/after checksums of installed `poseidon.library`, class files, and configuration |
 
 ## Per-run evidence packet
 
-Record host model, CPU/accelerator, Kickstart, Workbench, firmware/driver
-versions and checksums, Poseidon/library/class versions and checksums, device
-and hub VID:PID, topology and power, negotiated speed, TT type/think time,
-attach timestamp, last successful action, `PsdErrorlog`, Trident device and
-binding output, raw device/configuration/string descriptors, and correlated
-`ZZDiag` output. Retain raw logs outside the source tree; commit only concise
-results and explicit gaps here.
+| Record group | Include |
+|---|---|
+| System | Host model, CPU/accelerator, Kickstart, Workbench, firmware/driver versions and checksums, Poseidon/library/class versions and checksums |
+| Device and topology | Device and hub VID:PID, topology and power, negotiated speed, TT type/think time, attach timestamp |
+| Outcome | Last successful action, `PsdErrorlog`, Trident device and binding output, raw device/configuration/string descriptors, correlated `ZZDiag` output |
+| Raw logs | Retain raw logs outside the source tree. Commit concise results and explicit gaps here. |

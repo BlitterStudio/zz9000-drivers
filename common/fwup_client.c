@@ -12,6 +12,16 @@
  * real card under load. */
 #define FWUP_POLL_LIMIT 2000000UL
 
+/* Mirror polling: spin on the card-memory longword first (each read is a
+ * short Zorro III cycle that never waits on the ARM), then yield between
+ * reads. Past both budgets the command has timed out. */
+#ifndef FWUP_MIRROR_SPINS
+#define FWUP_MIRROR_SPINS 50000UL
+#endif
+#ifndef FWUP_MIRROR_IDLES
+#define FWUP_MIRROR_IDLES 1500UL /* about 30 s of one-tick yields */
+#endif
+
 static int valid_dest_char(char c) {
     return (c >= 'A' && c <= 'Z') ||
            (c >= 'a' && c <= 'z') ||
@@ -63,6 +73,49 @@ static uint16_t poll_status(struct fwup_io *io) {
     return FWUP_STATUS_BUSY;
 }
 
+/* A completion is a valid mirror whose sequence differs from the one
+ * read before the command was issued. Before the firmware's first
+ * completion the mirror holds no valid word, and then any valid word is
+ * the new one, whatever its sequence byte. */
+static int mirror_completed(uint32_t now, uint32_t before) {
+    if ((now >> 24) != FWUP_MIRROR_MAGIC) return 0;
+    if ((before >> 24) != FWUP_MIRROR_MAGIC) return 1;
+    return ((now >> 16) & 0xFFu) != ((before >> 16) & 0xFFu);
+}
+
+static uint16_t poll_mirror(struct fwup_io *io, uint32_t before) {
+    unsigned long n;
+    uint32_t now;
+
+    for (n = 0; n < FWUP_MIRROR_SPINS; n++) {
+        now = io->read_mirror(io);
+        if (mirror_completed(now, before)) return (uint16_t)now;
+    }
+    if (io->idle) {
+        for (n = 0; n < FWUP_MIRROR_IDLES; n++) {
+            io->idle(io);
+            now = io->read_mirror(io);
+            if (mirror_completed(now, before)) return (uint16_t)now;
+        }
+    }
+    /* Nothing else writes the mirror, so the command is still running or
+     * the card is wedged. Reading the register now would hold the bus
+     * until the ARM answers, which is the hang this path avoids. */
+    return FWUP_STATUS_BUSY;
+}
+
+static uint16_t run_command(struct fwup_io *io, uint16_t cmd) {
+    uint32_t before;
+
+    if (!io->read_mirror) {
+        io->write_cmd(io, cmd);
+        return poll_status(io);
+    }
+    before = io->read_mirror(io);
+    io->write_cmd(io, cmd);
+    return poll_mirror(io, before);
+}
+
 static void stage_name(struct fwup_io *io, const char *name) {
     uint8_t *buf = io->buffer(io);
     size_t n = strlen(name);
@@ -77,44 +130,37 @@ uint16_t fwup_probe(struct fwup_io *io) {
      * so use a non-destructive command that only a FWUP-capable firmware
      * answers with a protocol error. ABORT first also clears any stale
      * interrupted transfer. */
-    io->write_cmd(io, FWUP_CMD_ABORT);
-    st = poll_status(io);
+    st = run_command(io, FWUP_CMD_ABORT);
     if (st == FWUP_STATUS_BUSY) return 0;
 
     io->write_len(io, 0);
-    io->write_cmd(io, FWUP_CMD_WRITE);
-    st = poll_status(io);
+    st = run_command(io, FWUP_CMD_WRITE);
     return (st == FWUP_ERR_STATE || st == FWUP_ERR_LEN) ? 1 : 0;
 }
 
 uint16_t fwup_open(struct fwup_io *io, const char *dest_name) {
     if (!fwup_name_valid(dest_name)) return FWUP_ERR_BAD_NAME;
     stage_name(io, dest_name);
-    io->write_cmd(io, FWUP_CMD_OPEN);
-    return poll_status(io);
+    return run_command(io, FWUP_CMD_OPEN);
 }
 
 uint16_t fwup_write_chunk(struct fwup_io *io, const void *data, uint16_t len) {
     if (len == 0 || len > FWUP_CHUNK_BYTES) return FWUP_ERR_LEN;
     memcpy(io->buffer(io), data, len);
     io->write_len(io, len);
-    io->write_cmd(io, FWUP_CMD_WRITE);
-    return poll_status(io);
+    return run_command(io, FWUP_CMD_WRITE);
 }
 
 uint16_t fwup_close(struct fwup_io *io) {
-    io->write_cmd(io, FWUP_CMD_CLOSE);
-    return poll_status(io);
+    return run_command(io, FWUP_CMD_CLOSE);
 }
 
 uint16_t fwup_abort(struct fwup_io *io) {
-    io->write_cmd(io, FWUP_CMD_ABORT);
-    return poll_status(io);
+    return run_command(io, FWUP_CMD_ABORT);
 }
 
 uint16_t fwup_restore(struct fwup_io *io, const char *target) {
     if (!fwup_name_valid(target)) return FWUP_ERR_BAD_NAME;
     stage_name(io, target);
-    io->write_cmd(io, FWUP_CMD_RESTORE);
-    return poll_status(io);
+    return run_command(io, FWUP_CMD_RESTORE);
 }
