@@ -865,6 +865,10 @@ void gt_show_page(UWORD page)
 	}
 	old_page = gt_pages[current_page];
 	new_page = gt_pages[page];
+	/* Commit text still being typed on the page being left: GadTools
+	 * sends no GADGETUP when the user clicks the page list instead. */
+	if (window && old_page->flush)
+		old_page->flush();
 	if (old_page->hide)
 		old_page->hide();
 	if (window && old_page->gadgets)

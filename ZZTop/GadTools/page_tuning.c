@@ -411,6 +411,9 @@ static void tuning_gadget(UWORD id, UWORD code)
 	if (!audio_available() || audio_calibration_pending())
 		return;
 	if (id == G_SCENE) {
+		/* The name and ceilings may still hold typed text for the scene
+		 * being left; commit it before the sync shows the new scene. */
+		tuning_flush();
 		if (code < AUDIO_SCENE_COUNT && audio_select_scene(code))
 			changed = TRUE;
 		else

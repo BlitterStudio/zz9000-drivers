@@ -207,12 +207,31 @@ BOOL app_save(void)
 	return ok;
 }
 
+/* Finish an audio save the guard still covers (one that outlasted the
+ * Save wait, or whose restore write failed) before anything reloads or
+ * abandons ZZ9000.CFG: otherwise the firmware's rewrite of the non-audio
+ * keys would stand. TRUE when no guarded save is outstanding. */
+static BOOL settle_audio_save(void)
+{
+	if (!audio_save_running && !guard.valid)
+		return TRUE;
+	fe_busy(TRUE);
+	(void)save_audio();
+	fe_busy(FALSE);
+	return !audio_save_running && !guard.valid;
+}
+
 BOOL app_revert(void)
 {
 	static char msg[96];
 	BOOL ok = TRUE;
 
 	fe_flush();
+	/* save_audio() has put the reason on the status line. */
+	if (!settle_audio_save()) {
+		app_models_changed();
+		return FALSE;
+	}
 	fe_busy(TRUE);
 	if (!video_revert(msg, sizeof(msg))) {
 		fe_status("%s", msg);
@@ -240,6 +259,15 @@ BOOL app_quit_allowed(void)
 	LONG choice;
 
 	fe_flush();
+	while (!settle_audio_save()) {
+		choice = fe_ask("Retry|Quit anyway|Cancel",
+			"An audio save has not finished, so ZZ9000.CFG may still "
+			"hold older copies of your other settings.");
+		if (choice == 2)
+			return TRUE;
+		if (choice != 1)
+			return FALSE;
+	}
 	app_pending(&p);
 	if (!p.card && !p.live && !p.audio) return TRUE;
 
