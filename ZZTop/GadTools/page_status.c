@@ -147,8 +147,7 @@ static void sync(void)
 		board.zorro == 3 ? "III" : "II");
 	gt_page_set_text(g_card, buf_card);
 
-	snprintf(buf_firmware, sizeof(buf_firmware), "%u.%u",
-		board.fw_version >> 8, board.fw_version & 0xff);
+	board_fw_version_text(buf_firmware, sizeof(buf_firmware));
 	gt_page_set_text(g_firmware, buf_firmware);
 
 	features_text(buf_features, sizeof(buf_features));

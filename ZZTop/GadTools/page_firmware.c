@@ -1,5 +1,6 @@
 /*
- * ZZTop GadTools Firmware page: guarded BOOT.bin upload and backup restore.
+ * ZZTop GadTools Firmware page: online update check and download, guarded
+ * BOOT.bin upload and backup restore.
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -11,6 +12,8 @@
 #include <string.h>
 
 #include "board.h"
+#include "fw_release.h"
+#include "fwonline.h"
 #include "fwup_amiga.h"
 #include "fwup_client.h"
 #include "gt.h"
@@ -19,52 +22,117 @@
 
 enum {
 	G_INSTALLED = 1,
-	G_SUPPORT_ONE,
-	G_SUPPORT_TWO,
+	G_SUPPORT,
+	G_LATEST,
+	G_VARIANT,
+	G_CHECK,
+	G_UPDATE,
 	G_CHOOSE,
 	G_FILE,
 	G_INSTALL,
 	G_PROGRESS,
 	G_STATUS,
-	G_RESTART,
 	G_RESTORE,
 	G_RESTORE_NOTE
 };
 
 static struct Gadget *g_installed;
-static struct Gadget *g_support_one;
-static struct Gadget *g_support_two;
+static struct Gadget *g_support;
+static struct Gadget *g_latest;
+static struct Gadget *g_variant;
+static struct Gadget *g_check;
+static struct Gadget *g_update;
 static struct Gadget *g_choose;
 static struct Gadget *g_file;
 static struct Gadget *g_install;
 static struct Gadget *g_progress;
 static struct Gadget *g_status;
-static struct Gadget *g_restart;
 static struct Gadget *g_restore;
 static struct Gadget *g_restore_note;
 
 static char installed[32];
 static char path[256];
+/* Release tag of `path` when it is a verified online download kept for an
+ * Install retry; empty for a file the user chose. */
+static char path_tag[32];
 static char message[400];
-static char support_one[96] = "Checking update support...";
-static char support_two[96] = "";
+static char support_text[96] = "Checking update support...";
+static char latest_text[96] = "Not checked";
 static char file_text[96] = "No file chosen";
-static char progress_text[32] = "Progress: 0 KB";
+static char progress_text[40] = "Progress: 0 KB";
 static char status_note[96] = "";
-static char restart_note[96] = "";
 static char restore_note[96] = "Promotes BOOT.bak while card still boots.";
+
+static const char *variant_choices[FWREL_VARIANT_COUNT + 1];
+static int variant = FWREL_VARIANT_ZORRO3;   /* chosen release image */
+static int detected = FWREL_VARIANT_UNKNOWN; /* running bitstream */
+static BOOL variant_chosen;                  /* variant initialised */
+static int variant_shown = -1;               /* cycle gadget's value */
+
+static struct fwonline_release release;
+static BOOL release_known;
 
 static BOOL fwup_probed;
 static BOOL fwup_supported;
 static BOOL transfer_active;
 static ULONG progress_max = 1;
 
+static struct TagItem set_tags[] = {
+	{ TAG_IGNORE, 0 },
+	{ TAG_DONE, 0 }
+};
+
+/* Set one GadTools attribute through a real two-item TagItem array. */
+static void set_attr(struct Gadget *gadget, ULONG tag, ULONG value)
+{
+	if (!gadget)
+		return;
+	set_tags[0].ti_Tag = tag;
+	set_tags[0].ti_Data = value;
+	GT_SetGadgetAttrsA(gadget, gt_render_window(gadget), NULL, set_tags);
+}
+
 /* Enable firmware actions only when their prerequisites are met. */
 static void update_gate(void)
 {
+	gt_page_set_disabled(g_variant, transfer_active);
+	gt_page_set_disabled(g_check, transfer_active);
+	gt_page_set_disabled(g_update, transfer_active || !fwup_supported ||
+		!release_known);
 	gt_page_set_disabled(g_choose, transfer_active || !fwup_supported);
 	gt_page_set_disabled(g_install, transfer_active || !fwup_supported || !path[0]);
 	gt_page_set_disabled(g_restore, transfer_active || !fwup_supported);
+}
+
+static void set_status(const char *text)
+{
+	snprintf(status_note, sizeof(status_note), "%s", text);
+	gt_page_set_text(g_status, status_note);
+}
+
+static void set_progress(const char *text)
+{
+	snprintf(progress_text, sizeof(progress_text), "%s", text);
+	gt_page_set_text(g_progress, progress_text);
+}
+
+/* Describe the last check result for the chosen image. */
+static void render_latest(void)
+{
+	const char *state;
+
+	if (!release_known) {
+		gt_page_set_text(g_latest, latest_text);
+		return;
+	}
+	switch (release.compare) {
+	case FWREL_NEWER:           state = "update available"; break;
+	case FWREL_UP_TO_DATE:      state = "installed"; break;
+	case FWREL_INSTALLED_NEWER: state = "older than installed"; break;
+	default:                    state = "may be newer"; break;
+	}
+	snprintf(latest_text, sizeof(latest_text), "%s - %s", release.tag, state);
+	gt_page_set_text(g_latest, latest_text);
 }
 
 /* Probe update support once and describe the available firmware actions. */
@@ -74,78 +142,268 @@ static void probe(void)
 		return;
 	fwup_probed = TRUE;
 	fwup_supported = fwup_probe_board((ULONG)board.regs) != 0;
-	if (fwup_supported) {
-		snprintf(support_one, sizeof(support_one), "%s", "Firmware accepts updates from AmigaOS.");
-		snprintf(support_two, sizeof(support_two), "%s", "Choose a BOOT.bin image to install.");
-	} else {
-		snprintf(support_one, sizeof(support_one), "%s", "This firmware cannot update from AmigaOS.");
-		snprintf(support_two, sizeof(support_two), "%s", "Install a FWUP build first.");
-	}
-	gt_page_set_text(g_support_one, support_one);
-	gt_page_set_text(g_support_two, support_two);
+	snprintf(support_text, sizeof(support_text), "%s", fwup_supported ?
+		"Firmware accepts updates from AmigaOS." :
+		"Firmware cannot update from AmigaOS.");
+	gt_page_set_text(g_support, support_text);
 	update_gate();
 }
 
-/* Render firmware transfer progress supplied by the updater callback. */
-static void progress(void *ctx, ULONG done, LONG total)
+/* Render transfer progress as "<verb>N of M KB" (or "<verb>N KB"). */
+static void show_progress(const char *verb, ULONG done, LONG total)
 {
 	ULONG done_kb = (done + 1023) / 1024;
-	(void)ctx;
 
 	if (total > 0) {
 		progress_max = ((ULONG)total + 1023) / 1024;
 		if (progress_max == 0)
 			progress_max = 1;
-		snprintf(progress_text, sizeof(progress_text), "%lu of %lu KB",
-			(unsigned long)done_kb, (unsigned long)progress_max);
+		snprintf(progress_text, sizeof(progress_text), "%s%lu of %lu KB",
+			verb, (unsigned long)done_kb, (unsigned long)progress_max);
 	} else {
-		snprintf(progress_text, sizeof(progress_text), "%s", "Installing...");
+		snprintf(progress_text, sizeof(progress_text), "%s%lu KB", verb,
+			(unsigned long)done_kb);
 	}
 	gt_page_set_text(g_progress, progress_text);
 }
 
-/* Install the chosen image while reporting updater progress and outcome. */
-static void install(void)
+/* FWUP transfer progress (fwup_send_file callback). */
+static void progress(void *ctx, ULONG done, LONG total)
+{
+	(void)ctx;
+	show_progress("", done, total);
+}
+
+/* Release download progress (fwonline hook; ctx is the window wait). */
+static void download_progress(void *ctx, ULONG done, LONG total)
+{
+	(void)ctx;
+	show_progress("Downloaded ", done, total);
+}
+
+/* Push `image` to the card as BOOT.bin. `tag` names the release it came
+ * from (NULL for a file the user chose). Returns TRUE on success. */
+static BOOL install_image(const char *image, const char *tag)
 {
 	UWORD st;
 
+	transfer_active = TRUE;
+	update_gate();
+	progress_max = 1;
+	set_progress("0 KB");
+	set_status("Installing...");
+	gt_busy(TRUE);
+	st = fwup_send_file((ULONG)board.regs, image, "BOOT.bin", progress, NULL);
+	gt_busy(FALSE);
+	transfer_active = FALSE;
+	update_gate();
+	if (st == FWUP_OK) {
+		fwonline_record_install(tag);
+		set_progress("Installed");
+		set_status("Installed. Power-cycle the Amiga to start it.");
+		gt_status("Firmware installed; power-cycle the Amiga.");
+		return TRUE;
+	}
+	snprintf(message, sizeof(message), "Firmware install failed: %s (0x%04x)",
+		fwup_strerror(st), (unsigned)st);
+	set_status("Install failed.");
+	gt_ask("OK", "%s", message);
+	gt_status("Firmware install failed: %s", fwup_strerror(st));
+	return FALSE;
+}
+
+/* A verified online download kept after a failed flash (path_tag set) is
+ * ZZTop's own temporary file: it lives only as long as it is the
+ * selection. A successful flash, a new download, another chosen file and
+ * quitting all delete it. */
+static void drop_kept_image(void)
+{
+	if (!path_tag[0])
+		return;
+	DeleteFile((CONST_STRPTR)path);
+	path[0] = '\0';
+	path_tag[0] = '\0';
+	snprintf(file_text, sizeof(file_text), "%s", "No file chosen");
+	gt_page_set_text(g_file, file_text);
+	update_gate();
+}
+
+/* Install the chosen file after confirmation. */
+static void install(void)
+{
 	if (!path[0] || !fwup_supported || transfer_active)
 		return;
 	if (gt_ask("Install|Cancel",
 		"Install %s as BOOT.bin?\n\nCurrent image kept as BOOT.bak.\nPower-cycle Amiga afterwards.",
 		FilePart((CONST_STRPTR)path)) != 1)
 		return;
+	if (install_image(path, path_tag[0] ? path_tag : NULL))
+		drop_kept_image();
+}
 
+static int wait_keep_running(void *ctx)
+{
+	return fe_wait_keep_running(ctx);
+}
+
+/* Ask GitHub for the latest release and compare it with this card. */
+static void check_online(void)
+{
+	struct fe_wait wait;
+	struct fwonline_hooks hooks;
+	BOOL cancel = FALSE, cancelled;
+	BOOL ok;
+
+	if (transfer_active)
+		return;
 	transfer_active = TRUE;
 	update_gate();
-	progress_max = 1;
-	snprintf(progress_text, sizeof(progress_text), "%s", "0 KB");
-	gt_page_set_text(g_progress, progress_text);
-	restart_note[0] = '\0';
-	gt_page_set_text(g_restart, restart_note);
-	snprintf(status_note, sizeof(status_note), "%s", "Installing...");
-	gt_page_set_text(g_status, status_note);
+	set_status("Checking GitHub for firmware...");
+	hooks.keep_running = wait_keep_running;
+	hooks.progress = NULL;
+	hooks.ctx = &wait;
+	fe_wait_begin(&wait, &cancel);
 	gt_busy(TRUE);
-	st = fwup_send_file((ULONG)board.regs, path, "BOOT.bin", progress, NULL);
+	ok = fwonline_check(variant, &hooks, &release, &cancelled, message,
+		sizeof(message));
 	gt_busy(FALSE);
+	fe_wait_end(&wait);
 	transfer_active = FALSE;
+	release_known = ok;
+	render_latest();
 	update_gate();
-	if (st == FWUP_OK) {
-		snprintf(progress_text, sizeof(progress_text), "%s", "Installed");
-		gt_page_set_text(g_progress, progress_text);
-		snprintf(status_note, sizeof(status_note), "%s", "Installed.");
-		gt_page_set_text(g_status, status_note);
-		snprintf(restart_note, sizeof(restart_note), "%s", "Power-cycle Amiga to start new firmware.");
-		gt_page_set_text(g_restart, restart_note);
-		gt_status("Firmware installed; power-cycle the Amiga.");
-	} else {
-		snprintf(message, sizeof(message), "Firmware install failed: %s (0x%04x)",
-			fwup_strerror(st), (unsigned)st);
-		snprintf(status_note, sizeof(status_note), "%s", "Install failed.");
-		gt_page_set_text(g_status, status_note);
-		gt_ask("OK", "%s", message);
-		gt_status("Firmware install failed: %s", fwup_strerror(st));
+	if (!ok) {
+		set_status(cancelled ? "Check cancelled." : "Check failed.");
+		gt_status("%s", message);
+		return;
 	}
+	switch (release.compare) {
+	case FWREL_NEWER:
+		set_status(release.asset_listed ? "A newer firmware is available." :
+			"Newer firmware has no image for this board.");
+		break;
+	case FWREL_PATCH_UNKNOWN:
+		set_status("Card cannot report its patch level.");
+		break;
+	case FWREL_UP_TO_DATE:
+		set_status("Latest firmware is installed.");
+		break;
+	default:
+		set_status("Installed firmware is newer than the release.");
+		break;
+	}
+	gt_status("Latest release: %s", release.tag);
+}
+
+/* Refuse an image for the other bus; confirm any other build change. When
+ * the firmware cannot identify its build (before 2.8), the plain Zorro II
+ * or Zorro III build is the reference, so A500 or AGA images still ask. */
+static BOOL confirm_variant(void)
+{
+	BOOL card_z3 = board.zorro == 3;
+	int expected = detected;
+
+	if (fwrel_variant_is_zorro3(variant) != card_z3) {
+		gt_ask("OK", "The %s image is for Zorro %s, but this card is in "
+			"Zorro %s mode.\n\nChoose the matching board.",
+			fwrel_variant_name(variant), card_z3 ? "II" : "III",
+			card_z3 ? "III" : "II");
+		return FALSE;
+	}
+	if (expected == FWREL_VARIANT_UNKNOWN)
+		expected = card_z3 ? FWREL_VARIANT_ZORRO3 : FWREL_VARIANT_ZORRO2;
+	if (fwrel_variant_matches(expected, variant))
+		return TRUE;
+	return gt_ask("Use it|Cancel", "%s %s firmware build.\n"
+		"Install the %s build instead?\n\nA build for the wrong machine may "
+		"not start; recovery then needs the\nmicroSD card in another "
+		"computer.", detected == FWREL_VARIANT_UNKNOWN ?
+		"This firmware cannot report its build; the default is the" :
+		"This card runs the", fwrel_variant_name(expected),
+		fwrel_variant_name(variant)) == 1;
+}
+
+/* Download the checked release for the chosen board, then install it. */
+static void update_online(void)
+{
+	struct fe_wait wait;
+	struct fwonline_hooks hooks;
+	BOOL cancel = FALSE, cancelled;
+	BOOL ok;
+	static char image[64];
+	const char *question;
+
+	if (!release_known || !fwup_supported || transfer_active)
+		return;
+	if (!confirm_variant())
+		return;
+	switch (release.compare) {
+	case FWREL_UP_TO_DATE:
+		question = "%s is already installed. Reinstall it?";
+		break;
+	case FWREL_INSTALLED_NEWER:
+		question = "The card runs newer firmware than %s. Install %s anyway?";
+		break;
+	default:
+		question = "Download %s and install it as BOOT.bin?";
+		break;
+	}
+	snprintf(message, sizeof(message), question, release.tag, release.tag);
+	if (gt_ask("Install|Cancel", "%s\n\nBoard: %s\nCurrent image kept as "
+		"BOOT.bak.\nPower-cycle Amiga afterwards.", message,
+		fwrel_variant_label(variant)) != 1)
+		return;
+
+	/* The new download replaces any kept one, even under the same name. */
+	drop_kept_image();
+	snprintf(image, sizeof(image), "T:ZZ9000-%s-%s-BOOT.bin", release.tag,
+		fwrel_variant_name(variant));
+	transfer_active = TRUE;
+	update_gate();
+	set_progress("Connecting...");
+	set_status("Downloading firmware (Esc cancels)...");
+	hooks.keep_running = wait_keep_running;
+	hooks.progress = download_progress;
+	hooks.ctx = &wait;
+	fe_wait_begin(&wait, &cancel);
+	gt_busy(TRUE);
+	ok = fwonline_download(release.tag, variant, image, &hooks, &cancelled,
+		message, sizeof(message));
+	/* A key queued after the last read (or while the final chunk was
+	 * inflated) has not been polled yet; poll once more before deciding
+	 * to flash. */
+	if (ok)
+		fe_wait_keep_running(&wait);
+	gt_busy(FALSE);
+	fe_wait_end(&wait);
+	transfer_active = FALSE;
+	/* Escape in the last poll of a complete download still cancels: the
+	 * user asked not to flash. */
+	if (ok && cancel) {
+		DeleteFile((CONST_STRPTR)image);
+		ok = FALSE;
+		cancelled = TRUE;
+		snprintf(message, sizeof(message), "%s", "Download cancelled");
+	}
+	update_gate();
+	if (!ok) {
+		set_progress("Not downloaded");
+		set_status(cancelled ? "Download cancelled." : "Download failed.");
+		if (!cancelled)
+			gt_ask("OK", "%s", message);
+		gt_status("%s", message);
+		return;
+	}
+	if (install_image(image, release.tag)) {
+		DeleteFile((CONST_STRPTR)image);
+		return;
+	}
+	/* Keep the verified image so Install can retry without the network. */
+	snprintf(path, sizeof(path), "%s", image);
+	snprintf(path_tag, sizeof(path_tag), "%s", release.tag);
+	snprintf(file_text, sizeof(file_text), "%s", (const char *)FilePart((CONST_STRPTR)path));
+	gt_page_set_text(g_file, file_text);
+	update_gate();
 }
 
 /* Restore the card's backup firmware after user confirmation. */
@@ -161,81 +419,86 @@ static void restore(void)
 
 	transfer_active = TRUE;
 	update_gate();
-	restart_note[0] = '\0';
-	gt_page_set_text(g_restart, restart_note);
-	snprintf(status_note, sizeof(status_note), "%s", "Restoring previous firmware...");
-	gt_page_set_text(g_status, status_note);
+	set_status("Restoring previous firmware...");
 	gt_busy(TRUE);
 	st = fwup_restore_board((ULONG)board.regs, "BOOT.bin");
 	gt_busy(FALSE);
 	transfer_active = FALSE;
 	update_gate();
 	if (st == FWUP_OK) {
-		snprintf(status_note, sizeof(status_note), "%s", "Previous firmware restored.");
-		gt_page_set_text(g_status, status_note);
-		snprintf(restart_note, sizeof(restart_note), "%s",
-			"Power-cycle Amiga to start restored firmware.");
-		gt_page_set_text(g_restart, restart_note);
+		fwonline_record_install(NULL);
+		set_status("Restored. Power-cycle the Amiga to start it.");
 		gt_status("Previous firmware restored; power-cycle the Amiga.");
 	} else {
 		snprintf(message, sizeof(message), "Firmware restore failed: %s (0x%04x)",
 			fwup_strerror(st), (unsigned)st);
-		snprintf(status_note, sizeof(status_note), "%s", "Restore failed.");
-		gt_page_set_text(g_status, status_note);
+		set_status("Restore failed.");
 		gt_ask("OK", "%s", message);
 		gt_status("Firmware restore failed: %s", fwup_strerror(st));
 	}
 }
 
-/* Create the firmware status, update, and restore controls. */
+/* Create the firmware status, online update, file update and restore
+ * controls. */
 static BOOL create(struct gt_page *page)
 {
 	struct gt_form f;
-	static const char *const fw_labels[] = { "Installed", NULL };
+	static const char *const fw_labels[] = { "Installed", "Latest", "Board", NULL };
 	WORD left, width;
-	WORD choose_w, inst_w, rest_w;
+	WORD check_w, update_w, choose_w, inst_w, rest_w;
+	int i;
+
+	for (i = 0; i < FWREL_VARIANT_COUNT; i++)
+		variant_choices[i] = fwrel_variant_label(i);
+	variant_choices[FWREL_VARIANT_COUNT] = NULL;
+	/* Layout changes recreate the page; keep the user's choice. */
+	if (!variant_chosen) {
+		variant_chosen = TRUE;
+		detected = board_variant();
+		if (detected != FWREL_VARIANT_UNKNOWN)
+			variant = detected;
+		else
+			variant = board.zorro == 3 ? FWREL_VARIANT_ZORRO3 :
+				FWREL_VARIANT_ZORRO2;
+	}
+	variant_shown = -1;
 
 	gt_page_begin(page);
 	gt_form_init(&f, page, fw_labels);
 	left = f.left;
 	width = f.width;
 
-	/* Row 0: Installed */
 	g_installed = gt_form_field(&f, G_INSTALLED, 0, "Installed", installed);
+	g_support = gt_add_note(page, G_SUPPORT, left, 1, width, support_text);
+	g_latest = gt_form_field(&f, G_LATEST, 2, "Latest", latest_text);
+	g_variant = gt_form_cycle(&f, G_VARIANT, 3, "Board", variant_choices);
 
-	/* Rows 1 & 2: Support notes */
-	g_support_one = gt_add_note(page, G_SUPPORT_ONE, left, 1, width, support_one);
-	g_support_two = gt_add_note(page, G_SUPPORT_TWO, left, 2, width, support_two);
+	check_w = gt_button_width("Check online");
+	update_w = gt_button_width("Download and install");
+	g_check = gt_add_button(page, G_CHECK, left, 4, check_w, "Check online");
+	g_update = gt_add_button(page, G_UPDATE, (WORD)(left + check_w + 8), 4,
+		update_w, "Download and install");
 
-	/* Row 3: Choose button + file readout */
 	choose_w = gt_button_width("Choose file...");
-	g_choose = gt_add_button(page, G_CHOOSE, left, 3, choose_w, "Choose file...");
-	g_file = gt_add_note(page, G_FILE, (WORD)(left + choose_w + 8), 3,
+	g_choose = gt_add_button(page, G_CHOOSE, left, 5, choose_w, "Choose file...");
+	g_file = gt_add_note(page, G_FILE, (WORD)(left + choose_w + 8), 5,
 		(WORD)(width - choose_w - 8), file_text);
 
-	/* Row 4: Install button + progress */
 	inst_w = gt_button_width("Install");
-	g_install = gt_add_button(page, G_INSTALL, left, 4, inst_w, "Install");
-	g_progress = gt_add_note(page, G_PROGRESS, (WORD)(left + inst_w + 8), 4,
+	g_install = gt_add_button(page, G_INSTALL, left, 6, inst_w, "Install");
+	g_progress = gt_add_note(page, G_PROGRESS, (WORD)(left + inst_w + 8), 6,
 		(WORD)(width - inst_w - 8), progress_text);
 
-	/* Row 5: Status note */
-	g_status = gt_add_note(page, G_STATUS, left, 5, width, status_note);
+	g_status = gt_add_note(page, G_STATUS, left, 7, width, status_note);
 
-	/* Row 6: Restart note */
-	g_restart = gt_add_note(page, G_RESTART, left, 6, width, restart_note);
-
-	/* Row 7: Restore button */
 	rest_w = gt_button_width("Restore previous firmware");
-	g_restore = gt_add_button(page, G_RESTORE, left, 7, rest_w, "Restore previous firmware");
+	g_restore = gt_add_button(page, G_RESTORE, left, 8, rest_w, "Restore previous firmware");
+	g_restore_note = gt_add_note(page, G_RESTORE_NOTE, left, 9, width, restore_note);
 
-	/* Row 8: Restore note */
-	g_restore_note = gt_add_note(page, G_RESTORE_NOTE, left, 8, width, restore_note);
-
-	page->rows = 9;
-	return g_installed && g_support_one && g_support_two && g_choose &&
-		g_file && g_install && g_progress && g_status && g_restart &&
-		g_restore && g_restore_note;
+	page->rows = 10;
+	return g_installed && g_support && g_latest && g_variant && g_check &&
+		g_update && g_choose && g_file && g_install && g_progress &&
+		g_status && g_restore && g_restore_note;
 }
 
 /* Probe firmware update support when this page is shown. */
@@ -247,10 +510,24 @@ static void show(void)
 /* Dispatch a firmware page action selected by the user. */
 static void gadget(UWORD id, UWORD code)
 {
-	(void)code;
-	if (id == G_CHOOSE) {
+	if (id == G_VARIANT) {
+		if (code < FWREL_VARIANT_COUNT)
+			variant = variant_shown = code;
+	} else if (id == G_CHECK) {
+		check_online();
+	} else if (id == G_UPDATE) {
+		update_online();
+	} else if (id == G_CHOOSE) {
+		/* A cancelled or too-long pick must not disturb the current
+		 * image or its release tag. */
+		static char picked[sizeof(path)];
+
 		if (fwup_supported && gt_pick_file("Select firmware file to install",
-			"#?.(bin|rom|img)", path, sizeof(path))) {
+			"#?.(bin|rom|img)", picked, sizeof(picked))) {
+			if (path_tag[0] && strcmp(picked, path) != 0)
+				DeleteFile((CONST_STRPTR)path);
+			memcpy(path, picked, sizeof(path));
+			path_tag[0] = '\0';
 			snprintf(file_text, sizeof(file_text), "%s", (const char *)FilePart((CONST_STRPTR)path));
 			gt_page_set_text(g_file, file_text);
 			gt_status("Firmware image selected: %s", FilePart((CONST_STRPTR)path));
@@ -266,9 +543,13 @@ static void gadget(UWORD id, UWORD code)
 /* Synchronise installed-version and firmware action readouts. */
 static void sync(void)
 {
-	snprintf(installed, sizeof(installed), "%u.%u", board.fw_version >> 8,
-		board.fw_version & 0xff);
+	board_fw_version_text(installed, sizeof(installed));
 	gt_page_set_text(g_installed, installed);
+	render_latest();
+	if (variant_shown != variant) {
+		variant_shown = variant;
+		set_attr(g_variant, GTCY_Active, (ULONG)variant);
+	}
 	if (path[0]) {
 		snprintf(file_text, sizeof(file_text), "%s", (const char *)FilePart((CONST_STRPTR)path));
 		gt_page_set_text(g_file, file_text);
@@ -276,14 +557,21 @@ static void sync(void)
 	update_gate();
 }
 
+/* Remove a kept online download when ZZTop quits. */
+static void cleanup(void)
+{
+	if (path_tag[0])
+		DeleteFile((CONST_STRPTR)path);
+}
+
 struct gt_page gt_page_firmware = {
 	"Firmware",
 	"Firmware",
-	"Install new firmware or go back to the previous one.",
+	"Update online, install a file, or go back to the previous image.",
 	0,
 	NULL,
 	NULL,
-	9,
+	10,
 	create,
 	show,
 	NULL,
@@ -291,5 +579,5 @@ struct gt_page gt_page_firmware = {
 	NULL,
 	sync,
 	NULL,
-	NULL
+	cleanup
 };

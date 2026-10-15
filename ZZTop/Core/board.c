@@ -10,7 +10,11 @@
 #include <proto/exec.h>
 #include <proto/expansion.h>
 
+#include <stdio.h>
+
 #include "board.h"
+#include "fw_release.h"
+#include "zz9000_capture_calibration.h"
 
 struct board board;
 
@@ -56,6 +60,38 @@ void board_refresh_identity(void)
 	board.hw_version = board_read16(ZZ_REG_HW_VERSION);
 	board.fw_version = board_read16(ZZ_REG_FW_VERSION);
 	board.fw_caps = board_read16(ZZ_REG_FW_CAPABILITIES);
+	board.fw_patch_known = board_has_cap(ZZ_FW_CAP_FW_VERSION_PATCH);
+	board.fw_patch = board.fw_patch_known ?
+		board_read16(ZZ_REG_FW_VERSION_PATCH) : 0;
+}
+
+void board_fw_version_text(char *buf, ULONG size)
+{
+	if (board.fw_patch_known)
+		snprintf(buf, size, "%u.%u.%u", board.fw_version >> 8,
+			board.fw_version & 0xff, board.fw_patch);
+	else
+		snprintf(buf, size, "%u.%u", board.fw_version >> 8,
+			board.fw_version & 0xff);
+}
+
+/* Two ordered 16-bit reads, as every other bitstream-register client. */
+static ULONG board_read32(ULONG offset)
+{
+	ULONG high = board_read16(offset);
+
+	return high << 16 | board_read16(offset + 2);
+}
+
+int board_variant(void)
+{
+	/* The field-diagnostic bundle arrived with the 2.8 bitstreams. */
+	if (!BOARD_FW_AT_LEAST(2, 8))
+		return FWREL_VARIANT_UNKNOWN;
+	return fwrel_variant_detect(
+		board_read32(ZZ_CAPTURE_FIELD_DIAG_CAP_REG),
+		board_read32(ZZ_CAPTURE_FIELD_DIAG_VARIANT_REG),
+		board_read32(ZZ_CAPTURE_CAP_REG));
 }
 
 BOOL board_has_cfg(void)

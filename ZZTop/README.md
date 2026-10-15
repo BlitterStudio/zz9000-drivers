@@ -16,8 +16,10 @@ HighRes 640x200 with an 8-pixel font such as topaz 8, and PAL HighRes 640x256
 with fonts up to 13 pixels. On a screen too short for its font, ZZTop says how
 many lines are missing instead of opening. It requires a detected, configured
 ZZ9000.
-`asl.library` is needed only when choosing a firmware file. `zz9k.library` is
-optional, although the audio controls need its advertised audio capability.
+`asl.library` is needed only when choosing a firmware file. **Check online**
+needs a running TCP/IP stack (`bsdsocket.library`) and AmiSSL 5.
+`zz9k.library` is optional, although the audio controls need its advertised
+audio capability.
 
 ## Starting ZZTop
 
@@ -200,13 +202,59 @@ Fast RAM change takes effect at the next cold boot.
 ## Firmware
 
 The Firmware page shows the installed firmware version and update-protocol
-status.
+status. Firmware that reports its patch level shows three numbers, such as
+`2.8.1`; older firmware shows `2.8`.
+
+### Updating online
+
+1. Check that **Board** names the right firmware build. ZZTop selects the
+   build the card is running when the firmware identifies it (2.8 or later);
+   otherwise it selects the plain Zorro II or Zorro III build. The A500 and
+   A500+ builds are interchangeable.
+2. Select **Check online**. ZZTop reads the latest firmware release from
+   GitHub and shows it under **Latest**.
+3. Select **Download and install** and confirm. ZZTop downloads the release
+   archive for the selected board, extracts `BOOT.bin` to `T:`, checks its
+   CRC-32, size and Zynq boot header, then installs it like a chosen file.
+   Escape or the close gadget cancels the download. The temporary image is
+   deleted after a successful install. After a failed one it stays selected
+   for **Install** until it is installed, replaced by another download or
+   chosen file, or ZZTop quits.
+4. Power-cycle the Amiga to start the new firmware.
+
+**Latest** shows the release tag and one of these results:
+
+| Result | Meaning |
+|---|---|
+| `update available` | The release is newer than the installed firmware. |
+| `installed` | The installed firmware is the latest release. |
+| `may be newer` | The card cannot report its patch level and the release is a patch release of the same `major.minor`. |
+| `older than installed` | The card runs a newer development build. |
+
+Pre-releases are never offered. The archive's `ZZ9000.CFG` is not installed;
+the card keeps its own settings file. ZZTop refuses an image for the other
+Zorro bus and asks again before installing a build other than the running
+one. Firmware older than 2.8 cannot report its build, so ZZTop then asks
+before installing anything other than the plain Zorro II or Zorro III build.
+A build for the wrong machine may not start, and recovery then needs the
+microSD card in another computer.
+
+The download needs up to 4 MB free in `T:`. GitHub limits anonymous release
+queries to 60 per hour from one address; ZZTop reports when the limit is hit.
+After an online install ZZTop stores the release tag in
+`ENVARC:ZZTopFirmware`, so firmware that cannot report its patch level still
+compares exactly after the next boot. Installing a chosen file or restoring
+the previous firmware deletes it.
+
+### Installing a file
 
 1. Select **Choose file...** and select a `bin`, `rom`, or `img` file.
-2. Select **Install new firmware**, confirm the request, and wait for the
-   transfer to finish. ZZTop promotes the selected file to `BOOT.bin` and
-   saves the previous image as `BOOT.bak`.
+2. Select **Install**, confirm the request, and wait for the transfer to
+   finish. ZZTop promotes the selected file to `BOOT.bin` and saves the
+   previous image as `BOOT.bak`.
 3. Power-cycle the Amiga to start the new firmware.
+
+### Restoring the previous firmware
 
 **Restore previous firmware** promotes `BOOT.bak` to `BOOT.bin`. This discards
 the current `BOOT.bin` and leaves no backup. It works only while the card can

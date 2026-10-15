@@ -16,6 +16,8 @@ struct board {
 	UBYTE zorro;            /* 2 or 3 */
 	UWORD hw_version;
 	UWORD fw_version;       /* major << 8 | minor */
+	UWORD fw_patch;         /* release patch, valid when fw_patch_known */
+	BOOL fw_patch_known;    /* ZZ_FW_CAP_FW_VERSION_PATCH advertised */
 	UWORD fw_caps;          /* ZZ_REG_FW_CAPABILITIES */
 	ULONG zz9k_caps;        /* zz9k.library ZZ9KQueryCaps bits, 0 without */
 	BOOL zz9k_library;      /* zz9k.library opened and answered */
@@ -29,6 +31,13 @@ BOOL board_find(void);
 /* Re-read the firmware version and capability registers (they are
  * fixed per boot, but cheap and the source of truth). */
 void board_refresh_identity(void);
+
+/* "2.8.1", or "2.8" when the firmware cannot report its patch level. */
+void board_fw_version_text(char *buf, ULONG size);
+
+/* The running bitstream's release variant (enum fwrel_variant), or
+ * FWREL_VARIANT_UNKNOWN before firmware 2.8 or when unidentified. */
+int board_variant(void);
 
 UWORD board_read16(ULONG offset);
 void board_write16(ULONG offset, UWORD value);
