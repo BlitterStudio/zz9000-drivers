@@ -817,7 +817,9 @@ void gt_show_page(UWORD page)
 		WORD erase_l = (WORD)(gt_layout.border_left + sidebar_width + 4);
 		WORD erase_r = (WORD)(gt_layout.border_left + gt_layout.width - 2);
 		WORD erase_t = gt_layout.border_top;
-		WORD erase_b = (WORD)(gt_layout.body_bottom + gt_layout.section_gap);
+		/* EraseRect includes its last row: stop one line above the
+		 * status bar, or its top border is wiped on every switch. */
+		WORD erase_b = (WORD)(gt_layout.body_bottom + gt_layout.section_gap - 1);
 		EraseRect(window->RPort, erase_l, erase_t, erase_r, erase_b);
 	}
 	current_page = page;
