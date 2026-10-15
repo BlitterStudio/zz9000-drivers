@@ -339,6 +339,33 @@ static void tuning_show(void)
 	tuning_draw_labels();
 }
 
+/* Commit a scene name or calibration value still being typed, so Save,
+ * Revert and Quit see it: GadTools sends no GADGETUP when the user leaves
+ * a string or integer gadget by clicking elsewhere. */
+static void tuning_flush(void)
+{
+	const struct audio_scene *value;
+	const char *text;
+	UWORD paula;
+	UWORD ax;
+	BOOL changed = FALSE;
+
+	if (!audio_available() || audio_calibration_pending())
+		return;
+	value = audio_scene(audio_active_scene());
+	text = (const char *)gt_page_get(name, GTST_String);
+	if (value && text && strcmp(text, value->name) != 0 &&
+		audio_rename_scene(audio_active_scene(), text))
+		changed = TRUE;
+	paula = (UWORD)gt_page_get(ceil_paula, GTIN_Number);
+	ax = (UWORD)gt_page_get(ceil_ax, GTIN_Number);
+	if ((paula != audio_ceiling_paula() || ax != audio_ceiling_ax()) &&
+		audio_set_calibration(paula, ax))
+		changed = TRUE;
+	if (changed)
+		gt_pending_changed();
+}
+
 /* Coalesce active scene drags on the page timer cadence. */
 static void tuning_tick(void)
 {
@@ -427,6 +454,6 @@ struct gt_page gt_page_tuning = {
 	tuning_gadget,
 	tuning_tick,
 	tuning_sync,
-	NULL,
+	tuning_flush,
 	NULL
 };

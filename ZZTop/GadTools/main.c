@@ -73,10 +73,11 @@ int main(void)
 	if (!IntuitionBase)
 		return 20;
 	GfxBase = (struct GfxBase *)OpenLibrary((CONST_STRPTR)"graphics.library", 37);
-	GadToolsBase = OpenLibrary((CONST_STRPTR)"gadtools.library", 37);
+	/* V39: every page reads its gadgets with GT_GetGadgetAttrs. */
+	GadToolsBase = OpenLibrary((CONST_STRPTR)"gadtools.library", 39);
 	UtilityBase = OpenLibrary((CONST_STRPTR)"utility.library", 37);
 	if (!GfxBase || !GadToolsBase || !UtilityBase) {
-		fail("ZZTop needs AmigaOS 2.04 or newer.");
+		fail("ZZTop needs AmigaOS 3.0 or newer.");
 		goto out;
 	}
 	if (!board_find()) {

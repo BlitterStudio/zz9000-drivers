@@ -53,6 +53,7 @@ static struct Gadget *revert_gadget;
 static struct MsgPort *timer_port;
 static struct timerequest *timer_io;
 static BOOL timer_pending;
+static BOOL timer_device_open;   /* OpenDevice succeeded: CloseDevice is owed */
 static ULONG tick_count;
 static UWORD current_page;
 static BOOL advanced_mode;
@@ -933,6 +934,7 @@ static BOOL timer_open(void)
 		set_failure("Could not open timer.device VBLANK unit.");
 		return FALSE;
 	}
+	timer_device_open = TRUE;
 	return TRUE;
 }
 
@@ -954,7 +956,9 @@ static void timer_close(void)
 			AbortIO((struct IORequest *)timer_io);
 			WaitIO((struct IORequest *)timer_io);
 		}
-		CloseDevice((struct IORequest *)timer_io);
+		if (timer_device_open)
+			CloseDevice((struct IORequest *)timer_io);
+		timer_device_open = FALSE;
 		DeleteIORequest((struct IORequest *)timer_io);
 		timer_io = NULL;
 	}
@@ -1089,7 +1093,11 @@ BOOL gt_create(void)
 	gt_layout.font_x = screen->RastPort.TxWidth ? screen->RastPort.TxWidth : 8;
 	gt_layout.font_y = screen->RastPort.TxHeight ? screen->RastPort.TxHeight : 8;
 	if (!layout_fits()) {
-		set_failure("Screen font is %u pixels; a 256-line screen needs a font of 13 pixels or less.",
+		set_failure("This %ux%u screen is %u lines too short for its\n"
+			"%u-pixel font. Use an 8-pixel screen font (topaz 8)\n"
+			"or a taller screen mode.",
+			(unsigned)screen->Width, (unsigned)screen->Height,
+			(unsigned)(outer_height() - screen->Height),
 			(unsigned)gt_layout.font_y);
 		return FALSE;
 	}

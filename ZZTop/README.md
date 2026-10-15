@@ -10,9 +10,12 @@ native-video output and scanlines, calibrates the captured Amiga picture,
 controls the ZZ9000AX mixer, edits `ZZ9000.CFG` on the microSD card, and
 installs or restores firmware.
 
-ZZTop runs on AmigaOS 2.04 or later. It uses the screen's font and lays its
-window out for it, with compact and minimal forms for small screens such as
-PAL HighRes 640x256. It requires a detected, configured ZZ9000.
+ZZTop runs on AmigaOS 3.0 or later. It uses the screen's font and lays its
+window out for it, with compact and minimal forms for small screens: NTSC
+HighRes 640x200 with an 8-pixel font such as topaz 8, and PAL HighRes 640x256
+with fonts up to 13 pixels. On a screen too short for its font, ZZTop says how
+many lines are missing instead of opening. It requires a detected, configured
+ZZ9000.
 `asl.library` is needed only when choosing a firmware file. `zz9k.library` is
 optional, although the audio controls need its advertised audio capability.
 
@@ -262,4 +265,4 @@ Save operation.
 ## History and status
 
 ZZTop 3 replaces the earlier ZZTop 2 windows with one window of pages, a
-global Save and Revert, and a layout that fits a 640x256 screen.
+global Save and Revert, and a layout that fits screens down to 640x200.

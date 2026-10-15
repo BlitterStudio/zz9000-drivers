@@ -196,7 +196,7 @@ static void sync_controls(void)
 	gt_page_set_text(g_int_env, int_env_text);
 
 	if (cfg.env & CFG_ENV_MAC) {
-		snprintf(mac_env_text, sizeof(mac_env_text), "ENV:ZZ9K_MAC overrides (%s).", cfg.env_mac);
+		snprintf(mac_env_text, sizeof(mac_env_text), "ENV:ZZ9K_MAC is %s", cfg.env_mac);
 	} else if (!builtin && mac_text[0] && !settings_mac_valid(mac_text)) {
 		snprintf(mac_env_text, sizeof(mac_env_text), "%s", "Use aa:bb:cc:dd:ee:ff format.");
 	} else {
@@ -431,7 +431,7 @@ static void sync(void)
 struct gt_page gt_page_system = {
 	"System",
 	"System settings",
-	"Interrupt, network, SD boot, graphics and memory settings.",
+	"Interrupt, network, SD boot, RTG and memory settings.",
 	0,
 	NULL,
 	NULL,

@@ -385,13 +385,13 @@ static BOOL audio_open_control_plane(void)
 	}
 	if ((board.zz9k_caps & ZZ9K_CAP_AUDIO_CONTROL) == 0) {
 		audio_text(unavailable, sizeof(unavailable),
-			"Firmware lacks the audio control plane");
+			"Firmware lacks audio control");
 		return FALSE;
 	}
 	if (!audio_install_live_state()) {
 		retryable = TRUE;
 		audio_text(unavailable, sizeof(unavailable),
-			"Card did not answer the audio control-state request");
+			"No audio state from the card");
 		return FALSE;
 	}
 	available = TRUE;
@@ -831,16 +831,16 @@ BOOL audio_save_start(char *msg, UWORD size)
 	}
 	memcpy(&result, reply.payload.inline_data, sizeof(result));
 	status = zz9k_get_be32(result.status);
-	if (status == ZZ9K_AUDIO_SCENE_SAVE_QUEUED) {
+	/* QUEUED and OK both mean the firmware accepted the save and may
+	 * rewrite ZZ9000.CFG. Report the start as accepted either way: the
+	 * caller keeps its file snapshot and settles the result through
+	 * audio_save_poll(), even when the first state query is late. */
+	if (status == ZZ9K_AUDIO_SCENE_SAVE_QUEUED ||
+		status == ZZ9K_AUDIO_SCENE_SAVE_OK) {
 		save_generation = edit_generation;
 		save_pending = TRUE;
 		audio_text(msg, size, "Saving...");
 		return TRUE;
-	}
-	if (status == ZZ9K_AUDIO_SCENE_SAVE_OK) {
-		save_generation = edit_generation;
-		save_pending = TRUE;
-		return audio_save_poll(msg, size) == AUDIO_SAVE_DONE;
 	}
 	audio_text(msg, size, status == ZZ9K_AUDIO_SCENE_SAVE_BUSY ?
 		"Save busy - retry" : status == ZZ9K_AUDIO_SCENE_SAVE_REJECTED ?

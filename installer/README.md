@@ -110,9 +110,10 @@ interrupt-conflict troubleshooting and affects both audio drivers.
 ### SDK runtime and AmiSSL
 
 The SDK runtime needs SDK-service firmware. On matched Zorro II firmware,
-bitstream, SDK payload, and driver sets, SDK clients use a shared 64 KiB host
-window. The 4 MiB profile supports one bounded 224 KiB `ZZPlay` PIP source;
-the 2 MiB profile has no video PIP. Concurrent accelerated operations can
+bitstream, SDK payload, and driver sets, SDK clients share one host window:
+16 KiB on current generation-2 layouts, which reserve the other 48 KiB for the
+audio direct ring, and 64 KiB on generation 1. The 4 MiB profile supports one
+bounded 224 KiB `ZZPlay` PIP source; the 2 MiB profile has no video PIP. Concurrent accelerated operations can
 contend for that window. Legacy descriptor-free 4 MiB compatibility keeps the
 fixed 64 KiB window without negotiated layout or PIP; legacy 2 MiB and unknown
 sizes reject it.

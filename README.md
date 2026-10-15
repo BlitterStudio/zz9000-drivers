@@ -45,9 +45,10 @@ ZZTop and ZZPlay install in `SYS:Utilities/ZZ9000/`. Expert installation can
 add that drawer to the command path by updating its `;BEGIN ZZ9000` block in
 `S:User-Startup`. Upgrades can remove the former `SYS:Tools/ZZTop` location.
 
-`ZZTop` runs on AmigaOS 2.04 or newer and fits a 640x256 screen. See the
-[ZZTop manual](ZZTop/README.md) for setup, configuration, and feature
-requirements.
+`ZZTop` runs on AmigaOS 3.0 or newer. It fits screens down to NTSC HighRes
+640x200 with an 8-pixel screen font, and PAL HighRes 640x256 with fonts up to
+13 pixels. See the [ZZTop manual](ZZTop/README.md) for setup, configuration,
+and feature requirements.
 
 ## Picasso96 graphics
 

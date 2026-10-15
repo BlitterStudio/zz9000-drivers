@@ -567,7 +567,7 @@
 
       (copyfiles
          (prompt ("Install ZZTop into %s/" #zz-drawer))
-         (help "The ZZ9000 control panel: card status, native video output and picture alignment, the audio mixer, system settings stored on the SD card, and firmware install/restore, all in one window. Runs on every AmigaOS 3 system and fits a 640x256 Workbench.")
+         (help "The ZZ9000 control panel: card status, native video output and picture alignment, the audio mixer, system settings stored on the SD card, and firmware install/restore, all in one window. Runs on every AmigaOS 3 system and fits Workbench screens down to 640x200.")
          (source "Tools/ZZTop")
          (infos)
          (dest #zz-drawer))
