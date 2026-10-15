@@ -483,8 +483,12 @@ static void gadget(UWORD id, UWORD code)
 		gt_status("%s", action_text);
 		break;
 	case G_ENV_USE:
-		settings_env_adopt(CFG_ENV_NATIVE);
-		gt_status("ENV native-video setting copied into ZZ9000.CFG");
+		/* Through the profile transition, so crop measured on the old
+		 * capture grid is cleared and a live preview restored. */
+		if (cfg.env & CFG_ENV_NATIVE) {
+			video_set_profile(cfg.env_profile, action_text, sizeof(action_text));
+			gt_status("%s", action_text);
+		}
 		break;
 	case G_ENV_REMOVE:
 		if (gt_ask("Remove|Cancel",

@@ -489,7 +489,7 @@ BOOL video_set_geometry(UWORD width, UWORD height, char *msg, UWORD size)
 	}
 	if (!video_geometry_supported()) {
 		write_message(msg, size,
-			"Capture window needs firmware that confirms capture window changes.");
+			"Capture window needs firmware that confirms window changes");
 		return FALSE;
 	}
 	live.geometry_touched = TRUE;
@@ -536,14 +536,19 @@ BOOL video_set_profile(UWORD profile, char *msg, UWORD size)
 		live.crop_touched = FALSE;
 	}
 	settings_set(CFG_PROFILE, profile);
-	if (live.supported && (settings_present(&cfg.edit, CFG_CROP_H) ||
+	/* Crop offsets belong to the capture grid they were measured on:
+	 * clear them whenever the staged path changes, also on firmware
+	 * without live controls (only the preview restore above needs it). */
+	if ((settings_present(&cfg.edit, CFG_CROP_H) ||
 		settings_present(&cfg.edit, CFG_CROP_V)) &&
 		!zz_vcap_path_equal(&old_path, &new_path)) {
 		settings_clear(CFG_CROP_H);
 		settings_clear(CFG_CROP_V);
 		write_message(msg, size,
 			"Framing reset to Automatic; Save, reboot, then align picture");
-	} else write_message(msg, size, "Output changed; Save, then power-cycle");
+	} else {
+		write_message(msg, size, "Output changed; Save, then power-cycle");
+	}
 	return TRUE;
 }
 

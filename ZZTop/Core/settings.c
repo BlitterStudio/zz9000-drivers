@@ -485,6 +485,8 @@ void settings_env_scan(void)
 	}
 }
 
+/* Native-video overrides are adopted through video_set_profile(), which
+ * also clears crop measured on the old capture grid. */
 void settings_env_adopt(UWORD which)
 {
 	settings_env_scan();
@@ -492,8 +494,6 @@ void settings_env_adopt(UWORD which)
 		settings_set(CFG_INT2, 1);
 	if ((which & CFG_ENV_MAC) && (cfg.env & CFG_ENV_MAC))
 		settings_set_text(CFG_MAC, cfg.env_mac);
-	if ((which & CFG_ENV_NATIVE) && (cfg.env & CFG_ENV_NATIVE))
-		settings_set(CFG_PROFILE, cfg.env_profile);
 }
 
 static const char *const env_names_int2[] = { "ZZ9K_INT2", NULL };

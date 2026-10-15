@@ -508,10 +508,15 @@ static void sync(void)
 	sync_live();
 }
 
-/* Dispatch one page-local gadget action through the shared capture model. */
+static void flush(void);
+
+/* Dispatch one page-local gadget action through the shared capture model.
+ * Text typed into any field is committed first: GadTools sends no
+ * GADGETUP when another control is clicked, and the sync() below would
+ * otherwise overwrite it. For the fields and their Automatic boxes,
+ * flush() is the whole action. */
 static void gadget(UWORD id, UWORD code)
 {
-	LONG entered_phase;
 	int phase;
 	int delta;
 	BOOL ok;
@@ -519,6 +524,7 @@ static void gadget(UWORD id, UWORD code)
 	delta = 0;
 	ok = TRUE;
 	message_buffer[0] = '\0';
+	flush();
 	switch (id) {
 	case G_SAMPLE:
 		if (code >= 3)
@@ -526,15 +532,14 @@ static void gadget(UWORD id, UWORD code)
 		ok = video_set_sample(code, message_buffer, sizeof(message_buffer));
 		break;
 	case G_PHASE:
-		if (!field_value(phase_gadget, &entered_phase) || entered_phase < -1000 ||
-			entered_phase > 1000) {
-			snprintf(message_buffer, sizeof(message_buffer),
-				"Phase must be signed steps in this clock's range");
-			ok = FALSE;
-		} else {
-			ok = video_set_phase((int)entered_phase, TRUE, message_buffer,
-				sizeof(message_buffer));
-		}
+	case G_CROP_H:
+	case G_CROP_H_AUTO:
+	case G_CROP_V:
+	case G_CROP_V_AUTO:
+	case G_WIDTH:
+	case G_WIDTH_AUTO:
+	case G_HEIGHT:
+	case G_HEIGHT_AUTO:
 		break;
 	case G_PHASE_MINUS_28:
 		delta = -28;
@@ -547,18 +552,6 @@ static void gadget(UWORD id, UWORD code)
 		break;
 	case G_PHASE_PLUS_28:
 		delta = 28;
-		break;
-	case G_CROP_H:
-	case G_CROP_H_AUTO:
-	case G_CROP_V:
-	case G_CROP_V_AUTO:
-		ok = change_crop(message_buffer);
-		break;
-	case G_WIDTH:
-	case G_WIDTH_AUTO:
-	case G_HEIGHT:
-	case G_HEIGHT_AUTO:
-		ok = change_geometry(message_buffer);
 		break;
 	case G_AUTO:
 		ok = video_reset_automatic(message_buffer, sizeof(message_buffer));
@@ -580,7 +573,9 @@ static void gadget(UWORD id, UWORD code)
 				video_phase_domain()), TRUE, message_buffer, sizeof(message_buffer));
 		}
 	}
-	gt_status("%s", message_buffer);
+	/* An empty buffer means flush() already reported on the status line. */
+	if (message_buffer[0])
+		gt_status("%s", message_buffer);
 	gt_pending_changed();
 	sync();
 	(void)ok;
