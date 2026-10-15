@@ -212,7 +212,8 @@ static BOOL install_image(const char *image, const char *tag)
 	return FALSE;
 }
 
-/* Install the chosen file after confirmation. */
+/* Install the chosen file after confirmation. A kept online download is
+ * discarded once it has been installed, like the direct online path. */
 static void install(void)
 {
 	if (!path[0] || !fwup_supported || transfer_active)
@@ -221,7 +222,14 @@ static void install(void)
 		"Install %s as BOOT.bin?\n\nCurrent image kept as BOOT.bak.\nPower-cycle Amiga afterwards.",
 		FilePart((CONST_STRPTR)path)) != 1)
 		return;
-	install_image(path, path_tag[0] ? path_tag : NULL);
+	if (!install_image(path, path_tag[0] ? path_tag : NULL) || !path_tag[0])
+		return;
+	DeleteFile((CONST_STRPTR)path);
+	path[0] = '\0';
+	path_tag[0] = '\0';
+	snprintf(file_text, sizeof(file_text), "%s", "No file chosen");
+	gt_page_set_text(g_file, file_text);
+	update_gate();
 }
 
 static int wait_keep_running(void *ctx)
