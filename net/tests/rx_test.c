@@ -403,6 +403,78 @@ static int test_serial_wrap_is_not_an_overrun(void)
 	return EXIT_SUCCESS;
 }
 
+/* A flood refills the backlog as fast as the framer acks, so the drain
+ * never reaches WAIT. The framer must still leave ZZNET_FRAMER_PRI after
+ * each budget, and be back at it when it sleeps. */
+static int test_flood_drain_yields_after_budget(void)
+{
+	struct fw f;
+	struct framer fr;
+	struct zznet_rx_drain drain;
+	int pri = ZZNET_FRAMER_PRI, next;
+	unsigned frames, at_high = 0, at_low = 0, switches = 0, i;
+
+	fw_init(&f, FW_28);
+	framer_init(&fr, &f);
+	CHECK(zznet_rx_drain_reset(&drain) == ZZNET_RX_PRI_KEEP);
+	for (i = 0; i < 16; i++)
+		fw_receive(&f);
+
+	for (frames = 0; frames < 4 * ZZNET_RX_DRAIN_BUDGET; frames++) {
+		CHECK(framer_step(&fr, &f) == ZZNET_RX_DELIVER);
+		next = zznet_rx_drain_frame(&drain);
+		if (next != ZZNET_RX_PRI_KEEP) {
+			CHECK(next != pri);
+			pri = next;
+			switches++;
+		}
+		if (pri == ZZNET_FRAMER_PRI)
+			at_high++;
+		else
+			at_low++;
+		fw_receive(&f);         /* the flood keeps the backlog full */
+	}
+	CHECK(fr.delivered == 4 * ZZNET_RX_DRAIN_BUDGET);
+	CHECK(switches == 4);
+	CHECK(at_high == 2 * ZZNET_RX_DRAIN_BUDGET);
+	CHECK(at_low == 2 * ZZNET_RX_DRAIN_BUDGET);
+	CHECK(pri == ZZNET_FRAMER_PRI);
+
+	/* The flood ends during a budget at the yield priority: the next
+	 * sleep restores ZZNET_FRAMER_PRI. */
+	for (i = 0; i < ZZNET_RX_DRAIN_BUDGET; i++) {
+		next = zznet_rx_drain_frame(&drain);
+		if (next != ZZNET_RX_PRI_KEEP)
+			pri = next;
+	}
+	CHECK(pri == ZZNET_FRAMER_YIELD_PRI);
+	CHECK(framer_run(&fr, &f) == 0);
+	CHECK(zznet_rx_drain_reset(&drain) == ZZNET_FRAMER_PRI);
+	CHECK(drain.left == ZZNET_RX_DRAIN_BUDGET);
+	return EXIT_SUCCESS;
+}
+
+/* A burst within the budget is drained without ever leaving
+ * ZZNET_FRAMER_PRI. */
+static int test_burst_within_budget_never_yields(void)
+{
+	struct fw f;
+	struct framer fr;
+	struct zznet_rx_drain drain;
+	unsigned i;
+
+	fw_init(&f, FW_28);
+	framer_init(&fr, &f);
+	zznet_rx_drain_reset(&drain);
+	for (i = 0; i < ZZNET_RX_DRAIN_BUDGET - 1; i++)
+		fw_receive(&f);
+	while (framer_step(&fr, &f) != ZZNET_RX_WAIT)
+		CHECK(zznet_rx_drain_frame(&drain) == ZZNET_RX_PRI_KEEP);
+	CHECK(fr.delivered == ZZNET_RX_DRAIN_BUDGET - 1);
+	CHECK(zznet_rx_drain_reset(&drain) == ZZNET_RX_PRI_KEEP);
+	return EXIT_SUCCESS;
+}
+
 /* An offset-2 frame: the length word carries the flag, the decision
  * carries the plain size and the offset. */
 static int test_offset2_flag_is_masked_from_size(void)
@@ -441,6 +513,8 @@ int main(void)
 		test_bad_size_is_dropped,
 		test_gap_spans_empty_drain_boundary,
 		test_serial_wrap_is_not_an_overrun,
+		test_flood_drain_yields_after_budget,
+		test_burst_within_budget_never_yields,
 		test_offset2_flag_is_masked_from_size,
 	};
 	unsigned i;

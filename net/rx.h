@@ -79,4 +79,31 @@ void zznet_rx_reset(struct zznet_rx_state *state, uint16_t fw_version);
 struct zznet_rx_decision zznet_rx_next(struct zznet_rx_state *state,
                                        const struct zznet_rx_io *io);
 
+/* Framer drain budget. frame_proc runs above the stack's tasks so the
+ * backlog empties as frames arrive, but its drain loop only sleeps once
+ * the backlog is empty. Under a flood faster than the 68k drains, it would
+ * never sleep and starve every task below it. After ZZNET_RX_DRAIN_BUDGET
+ * frames without sleeping, the framer drops to ZZNET_FRAMER_YIELD_PRI for
+ * the next budget, where Exec time-slices it with ordinary tasks, then
+ * returns to ZZNET_FRAMER_PRI; it is back at ZZNET_FRAMER_PRI whenever it
+ * sleeps. The budget is half the 128-slot firmware backlog, above what a
+ * TCP receive window keeps in flight, so normal delivery never yields. */
+#define ZZNET_FRAMER_PRI        10
+#define ZZNET_FRAMER_YIELD_PRI  0
+#define ZZNET_RX_DRAIN_BUDGET   64
+#define ZZNET_RX_PRI_KEEP       (-128)
+
+struct zznet_rx_drain {
+	uint16_t left;     /* frames before the next priority switch */
+	uint8_t  lowered;  /* running at ZZNET_FRAMER_YIELD_PRI */
+};
+
+/* Start of a wakeup. Returns the priority to set before sleeping, or
+ * ZZNET_RX_PRI_KEEP if the framer is already at ZZNET_FRAMER_PRI. */
+int zznet_rx_drain_reset(struct zznet_rx_drain *drain);
+
+/* Call once per DROP or DELIVER. Returns the priority to switch to now, or
+ * ZZNET_RX_PRI_KEEP. */
+int zznet_rx_drain_frame(struct zznet_rx_drain *drain);
+
 #endif /* ZZNET_RX_H */

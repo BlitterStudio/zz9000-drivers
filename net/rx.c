@@ -73,3 +73,21 @@ struct zznet_rx_decision zznet_rx_next(struct zznet_rx_state *state,
 	d.action = ZZNET_RX_DELIVER;
 	return d;
 }
+
+int zznet_rx_drain_reset(struct zznet_rx_drain *drain)
+{
+	int pri = drain->lowered ? ZZNET_FRAMER_PRI : ZZNET_RX_PRI_KEEP;
+
+	drain->left = ZZNET_RX_DRAIN_BUDGET;
+	drain->lowered = 0;
+	return pri;
+}
+
+int zznet_rx_drain_frame(struct zznet_rx_drain *drain)
+{
+	if (--drain->left)
+		return ZZNET_RX_PRI_KEEP;
+	drain->left = ZZNET_RX_DRAIN_BUDGET;
+	drain->lowered = !drain->lowered;
+	return drain->lowered ? ZZNET_FRAMER_YIELD_PRI : ZZNET_FRAMER_PRI;
+}
