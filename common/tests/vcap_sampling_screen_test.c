@@ -1,6 +1,6 @@
 /*
  * Regression for the interactive C28 sampling-calibration screen-opening
- * path in ZZTop/Sources/vcap_sampling.c.
+ * path in ZZTop/Core/vcap_sampling.c.
  *
  * It compiles and drives the REAL vcap_sampling.c (VCAP_SAMPLING_TEST_IO)
  * against a faithful host surface:

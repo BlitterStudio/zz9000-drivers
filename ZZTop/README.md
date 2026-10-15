@@ -3,235 +3,266 @@
   SPDX-License-Identifier: GPL-3.0-or-later
 -->
 
-# ZZTop — the ZZ9000 control panel
+# ZZTop 3
 
-ZZTop is the Workbench program for the card's everyday controls: it shows
-board and firmware status, edits `ZZ9000.CFG` on the microSD card without
-pulling the card, adjusts the scandoubler and the audio mixer, and
-installs or restores firmware. It needs no shell and no configuration
-files of its own.
+ZZTop is the ZZ9000 Workbench control panel. It shows card health, changes
+native-video output and scanlines, calibrates the captured Amiga picture,
+controls the ZZ9000AX mixer, edits `ZZ9000.CFG` on the microSD card, and
+installs or restores firmware.
 
-From v2.8 it installs to `SYS:Utilities/ZZ9000/ZZTop`, sharing one drawer
-with ZZPlay. The installer offers to put that drawer on the command path
-(`SYS:Utilities` itself is not searched recursively) and offers to delete
-an old `SYS:Tools/ZZTop` when upgrading.
+ZZTop runs on AmigaOS 3.0 or later. It uses the screen's font and lays its
+window out for it, with compact and minimal forms for small screens: NTSC
+HighRes 640x200 with an 8-pixel font such as topaz 8, and PAL HighRes 640x256
+with fonts up to 13 pixels. On a screen too short for its font, ZZTop says how
+many lines are missing instead of opening. It requires a detected, configured
+ZZ9000.
+`asl.library` is needed only when choosing a firmware file. `zz9k.library` is
+optional, although the audio controls need its advertised audio capability.
 
-Most controls write the SD card's `ZZ9000.CFG`, which firmware reads at
-the next cold boot. Scanlines, audio levels and explicitly live capture
-calibration also affect the running card. Live changes still need Save to
-survive a power cycle.
+## Starting ZZTop
 
-## Main window
+Start `ZZTop` from Workbench. It has no command-line options or Workbench
+ToolTypes.
 
-The main window reads back the board identity, firmware version and
-capabilities, and the current capture state. Two buttons open the
-windows you will use most, **Scandoubler** and **Audio**; the same
-windows are also on the **Settings** menu for screens where the buttons
-do not fit.
+Choose a page from the list at the left. The normal list contains Status,
+Display, Audio, System, and Firmware. Enable **Settings > Advanced controls**
+to add Capture and Scenes as indented child pages, and Diagnostics as an
+additional page. This choice is kept in `ENV:ZZTopAdvanced`; it is a program
+setting, not a ToolType.
 
-## Settings — Scandoubler
+The selected page has a title and a short description. The footer has a status
+line, **Revert**, and **Save**. The menus provide **Project > About**,
+**Project > Quit**, **Edit > Save**, **Edit > Revert**, and **Settings >
+Advanced controls**, with the shortcuts `?`, `Q`, `S`, `R`, and `A`.
 
-The Scandoubler window owns native Amiga video: how the captured chipset
-picture is presented on the HDMI output.
+## Saving, reverting, and quitting
 
-**Output** and **Refresh** are dependent selectors. Only combinations the
-installed firmware and bitstream support are offered; changing the output
-keeps the refresh when that pair exists, otherwise a valid refresh is
-selected visibly.
+Changes have one of two effects.
 
-| Output | Refresh | Saved profile |
+| Effect | Settings |
+|---|---|
+| Live | Scanlines, live picture alignment and sampling, capture geometry where supported, and audio controls |
+| After a power cycle | Native-output profile, sampling mode, interrupt, MAC address, SD-card boot image, RTG options, and Fast RAM |
+
+**Save** first validates pending MAC, HDF, and capture values. It saves audio,
+repairs any non-audio settings that the firmware audio save replaced, rereads
+`ZZ9000.CFG`, merges only the changed non-audio fields, then writes the merged
+file. The status line identifies settings that need a power cycle.
+
+**Revert** restores the saved live capture, scanline, and audio state, then
+reloads the settings file. It reports a restore failure instead of pretending
+that the previous state is known.
+
+When quitting with live or audio changes, select **Save**, **Keep until
+reboot**, **Discard**, or **Cancel**. With card-file-only changes, the choices
+are **Save**, **Discard**, and **Cancel**.
+
+`ZZ9000.CFG` handling requires firmware 2.3 or later. ZZTop keeps fields it did
+not change when it rewrites the file. Firmware keeps the previous card file as
+`ZZ9000.BAK`; comments in a hand-written file are not retained. A write that
+would exceed the firmware file limit is rejected.
+
+## Status
+
+Status is read-only and refreshes the health values twice per second. It shows:
+
+- card model and Zorro II or Zorro III bus;
+- firmware version and advertised features;
+- FPGA temperature, its minimum and maximum since ZZTop started, `VCCINT`, and
+  `VCCAUX`;
+- ZZ9000AX/audio availability and native-video signal information;
+- SD-card boot state and `ZZ9000.CFG` read status and size; and
+- a notice for pending changes.
+
+## Display
+
+Display controls the native Amiga picture on HDMI. It offers only output and
+refresh pairs supported by the installed firmware and bitstream. Changing an
+output keeps the selected refresh when that pair exists; otherwise it selects
+a supported refresh. The selected profile applies after a power cycle.
+
+| Output | Refresh | `videocap_profile` |
 |---|---|---|
-| 1280x1024 - full detail | 60Hz | `full_60` |
+| 1280x1024 - full detail | 60 Hz | `full_60` |
 | 1280x1024 - full detail | Match Amiga | `full_exact` |
-| 1920x1080 - centered | 60Hz | `centered_1080p_60` |
-| 1920x1080 - centered | 50Hz | `centered_1080p_50` |
-| 1920x1080 - centered | Match Amiga (experimental) | `centered_1080p_match` |
-| 800x600 / 720x480 - filtered | 60Hz | `filtered_60` |
-| 720x576 / 720x480 - filtered | 50Hz PAL, 60Hz NTSC | `filtered_pal` |
+| 1920x1080 - centered | 60 Hz | `centered_1080p_60` |
+| 1920x1080 - centered | 50 Hz | `centered_1080p_50` |
+| 1920x1080 - centered | Match Amiga | `centered_1080p_match` |
+| 800x600 / 720x480 - filtered | 60 Hz | `filtered_60` |
+| 720x576 / 720x480 - filtered | 50 Hz PAL, 60 Hz NTSC | `filtered_pal` |
 | 720x576 / 720x480 - filtered | PAL Amiga clock | `filtered_pal_exact` |
 | 720x576 / 720x480 - filtered | NTSC Amiga clock | `filtered_ntsc_exact` |
 
-The centered rows need a matched v2.8 stack: ZZTop checks the firmware
-capability register (bit 3 for centered 60 Hz, bits 3+4 for 50 Hz, bits
-3-5 for `centered_1080p_match`) and offers only what the card can do. A
-stored centered profile the stack cannot support is replaced by `full_60`
-at the next save, from any configuration window. `Match Amiga` on the
-full-detail output selects fixed approximations (about 49.93/59.95 Hz);
-only `centered_1080p_match` actually follows the Amiga's own raster.
+Centered profiles are capability-gated. An unavailable centered profile is
+stored as `full_60`. `Match Amiga` with the full-detail output uses fixed
+approximations; `centered_1080p_match` follows the Amiga raster when the
+firmware advertises that capability.
 
-Choose the pair, press **Save**, then power-cycle. Scanline mode and
-parity apply immediately but still need **Save** to survive the power
-cycle.
+`ENV:ZZ9000-VCAP-800x600` and `ENV:ZZ9000-NS-VSYNC` override this selection.
+When either is present, the page identifies the override and provides **Use
+it** to copy its meaning into pending card-file settings, or **Remove** to
+delete its `ENV:` and `ENVARC:` copies.
 
-### Capture and live calibration
+The page also provides these live controls:
 
-**Capture…** separates live hardware values, edits staged by **Done**, and
-values persisted by the Scandoubler window's **Save**. Opening the window
-or leaving a field untouched does not turn a live Automatic value into a
-saved override.
+| Control | Action |
+|---|---|
+| **Scanlines** | Selects `Off`, `Classic`, `Soft`, or `Gradient`. |
+| **Darken** | Selects `Odd lines` or `Even lines`. |
+| **Picture** | Reports the current framing and sampling state. |
+| **Align picture...** | Opens a native PAL or NTSC Hires calibration screen. Arrow keys move one step, Shift plus an arrow moves 16 steps, Enter keeps the position, and Escape restores the position from before the screen opened. |
+| **Find phase...** | Measures a C28 capture-engine test pattern, selects the middle of a clean range, and retests it. Keep the pattern screen in front. Enter keeps the result; Escape or Ctrl-C restores the previous phase. |
+| **Reset auto** | Returns framing, sampling phase, and capture geometry to automatic settings. |
 
-- **Sampling Phase** and the ±1/±28 buttons apply live. The title names the
-  C28 or legacy E7M engine; its signed range and step units are used
-  throughout. C28 requires a qualified, locked C28 input clock. E7M uses
-  its own ready/error/status layout, not the C28 clock gate.
-- **Capture W / H** requests a window at the next stable native vblank.
-  Width is 256–1280, aligned to 16 words; height is 100–1024 in the existing
-  capture-window units. Clear either axis for Automatic independently.
-  The status distinguishes the requested overrides from the resolved
-  VDMA word width/source-row count. It reports applied only after the
-  firmware acknowledges successful programming; RTG vblanks do not count.
-  This needs the geometry-ACK firmware capability (bit 10 plus bit 8).
-- Crop fields stage per-axis overrides. An empty field stages Automatic
-  for that axis. **Align picture...** is the live framing editor. Automatic crop
-  is resolved by the capture path and source class, not saved as a number.
-- **Reset to Auto** resets the supported crop, phase and window controls live,
-  then stages removal of their active-domain overrides with Done. Editing
-  only phase afterwards leaves crop/window Automatic. A legacy geometry
-  stack without readback/ACK disables Window and Reset to Auto rather than
-  claiming that an unconfirmed reset succeeded. Cancel stops later
-  steps of the reset: it does not force phase/window requests for components
-  the cancelled reset never reached.
+Live picture work needs firmware 2.8 with a matching bitstream. Alignment also
+needs stable native frames and a capture path that matches the staged output
+profile and sampling mode. Capture geometry needs firmware acknowledgement.
+After changing between full-detail and filtered capture paths, align the
+picture again after the power cycle.
 
-**Align picture...** opens a native PAL or NTSC Hires alignment screen:
+## Capture
 
-- Arrows move the picture in the named direction, one crop unit at a
-  time; Shift selects 16-unit steps.
-- Enter accepts the displayed crop pair; Escape queues restoration of the
-  exact entry state, including per-axis Automatic flags. Pending requests
-  are reconciled without blocking keyboard input for the frame timeout.
-- Accepted previews remain live. Done stages their values; Save alone
-  writes `ZZ9000.CFG`. A cold boot reproduces the saved settings. Once
-  Done accepts, later queued edits or Close do not alter that decision.
+Capture is an advanced child page under Display. It is disabled when firmware
+configuration support is unavailable, and individual controls are disabled
+when their live-capture capability is unavailable.
 
-To populate **Last phase sweep**, open **Scandoubler -> Capture...**,
-then select **Find phase...**. Keep the native pattern screen in front
-while it sweeps and retests. Press **Enter** at the final prompt to accept
-the selected phase; **Escape/Ctrl-C** restores the entry phase. Then use
-Capture **Done** to stage it and Scandoubler **Save** to persist it.
+| Control | Values and behaviour |
+|---|---|
+| **Sample mode** | `Average (recommended)`, `Even fields (diagnostic)`, or `Odd fields (diagnostic)`. This applies after a power cycle. |
+| **Sampling phase** | Fine and coarse controls for the active capture engine. The step buttons are `-28`, `-1`, `+1`, and `+28`. C28 accepts `-896..895`; E7M accepts `-255..255`. ZZTop saves a live value only after the card confirms it. |
+| **Last phase sweep** | Result of the most recent phase search. `=` means every measured phase in the group was clean, `+` means mixed, `.` means dirty, and `|` marks the current phase. |
+| **Crop H** and **Crop V** | Signed crop values with an **Automatic** control. |
+| **Capture width** and **Capture height** | Width is `256..1280` in 16-pixel steps; height is `100..1024`. Each has an **Automatic** control. |
+| **Picture actions** | **Align picture...**, **Find phase...**, and **Reset auto** are also available here. |
 
-**Find phase...** is C28-only and requires the frozen-field metadata
-interface. It opens a native SuperHires 8-bit pattern with the verified
-PAL/NTSC standard; a native caller's interlace mode is preserved, while an
-RTG caller requests a progressive native test pattern. It verifies the
-actual screen/mode, front-screen ownership, phase, source flags and frozen
-geometry throughout acquisition. Each measured phase is applied once,
-settling fields are discarded, and the selected circular eye is refined
-and retested before acceptance. Escape/Ctrl-C restores the child's entry
-phase before its screen closes. Progress text stays in the unsampled
-header band, and the pointer is hidden so UI overlays cannot spoil the
-measured pattern.
+Typed values are committed before changing page and before Save, Revert, or a
+quit decision. An Automatic crop, phase, width, or height clears its native
+configuration key. Geometry requests show both the requested value and the
+value acknowledged by the card.
 
-**Last phase sweep** is a measured pattern sweep, not a continuous live
-eye: each glyph groups four coarse bins (`=` all clean, `+` mixed,
-`.` all dirty); `|` marks the last confirmed phase group. Unsupported
-E7M sampling and an unmeasured/invalidated sweep have no fabricated eye.
+## Audio
 
-Capture **Cancel** restores the immutable parent entry phase, crop and
-window even after a child sweep was accepted. Reload/closing Scandoubler
-restores its unsaved live changes; a successful Save rebases that anchor.
-Unconfirmed commands cannot be staged or saved. A failed restore leaves
-the window open with live state explicitly unknown: retry when native
-frames/clock return, or cold-boot to recover. Close/Cancel remains serviced
-while normal phase/window/Automatic requests await acknowledgement.
+Audio controls the ZZ9000AX mixer live. It requires the daughterboard,
+`zz9k.library`, the firmware audio-control capability, and a responding
+control-state request. The page identifies the missing condition. **Retry** is
+available only for a transient audio-control-plane response failure.
 
-Live framing requires matched firmware 2.8+ and a protocol-1 live-control
-bitstream. Custom crop is tied to its sample/full-width capture path;
-Align picture and Custom Save stay unavailable while staged settings select a
-different path. Other numeric configuration edits can still be staged on
-older stacks, but disabled live controls do not confirm running hardware.
+- **Scene** selects one of eight scenes.
+- **Paula level** and **AX level** set the two mix levels. Their `0..255`
+  ranges are constrained by the card calibration and current mix boundary.
+- **Balance** applies the qualified mix preset: Paula at three quarters of its
+  ceiling and AX at twice the Paula value.
+- **Mix limit** shows the weighted combined level against the limit.
+- **Meters** show output left/right and input left/right peaks in `-60..0`
+  dBFS, plus output clipping, underruns, limiter activity, input clipping, and
+  overruns since the page opened.
 
-## Settings — Audio
+Save asks the firmware to persist the audio state. Meter values need the
+separate audio-metering capability.
 
-The Audio window is the operator surface of the firmware-owned audio
-scene: master mix, per-device level trims, and live level metering. It
-opens only when the running firmware advertises the audio control plane;
-on older firmware or a machine without the ZZ9000AX daughterboard the
-button is greyed out and playback is unaffected.
+## Scenes
 
-- **Baseline and ceilings.** The Paula and AX sliders are bounded by the
-  card's own measured calibration, read live from the firmware. The
-  **Balance** preset applies the firmware's parity formula (Paula at
-  three quarters of the ceiling, AX at twice Paula, capped by the
-  ceiling), which is also what an unconfigured card boots with.
-- **Save** persists the scene — all eight scenes keep their names and
-  calibration values — into `ZZ9000.CFG`.
-- While the firmware confirms a new ceiling pair, edits and Save pause
-  and the window retries once per second; if it stays pending, close and
-  reopen Audio to read the live state. If the boundary read fails, reopen
-the window once the control service responds; no settings changed.
+Scenes is an advanced child page under Audio. It edits the active scene.
 
-Recording setup, jumper positions and the audio driver details have
-their own manual (`ahi/README.md` in this repository), shipped as
-`ahi.guide` in the installer drawer.
+| Group | Controls |
+|---|---|
+| Scene | **Scene** selector and **Name**, up to 16 characters |
+| Master | **Output lowpass** (`1..23900` Hz), **Volume**, **Pre-gain**, and **Pan** (`0..100`, where `50` is centre) |
+| Equaliser (Hz) | Ten bands: `31`, `63`, `125`, `250`, `500`, `1k`, `2k`, `4k`, `8k`, and `16k`; the middle position is flat |
+| Card calibration | **Paula clean ceiling** and **AX clean ceiling**, each `1..4095` |
 
-## Settings — Other Settings
+Volume, pre-gain, pan, and equaliser controls update while being dragged.
+Output lowpass is applied after release. Changing either calibration value
+blocks other audio edits until the card acknowledges the paired calibration.
 
-The remaining card-level options. All of them take effect at the next
-cold boot; native-video controls are not here, they live in Scandoubler.
+## System
 
-**INT2** moves the card's interrupt from INT6 to INT2 for every driver at
-once — audio (AHI and MHI) and networking. Some accelerators, SCSI
-controllers and network cards monopolise INT6; if the card's devices
-misbehave or do not appear, this is the switch to try. It writes
-`int2 = on`, which is safer than the old `ENV:ZZ9K_INT2` variable because
-all three drivers can no longer disagree about the line; an existing ENV
-variable still wins, so remove it when you set this.
+System settings apply after a power cycle and are disabled when firmware
+configuration support is unavailable.
 
-**MAC** overrides the card's Ethernet address. `ZZ9000Net.device` adopts
-whatever the firmware reports, so a router reservation or a duplicate
-address after a board swap is fixed here, once, instead of per stack.
-Enter six colon-separated bytes (`00:11:22:33:44:55`); an absent or
-invalid entry keeps the card's built-in address.
+| Group | Controls and settings |
+|---|---|
+| Interrupt | **INT6 (default)** or **INT2**. Use INT2 only when an INT6 conflict prevents ZZ9000 devices from working. Set J4 to the selected interrupt; a mismatch can lock the machine when a network cable is connected. |
+| Network | **Use the card's built-in address** or enter a MAC address as `aa:bb:cc:dd:ee:ff` (hyphens are also accepted). |
+| SD card boot | **Boot from an SD card image** and an image filename in the microSD root. An empty setting leaves the firmware default, `zz9000.hdf`; disabled boot writes `hdf = off`. |
+| Graphics | **Off-screen bitmaps in card memory (for incompatible software)** and **Video overlay window (needed by in-window ZZPlay)**. Both default to on. |
+| Memory | **Zorro III Fast RAM**, with an effective-state message from the boot result. |
 
-**HDF** names a root-level hard-disk image on the microSD card that the
-firmware presents to the Amiga at boot — booting Workbench straight from
-the SD card with no hard drive attached. Type the file name of an HDF
-placed in the card's root. With no `hdf` line in `ZZ9000.CFG` the field
-shows `zz9000.hdf`, the image the firmware boots by default. Clearing
-the entry saves `hdf = off`, which disables SD boot even when
-`zz9000.hdf` is present.
+`ENV:ZZ9K_INT2` and a valid `ENV:ZZ9K_MAC` override their card-file values.
+For either, select **Use it** to adopt the value or **Remove** to delete both
+its `ENV:` and `ENVARC:` copies. The precedence is `ENV:` override, card file,
+then firmware default.
 
-**Fast RAM** controls Zorro III Fast RAM where the running firmware supports
-the fail-closed boot gate. The status line reports the *effective* boot result,
-not only the saved choice: a configured-on value withheld for an invalid,
-truncated, unreadable, or slow configuration is distinct from enabled. Older
-firmware leaves the control disabled as unavailable. Every fast_ram change,
-ZZTop Save or manual SD edit, applies at the next reboot (warm reset re-reads
-the card).
+Fast RAM is fail-closed. The firmware leaves it disabled after a malformed,
+truncated, missing, unreadable, slow, or failed configuration read. A saved
+Fast RAM change takes effect at the next cold boot.
 
-**Offscreen bitmaps** (default on) is the switch for Picasso96 off-screen
-bitmaps in card memory — the accelerated path that keeps intermediate
-bitmaps next to the display. Turn it off only as an escape hatch when an
-application misbehaves with card-side bitmaps.
+## Firmware
 
-**Video overlay** (default on) is the switch for the Picasso96 video
-window, the hardware-scaled overlay that in-window video playback uses.
-ZZPlay video requires it; with the overlay off, applications lose
-in-window video (ZZPlay's dedicated fullscreen screen still plays).
+The Firmware page shows the installed firmware version and update-protocol
+status.
 
-## Project menu
+1. Select **Choose file...** and select a `bin`, `rom`, or `img` file.
+2. Select **Install new firmware**, confirm the request, and wait for the
+   transfer to finish. ZZTop promotes the selected file to `BOOT.bin` and
+   saves the previous image as `BOOT.bak`.
+3. Power-cycle the Amiga to start the new firmware.
 
-- **Update Firmware…** copies a firmware image to the SD card as
-  `BOOT.bin`, keeping the previous image as `BOOT.bak`. Power-cycle
-  afterwards so the card boots it.
-- **Restore Backup…** promotes `BOOT.bak` back to `BOOT.bin` after a
-  confirmation. It talks to the running firmware, so it recovers an
-  update that boots but misbehaves; a card that does not boot at all
-  needs the microSD removed and restored on another computer.
-- **Audio Debug Log** toggles the audio driver's debug output.
-- **About** shows the component versions; **Quit** exits.
+**Restore previous firmware** promotes `BOOT.bak` to `BOOT.bin`. This discards
+the current `BOOT.bin` and leaves no backup. It works only while the card can
+boot and communicate with ZZTop; restore an unbootable card's microSD card on
+another computer. Transfers and restore are disabled until the updater probe
+succeeds, and during a transfer.
 
-## Save rules
+## Diagnostics
 
-Each window saves only its own edits, preserving supported values from
-the other sections. Absent native-video keys stay inactive during a
-general Settings save; only Scandoubler Save activates the displayed
-native settings. Generated files are written in compact formatting to
-stay within the firmware's 4 KiB limit, so per-setting comments in a
-hand-written file are not retained; a generation failure leaves the
-existing file untouched.
+Diagnostics is an advanced page for observation and safe checks.
 
-Precedence is always `ENV:` variable first, then the config file, then
-the built-in default. A lingering ENV variable hides the saved value, so
-remove `ZZ9K_INT2`, `ZZ9K_MAC` and the legacy video variables when you
-migrate to `ZZ9000.CFG`.
+- **Board** shows the Zorro revision, board address, FPGA temperature, and its
+  session range.
+- **Raw registers** lists hardware and firmware versions, capability bits,
+  temperature, `VCCAUX`, `VCCINT`, USB, SD-card and SD-boot states, scanline
+  mode and parity, video-capture statistics, audio configuration, and updater
+  status.
+- **Capabilities** lists video profile, live adjustment, 1080p, 50 Hz, sync,
+  scanout-origin, geometry, geometry acknowledgement, and statistics support,
+  plus SDK audio-control and metering support.
+- **Run bus probe** reads the identity register eight times and reports the
+  result.
+- **Reset temperature range** clears the session temperature range.
+- **Audio control-plane debug log (`T:zztop-audio.log`)** enables or disables
+  the audio debug log.
+
+Dynamic register and temperature values refresh twice per second.
+
+## Settings file fields
+
+ZZTop reads and writes the following current non-audio fields. Values marked
+Automatic are omitted or commented out when saved.
+
+| Field | Values |
+|---|---|
+| `videocap_profile` | `full_60`, `full_exact`, `filtered_60`, `filtered_pal`, `filtered_pal_exact`, `filtered_ntsc_exact`, `centered_1080p_60`, `centered_1080p_50`, `centered_1080p_match` |
+| Legacy native-video fields | `videocap_mode = pal|800x600`, `videocap_shres = full|filter`, `nonstandard_vsync = off|pal|ntsc` |
+| `videocap_sample` | `average`, `even`, `odd` |
+| `videocap_crop_h`, `videocap_crop_v` | `0..4095`, or Automatic |
+| `videocap_phase` | `-255..255`, or Automatic |
+| `videocap_c28_phase` | `-896..895`, or Automatic |
+| `videocap_width` | `256..1280`, in 16-pixel steps, or Automatic |
+| `videocap_height` | `100..1024`, or Automatic |
+| `scanline_mode` | `0..3` |
+| `scanline_parity` | `0` or `1` |
+| `int2`, `offscreen_bitmaps`, `video_overlay`, `fast_ram` | `on` or `off` |
+| `mac` | Six hexadecimal octets separated by `:` or `-` |
+| `hdf` | Image filename in the microSD root, or `off` |
+
+The firmware audio save owns `audio_active`, `audio_baseline`,
+`audio_ceiling_paula`, `audio_ceiling_ax`, and the eight scene groups
+`audio_scene<N>_{lpf,eq01,eq23,eq45,eq67,eq89,out,pan,nm1..nm8}` for
+zero-based `N=0..7`. ZZTop preserves these fields while completing a shared
+Save operation.
+
+## History and status
+
+ZZTop 3 replaces the earlier ZZTop 2 windows with one window of pages, a
+global Save and Revert, and a layout that fits screens down to 640x200.

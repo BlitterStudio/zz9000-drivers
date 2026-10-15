@@ -2,266 +2,89 @@
 
 # ZZ9000 Drivers for AmigaOS
 
-AmigaOS driver and utility package for the MNT ZZ9000 Zorro II/III card.
-It includes RTG graphics, SANA-II networking, ZZ9000AX audio, Poseidon
-USB, SD-card boot support, firmware-update tooling, diagnostics, and a
-Commodore Installer drawer for end-user releases.
-
-This repository contains the Amiga-side drivers and tools. Matching FPGA
-logic and ARM firmware live in
+This package installs the AmigaOS drivers, utilities, configuration panels, and
+SDK runtime payloads for an MNT ZZ9000 Zorro II or Zorro III card. It is the
+Amiga-side half of the stack; the matching FPGA logic and ARM firmware are in
 [zz9000-firmware](https://github.com/BlitterStudio/zz9000-firmware).
 
-## Fork Notice
+Use firmware, bitstream, SDK payloads, and drivers from the same release. That
+is especially important on Zorro II, where the stack negotiates the board's
+shared-memory layout before SDK services are exposed.
 
-This is an independent BlitterStudio-maintained fork of the original MNT
-ZZ9000 AmigaOS driver sources. It is maintained by Dimitris Panokostas
-and is not affiliated with, endorsed by, or supported by MNT Research
-GmbH. The ZZ9000 hardware itself is designed and manufactured by MNT
-Research GmbH.
+## Components
 
-Hardware questions belong with MNT Research. Driver, installer, and
-fork-specific issues belong in this repository's
-[issue tracker](https://github.com/BlitterStudio/zz9000-drivers/issues).
-
-Upstream pre-fork source: <https://source.mnt.re/amiga/zz9000-drivers>
-
-## What Changed Since the Original MNT Drivers
-
-The original MNT drivers provided the essential AmigaOS connection to the
-ZZ9000. This independent BlitterStudio fork keeps that foundation and builds a
-complete end-user package around it. The most important differences are:
-
-| Improvement | What an Amiga owner gets |
+| Component | What it provides |
 |---|---|
-| **One guided installer** | A standard Commodore Installer puts the graphics, network, audio, USB and SD drivers in the right places, installs icons and tools, updates Picasso96 settings, and offers the correct extras for the detected CPU. Upgrades are handled without asking users to copy a collection of files by hand. |
-| **ZZTop as the card's control centre** | ZZTop shows firmware and board status, edits `ZZ9000.CFG` directly on the card, changes scanlines and native-video settings, performs live picture calibration, and can install or restore firmware without removing the microSD card. |
-| **Better native and RTG video** | The current stack offers clear native-output choices, full-detail 1280x1024 capture, the optional 1280x1024 image centered in a 1920x1080 signal at 50 or 60 Hz, 1920x1080x32 RTG modes on Zorro III, improved acceleration, monitor sleep/DPMS, modern scanlines, and numerous correctness fixes. |
-| **ZZPlay media playback** | The installed **ZZPlay** Workbench application uses the ZZ9000's ARM processors to decode MPEG-1 video and MP3/MP2 audio. Video can appear in a hardware-scaled Workbench window or on a dedicated screen. |
-| **Hardware-assisted AmiSSL** | The installer can add a CPU-matched AmiSSL library with ZZ9000 acceleration built in. Supported TLS handshakes and encrypted data are offloaded automatically for existing AmiSSL applications; unsupported operations remain in software. |
-| **A broader matched driver set** | The package includes maintained SANA-II networking, ZZ9000AX AHI/MHI audio, capability-gated Poseidon USB, SD-card boot support, firmware update/recovery, and focused board and network diagnostics. |
-| **Useful acceleration on Zorro II too** | Matched 2 MB and 4 MB releases safely expose a small shared service area for images, archives, audio and AmiSSL. A 4 MB card can additionally provide one bounded ZZPlay picture-in-picture source; 2 MB cards deliberately do not advertise PIP. |
-| **Repeatable releases** | Every component is built with pinned toolchains in CI, assembled into one installer drawer, and checked so stale local binaries cannot accidentally enter a release. |
+| [Installer](installer/README.md) | The Commodore Installer drawer, release layout, and end-user installation flow. |
+| [Picasso96 graphics](#picasso96-graphics) | `ZZ9000.card`, monitor settings, acceleration, DPMS, P96 video overlay, and custom modelines. |
+| [Networking](#networking-and-diagnostics) | `ZZ9000Net.device`, the optional Roadshow `ZZ9000Net` template, `ZZNetReady`, and `ZZNetStats`. |
+| [Board and command-line tools](docs/cli-tools.md) | `ZZDiag`, `ZZFwUpdate`, `ZZScanlines`, and their command-line reference. |
+| [ZZCapture](ZZCapture/README.md) | Native-video timing observation and experimental A4000/C28 capture diagnostics. |
+| [ZZ9000AX audio](ahi/README.md) | `zz9000ax.audio`, its AudioMode, and `mhizz9000.library` for PCM playback, recording, and hardware MP3 decoding. |
+| [Poseidon USB](usb-poseidon/README.md) | `zzusbhw.device` for the external Poseidon 4.5 USB stack. |
+| [SD-card boot](sd-boot/README.md) | `zzsd.device` in `BOOT.bin`, which boots an HDF file from the FAT-formatted microSD card. |
+| [ZZTop](ZZTop/README.md) | The `ZZTop` control panel. |
+| [SDK runtime payloads](sdk/README.md) | `zz9k.library`, `mpega.library`, `zz9k-picture.datatype`, SDK tools, and ZZPlay. |
+| [AmiSSL provider](amissl/README.md) | The CPU-specific `amissl_v362.library` builds with supported ZZ9000 TLS crypto offload. |
 
-The installer also brings in the matching SDK runtime: `zz9k.library`,
-`mpega.library`, the optional accelerated picture DataType, command-line tools,
-and the ZZPlay application. For best results, use drivers, firmware and SDK
-payloads from the same release—particularly on Zorro II.
-
-## Quick Start
-
-For normal installation, use the latest GitHub Release LHA:
+## Install from a release
 
 1. Download `zz9000-drivers-<tag>.lha` from
    [Releases](https://github.com/BlitterStudio/zz9000-drivers/releases).
 2. Unpack it on the Amiga.
-3. Double-click `ZZ9000Installer/Install ZZ9000`.
+3. Open `ZZ9000Installer/Install ZZ9000`.
 4. Reboot after installing or replacing drivers.
 
-The installer handles driver placement, tool installation, icons,
-Picasso96 settings, the optional Roadshow NetInterface template, and
-network setup prompts. Manuals follow the components they document,
-installed as double-clickable AmiGuide files with MultiView-associated
-icons: the ZZTop and ZZPlay manuals land next to their programs, and
-every other manual goes to one drawer of your choice (defaulting to
-the ZZ9000 drawer) together with the package overview. Current
-releases also install `ZZTop`, which can
-edit the SD-card `ZZ9000.CFG` file for MAC, INT2, native-video,
-scanline, and boot-HDF settings. The installer also installs the SDK
-runtime (`zz9k.library`, `mpega.library`, and the picture datatype) and
-the per-CPU accelerated `amissl.library` (auto-detecting the CPU,
-installing the matching build, and backing up the stock library once).
+The installer places the drivers, tools, icons, Picasso96 settings, and optional
+Roadshow template. It also stages the SDK runtime and selects the matching
+AmiSSL build for the detected CPU when an AmiSSL 5.27 installation is present.
+Its AmiGuide manuals install beside ZZTop and ZZPlay or into the documentation
+drawer selected during installation.
 
-## Compatibility
+ZZTop and ZZPlay install in `SYS:Utilities/ZZ9000/`. Expert installation can
+add that drawer to the command path by updating its `;BEGIN ZZ9000` block in
+`S:User-Startup`. Upgrades can remove the former `SYS:Tools/ZZTop` location.
 
-- Target OS/toolchain: `m68k-amigaos`
-- Hardware: MNT ZZ9000 Zorro II or Zorro III card
-- Optional hardware: ZZ9000AX daughterboard for AHI/MHI/AX tools
-- RTG stack: Picasso96
-- Networking: any SANA-II capable stack, such as Roadshow, Miami DX, or
-  AmiTCP
-- USB: Poseidon, with a matching firmware USB mailbox implementation
+`ZZTop` runs on AmigaOS 3.0 or newer. It fits screens down to NTSC HighRes
+640x200 with an 8-pixel screen font, and PAL HighRes 640x256 with fonts up to
+13 pixels. See the [ZZTop manual](ZZTop/README.md) for setup, configuration,
+and feature requirements.
 
-Several features require current ZZ9000 firmware. In particular,
-`ZZFwUpdate` needs firmware with FWUP protocol support, and USB interrupt/ISO
-support requires the matched firmware 2.9 and `zzusbhw.device` 2.2 pair;
-Picasso96 DPMS needs firmware 2.7+ with a matching rebuilt bitstream, and
-`zzsd.device` is packed into `BOOT.bin` rather than installed as a normal
-AmigaOS file.
+## Picasso96 graphics
 
-SDK offload services are bounded, but no longer audio-only, on Zorro 2.
-Current matched firmware, bitstream, SDK runtime, and drivers negotiate and
-acknowledge the exact board layout before exposing a shared CPU-visible host
-heap. The layout has two generations: generation 1 (previous matched sets and
-older FPGA/firmware pairs) provides a 64 KiB heap; generation 2 shrinks it to
-16 KiB on the 2 MiB and 4 MiB profiles and reserves the freed 48 KiB for the
-Z2 audio direct-ring grant. Both generations keep negotiating — a driver
-update alone never disables RTG on a generation-1 board. `mpega.library`,
-`mhizz9000.library`, ZZPlay standalone MP3, streamed `zz9k-view`,
-`zz9k-picture.datatype`, streamed archive work, and the accelerated
-`amissl.library` use compact host-window/card-only layouts on both shipped
-2 MiB and 4 MiB profiles. The 4 MiB profile additionally provides one 224 KiB
-PIP source for video frames that fit; the 2 MiB profile has no PIP.
+Install Picasso96 before running the installer. It configures
+`Devs:Monitors/ZZ9000` with `BOARDTYPE=ZZ9000`, `FAKENATIVEMODES=No`, and
+`DISPLAYCHAIN=Yes`. Keep `DISPLAYCHAIN` enabled so the ZZ9000 can switch the
+native Amiga signal through its flicker fixer.
 
-Keep firmware, bitstream, SDK payloads, and drivers from the same release on
-Zorro 2. Invalid or unacknowledged descriptors deliberately fail closed.
-Descriptor-absent legacy 4 MiB compatibility instead retains the historical
-fixed 64 KiB host window only; legacy 2 MiB and unknown sizes reject it. The
-negotiated heap is shared across clients, so concurrent image, archive,
-audio, DataType, and TLS work can contend. Not every low-level SDK diagnostic
-has been converted from the legacy default shared heap. See the SDK's
-[Zorro II service matrix](https://github.com/BlitterStudio/zz9000-sdk/blob/master/docs/zz9k-zorro2-services.md)
-for exact client limits and fallback behavior. An 8 MiB software profile
-exists for future work, but no 8 MiB bitstream variant is shipped.
+Set `MASKEDBLITS=On` and `PLANAR2CHUNKY=On` in the P96 Preferences Editor for
+hardware-accelerated masked blits and planar conversion. Keep `BLITTER` on and
+`SOFTSPRITE` off. `BIGSPRITE` is optional for a larger pointer; `OVERCLOCK`
+has no effect, and `BORDERBLANK` affects appearance only. `SYSTEM2SCREENBLITS`
+can help on Zorro III; leave it at its default on Zorro II. A program that
+requires a planar RTG screen needs `EmulatePlanar=On`.
 
-## Components
+Firmware that advertises `ZZ_FW_CAP_CUSTOM_MODE` accepts progressive custom
+P96 timings. Width must be 320–2560 pixels and a multiple of eight; height must
+be at least 200. Both axes need positive porch and sync values, totals no
+larger than 4095, and a 25–165 MHz pixel clock that the PLL can produce within
+0.5%. Use equal sync polarity and avoid doubled-clock or doubled-scan flags.
+Test a mode in P96Prefs/Picasso96Mode before saving it. A rejected mode keeps
+the last accepted `BoardInfo.ModeInfo` and blocks panning until another mode is
+accepted.
+For an initial 960x720 test, use 53.000 MHz; horizontal total 1184, front
+porch 48, and sync width 96; vertical total 746, front porch 3, and sync width
+4; with both syncs negative. This produces about 60.00471 Hz. Fixed packaged
+timings retain the fixed-preset path, including its polarity handling. `QUIET`
+is unavailable; `BELOW`, `LEFT-OF`, `RIGHT-OF`, `MONITORWIDTH`, and
+`MONITORHEIGHT` place a second graphics board and do not affect a single
+ZZ9000.
 
-| Area | Artifact | Installed to | Notes |
-|------|----------|--------------|-------|
-| RTG graphics | `ZZ9000.card` | `Libs:Picasso96/` | Picasso96 RTG driver using the native `BT_MNT_ZZ9000` board identity, accelerated VRAM/PIP paths, and firmware-gated DPMS monitor power management. |
-| P96 settings | `Picasso96Settings` / `Picasso96Settings-Z3` | `Devs:Picasso96Settings` | Installer backs up an existing file to `Devs:Picasso96Settings.pre-ZZ9000-2.4`, advertises Standby/Suspend/Active Off DPMS support, and offers a Zorro III high-memory profile with 1920x1080x32 enabled. |
-| Networking | `ZZ9000Net.device` | `Devs:Networks/` | SANA-II Ethernet driver with multicast group filtering (programs the firmware's multicast hash filter, so IPv6 and service-discovery stacks receive their groups). |
-| Network template | `ZZ9000Net` | `Devs:NetInterfaces/` | Optional Roadshow DHCP template installed by the installer. |
-| Boot-time link check | `ZZNetReady` | `C:` | Exit-code check for `S:User-Startup`: ZZ9000 present and Ethernet negotiated. |
-| Network diagnostics | `ZZNetStats` | `C:` | Dumps SANA-II counters plus firmware RX backlog/drop registers. |
-| Board diagnostics | `ZZDiag` | `C:` | Dumps board identity, firmware, VideoCap, USB, SD, AX/audio, and Ethernet diagnostic registers. |
-| Native capture diagnostics | `ZZCapture` | `C:` (optional) | Captures native-video row timing and C28 calibration evidence. Install and use it only with the matching firmware/bitstream; see [ZZCapture/README.md](ZZCapture/README.md). |
-| AHI audio | `zz9000ax.audio` | `Devs:AHI/` | ZZ9000AX playback and stereo RCA recording driver. Runtime setup and tunables are documented in [ahi/README.md](ahi/README.md). |
-| AHI mode | `ZZ9000AX` | `Devs:AudioModes/` | AudioMode file generated by the AHI build. |
-| MHI audio | `mhizz9000.library` | `Libs:MHI/` | Exposes the AX hardware MP3 decoder to MHI-aware players. |
-| USB | `zzusbhw.device` | `Devs:USBHardware/` | Capability-gated Poseidon USB hardware driver. See [usb-poseidon/README.md](usb-poseidon/README.md) and the [qualification matrix](docs/usb-qualification-matrix.md). |
-| SD boot | `zzsd.device` | Firmware `BOOT.bin` | Size-constrained boot driver for FAT32-hosted HDF boot. See [sd-boot/README.md](sd-boot/README.md). |
-| Configuration | `ZZTop` | `SYS:Utilities/ZZ9000/` | GUI for hardware readback, firmware update/restore, and `ZZ9000.CFG` settings. The **Settings** menu opens **Scandoubler…**, **Audio…** and **Other Settings…**; the **Project** menu carries **Update Firmware…**, **Restore Backup…**, the **Audio Debug Log** toggle, **About…** and **Quit**. The main window also has a **Scandoubler** button directly above **Audio**. The capability-gated **Scandoubler** window owns native-video **Output**/**Refresh** selection, advanced capture framing, scanlines, and live calibration; the **Audio** window owns scenes, meters, Paula/AX baseline and measured per-card ceilings. Edits apply live, and each window's **Save** persists its keys. |
-| Scanlines | `ZZScanlines` | `C:` | CLI for scanline V1/V2 modes. |
-| Firmware update | `ZZFwUpdate` | `C:` | Pushes `BOOT.bin` or another root-level file to the ZZ9000 FAT32 microSD card over Zorro. |
-| SDK services | `zz9k.library` | `Libs:` | AmigaOS gateway to the SDK v2 firmware services (image/video decode, audio, compression, crypto). Built from the pinned [zz9000-sdk](https://github.com/BlitterStudio/zz9000-sdk) ref by `sdk/build.sh`. |
-| MP3 decode | `mpega.library` | `Libs:` | ARM-accelerated drop-in MPEGA replacement (from zz9000-sdk). |
-| Picture datatype | `zz9k-picture.datatype` | `SYS:Classes/DataTypes/` | Hardware-accelerated picture datatype; JPEG/PNG descriptors staged inactive in `SYS:Storage/DataTypes` (from zz9000-sdk). |
-| SDK tools | `zz9k-info`, `zz9k-services`, `zz9k-view`, `zz9k-mp3`, `zz9k-cryptobench`, `zz9k-archive` | `C:` | Board/service introspection and release smoke check, plus accelerated image viewer, MP3 player, crypto-offload benchmark, and archive extractor (from zz9000-sdk). |
-| ZZPlay | `ZZPlay` + `ZZPlay.info` | `SYS:Utilities/ZZ9000/` | MPEG-1 video and MP3 media player (from zz9000-sdk). See [the ZZ9000 drawer](#the-zz9000-drawer). |
-| TLS offload | `amissl_v362.library` | `Libs:AmiSSL/` | AmiSSL 5.27 core with the ZZ9000 crypto-offload provider compiled in; accelerates supported TLS handshake and record crypto for all AmiSSL applications. Built per CPU (`68020-40` for 68020/030/040 and `68060`); the installer auto-detects the CPU and installs the matching build. Requires an existing AmiSSL 5.27 install. |
-| Installer | `ZZ9000Installer` | Release LHA root | Commodore Installer drawer used for end-user deployment. |
+## Scandoubler output and refresh
 
-## The ZZ9000 drawer
-
-ZZTop and ZZPlay are the two ZZ9000 tools with a Workbench interface, so
-from v2.8 they share one drawer instead of being split between `SYS:Tools`
-and `C:`:
-
-```
-SYS:Utilities/ZZ9000/ZZTop
-SYS:Utilities/ZZ9000/ZZPlay
-```
-
-In Expert mode the installer asks where to create the drawer. It also
-offers to add that drawer to the command path, because AmigaOS path
-entries are not recursive — `SYS:Utilities` being on the path does not
-make a drawer inside it searchable, and both tools have a CLI. Answering
-yes writes a `Path ... ADD` line into a `;BEGIN ZZ9000` block in
-`S:User-Startup`, which re-running the installer updates in place.
-
-Upgrading from an earlier release, the installer offers to delete the old
-`SYS:Tools/ZZTop` so you are not left running a stale copy.
-
-ZZTop's fixed-size windows use Intuition Smart Refresh to preserve their
-contents when uncovered while a secondary window or requester is open.
-This uses additional display memory for obscured areas; it does not make
-the modal dialogs non-modal or change the background readout update rate.
-
-## SD-Card Configuration (ZZ9000.CFG)
-
-Firmware 2.3+ reads an optional `ZZ9000.CFG` file from the root of the
-ZZ9000's FAT32 microSD card at cold boot (documented in the
-[zz9000-firmware README](https://github.com/BlitterStudio/zz9000-firmware#configuration-file-zz9000cfg)).
-ZZTop's **Settings → Scandoubler…**, **Settings → Audio…** and
-**Settings → Other Settings…** windows (plus the main window's **Scandoubler** and
-**Audio** buttons) read and write it directly from AmigaOS, so the card
-never needs to leave the slot. Each window applies only its own edits and
-ENV overrides, preserving supported values from the other sections.
-Absent native-video keys stay inactive during a general Settings save;
-only Scandoubler Save activates its displayed native settings.
-The unsupported-centered-profile fallback described below applies to every
-save. Saves preserve all eight audio scenes, including their names and
-calibration values. Generated files use compact formatting to
-stay within the firmware's 4 KiB configuration limit; explanatory
-per-setting comments are not retained. A generation failure leaves the
-existing SD file untouched.
-
-The **Other Settings…** window contains INT2, MAC, HDF, Fast RAM,
-offscreen bitmaps and video overlay; native-video controls are only in
-**Scandoubler**. Fast RAM is off by default and fail-closed: its effective
-boot result is shown separately from the staged setting, so a configured-on
-value withheld by the boot gate is never presented as enabled. The main
-**Scandoubler…** button sits directly above **Audio…**, without an extra
-button row. Use the **Settings** menu on screens where those buttons are
-off-screen.
-
-The drivers in this repo consult it too:
-
-- `ZZ9000.card` takes its native-video defaults from the firmware's parsed
-  configuration. ZZTop presents the stored `videocap_profile` as two
-  dependent selectors in the **Scandoubler** window — **Output**
-  (`1280x1024 - full detail`, `1920x1080 - centered`, `800x600 / 720x480 - filtered`,
-  `720x576 / 720x480 - filtered`) and **Refresh** (`50Hz`, `60Hz`,
-  `Match Amiga`, `50Hz PAL, 60Hz NTSC`, `PAL Amiga clock`,
-  `NTSC Amiga clock`) — offering only the combinations the installed
-  stack supports; changing the output keeps the refresh when the pair
-  still exists, otherwise visibly selects a valid one. Native Amiga
-  chipset video normally defaults to `filtered_60` (PAL 800x600 or NTSC
-  720x480 at nominal 60 Hz);
-  the nonstandard-sync firmware variant defaults to PAL timing. Use
-  ZZTop to choose another combination and save it to `ZZ9000.CFG` for
-  the next cold boot. **Capture…** opens sampling, phase, framing and
-  calibration controls from the Scandoubler window. Framing defaults to
-  **Automatic**: full-rate/full-width capture uses `278/40`, while filtered and Denise-adapter paths retain
-  `188/26`. Manual values remain literal per-machine overrides.
-  Firmware 2.8 with the profile capability stores this as
-  `videocap_profile`; ZZTop transparently writes the equivalent legacy
-  key combination for older firmware, including 2.8 RC1.
-- With a matching v2.8-RC2-or-newer full-rate bitstream and firmware
-  capability bit 3, `centered_1080p_60` places the unchanged 1280x1024 native
-  content at `(320,28)` inside a 1920x1080 active raster. The content rectangle
-  is `[320,1600) x [28,1052)` and every surrounding pixel stays black. This is
-  native Amiga chipset video, not the separate Picasso96 1920x1080x32 RTG
-  screen mode. Its fixed 148.5714286 MHz clock and 2200x1125 totals
-  produce approximately 60.02886 Hz.
-- On stacks that also advertise the source-sync capability bit (bit 5,
-  which implies bits 3 and 4), the experimental `centered_1080p_match`
-  centers the same unchanged 1280x1024 content and locks the output
-  cadence to the captured Amiga raster instead of free-running: refresh
-  follows the input (PAL or NTSC, progressive or interlaced), so no
-  fixed rate applies. It needs bitstream, firmware, `ZZ9000.card` and
-  ZZTop from the same build; during acquisition the picture stays
-  hidden until the capture/read phase is safe.
-  Install matching firmware, bitstream, `ZZ9000.card`, and ZZTop.
-  ZZTop gates centered choices on the firmware capability register:
-  bit 3 for centered 60 Hz, both bits 3 and 4 for centered 50 Hz, and
-  all of bits 3-5 for `centered_1080p_match`. Current ZZTop substitutes
-  `full_60` for an unsupported stored centered
-  profile, including when another configuration window saves. This is
-  separate from the normal `filtered_60` default. Older firmware can
-  ignore an unknown profile token, so hand-editing that token is not a
-  substitute for a matched update. Unrelated MAC
-  and INT2 ENV overrides preserve a supported centered choice, while legacy
-  native-video ENV overrides intentionally select their legacy fallback.
-  Centered 60 Hz and 1920x1080 RTG share hardware preset 5, so the RTG
-  clock callbacks and both stock `Picasso96Settings` templates now use
-  148571429 Hz too. Back up custom settings rather than blindly replacing
-  them with a stock template.
-- `ZZ9000Net.device`, `zz9000ax.audio` and `mhizz9000.library` honor
-  `int2 = on`; `ZZ9000Net.device` adopts the firmware's `mac`.
-- `ZZ9000.card` also reads `offscreen_bitmaps` and `video_overlay`,
-  the kill switches for card-side off-screen bitmaps and the P96 video
-  window. Both default to on; ZZTop's Settings window edits them.
-
-The existing `1280x1024` / `Match Amiga` pair (`full_exact`) selects fixed
-PAL/NTSC approximations of about 49.93/59.95 Hz; the label does not imply
-input genlock. Centered output offers fixed 50 Hz and 60 Hz, plus the
-experimental genlocked `centered_1080p_match` above on matched stacks.
-
-### Scandoubler output and refresh
-
-The selectors map to the following saved profiles. Only supported pairs
-are offered; the centered rows require the capabilities described above.
+ZZTop saves the chosen native-video profile to `ZZ9000.CFG`; it takes effect on
+the next power cycle. It offers only profile and refresh pairs that the
+installed firmware and bitstream advertise.
 
 | Output | Refresh | `videocap_profile` |
 |---|---|---|
@@ -271,314 +94,82 @@ are offered; the centered rows require the capabilities described above.
 | 1920x1080 - centered | 50Hz | `centered_1080p_50` |
 | 1920x1080 - centered | Match Amiga (experimental) | `centered_1080p_match` |
 | 800x600 / 720x480 - filtered | 60Hz | `filtered_60` |
-| 720x576 / 720x480 - filtered | 50Hz PAL,60Hz NTSC | `filtered_pal` |
+| 720x576 / 720x480 - filtered | 50Hz PAL, 60Hz NTSC | `filtered_pal` |
 | 720x576 / 720x480 - filtered | PAL Amiga clock | `filtered_pal_exact` |
 | 720x576 / 720x480 - filtered | NTSC Amiga clock | `filtered_ntsc_exact` |
 
-Output and Refresh are staged for the next cold boot: choose the pair,
-press **Save**, then power-cycle. Scanline mode and parity changes apply
-live, but also need **Save** to survive a power cycle. Capture/calibration
-previews have the separate accept/restore rules below.
+The centered 60 Hz profile requires firmware capability bit 3; centered 50 Hz
+requires bits 3 and 4; `centered_1080p_match` requires bits 3–5 and a matched
+v2.8 stack. `full_exact` selects fixed PAL/NTSC approximations rather than
+source-synchronised output. The [ZZTop manual](ZZTop/README.md) describes
+picture alignment, sampling controls, and the capability checks for each mode.
+`centered_1080p_60` places unchanged 1280x1024 content at `(320,28)` in a
+1920x1080 raster. Its content rectangle is `[320,1600) x [28,1052)`; the
+surrounding pixels are black. It uses a 148.5714286 MHz clock and 2200x1125
+totals for approximately 60.02886 Hz. The Zorro III P96 profile separately
+offers 1920x1080x32.
 
-### Live native-video calibration
+The firmware reads `ZZ9000.CFG` from the microSD-card root at boot. See
+[firmware configuration](https://github.com/BlitterStudio/zz9000-firmware/blob/master/docs/configuration.md)
+for every key and parser rule. `ENV:` settings and RTG ToolTypes take
+precedence over the card file. Remove `ZZ9K_INT2`, `ZZ9K_MAC`,
+`ZZ9000-VCAP-800x600`, `ZZ9000-NS-VSYNC[-NTSC]`, `ZZ9000-NO-OFFSCREEN`, and
+`ZZ9000-NO-PIP` when moving those settings to the card file.
 
-ZZTop 2.8 can calibrate Custom native-video framing without the old
-guess/save/power-cycle loop. It requires matched firmware 2.8-or-newer and a
-protocol-1 live-calibration bitstream. ZZTop checks an explicit firmware
-live-control bit as well as the exact RTL capability, so either half of an
-older/mixed install—including 2.8 RC1 firmware—leaves the existing Automatic
-and numeric Custom controls available but keeps **Calibrate** disabled.
+## Networking and diagnostics
 
-In **Settings → Scandoubler…**, leave the staged Output/Refresh path
-matching the currently applied path, then choose **Capture… → Calibrate…**. ZZTop opens
-an explicit native PAL or NTSC Hires screen—never an RTG fallback—so its edge,
-safe-area, and centre guides pass through the physical capture path being
-adjusted.
+`ZZ9000Net.device` is a SANA-II Ethernet driver and works with SANA-II-capable
+stacks such as Roadshow, Miami DX, and AmiTCP. It programs the firmware
+multicast hash filter for joined groups. `ZZNetReady` reports whether the card
+is present and Ethernet has negotiated; `ZZNetStats` reports SANA-II counters
+and firmware receive-backlog and drop registers. `ZZDiag` reports board,
+firmware, VideoCap, USB, SD, audio, and Ethernet diagnostics.
 
-- Arrow keys move the visible picture in the named direction, one crop unit at
-  a time. Hold either Shift key for 16-unit steps.
-- Values change on screen only after the FPGA applies the complete H/V control
-  word at a capture-frame boundary and acknowledges it.
-- **Enter** accepts the displayed pair as explicit Custom values and returns to
-  the Capture window. It does not write the SD card.
-- **Escape** restores and acknowledges the exact state from calibration entry,
-  including independent per-axis Automatic flags, before the native screen
-  closes.
-- **Done** in Capture stages an accepted preview in Scandoubler; **Save** is
-  the only action that writes `ZZ9000.CFG`. A cold boot later reproduces the
-  saved pair.
-- The Capture window also edits the sampling phase (in the build clock's
-  own step units, shown in the window title as *C28 clock* or *E7M
-  clock*; disabled when the card has no phase engine) and, on firmware
-  advertising the geometry capability, the capture window width and
-  height. Every field applies live as you leave it; an empty Window
-  field means Automatic. The single **Automatic** button restores every
-  override at once — automatic crop through the live engine, phase back
-  to the routed default (0) and the capture window back to the per-mode
-  automatic size — and Done then clears the saved values. **Save**
-  persists `videocap_phase`/`videocap_c28_phase` (whichever clock the
-  card uses) and `videocap_width`/`videocap_height`.
+`ZZFwUpdate` copies `BOOT.bin` or another root-level file to the microSD card
+over Zorro and keeps `BOOT.bak` rollback images. It requires firmware with the
+FWUP protocol. Use the [command-line tool manual](docs/cli-tools.md) for its
+backup and restore procedure.
 
-Capture Cancel, Scandoubler Reload, and closing the Scandoubler window
-restore their owning live snapshots before discarding an unsaved preview; the
-general Settings window is never blocked by video-calibration state. If an
-acknowledgement times out, ZZTop keeps the relevant window open and
-reports that the state is unknown; retry the restore when native frames
-return, or cold-boot to recover
-the persisted CFG state. If another live writer wins the same request
-sequence, ZZTop detects the different applied raw word and asks for a retry or
-exact restore rather than claiming success. A Custom pair is tied to the
-applied capture-path signature (sample mode plus full-width state). If staged
-settings select a different path, Calibrate and Custom Save remain unavailable
-until the path is restored, or framing is set to Automatic, saved,
-cold-booted, and calibrated on the newly active path.
+## Compatibility and status
 
-Precedence is always: `ENV:` variable (and RTG tooltypes) first, then
-the config file, then the built-in default — so existing setups keep
-working, but a lingering ENV variable also hides the config value.
-Remove the ENV variables (`ZZ9K_INT2`, `ZZ9K_MAC`,
-`ZZ9000-VCAP-800x600`, `ZZ9000-NS-VSYNC[-NTSC]`, `ZZ9000-NO-OFFSCREEN`,
-`ZZ9000-NO-PIP`) when migrating to the config file. On firmware older than 2.3 the drivers silently fall back
-to the ENV variables.
+| Area | Requirement or status |
+|---|---|
+| Base platform | `m68k-amigaos`, an MNT ZZ9000 Zorro II or Zorro III card, and Picasso96 for RTG graphics. |
+| Audio | A ZZ9000AX daughterboard for AHI, MHI, and AX tools. |
+| SD boot | `zzsd.device` is embedded in `BOOT.bin`; its 7424-byte boot-ROM limit is checked by CI. |
+| Configuration | Firmware 2.3 or newer reads `ZZ9000.CFG`. |
+| Display power management | Picasso96 DPMS needs firmware 2.7 or newer with the matching rebuilt bitstream. |
+| USB | Interrupt and ISO paths require the matched firmware 2.9 and `zzusbhw.device` 2.2 pair. The [USB manual](usb-poseidon/README.md) and [qualification matrix](docs/usb-qualification-matrix.md) record tested devices and pending qualification. |
+| Zorro II SDK services | Generation 1 supplies a 64 KiB host heap; generation 2 supplies a 16 KiB host heap and reserves 48 KiB for the audio direct ring. The [SDK manual](sdk/README.md) lists supported payloads, PIP limits, fallbacks, and qualification status. |
+| ZZCapture calibration | `phase`, `check`, `startup`, and `calibrate` remain experimental A4000/C28 diagnostics. Follow the [ZZCapture manual](ZZCapture/README.md) before running them. |
 
-Activation follows the existing configuration lifecycle. ZZTop **Save** writes
-the staged file, which is read at the next cold boot; valid runtime native-mode
-writes take effect at the next stable vblank. The centered profile does not
-add a monitor hot-plug or HDMI mode-switch guarantee.
+## Building and releases
 
-Fast RAM is an exception to the cold-boot wording: every `fast_ram` change,
-whether ZZTop **Save** or a manually edited SD card, applies at the next
-reboot (the firmware re-reads the card on a warm reset). Firmware reports an
-unavailable Fast RAM setting on older images rather than claiming the saved
-choice applied.
+GitHub Actions builds every component in
+`sacredbanana/amiga-compiler:m68k-amigaos`, assembles tag releases, and checks
+release contents. Run `make build-all` for the local equivalent. The
+[build script](tools/build-all.sh), [CI workflow](.github/workflows/ci.yml),
+and [release guide](RELEASING.md) define the artifact and tag procedures.
 
-## Custom Picasso96 Modelines
+`make package-local` creates `zz9000-drivers-local.lha` and needs an `lha`
+with compression support. CI uses the `lha` in the compiler image. Release
+binaries come from CI; [binary policy](docs/BINARY_POLICY.md) describes the
+source-tree exceptions.
 
-`ZZ9000.card` 2.11 uses custom progressive timings when the firmware
-advertises `ZZ_FW_CAP_CUSTOM_MODE` (capability bit 7). Install the matched
-firmware and card driver; older firmware continues to use fixed presets
-and rejects unknown dimensions.
+## Provenance and license
 
-Create a mode in P96Prefs/Picasso96Mode and use its temporary **Test**
-display before saving. Custom timings require:
+This independent BlitterStudio-maintained fork is maintained by Dimitris
+Panokostas and has no affiliation with MNT Research GmbH. MNT Research designs
+and manufactures the ZZ9000 hardware. Send hardware questions to MNT Research
+and driver, installer, or fork issues to this repository's
+[issue tracker](https://github.com/BlitterStudio/zz9000-drivers/issues).
 
-- Width 320–2560, aligned to 8 pixels; height at least 200.
-- Positive front porch, sync width, and back porch; totals no greater
-  than 4095 on either axis.
-- A requested pixel clock from 25 to 165 MHz. The driver reports the
-  nearest achievable clock, with at most 0.5% error. Requests with no
-  legal PLL clock inside that tolerance are rejected.
-- Progressive scan without doubled-clock/doubled-scan flags, and equal
-  HSync/VSync polarity. Mixed polarity requires an FPGA change.
+The original source is at <https://source.mnt.re/amiga/zz9000-drivers>.
+Dimitris Panokostas contributed RTG optimisation, scanline tools, ZZTop
+settings work, USB, SD boot, firmware update and restore, network diagnostics,
+SDK and AmiSSL packaging, CI, releases, and installer updates. Xanxi created
+the V1 and V2 scanline bitstreams. Henryk Richter wrote the network-driver
+base in 2018.
 
-For an initial 960x720 test, use 53.000 MHz, horizontal total 1184,
-front porch 48 and sync width 96; vertical total 746, front porch 3 and
-sync width 4; both syncs negative. This resolves to approximately
-60.00471 Hz. Monitor acceptance still needs hardware verification.
-
-Back up `LIBS:Picasso96/ZZ9000.card` and your P96 settings. Do not replace
-your configured settings with a stock template. Exact packaged numeric
-timings preserve the old fixed-preset path, including its historical
-polarity handling; changing only their polarity flags does not create a
-custom modeline. Timing or clock edits use the custom path instead.
-
-A rejected mode does not replace the accepted `BoardInfo.ModeInfo`.
-Subsequent panning is blocked until a mode is successfully applied, so a
-failed mode switch cannot independently replace the scanout's layout.
-
-## Picasso96 Board Settings
-
-The P96 Preferences Editor (or the tooltypes on `Devs:Monitors/ZZ9000`)
-controls per-board options. The installer already writes the required
-ones: `BOARDTYPE=ZZ9000`, `FAKENATIVEMODES=No`, and `DISPLAYCHAIN=Yes`.
-Keep `DISPLAYCHAIN` on because the ZZ9000 switches the Amiga signal as a
-flicker fixer, and `FAKENATIVEMODES` off because the card has a real
-scandoubler. All other defaults are correct: `ZZ9000.card` advertises its
-capabilities to rtg.library at init, so P96 needs no compatibility
-overrides.
-
-Two items are worth changing from `<default>` for best performance:
-
-- `MASKEDBLITS=On` — the firmware blitter honors blit masks; the driver
-  forwards the mask on both Zorro II and Zorro III in `BlitRect`,
-  `FillRect`, and `InvertRect`. With this off, masked blits fall back to
-  an rtg.library software path. If an application ever shows mask
-  artifacts, this is the switch to revert.
-- `PLANAR2CHUNKY=On` — the driver installs accelerated
-  `BlitPlanar2Chunky`/`BlitPlanar2Direct` with card-resident template
-  scratch even on Zorro II. This is the main win for planar-rendering
-  applications (datatypes, older tools) targeting an RTG screen.
-
-Leave the rest alone:
-
-- `BLITTER` stays on; the driver sets the blitter capability itself and
-  turning it off disables all acceleration.
-- `SOFTSPRITE` stays off; the card has a hardware sprite, so a software
-  sprite only costs CPU and memory bandwidth.
-- `BIGSPRITE` is optional. It doubles the pointer size, which some prefer
-  at 1920x1080; the driver supports it.
-- `OVERCLOCK` has no effect; the driver never reads that flag.
-- `QUIET` is not implemented by P96 itself.
-- `BORDERBLANK` is cosmetic. Native-output behavior is configured from
-  ZZTop and `ZZ9000.CFG`, not P96.
-- `BELOW`, `LEFT-OF`, `RIGHT-OF`, `MONITORWIDTH`, and `MONITORHEIGHT`
-  position a second graphics board; they do nothing with a single ZZ9000.
-- `SYSTEM2SCREENBLITS` may be worth trying on Zorro III (the driver
-  already grants direct access); leave it default on Zorro II, where CPU
-  writes to video RAM are the bottleneck.
-
-The global "Overall settings" and "Native Amiga graphics" groups should
-stay at `<default>`. They exist for problem boards and applications, and
-none of them map to a ZZ9000 driver or firmware feature. The one
-exception: an application that insists on opening a planar RTG screen
-needs `EmulatePlanar=On`, because the card exposes only 8-bit CLUT,
-15/16-bit, and 32-bit BGRA formats.
-
-## Command-Line Tools
-
-The command-line tools install to `C:`. The full manual — usage,
-arguments, the firmware backup/rollback flow, and what each tool
-reports — is [docs/cli-tools.md](docs/cli-tools.md), shipped as
-`tools.guide` in the installer drawer:
-
-- `ZZFwUpdate` — copy firmware to the SD card without pulling it,
-  keep/restore `BOOT.bak` rollbacks.
-- `ZZNetStats` — SANA-II counters plus firmware RX queue/drop state,
-  for before/after throughput reading.
-- `ZZDiag` — board, firmware, VideoCap, USB, SD, audio and Ethernet
-  diagnostics in one dump; checks the matched set.
-- `ZZScanlines` — live scanline mode and parity control.
-
-`ZZCapture` is an optional advanced diagnostic for native Amiga video
-entering the ZZ9000. For a first report, install the tool and
-firmware/bitstream from the same matched package, cold-boot, and collect
-the non-phase-changing commands:
-
-```text
-ZZCapture info >RAM:zzcapture-info.txt
-ZZCapture observe >RAM:zzcapture-observe.txt
-```
-
-Send both complete files together with the exact hardware and firmware
-variant. The `phase`, `check`, `startup`, and `calibrate` commands are
-experimental A4000/C28 investigation tools; they require `Stack 32768`
-and the exact matched diagnostic firmware. Do not bypass the capability
-check or copy a phase value between machines. See the complete
-[ZZCapture manual](ZZCapture/README.md) before using them.
-
-## Building
-
-GitHub Actions is the source of truth for release builds. Every push and
-pull request builds each component inside
-`sacredbanana/amiga-compiler:m68k-amigaos`; tag builds assemble the
-release LHA.
-
-The same image can be used locally with Docker or Podman:
-
-```bash
-IMAGE=sacredbanana/amiga-compiler:m68k-amigaos
-```
-
-Top-level helpers mirror the CI build and package flow:
-
-```bash
-make build-all
-make rtg-tests
-make package-local
-make check-release
-make quality
-```
-
-`make package-local` produces `zz9000-drivers-local.lha` and requires
-a native `lha` that supports compression. CI uses the `lha` included in
-`sacredbanana/amiga-compiler:m68k-amigaos` for packaging.
-
-Commit and pull-request builds retain the individual component artifacts
-and also upload `zz9000-drivers-<short-sha>.lha`, a complete installer
-bundle with the same layout as a release. Tag builds upload the bundle
-as `zz9000-drivers-<tag>.lha` and publish it on the GitHub Release.
-
-Component `build.sh` wrappers also use the same Docker image when the
-Amiga cross-toolchain is not already on `PATH`.
-
-For exact commands for every artifact, use
-[`tools/build-all.sh`](tools/build-all.sh) and
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml).
-
-`sd-boot/zzsd.device` has a hard size ceiling of 7424 bytes because it
-must fit in the FPGA-decoded boot ROM window. CI enforces this limit.
-
-Release binaries are built by CI and should not be tracked in the source
-tree unless there is a documented exception; see
-[docs/BINARY_POLICY.md](docs/BINARY_POLICY.md).
-
-## Release Packaging
-
-Pushing a tag matching `v*` builds all artifacts and publishes a GitHub
-Release LHA:
-
-```bash
-git tag -a v2.3.0 -m "ZZ9000 drivers 2.3.0"
-git push origin v2.3.0
-```
-
-The release bundle layout is:
-
-```text
-zz9000-drivers-<tag>/
-  README.md
-  ZZ9000Installer.info
-  ZZ9000Installer/
-```
-
-The release job populates `ZZ9000Installer/` with fresh CI-built
-binaries before archiving it. Binaries are not duplicated as loose files
-at the archive root. The release LHA's `README.md` is copied from
-[installer/README.md](installer/README.md), which is focused on the
-installer drawer layout and local installer testing.
-
-Tags containing `-`, such as `v2.3.0-rc1`, are marked as pre-releases.
-GitHub release notes are generated automatically.
-
-## Repository Layout
-
-| Path | Purpose |
-|------|---------|
-| `.github/workflows/ci.yml` | CI, artifact builds, release assembly. |
-| `installer/` | End-user Commodore Installer drawer, icons, templates, and release packaging docs. |
-| `rtg/` | Picasso96 RTG driver. |
-| `net/` | SANA-II network driver and `ZZNetStats`. |
-| `ZZDiag/` | Consolidated board and firmware diagnostics CLI. |
-| `ZZCapture/` | Native-video row-timing capture and experimental C28 calibration diagnostic. |
-| `ahi/` | ZZ9000AX AHI driver, AudioMode file, and audio runtime documentation. |
-| `mhi/` | ZZ9000AX MHI library. |
-| `usb-poseidon/` | Poseidon USB hardware driver and setup notes. |
-| `sd-boot/` | SD-card boot driver and boot-ROM integration notes. |
-| `ZZTop/` | Configuration GUI. |
-| `ZZScanlines/` | Scanline control CLI. |
-| `ZZFwUpdate/` | Firmware/file push CLI using the FWUP protocol. |
-| `common/` | Shared FWUP protocol client (`fwup_client.c`, `fwup_amiga.c`) and ZZ9000.CFG client (`zzcfg_amiga.c`) linked by `ZZFwUpdate` and `ZZTop`. |
-| `sdk/` | Pulls the pinned zz9000-sdk ref and collects its end-user payloads (libraries, datatype, diagnostics). |
-| `amissl/` | Builds the ZZ9000-accelerated `amissl.library` (adtools toolchain image + zz9000-sdk integration). |
-
-## Credits
-
-- RTG optimization work, scanline tooling, ZZTop V2/Settings updates,
-  USB Poseidon driver, SD-card boot driver, firmware update/restore
-  tool, network diagnostics, SDK runtime packaging, accelerated AmiSSL
-  packaging, CI/release packaging, and installer modernization:
-  Dimitris Panokostas (midwan).
-- Scanline bitstream V1 and V2: Xanxi. V2 adds multi-mode patterns
-  with odd/even parity, gated to AGA scandoubled modes and RTG
-  resolutions below 350 lines.
-- Network driver base: Henryk Richter <henryk.richter@gmx.net> (2018).
-- Original upstream driver sources: MNT Research pre-fork repository
-  listed above.
-
-Per-file copyright notices are preserved in source files.
-
-## License
-
-SPDX-License-Identifier: `GPL-3.0-or-later`
-
-See <https://spdx.org/licenses/GPL-3.0-or-later.html>.
+SPDX-License-Identifier: `GPL-3.0-or-later`. See
+<https://spdx.org/licenses/GPL-3.0-or-later.html>.

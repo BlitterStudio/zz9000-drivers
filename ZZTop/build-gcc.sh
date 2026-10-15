@@ -40,8 +40,16 @@ fi
 
 export PATH=/opt/amiga/bin:"$PATH"
 
-m68k-amigaos-gcc Sources/ZZTop.c Sources/vcap_sampling.c ../common/fwup_amiga.c ../common/fwup_client.c \
+# Core/ holds the logic (board, ZZ9000.CFG model, live video, audio control
+# plane, Save/Revert/Quit); GadTools/ is the user interface on top of it.
+# NO_INLINE_STDARG: the inline varargs macros warn on pointer tag values.
+common="../common/fwup_amiga.c ../common/fwup_client.c \
   ../common/zzcfg_amiga.c ../common/zz_vcap_live.c \
-  ../common/zz_vcap_client.c ../common/zz_vcap_geometry.c \
-  -m68030 -O2 -I../common -I../include -Izz9k-headers -o ZZTop \
-  -Wall -Wextra -Wno-unused-parameter -lamiga -ldebug -noixemul -lm
+  ../common/zz_vcap_client.c ../common/zz_vcap_geometry.c"
+flags="-m68030 -O2 -DNO_INLINE_STDARG -I../common -I../include -Izz9k-headers -ICore \
+  -Wall -Wextra -Wno-unused-parameter"
+libs="-lamiga -ldebug -noixemul -lm"
+
+# shellcheck disable=SC2086
+m68k-amigaos-gcc GadTools/*.c Core/*.c $common \
+  $flags -IGadTools -o ZZTop $libs

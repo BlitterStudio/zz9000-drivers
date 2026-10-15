@@ -5,71 +5,89 @@
 
 # ZZ9000 command-line tools
 
-The installer puts the diagnostic and maintenance tools in `C:`, where
-any shell finds them. This manual covers the firmware updater, the
-networking tools, the board diagnostic, and the scanline controller;
-`ZZCapture` has its own manual (`ZZCapture.guide` in this drawer), and
-the GUI tools ZZTop and ZZPlay install to `SYS:Utilities/ZZ9000/`.
+The standard installer places `ZZFwUpdate`, `ZZNetStats`, `ZZDiag`,
+`ZZNetReady`, and `ZZScanlines` in `C:`. They update files on the card,
+inspect the network and board, gate network startup, and set scanlines.
+`ZZCapture` is an optional diagnostic with its own `ZZCapture.guide`.
+The SDK tools, when installed, are documented in `sdk.guide`.
 
-## Firmware updates — ZZFwUpdate
+| Tool | What it does |
+| --- | --- |
+| `ZZFwUpdate` | Copies a local file to the card's FAT32 root, including `BOOT.bin`, and restores a saved backup. |
+| `ZZNetStats` | Reads SANA-II and firmware receive counters from `ZZ9000Net.device`. |
+| `ZZDiag` | Prints board, aperture, USB, video-capture, SD, audio, Ethernet, and scanline diagnostics. |
+| `ZZNetReady` | Returns an AmigaDOS status for a boot script that waits for Ethernet negotiation. |
+| `ZZScanlines` | Changes the active scandoubler scanline mode and parity. |
 
-`ZZFwUpdate` copies a firmware image from AmigaOS to the ZZ9000's FAT32
-microSD card without removing the card. The usual update flow:
+## ZZFwUpdate: firmware updates
+
+`ZZFwUpdate` transfers a local file to the ZZ9000 microSD card without
+removing it. A normal firmware update writes a new `BOOT.bin` and then
+requires a power cycle:
 
 ```text
 ZZFwUpdate RAM:BOOT.bin
 ```
 
-Power-cycle the Amiga after replacing `BOOT.bin` so the ZZ9000 boots the
-new firmware. The ZZTop Project menu offers the same operation with a
-file requester.
-
-By default the destination filename on the SD card is the source
-basename. To write a different root-level filename, pass it as the
-optional second argument:
+The command derives the card filename from the final component of the
+source path. Give a second argument to choose a different filename:
 
 ```text
 ZZFwUpdate SYS:Storage/zz9000-fw.bin BOOT.bin
 ```
 
-The destination name must be 1-64 characters from `A-Z`, `a-z`, `0-9`,
-`.`, `_`, or `-`.
+`ZZFwUpdate` accepts these forms:
+
+| Form | Result |
+| --- | --- |
+| `ZZFwUpdate <source-file> [dest-name]` | Copies `source-file` to `0:/<dest-name>`. Without `dest-name`, uses the source basename. |
+| `ZZFwUpdate RESTORE [name] [-y\|FORCE]` | Promotes the saved backup for `name` to the active file. `name` defaults to `BOOT.bin`; `-y` and `FORCE` skip confirmation. |
+
+`dest-name` and the restore name must contain 1–64 characters from `A-Z`,
+`a-z`, `0-9`, `.`, `_`, and `-`. The command writes only the FAT32 root.
+A leading slash, a path, and a volume prefix are rejected by the CLI.
+
+During a transfer, it prints the card address, source and destination, then
+byte and percentage progress. On success it prints the bytes written and,
+when measurable, elapsed time and throughput. If a transfer fails after it
+starts, the client aborts the temporary card file.
 
 ### Backups and rollback
 
-When you replace `BOOT.bin`, the firmware keeps the previous image as
-`BOOT.bak`. If a new firmware boots but misbehaves, roll back without
-removing the card:
+Replacing an existing file preserves the previous file under a derived backup
+name. For example, replacing `BOOT.bin` saves the previous image as
+`BOOT.bak`. Restoring `BOOT.bin` promotes `BOOT.bak`:
 
 ```text
 ZZFwUpdate RESTORE
 ```
 
-This promotes `BOOT.bak` to the active `BOOT.bin` (discarding the
-replaced image, so no backup remains afterwards) after a confirmation
-prompt. Pass `-y` to skip the prompt, or a name to restore something
-other than `BOOT.bin`. Restore talks to the *running* firmware, so it
-recovers a booting-but-misbehaving update; a card that does not boot at
-all still needs the microSD removed and restored on another computer.
-RESTORE needs firmware with FWUP cmd 5 support.
+The command asks for confirmation unless `-y` or `FORCE` is present. It moves
+the file being replaced to an internal discard path, which firmware attempts
+to clear at the next boot. A restore therefore needs a running firmware with FWUP RESTORE
+support and a saved backup. It can recover a booting firmware that misbehaves;
+if the card no longer boots, restore the card on another computer.
 
-## Networking — ZZ9000Net.device
+ZZTop's Firmware page uses the same FWUP protocol for file install and
+restore.
 
-`ZZ9000Net.device` in `Devs:Networks/` is the SANA-II Ethernet driver.
-It programs the firmware's multicast hash filter, so IPv6 and
-service-discovery stacks receive their groups. It adopts the MAC address
-from `ZZ9000.CFG` (`mac`), honours `int2 = on`, and works with any
-SANA-II stack (Roadshow, Miami DX, Genesis).
+## ZZ9000Net.device: networking
 
-The installer can also install a Roadshow NetInterface template
-(`Devs:NetInterfaces/ZZ9000`) configured for DHCP. When the installer
-asks about network setup, answering yes writes the template; Roadshow
-then brings the interface up with no manual `NetConfig` editing.
+`ZZ9000Net.device` in `Devs:Networks/` is the SANA-II Ethernet driver. It
+programs the firmware multicast hash filter. The driver adopts the firmware
+MAC address, including a `mac` value from `ZZ9000.CFG`; `ENV:ZZ9K_MAC`
+overrides that address. `ENV:ZZ9K_INT2`, or `int2 = on` in `ZZ9000.CFG`,
+selects INT2 instead of the default INT6.
+
+The installer also copies a DHCP Roadshow NetInterface template to
+`Devs:NetInterfaces/ZZ9000Net`. Edit that template if the network requires
+different settings.
 
 ### ZZNetStats
 
-`ZZNetStats` opens `ZZ9000Net.device`, requests SANA-II global stats,
-and prints the firmware RX queue, backpressure and drop counters:
+`ZZNetStats` opens `ZZ9000Net.device` and prints the SANA-II global counters,
+firmware receive status, and any driver special counters. The default device
+is `Networks/ZZ9000Net.device`, unit `0`.
 
 ```text
 ZZNetStats
@@ -77,43 +95,88 @@ ZZNetStats DEVICE=Networks/ZZ9000Net.device UNIT=0
 ZZNetStats Networks/ZZ9000Net.device 0
 ```
 
-Run it before and after a throughput test to see whether drops happen
-in the Amiga-side driver or in the firmware RX path.
+The accepted arguments are case-sensitive:
 
-## Board diagnostics — ZZDiag
+| Argument | Meaning |
+| --- | --- |
+| `DEVICE=<name>` | Device name to open. |
+| `UNIT=<n>` | Device unit to open. |
+| `<name> [<unit>]` | Positional alternatives for device name and unit. |
+| `MONITOR` | Keeps the device open and prints one compact sample until Ctrl-C. |
+| `SECS=<n>` | Monitor interval in seconds. The default is `2`; values below `1` become `1`. |
 
-`ZZDiag` dumps the useful hardware-facing diagnostics in one place:
+Normal output includes `PacketsReceived`, `PacketsSent`, `BadData`,
+`Overruns`, `UnknownTypesReceived`, `Reconfigurations`, and the last-start
+time. It also prints `FirmwareRXReady`, `FirmwareRXReserved`,
+`FirmwareRXBackpress`, `FirmwareRXDropped`, and `FirmwareRXPauseSent` when
+the board is present, plus special statistics supplied by the driver.
+
+Use `MONITOR` before reproducing a network stall and redirect the output to a
+local file:
+
+```text
+ZZNetStats MONITOR >RAM:netmon.log
+```
+
+Each monitor line reports receive and transmit totals, `RxEmptySlot`, the SMB
+ACK probe counters, and `FwRdy`. `P445In`, `SrvAck`, `SrvAckUpd`, `P445Out`,
+`TxSeq`, and `TxSeqMax` describe only TCP traffic on port 445. `SECS` has no
+effect unless `MONITOR` is present. A `?` argument prints the usage text.
+
+## ZZDiag: board diagnostics
+
+`ZZDiag` reads the card registers and prints a diagnostic report. Use it
+without arguments for one sample:
 
 ```text
 ZZDiag
 ZZDiag 3 50
 ```
 
-The optional arguments are sample count and AmigaDOS delay ticks between
-samples. It reports the board identity, firmware version, VideoCap
-state, USB, SD, AX/audio and Ethernet diagnostic registers — the
-VideoCap section includes the detailed capture and genlock registers
-when the running firmware exposes them. It also checks whether the
-installed firmware, drivers and SDK payloads are a matched set; include
-its output when reporting a problem.
+| Form | Result |
+| --- | --- |
+| `ZZDiag [samples] [delay_ticks] [capture.ppm]` | Prints `samples` reports, with `delay_ticks` AmigaDOS ticks between reports. Defaults are `1` and `50`. A sample count below `1` becomes `1`; a negative delay becomes `0`. |
+| `ZZDiag usb-driver` | Prints diagnostics exported by `zzusbhw.device` only. It does not require a board lookup. |
 
-### Boot-time link check — ZZNetReady
+A normal report identifies the card and Zorro version, reports the negotiated
+Zorro II aperture layout where applicable, and prints firmware, USB, SD,
+audio, Ethernet, scanline, RTG, and VideoCap registers. When available, it
+also prints firmware and `zzusbhw.device` USB diagnostic snapshots and their
+recent events.
 
-`ZZNetReady` answers one question for `S:User-Startup`: is the ZZ9000
-present, and is its Ethernet port up? It needs no TCP/IP stack:
+Give a third positional argument to create a native-capture PPM file:
+
+```text
+ZZDiag 1 50 RAM:capture.ppm
+```
+
+The capture path requires a Zorro III board. After the optional delay,
+`ZZDiag` collects VideoCap probe comparisons when the firmware exposes them,
+then writes a binary P6 PPM image at `1280x320`. It prints `CapturePPM` with
+the path and written size, or an error if the file cannot be created or
+written.
+
+## ZZNetReady: boot-time link check
+
+`ZZNetReady` is for `S:User-Startup`. It checks that a ZZ9000 is present and,
+when supported by the firmware, waits for Ethernet negotiation. It does not
+need a TCP/IP stack.
 
 ```text
 ZZNetReady
 ZZNetReady TIMEOUT=10 QUIET
 ```
 
-Exit codes: `0` link ready (also returned on firmware that cannot
-report link state, so the old always-start behaviour is kept), `5`
-not ready - no card, no link within `TIMEOUT` seconds (default 5),
-or unreadable arguments. Everything except OK returns WARN because
-AmigaDOS shells run `S:User-Startup` with FAILAT 10 by default: a
-failure code would abort the rest of the script before `If WARN`
-can branch. A typical `S:User-Startup` gating:
+| Argument | Meaning |
+| --- | --- |
+| `TIMEOUT=<seconds>` | Maximum time to wait for negotiation. The default is `5`. |
+| `QUIET` | Suppresses the status message. |
+
+It returns `0` (`OK`) when the link is ready. Firmware without
+`ETH_CONFIG_CAP_LINK_STATE` also returns `0`, preserving the prior
+always-start behavior. It returns `5` (`WARN`) if no card is found, the link
+is not ready before the timeout, or AmigaDOS cannot parse the arguments.
+`WARN` keeps `S:User-Startup` running under its usual `FAILAT 10` setting.
 
 ```text
 ZZNetReady QUIET
@@ -124,17 +187,13 @@ Else
 EndIf
 ```
 
-Requires firmware with `ETH_CONFIG_CAP_LINK_STATE` for real link
-reporting (v2.8.1); the bit means negotiation completed since
-power-on, not that the cable is in right now.
+`ETH_CONFIG_CAP_LINK_STATE` reports that PHY auto-negotiation completed and
+the Ethernet MAC initialized since power-on. It is not cleared when the cable
+is later removed.
 
-`ZZCapture` extends native-video diagnosis with row timing and C28
-calibration evidence. Its phase-changing commands are experimental; see
-`ZZCapture.guide` before using them.
+## ZZScanlines: scanlines
 
-## Scanlines — ZZScanlines
-
-`ZZScanlines` controls the scanline modes of the scandoubler output:
+`ZZScanlines` changes the active scanline setting of the scandoubler.
 
 ```text
 ZZScanlines 0
@@ -143,9 +202,17 @@ ZZScanlines 2 1
 ZZScanlines 3 0
 ```
 
-Modes are `0=off`, `1=classic`, `2=soft`, `3=gradient`; parity is
-`0=odd dark`, `1=even dark`.
+| Argument | Values |
+| --- | --- |
+| `mode` | `0` off, `1` classic, `2` soft, or `3` gradient. |
+| `parity` | Optional: `0` for odd dark lines, the default; `1` for even dark lines. |
 
-Like ZZTop's Scandoubler window, `ZZScanlines` changes the live FPGA
-state immediately. To make scanlines survive a power cycle, save them to
-`ZZ9000.CFG` — the ZZTop Scandoubler window's Save button does that.
+The command applies the setting immediately and prints the card address and
+the selected state. Scanlines operate in AGA scandoubled modes and RTG modes
+below 350 lines; they are disabled in interlaced and high-resolution RTG
+modes.
+
+`ZZScanlines` does not save settings. To retain them across a power cycle,
+write `scanline_mode` and `scanline_parity` to `ZZ9000.CFG`; ZZTop's Save
+command writes those keys. The firmware accepts mode values `0`–`3` and
+parity values `0`–`1`.
