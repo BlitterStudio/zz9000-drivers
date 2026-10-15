@@ -492,19 +492,68 @@ struct Window *gt_render_window(struct Gadget *gadget)
 	return NULL;
 }
 
-/* Set a dynamic text gadget after copying its value into a static page buffer. */
+/* Last text set on each text gadget. GadTools clears and redraws a
+ * TEXT_KIND gadget on every GTTX_Text set, so re-setting unchanged text
+ * from the 10 Hz tick makes it flicker; this lets such sets be skipped.
+ * A gadget that does not get a slot (table full, text too long) is
+ * simply always set. */
+#define TEXT_CACHE_ENTRIES 80
+#define TEXT_CACHE_CHARS 128
+
+struct text_cache_entry {
+	struct Gadget *gadget;
+	BOOL valid;
+	char text[TEXT_CACHE_CHARS];
+};
+
+static struct text_cache_entry text_cache[TEXT_CACHE_ENTRIES];
+static UWORD text_cache_used;
+
+/* Find the gadget's cache slot, claiming a free one on first use. */
+static struct text_cache_entry *text_cache_slot(struct Gadget *gadget)
+{
+	UWORD i;
+
+	for (i = 0; i < text_cache_used; i++)
+		if (text_cache[i].gadget == gadget)
+			return &text_cache[i];
+	if (text_cache_used == TEXT_CACHE_ENTRIES)
+		return NULL;
+	text_cache[text_cache_used].gadget = gadget;
+	text_cache[text_cache_used].valid = FALSE;
+	return &text_cache[text_cache_used++];
+}
+
+/* Set a dynamic text gadget, skipping the redraw when the text is unchanged. */
 void gt_page_set_text(struct Gadget *gadget, const char *text)
 {
+	struct text_cache_entry *slot;
+
 	if (!gadget)
+		return;
+	if (!text)
+		text = "";
+	slot = text_cache_slot(gadget);
+	if (slot && slot->valid && strcmp(slot->text, text) == 0)
 		return;
 	GT_SetGadgetAttrs(gadget, gt_render_window(gadget), NULL,
 		GTTX_Text, (ULONG)text, TAG_END);
+	if (slot) {
+		slot->valid = strlen(text) < TEXT_CACHE_CHARS;
+		if (slot->valid)
+			strcpy(slot->text, text);
+	}
 }
 
-/* Enable or disable a page control. */
+/* Enable or disable a control; no redraw when it is already in that state. */
 void gt_page_set_disabled(struct Gadget *gadget, BOOL disabled)
 {
+	BOOL current;
+
 	if (!gadget)
+		return;
+	current = (gadget->Flags & GFLG_DISABLED) != 0;
+	if (current == (disabled != FALSE))
 		return;
 	GT_SetGadgetAttrs(gadget, gt_render_window(gadget), NULL,
 		GA_Disabled, disabled, TAG_END);
@@ -715,6 +764,7 @@ void gt_pending_changed(void)
 {
 	struct app_pending pending;
 	char base[64];
+	char title[sizeof(window_title)];
 	BOOL any;
 
 	app_pending(&pending);
@@ -727,17 +777,22 @@ void gt_pending_changed(void)
 	else
 		snprintf(base, sizeof(base), "%s", ZZTOP_NAME);
 	if (pending.card && pending.reboot)
-		snprintf(window_title, sizeof(window_title), "%s - %u unsaved, reboot needed",
+		snprintf(title, sizeof(title), "%s - %u unsaved, reboot needed",
 			base, (unsigned)pending.card);
 	else if (pending.card)
-		snprintf(window_title, sizeof(window_title), "%s - %u unsaved", base,
+		snprintf(title, sizeof(title), "%s - %u unsaved", base,
 			(unsigned)pending.card);
 	else if (pending.audio)
-		snprintf(window_title, sizeof(window_title), "%s - audio unsaved", base);
+		snprintf(title, sizeof(title), "%s - audio unsaved", base);
 	else if (pending.live)
-		snprintf(window_title, sizeof(window_title), "%s - live changes", base);
+		snprintf(title, sizeof(title), "%s - live changes", base);
 	else
-		snprintf(window_title, sizeof(window_title), "%s", base);
+		snprintf(title, sizeof(title), "%s", base);
+	/* Called from the tick on some pages: only redraw the title bar
+	 * when the text changes. */
+	if (strcmp(title, window_title) == 0)
+		return;
+	strcpy(window_title, title);
 	if (window)
 		SetWindowTitles(window, (CONST_STRPTR)window_title, (CONST_STRPTR)~0UL);
 }
@@ -1240,6 +1295,7 @@ void gt_destroy(void)
 		if (gt_pages[i]->cleanup)
 			gt_pages[i]->cleanup();
 	}
+	text_cache_used = 0;
 	timer_close();
 	if (menu_strip) {
 		FreeMenus(menu_strip);

@@ -84,9 +84,13 @@ static void diag_format_register(struct diag_reg_desc *desc, UWORD value)
 		(unsigned long)desc->offset, desc->name, (unsigned)value);
 }
 
-/* Read live registers and update their diagnostics list entries. */
+/* Read live registers and update their diagnostics list entries. The list
+ * is detached and reattached only when a value changed: every reattach
+ * redraws the whole list. */
 static void diag_refresh_registers(void)
 {
+	static UWORD shown[DIAG_REG_COUNT];
+	static BOOL shown_valid;
 	struct board_health health;
 	UWORD values[DIAG_REG_COUNT];
 	UWORD i;
@@ -107,14 +111,19 @@ static void diag_refresh_registers(void)
 	values[12] = board_read16(ZZ_REG_AUDIO_CONFIG);
 	values[13] = board_read16(ZZ_REG_FWUP_STATUS);
 
-	for (i = 0; i < DIAG_REG_COUNT; i++)
-		diag_format_register(&diag_registers[i], values[i]);
-
-	if (diag_register_list) {
-		GT_SetGadgetAttrs(diag_register_list, gt_render_window(diag_register_list), NULL,
-			GTLV_Labels, ~0UL, TAG_END);
-		GT_SetGadgetAttrs(diag_register_list, gt_render_window(diag_register_list), NULL,
-			GTLV_Labels, (ULONG)&diag_register_labels, TAG_END);
+	if (!shown_valid || memcmp(shown, values, sizeof(values)) != 0) {
+		if (diag_register_list)
+			GT_SetGadgetAttrs(diag_register_list,
+				gt_render_window(diag_register_list), NULL,
+				GTLV_Labels, ~0UL, TAG_END);
+		for (i = 0; i < DIAG_REG_COUNT; i++)
+			diag_format_register(&diag_registers[i], values[i]);
+		if (diag_register_list)
+			GT_SetGadgetAttrs(diag_register_list,
+				gt_render_window(diag_register_list), NULL,
+				GTLV_Labels, (ULONG)&diag_register_labels, TAG_END);
+		memcpy(shown, values, sizeof(values));
+		shown_valid = TRUE;
 	}
 	snprintf(diag_temperature_text, sizeof(diag_temperature_text),
 		"Temp: %d.%d C (%d.%d-%d.%d)",

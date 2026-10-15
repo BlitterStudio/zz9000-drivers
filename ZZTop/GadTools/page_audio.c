@@ -47,7 +47,14 @@ static char state_text[96];
 static char headroom_text[48];
 static char output_text[48];
 static char input_text[48];
-static BOOL meters_changed;
+
+/* What each meter bar last showed, so the tick redraws only bars whose
+ * fill or caption changed; bars_valid is cleared when the page area has
+ * been erased (page shown). */
+#define AUDIO_BAR_COUNT 5
+static WORD bar_fill[AUDIO_BAR_COUNT];
+static char bar_text[AUDIO_BAR_COUNT][48];
+static BOOL bars_valid;
 
 /* Approximates a 16.16 peak on the visible -60..0 dBFS scale. */
 static LONG audio_dbfs(ULONG fixed)
@@ -133,13 +140,19 @@ static void audio_scene_labels_refresh(void)
 	audio_set_attr(scene_gadget, GTCY_Labels, (ULONG)scene_labels);
 }
 
-/* Fills and labels a framed meter bar. */
-static void audio_draw_bar(WORD left, WORD top, WORD width, ULONG level,
-	ULONG maximum, const char *text)
+/* Fills and labels framed meter bar `slot`, drawing nothing when it
+ * already shows this fill and caption. The interior is painted as fill
+ * plus remainder, never cleared first, so a changing bar does not blink. */
+static void audio_draw_bar(UWORD slot, WORD left, WORD top, WORD width,
+	ULONG level, ULONG maximum, const char *text)
 {
 	struct Window *win;
 	struct RastPort *rp;
 	WORD fill;
+	WORD inner_right;
+	WORD inner_bottom;
+	struct TextExtent extent;
+	ULONG count;
 
 	win = gt_window();
 	if (!win)
@@ -150,19 +163,33 @@ static void audio_draw_bar(WORD left, WORD top, WORD width, ULONG level,
 	if (level > maximum)
 		level = maximum;
 	fill = (WORD)((width - 4) * level / maximum);
-	SetAPen(rp, 0);
-	RectFill(rp, left, top, (WORD)(left + width - 1), (WORD)(top + gt_layout.row_height - 1));
-	SetAPen(rp, 1);
-	DrawBevelBox(rp, left, top, width, gt_layout.row_height, GT_VisualInfo,
-		(ULONG)gt_visual_info(), TAG_DONE);
+	if (bars_valid && bar_fill[slot] == fill && strcmp(bar_text[slot], text) == 0)
+		return;
+	bar_fill[slot] = fill;
+	snprintf(bar_text[slot], sizeof(bar_text[slot]), "%s", text);
+	inner_right = (WORD)(left + width - 3);
+	inner_bottom = (WORD)(top + gt_layout.row_height - 3);
 	if (fill > 0) {
 		SetAPen(rp, 3);
-		RectFill(rp, (WORD)(left + 2), (WORD)(top + 2), (WORD)(left + 2 + fill),
-			(WORD)(top + gt_layout.row_height - 3));
+		RectFill(rp, (WORD)(left + 2), (WORD)(top + 2), (WORD)(left + 1 + fill),
+			inner_bottom);
 	}
+	if (left + 2 + fill <= inner_right) {
+		SetAPen(rp, 0);
+		RectFill(rp, (WORD)(left + 2 + fill), (WORD)(top + 2), inner_right,
+			inner_bottom);
+	}
+	DrawBevelBox(rp, left, top, width, gt_layout.row_height, GT_VisualInfo,
+		(ULONG)gt_visual_info(), TAG_DONE);
+	/* Centre the caption on the bar using the font's real height and
+	 * baseline (any screen font size), cut to the bar's inner width. */
 	SetAPen(rp, 1);
-	Move(rp, (WORD)(left + 4), (WORD)(top + gt_layout.font_y - 2));
-	Text(rp, (CONST_STRPTR)text, (ULONG)strlen(text));
+	SetDrMd(rp, JAM1);
+	count = TextFit(rp, (CONST_STRPTR)text, strlen(text), &extent, NULL, 1,
+		(UWORD)(width - 8), 32767);
+	Move(rp, (WORD)(left + 4),
+		(WORD)(top + (gt_layout.row_height - rp->TxHeight) / 2 + rp->TxBaseline));
+	Text(rp, (CONST_STRPTR)text, count);
 }
 
 /* Draws the three bars that have no GadTools equivalent. */
@@ -186,23 +213,25 @@ static void audio_draw_meters(void)
 	bar_width = (WORD)(gt_layout.page_width - (bar_left - left) - gt_button_width("Retry") - 12);
 	snprintf(headroom_text, sizeof(headroom_text), "Level %lu of %lu (limit)",
 		(unsigned long)weighted, (unsigned long)boundary);
-	audio_draw_bar(bar_left, gt_row(3), bar_width, weighted, boundary ? boundary : 1, headroom_text);
+	audio_draw_bar(0, bar_left, gt_row(3), bar_width, weighted,
+		boundary ? boundary : 1, headroom_text);
 
 	out_left = audio_dbfs(output_meter.peak_left);
 	out_right = audio_dbfs(output_meter.peak_right);
 	snprintf(output_text, sizeof(output_text), "Out L %ld dB", (long)out_left);
-	audio_draw_bar(left, gt_row(4), width, (ULONG)(out_left + 60), 60, output_text);
+	audio_draw_bar(1, left, gt_row(4), width, (ULONG)(out_left + 60), 60, output_text);
 	snprintf(output_text, sizeof(output_text), "Out R %ld dB", (long)out_right);
-	audio_draw_bar((WORD)(left + width + gap), gt_row(4), width,
+	audio_draw_bar(2, (WORD)(left + width + gap), gt_row(4), width,
 		(ULONG)(out_right + 60), 60, output_text);
 
 	in_left = audio_dbfs(input_meter.peak_left);
 	in_right = audio_dbfs(input_meter.peak_right);
 	snprintf(input_text, sizeof(input_text), "In L %ld dB", (long)in_left);
-	audio_draw_bar(left, gt_row(6), width, (ULONG)(in_left + 60), 60, input_text);
+	audio_draw_bar(3, left, gt_row(6), width, (ULONG)(in_left + 60), 60, input_text);
 	snprintf(input_text, sizeof(input_text), "In R %ld dB", (long)in_right);
-	audio_draw_bar((WORD)(left + width + gap), gt_row(6), width,
+	audio_draw_bar(4, (WORD)(left + width + gap), gt_row(6), width,
 		(ULONG)(in_right + 60), 60, input_text);
+	bars_valid = TRUE;
 }
 
 /* Creates the compact ten-row audio page. */
@@ -287,7 +316,6 @@ static void audio_sync(void)
 	gt_page_set_text(in_counts_gadget, in_counts);
 	gt_page_set_text(meter_note_gadget, meter_note);
 	gt_page_set_text(state_gadget, state_text);
-	meters_changed = TRUE;
 	audio_draw_meters();
 }
 
@@ -300,6 +328,7 @@ static void audio_show(void)
 	memset(&input_meter, 0, sizeof(input_meter));
 	(void)audio_get_meter(FALSE, &meter_open_out);
 	(void)audio_get_meter(TRUE, &meter_open_in);
+	bars_valid = FALSE;   /* the page area was just erased */
 	audio_sync();
 }
 
@@ -345,7 +374,6 @@ static void audio_page_tick(void)
 		(unsigned long)audio_meter_delta(input_meter.overrun, meter_open_in.overrun));
 	gt_page_set_text(out_counts_gadget, out_counts);
 	gt_page_set_text(in_counts_gadget, in_counts);
-	meters_changed = TRUE;
 	audio_draw_meters();
 }
 
