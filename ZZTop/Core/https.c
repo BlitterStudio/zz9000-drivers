@@ -230,13 +230,18 @@ static int conn_write(struct conn *c, const char *data, int len)
 	return 1;
 }
 
-/* Read some bytes: >0 count, 0 orderly end of stream, -1 failure. */
+/* Read some bytes: >0 count, 0 orderly end of stream, -1 failure or
+ * cancel. The hook runs before every read, not only while the socket
+ * would block: a fast transfer can keep SSL_read() succeeding until the
+ * whole body has arrived. */
 static int conn_read(struct conn *c, UBYTE *buf, int size)
 {
 	for (;;) {
-		int rc = SSL_read(c->ssl, buf, size);
-		int e;
+		int rc, e;
 
+		if (!keep_running(c))
+			return -1;
+		rc = SSL_read(c->ssl, buf, size);
 		if (rc > 0)
 			return rc;
 		e = SSL_get_error(c->ssl, rc);
@@ -247,8 +252,6 @@ static int conn_read(struct conn *c, UBYTE *buf, int size)
 		if (e == SSL_ERROR_SYSCALL && ERR_peek_error() == 0)
 			return 0;
 		if (!ssl_retry(c, rc, "Receiving data failed"))
-			return -1;
-		if (!keep_running(c))
 			return -1;
 	}
 }

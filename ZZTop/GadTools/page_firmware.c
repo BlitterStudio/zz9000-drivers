@@ -350,6 +350,14 @@ static void update_online(void)
 	gt_busy(FALSE);
 	fe_wait_end(&wait);
 	transfer_active = FALSE;
+	/* Escape in the last poll of a complete download still cancels: the
+	 * user asked not to flash. */
+	if (ok && cancel) {
+		DeleteFile((CONST_STRPTR)image);
+		ok = FALSE;
+		cancelled = TRUE;
+		snprintf(message, sizeof(message), "%s", "Download cancelled");
+	}
 	update_gate();
 	if (!ok) {
 		set_progress("Not downloaded");
