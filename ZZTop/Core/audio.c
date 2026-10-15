@@ -612,6 +612,7 @@ BOOL audio_select_scene(UWORD scene)
 {
 	ZZ9KAudioSceneSelectPayload payload;
 	ZZ9KMailboxEntry reply;
+	struct audio_model live;
 	int status;
 
 	if (!available || calibration_pending || scene >= AUDIO_SCENE_COUNT)
@@ -620,7 +621,20 @@ BOOL audio_select_scene(UWORD scene)
 	zz9k_put_be32(payload.scene, scene);
 	status = audio_mb_call(ZZ9K_OP_AUDIO_SCENE_SELECT, &payload,
 		sizeof(payload), &reply);
-	if (status != ZZ9K_STATUS_OK) {
+	if (status == ZZ9K_STATUS_TIMEOUT) {
+		/* The firmware may have switched anyway: ask which scene is
+		 * live and record the switch only when it did. */
+		live = model;
+		if (!audio_control_state_get(&live, NULL)) {
+			audio_text(last_error, sizeof(last_error),
+				"Scene switch not confirmed - retry");
+			return FALSE;
+		}
+		if (live.active != scene) {
+			audio_text(last_error, sizeof(last_error), "Scene switch failed - retry");
+			return FALSE;
+		}
+	} else if (status != ZZ9K_STATUS_OK) {
 		audio_text(last_error, sizeof(last_error), "Scene switch failed - retry");
 		return FALSE;
 	}

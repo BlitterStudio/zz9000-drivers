@@ -399,6 +399,7 @@ BOOL video_set_sample(UWORD sample, char *msg, UWORD size)
 {
 	struct zz_vcap_control control;
 	struct zz_vcap_snapshot applied;
+	struct zz_vcap_path staged, running;
 	struct fe_wait wait;
 	BOOL cancel = FALSE;
 
@@ -411,6 +412,21 @@ BOOL video_set_sample(UWORD sample, char *msg, UWORD size)
 			write_message(msg, size, "Live capture state is unavailable");
 			return FALSE;
 		}
+		/* A staged output profile whose capture width the running path
+		 * does not use yet takes effect at the next power-cycle: stage
+		 * the sample with it instead of building a live target that
+		 * video_save_check() would reject, which would make the pair
+		 * impossible to save. */
+		path_for(&staged, cfg.edit.videocap_profile, control.sample);
+		running.sample = control.sample;
+		running.full_width = control.full_width;
+		if (!zz_vcap_path_equal(&staged, &running)) {
+			settings_set(CFG_SAMPLE, sample);
+			live.sweep_valid = FALSE;
+			write_message(msg, size,
+				"Sample mode staged with the new output; applies after reboot");
+			return TRUE;
+		}
 		control.sample = sample;
 		live.crop_touched = TRUE;
 		live.crop_confirmed = FALSE;
@@ -420,7 +436,7 @@ BOOL video_set_sample(UWORD sample, char *msg, UWORD size)
 		fe_busy(TRUE);
 		if (!apply_raw(live.crop_target, &applied, &wait, FALSE)) {
 			fe_busy(FALSE);
-		fe_wait_end(&wait);
+			fe_wait_end(&wait);
 			write_message(msg, size, cancel ? "Sample change cancelled" :
 				"Sample change was not acknowledged");
 			return FALSE;

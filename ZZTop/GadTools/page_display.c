@@ -89,6 +89,12 @@ static UWORD refresh_count;
 
 static char description_text[128];
 static char refresh_note_text[128];
+/* The output and refresh the selectors show. They differ from the stored
+ * profile when this firmware cannot produce it; changes start from what
+ * the user sees, not from the unsupported stored value. */
+static UWORD shown_output;
+static UWORD shown_refresh;
+static BOOL stored_unsupported;
 static char env_note_text[128];
 static char framing_text[64];
 static char sampling_text[64];
@@ -194,6 +200,7 @@ static void sync_choices(void)
 	if (!output_count)
 		return;
 	output_index = map_index(output_map, output_count, output);
+	stored_unsupported = output_index < 0;
 	if (output_index < 0) {
 		output = output_map[0];
 		output_index = 0;
@@ -208,13 +215,19 @@ static void sync_choices(void)
 		TAG_END);
 	refresh_index = map_index(refresh_map, refresh_count, refresh);
 	if (refresh_index < 0) {
+		stored_unsupported = TRUE;
 		refresh = refresh_map[0];
 		refresh_index = 0;
 	}
 	GT_SetGadgetAttrs(refresh_gadget, gt_render_window(refresh_gadget), NULL,
 		GTCY_Active, (ULONG)refresh_index,
 		TAG_END);
+	shown_output = output;
+	shown_refresh = refresh;
 	pair_description(output, refresh);
+	if (stored_unsupported)
+		snprintf(description_text, sizeof(description_text), "%s",
+			"Stored output unsupported here: pick one, then Save");
 	gt_page_set_text(description_gadget, description_text);
 	gt_page_set_text(refresh_note_gadget, refresh_note_text);
 }
@@ -427,22 +440,21 @@ static void gadget(UWORD id, UWORD code)
 		if (code >= output_count)
 			return;
 		output = output_map[code];
-		refresh = zzcfg_profile_refresh(cfg.edit.videocap_profile);
+		refresh = shown_refresh;
 		if (zzcfg_profile_for_output_refresh(output, refresh, board.fw_caps) ==
 			ZZCFG_VCAP_PROFILE_COUNT)
 			refresh = first_refresh(output);
 		profile = zzcfg_profile_for_output_refresh(output, refresh, board.fw_caps);
-		if (video_set_profile(profile, action_text, sizeof(action_text)))
-			gt_status("%s", action_text);
+		video_set_profile(profile, action_text, sizeof(action_text));
+		gt_status("%s", action_text);
 		break;
 	case G_REFRESH:
 		if (code >= refresh_count)
 			return;
-		output = zzcfg_profile_output(cfg.edit.videocap_profile);
-		profile = zzcfg_profile_for_output_refresh(output, refresh_map[code],
+		profile = zzcfg_profile_for_output_refresh(shown_output, refresh_map[code],
 			board.fw_caps);
-		if (video_set_profile(profile, action_text, sizeof(action_text)))
-			gt_status("%s", action_text);
+		video_set_profile(profile, action_text, sizeof(action_text));
+		gt_status("%s", action_text);
 		break;
 	case G_SCANLINES:
 		if (code < BOARD_SCANLINE_MODES) {
