@@ -74,6 +74,7 @@ const struct NSDeviceQueryResult NSDQueryAnswer = {
 #include "zzcfg_query.h"
 #include "macros.h"
 #include "rx.h"
+#include "tx.h"
 
 #if ZZNET_S2ERR_NO_RESOURCES != S2ERR_NO_RESOURCES || \
     ZZNET_S2ERR_BAD_STATE != S2ERR_BAD_STATE || \
@@ -98,6 +99,14 @@ static BOOL zznet_z2 = FALSE;
 static BOOL zznet_rx_split = FALSE;
 #define ZZ9K_RX 0x2000
 #define ZZ9K_TX 0x8000
+#define ZZ9K_TX_STATUS 0x68
+
+/* Status reads (about 1 us each, served by the ARM) a writer spends waiting
+ * for one of the four TX slots to retire before it gives up on the frame.
+ * Four full-size frames leave the wire in ~0.5 ms at 100 Mbit/s and ~5 ms at
+ * 10 Mbit/s; the firmware retires refused frames as well, so only a hung
+ * firmware reaches this. */
+#define ZZNET_TX_WAIT_READS 100000UL
 
 struct Sana2DeviceStats global_stats;
 BOOL is_online;
@@ -391,6 +400,16 @@ SAVEDS struct Device *DevInit( ASMR(d0) DEVBASEP                  ASMREG(d0),
             D(("ZZ9000Net: Using firmware MAC.\n"));
           }
 
+          /* Firmware with the asynchronous TX path reports it in bit 15 of
+           * ETH_TX_STATUS; older firmware reads 0 there and keeps the
+           * synchronous send. */
+          InitSemaphore(&db->db_TxSem);
+          if (zznet_tx_reset(&db->db_Tx,
+                             *(volatile USHORT*)(ZZ9K_REGS+ZZ9K_TX_STATUS))) {
+            D(("ZZ9000Net: Using asynchronous TX.\n"));
+            db->db_Flags |= DEVF_TXASYNC;
+          }
+
           ok = 1;
 
         } else {
@@ -679,12 +698,32 @@ SAVEDS BPTR DevClose(   ASMR(a1) struct IORequest *ioreq        ASMREG(a1),
 	return ret;
 }
 
+static uint16_t read_tx_status(void *context)
+{
+	(void)context;
+	return *(volatile USHORT*)(ZZ9K_REGS+ZZ9K_TX_STATUS);
+}
+
 SAVEDS BPTR DevExpunge( ASMR(a6) DEVBASEP                        ASMREG(a6) )
 {
 	BPTR seglist = db->db_SegList;
 
 	if( db->db_Lib.lib_OpenCnt )
 	{
+		db->db_Lib.lib_Flags |= LIBF_DELEXP;
+		return (0);
+	}
+
+	/* Asynchronous sends still outstanding own their TX-window slots until
+	 * the card retires them. A reloaded driver would hand those slots out
+	 * again and count the old completions against its new sends, so give
+	 * them a moment and refuse the expunge if they are still in DMA (the
+	 * firmware retires a stalled send, so a later expunge succeeds). */
+	if ((db->db_Flags & DEVF_TXASYNC) &&
+	    !zznet_tx_drain(&db->db_Tx, read_tx_status, NULL,
+	                    ZZNET_TX_WAIT_READS))
+	{
+		D(("ZZ9000Net: TX still in flight, expunge deferred\n"));
 		db->db_Lib.lib_Flags |= LIBF_DELEXP;
 		return (0);
 	}
@@ -716,7 +755,8 @@ static void set_last_start()
 }
 
 ULONG read_frame(DEVBASETYPE *db, struct IOSana2Req *req, volatile UBYTE *frame, USHORT sz, USHORT tp);
-ULONG write_frame(struct IOSana2Req *req, UBYTE *frame);
+ULONG write_frame(DEVBASETYPE *db, struct IOSana2Req *req, UBYTE *frame, int slot);
+static ULONG write_frame_async(DEVBASETYPE *db, struct IOSana2Req *req);
 
 SAVEDS VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
                             ASMR(a6) DEVBASEP                       ASMREG(a6) )
@@ -762,7 +802,9 @@ SAVEDS VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
     }
     /* fall through */
   case CMD_WRITE: {
-    ULONG res = write_frame(ioreq, (UBYTE*)(ZZ9K_REGS+ZZ9K_TX));
+    ULONG res = (db->db_Flags & DEVF_TXASYNC)
+        ? write_frame_async(db, ioreq)
+        : write_frame(db, ioreq, (UBYTE*)(ZZ9K_REGS+ZZ9K_TX), -1);
     if (res!=0) {
       ioreq->ios2_Req.io_Error = S2ERR_NO_RESOURCES;
       ioreq->ios2_WireError = S2WERR_GENERIC_ERROR;
@@ -1180,7 +1222,10 @@ ULONG read_frame(DEVBASETYPE *db, struct IOSana2Req *req, volatile UBYTE *frame,
 	return err;
 }
 
-ULONG write_frame(struct IOSana2Req *req, UBYTE *frame)
+/* slot < 0: the synchronous send from the start of the TX window. slot
+ * 0..3: an asynchronous send from that slot, which the caller has taken
+ * from db_Tx under db_TxSem. */
+ULONG write_frame(DEVBASETYPE *db, struct IOSana2Req *req, UBYTE *frame, int slot)
 {
 	struct BufferManagement *bm;
 	USHORT sz = 0;
@@ -1232,6 +1277,16 @@ ULONG write_frame(struct IOSana2Req *req, UBYTE *frame)
 		}
 	}
 
+	if (slot >= 0) {
+		/* Queued, not sent: the bus cycle returns at once and the slot
+		 * stays the firmware's until ETH_TX_STATUS retires it. A refused
+		 * submission is retired the same way and cannot be told apart
+		 * from a sent one, so there is no result to read back. */
+		*(volatile USHORT*)(ZZ9K_REGS+0x80) = zznet_tx_word(slot, sz);
+		zznet_tx_submitted(&db->db_Tx);
+		return 0;
+	}
+
 	{
 		volatile USHORT *reg = (volatile USHORT*)(ZZ9K_REGS+0x80);
 		*reg = sz;      /* kick the TX engine */
@@ -1241,6 +1296,36 @@ ULONG write_frame(struct IOSana2Req *req, UBYTE *frame)
 		}
 	}
 
+	return rc;
+}
+
+/* Asynchronous send: take the next TX slot in submission order, waiting
+ * for the firmware to retire the oldest one while all four are in flight.
+ * A slot is reused only after ETH_TX_STATUS has counted its frame, so the
+ * copy into it can never overwrite a frame the GEM is still reading. */
+static ULONG write_frame_async(DEVBASETYPE *db, struct IOSana2Req *req)
+{
+	ULONG rc = 1;
+	ULONG reads;
+	int slot;
+
+	/* A frame longer than a slot would run into the next one. */
+	if (req->ios2_DataLength > HW_ETH_MAX_RAW)
+		return 1;
+
+	ObtainSemaphore(&db->db_TxSem);
+	for (reads = 0; (slot = zznet_tx_slot(&db->db_Tx)) < 0 &&
+	                reads < ZZNET_TX_WAIT_READS; reads++)
+		zznet_tx_reclaim(&db->db_Tx,
+		                 *(volatile USHORT*)(ZZ9K_REGS+ZZ9K_TX_STATUS));
+	if (slot >= 0) {
+		rc = write_frame(db, req,
+		                 (UBYTE*)(ZZ9K_REGS + ZZ9K_TX +
+		                          (ULONG)slot * ZZNET_TX_SLOT_SIZE), slot);
+	} else {
+		D(("tx: no slot retired\n"));
+	}
+	ReleaseSemaphore(&db->db_TxSem);
 	return rc;
 }
 
