@@ -275,10 +275,13 @@ static void check_online(void)
 	gt_status("Latest release: %s", release.tag);
 }
 
-/* Refuse an image for the other bus; confirm any other build change. */
+/* Refuse an image for the other bus; confirm any other build change. When
+ * the firmware cannot identify its build (before 2.8), the plain Zorro II
+ * or Zorro III build is the reference, so A500 or AGA images still ask. */
 static BOOL confirm_variant(void)
 {
 	BOOL card_z3 = board.zorro == 3;
+	int expected = detected;
 
 	if (fwrel_variant_is_zorro3(variant) != card_z3) {
 		gt_ask("OK", "The %s image is for Zorro %s, but this card is in "
@@ -287,13 +290,16 @@ static BOOL confirm_variant(void)
 			card_z3 ? "III" : "II");
 		return FALSE;
 	}
-	if (detected == FWREL_VARIANT_UNKNOWN ||
-	    fwrel_variant_matches(detected, variant))
+	if (expected == FWREL_VARIANT_UNKNOWN)
+		expected = card_z3 ? FWREL_VARIANT_ZORRO3 : FWREL_VARIANT_ZORRO2;
+	if (fwrel_variant_matches(expected, variant))
 		return TRUE;
-	return gt_ask("Use it|Cancel", "This card runs the %s firmware build.\n"
+	return gt_ask("Use it|Cancel", "%s %s firmware build.\n"
 		"Install the %s build instead?\n\nA build for the wrong machine may "
 		"not start; recovery then needs the\nmicroSD card in another "
-		"computer.", fwrel_variant_name(detected),
+		"computer.", detected == FWREL_VARIANT_UNKNOWN ?
+		"This firmware cannot report its build; the default is the" :
+		"This card runs the", fwrel_variant_name(expected),
 		fwrel_variant_name(variant)) == 1;
 }
 

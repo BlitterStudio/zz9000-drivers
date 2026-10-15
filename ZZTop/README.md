@@ -233,7 +233,9 @@ status. Firmware that reports its patch level shows three numbers, such as
 Pre-releases are never offered. The archive's `ZZ9000.CFG` is not installed;
 the card keeps its own settings file. ZZTop refuses an image for the other
 Zorro bus and asks again before installing a build other than the running
-one. A build for the wrong machine may not start, and recovery then needs the
+one. Firmware older than 2.8 cannot report its build, so ZZTop then asks
+before installing anything other than the plain Zorro II or Zorro III build.
+A build for the wrong machine may not start, and recovery then needs the
 microSD card in another computer.
 
 The download needs up to 4 MB free in `T:`. GitHub limits anonymous release
