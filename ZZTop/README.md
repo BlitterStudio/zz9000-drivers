@@ -217,8 +217,9 @@ status. Firmware that reports its patch level shows three numbers, such as
    archive for the selected board, extracts `BOOT.bin` to `T:`, checks its
    CRC-32, size and Zynq boot header, then installs it like a chosen file.
    Escape or the close gadget cancels the download. The temporary image is
-   deleted after a successful install and kept, selected for **Install**,
-   after a failed one.
+   deleted after a successful install. After a failed one it stays selected
+   for **Install** until it is installed, replaced by another download or
+   chosen file, or ZZTop quits.
 4. Power-cycle the Amiga to start the new firmware.
 
 **Latest** shows the release tag and one of these results:

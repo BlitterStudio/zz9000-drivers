@@ -212,8 +212,23 @@ static BOOL install_image(const char *image, const char *tag)
 	return FALSE;
 }
 
-/* Install the chosen file after confirmation. A kept online download is
- * discarded once it has been installed, like the direct online path. */
+/* A verified online download kept after a failed flash (path_tag set) is
+ * ZZTop's own temporary file: it lives only as long as it is the
+ * selection. A successful flash, a new download, another chosen file and
+ * quitting all delete it. */
+static void drop_kept_image(void)
+{
+	if (!path_tag[0])
+		return;
+	DeleteFile((CONST_STRPTR)path);
+	path[0] = '\0';
+	path_tag[0] = '\0';
+	snprintf(file_text, sizeof(file_text), "%s", "No file chosen");
+	gt_page_set_text(g_file, file_text);
+	update_gate();
+}
+
+/* Install the chosen file after confirmation. */
 static void install(void)
 {
 	if (!path[0] || !fwup_supported || transfer_active)
@@ -222,14 +237,8 @@ static void install(void)
 		"Install %s as BOOT.bin?\n\nCurrent image kept as BOOT.bak.\nPower-cycle Amiga afterwards.",
 		FilePart((CONST_STRPTR)path)) != 1)
 		return;
-	if (!install_image(path, path_tag[0] ? path_tag : NULL) || !path_tag[0])
-		return;
-	DeleteFile((CONST_STRPTR)path);
-	path[0] = '\0';
-	path_tag[0] = '\0';
-	snprintf(file_text, sizeof(file_text), "%s", "No file chosen");
-	gt_page_set_text(g_file, file_text);
-	update_gate();
+	if (install_image(path, path_tag[0] ? path_tag : NULL))
+		drop_kept_image();
 }
 
 static int wait_keep_running(void *ctx)
@@ -345,6 +354,8 @@ static void update_online(void)
 		fwrel_variant_label(variant)) != 1)
 		return;
 
+	/* The new download replaces any kept one, even under the same name. */
+	drop_kept_image();
 	snprintf(image, sizeof(image), "T:ZZ9000-%s-%s-BOOT.bin", release.tag,
 		fwrel_variant_name(variant));
 	transfer_active = TRUE;
@@ -358,6 +369,11 @@ static void update_online(void)
 	gt_busy(TRUE);
 	ok = fwonline_download(release.tag, variant, image, &hooks, &cancelled,
 		message, sizeof(message));
+	/* A key queued after the last read (or while the final chunk was
+	 * inflated) has not been polled yet; poll once more before deciding
+	 * to flash. */
+	if (ok)
+		fe_wait_keep_running(&wait);
 	gt_busy(FALSE);
 	fe_wait_end(&wait);
 	transfer_active = FALSE;
@@ -508,6 +524,8 @@ static void gadget(UWORD id, UWORD code)
 
 		if (fwup_supported && gt_pick_file("Select firmware file to install",
 			"#?.(bin|rom|img)", picked, sizeof(picked))) {
+			if (path_tag[0] && strcmp(picked, path) != 0)
+				DeleteFile((CONST_STRPTR)path);
 			memcpy(path, picked, sizeof(path));
 			path_tag[0] = '\0';
 			snprintf(file_text, sizeof(file_text), "%s", (const char *)FilePart((CONST_STRPTR)path));
@@ -539,6 +557,13 @@ static void sync(void)
 	update_gate();
 }
 
+/* Remove a kept online download when ZZTop quits. */
+static void cleanup(void)
+{
+	if (path_tag[0])
+		DeleteFile((CONST_STRPTR)path);
+}
+
 struct gt_page gt_page_firmware = {
 	"Firmware",
 	"Firmware",
@@ -554,5 +579,5 @@ struct gt_page gt_page_firmware = {
 	NULL,
 	sync,
 	NULL,
-	NULL
+	cleanup
 };
