@@ -1217,6 +1217,12 @@ void gt_destroy(void)
 	if (window && gt_pages[current_page]->hide)
 		gt_pages[current_page]->hide();
 	if (window) {
+		/* AddGList appended the visible page's gadgets after the frame
+		 * list, linking the frame's last gadget to them. Detach them
+		 * first, or FreeGadgets(frame_gadgets) would also free the page
+		 * and the page loop below would free it again (81000005). */
+		if (gt_pages[current_page]->gadgets)
+			RemoveGList(window, gt_pages[current_page]->gadgets, -1);
 		ClearMenuStrip(window);
 		CloseWindow(window);
 		window = NULL;
