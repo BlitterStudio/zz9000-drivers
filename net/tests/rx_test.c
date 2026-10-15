@@ -44,6 +44,10 @@ struct fw {
 	int swap_on_reread;
 	uint16_t swap_size, swap_serial;
 	unsigned reads;
+	/* One-shot: a frame lands between the two word reads of a split
+	 * (Zorro II) header read. */
+	int publish_between_words;
+	unsigned words;
 };
 
 static uint16_t fw_version(const struct fw *f)
@@ -126,6 +130,43 @@ static uint32_t fw_header(void *ctx)
 	return ((uint32_t)f->size[f->read] << 16) | f->serial[f->read];
 }
 
+/* Zorro II: the longword header read is two word cycles. */
+static uint16_t fw_word(void *ctx, unsigned off)
+{
+	struct fw *f = ctx;
+	uint16_t v = off == 0 ? f->size[f->read] : f->serial[f->read];
+
+	if (++f->words == 1 && f->publish_between_words) {
+		f->publish_between_words = 0;
+		fw_receive(f);
+	}
+	return v;
+}
+
+/* The longword read as the bus splits it: size word, then serial word. */
+static uint32_t fw_header_size_first(void *ctx)
+{
+	uint16_t size = fw_word(ctx, 0);
+
+	return ((uint32_t)size << 16) | fw_word(ctx, 2);
+}
+
+static uint32_t fw_header_serial_first(void *ctx)
+{
+	return zznet_rx_header_split(fw_word, ctx);
+}
+
+/* The Zorro II header read frame_proc makes: serial first where the
+ * firmware allows it, else the bus-split longword, size first. */
+static uint32_t fw_header_z2(void *ctx)
+{
+	struct fw *f = ctx;
+
+	if (zznet_rx_serial_first(fw_version(f)))
+		return zznet_rx_header_split(fw_word, ctx);
+	return fw_header_size_first(ctx);
+}
+
 static uint16_t fw_status(void *ctx)
 {
 	struct fw *f = ctx;
@@ -157,6 +198,7 @@ static enum zznet_rx_action framer_step(struct framer *fr, struct fw *f)
 	struct zznet_rx_decision d;
 
 	f->reads = 0;
+	f->words = 0;
 	d = zznet_rx_next(&fr->state, &fr->io);
 	fr->overruns += d.overruns;
 	fr->bad_data += d.bad_data;
@@ -403,6 +445,43 @@ static int test_serial_wrap_is_not_an_overrun(void)
 	return EXIT_SUCCESS;
 }
 
+/* A frame published between the two word reads of a split header read.
+ * Size first reads the empty slot's size 0 beside the new serial: the
+ * framer drops it as a torn header and the ack consumes it unread.  Serial
+ * first sees the empty slot, and the frame on the next read. */
+static int run_split_race(uint32_t (*reader)(void *), unsigned *delivered,
+                          unsigned *bad_data)
+{
+	struct fw f;
+	struct framer fr;
+
+	fw_init(&f, FW_28);
+	framer_init(&fr, &f);
+	fr.io.read_header = reader;
+	fw_receive(&f);                  /* serial 2 */
+	CHECK(framer_run(&fr, &f) == 0);
+	CHECK(fr.delivered == 1);
+	f.publish_between_words = 1;     /* serial 3 lands mid-read */
+	framer_step(&fr, &f);
+	CHECK(framer_run(&fr, &f) == 0);
+	*delivered = fr.delivered;
+	*bad_data = fr.bad_data;
+	return EXIT_SUCCESS;
+}
+
+static int test_split_header_read_serial_first(void)
+{
+	unsigned delivered, bad_data;
+
+	CHECK(run_split_race(fw_header_size_first, &delivered, &bad_data) ==
+	      EXIT_SUCCESS);
+	CHECK(delivered == 1 && bad_data == 1);  /* the failure this avoids */
+	CHECK(run_split_race(fw_header_serial_first, &delivered, &bad_data) ==
+	      EXIT_SUCCESS);
+	CHECK(delivered == 2 && bad_data == 0);
+	return EXIT_SUCCESS;
+}
+
 /* A flood refills the backlog as fast as the framer acks, so the drain
  * never reaches WAIT. The framer must still leave ZZNET_FRAMER_PRI after
  * each budget, and be back at it when it sleeps. */
@@ -499,6 +578,68 @@ static int test_offset2_flag_is_masked_from_size(void)
 	return EXIT_SUCCESS;
 }
 
+/* Firmware before 2.8 gives serial 0 to the frame after 0xffff. The
+ * Zorro II read must deliver it: serial first would take it for an empty
+ * slot, never ack it, and stall with the frame waiting. One frame per drain,
+ * so the legacy backlog presents a fresh slot 0 each time. */
+static int run_split_wrap(enum fw_gen gen, uint32_t (*reader)(void *),
+                          unsigned *delivered)
+{
+	struct fw f;
+	struct framer fr;
+	int i, rc = 0;
+
+	fw_init(&f, gen);
+	framer_init(&fr, &f);
+	fr.io.read_header = reader;
+	f.frame_serial = 0xfffe;
+	for (i = 0; i < 3 && rc == 0; i++) {
+		fw_receive(&f);         /* 0xffff, 0, 1 */
+		rc = framer_run(&fr, &f);
+	}
+	*delivered = fr.delivered;
+	return rc;
+}
+
+static int test_split_header_read_serial_wrap_before_2_8(void)
+{
+	static const enum fw_gen gens[] = { FW_LEGACY, FW_21 };
+	unsigned i, delivered;
+
+	CHECK(!zznet_rx_serial_first(0x0200));
+	CHECK(!zznet_rx_serial_first(0x0201));
+	CHECK(!zznet_rx_serial_first(0x0202));
+	CHECK(zznet_rx_serial_first(0x0208));
+	for (i = 0; i < sizeof(gens) / sizeof(gens[0]); i++) {
+		/* the stall the firmware gate avoids */
+		CHECK(run_split_wrap(gens[i], fw_header_serial_first,
+		                     &delivered) == -1);
+		CHECK(delivered == 1);
+		CHECK(run_split_wrap(gens[i], fw_header_z2, &delivered) == 0);
+		CHECK(delivered == 3);
+	}
+	return EXIT_SUCCESS;
+}
+
+/* Firmware 2.8+ skips 0 and 1: the Zorro II read is serial first and
+ * crosses the wrap. */
+static int test_split_header_read_serial_wrap_2_8(void)
+{
+	struct fw f;
+	struct framer fr;
+
+	fw_init(&f, FW_28);
+	framer_init(&fr, &f);
+	fr.io.read_header = fw_header_z2;
+	f.frame_serial = 0xfffe;
+	fw_receive(&f);                 /* 0xffff */
+	fw_receive(&f);                 /* 2 */
+	CHECK(framer_run(&fr, &f) == 0);
+	CHECK(fr.delivered == 2);
+	CHECK(fr.overruns == 0 && fr.bad_data == 0);
+	return EXIT_SUCCESS;
+}
+
 int main(void)
 {
 	static int (*const tests[])(void) = {
@@ -513,6 +654,9 @@ int main(void)
 		test_bad_size_is_dropped,
 		test_gap_spans_empty_drain_boundary,
 		test_serial_wrap_is_not_an_overrun,
+		test_split_header_read_serial_first,
+		test_split_header_read_serial_wrap_before_2_8,
+		test_split_header_read_serial_wrap_2_8,
 		test_flood_drain_yields_after_budget,
 		test_burst_within_budget_never_yields,
 		test_offset2_flag_is_masked_from_size,

@@ -24,6 +24,9 @@
 
 #define ZZNET_ETH_RX_STATUS_READY 0x00ff
 #define ZZNET_RX_STATUS_MIN_FW    0x0201
+/* Firmware from 2.8 skips serials 0 and 1 on the u16 wrap; older firmware
+ * hands serial 0 to a real frame after 0xffff. */
+#define ZZNET_RX_SERIAL_SKIP_MIN_FW 0x0208
 
 /* Wire-level size bounds; device.c checks them against device.h. */
 /* Length-word flag: the frame starts 2 bytes further into the slot, so the
@@ -64,6 +67,27 @@ struct zznet_rx_decision {
 	uint16_t serial;     /* ack value for DROP and DELIVER */
 	uint8_t  offset2;    /* the frame starts 2 bytes later in the slot */
 };
+
+/* The presented header from two 16-bit reads, for a bus that splits a
+ * longword read (Zorro II: two word cycles, size first).  Size first can
+ * read the size of the empty slot, then the serial of a frame published in
+ * between: size 0 beside a fresh serial, which zznet_rx_next() drops as a
+ * torn header, acking the frame unread.  The serial goes first instead, as
+ * the publication marker: 0 is an empty slot and the size is not read; any
+ * other serial was published together with its size.  read16(ctx, off)
+ * reads the header word at off (0 size, 2 serial).
+ *
+ * Only valid where serial 0 never names a frame: see zznet_rx_serial_first().
+ */
+uint32_t zznet_rx_header_split(uint16_t (*read16)(void *ctx, unsigned off),
+                               void *ctx);
+
+/* 1 if zznet_rx_header_split() may be used with this FW_VERSION. Firmware
+ * before 2.8 wraps its serial through 0, so a serial-first read would take
+ * the frame after 0xffff for an empty slot, never ack it, and stall
+ * reception. Those keep the size-first read, and with it the torn-header
+ * race above. */
+int zznet_rx_serial_first(uint16_t fw_version);
 
 /* fw_version is the FW_VERSION register value. */
 void zznet_rx_reset(struct zznet_rx_state *state, uint16_t fw_version);
