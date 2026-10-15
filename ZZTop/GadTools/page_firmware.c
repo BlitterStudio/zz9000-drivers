@@ -52,6 +52,9 @@ static struct Gadget *g_restore_note;
 
 static char installed[32];
 static char path[256];
+/* Release tag of `path` when it is a verified online download kept for an
+ * Install retry; empty for a file the user chose. */
+static char path_tag[32];
 static char message[400];
 static char support_text[96] = "Checking update support...";
 static char latest_text[96] = "Not checked";
@@ -218,7 +221,7 @@ static void install(void)
 		"Install %s as BOOT.bin?\n\nCurrent image kept as BOOT.bak.\nPower-cycle Amiga afterwards.",
 		FilePart((CONST_STRPTR)path)) != 1)
 		return;
-	install_image(path, NULL);
+	install_image(path, path_tag[0] ? path_tag : NULL);
 }
 
 static int wait_keep_running(void *ctx)
@@ -373,6 +376,7 @@ static void update_online(void)
 	}
 	/* Keep the verified image so Install can retry without the network. */
 	snprintf(path, sizeof(path), "%s", image);
+	snprintf(path_tag, sizeof(path_tag), "%s", release.tag);
 	snprintf(file_text, sizeof(file_text), "%s", (const char *)FilePart((CONST_STRPTR)path));
 	gt_page_set_text(g_file, file_text);
 	update_gate();
@@ -490,8 +494,14 @@ static void gadget(UWORD id, UWORD code)
 	} else if (id == G_UPDATE) {
 		update_online();
 	} else if (id == G_CHOOSE) {
+		/* A cancelled or too-long pick must not disturb the current
+		 * image or its release tag. */
+		static char picked[sizeof(path)];
+
 		if (fwup_supported && gt_pick_file("Select firmware file to install",
-			"#?.(bin|rom|img)", path, sizeof(path))) {
+			"#?.(bin|rom|img)", picked, sizeof(picked))) {
+			memcpy(path, picked, sizeof(path));
+			path_tag[0] = '\0';
 			snprintf(file_text, sizeof(file_text), "%s", (const char *)FilePart((CONST_STRPTR)path));
 			gt_page_set_text(g_file, file_text);
 			gt_status("Firmware image selected: %s", FilePart((CONST_STRPTR)path));
