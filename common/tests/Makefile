@@ -56,9 +56,17 @@ ZZTOP_SETTINGS_DEPS := stubs/zztop_settings_test_platform.h \
 ZZTOP_SETTINGS_CPPFLAGS := $(CFG_CPPFLAGS) -I../../ZZTop/Core \
 	-DZZTOP_SETTINGS_TEST
 
+# Online firmware update helpers. Production inflates with the vendored
+# miniz tinfl; the test builds its fixture archives with host zlib.
+FW_RELEASE_TARGET := $(BUILD_DIR)/fw_release_test
+FW_RELEASE_SOURCES := fw_release_test.c $(COMMON_DIR)/fw_release.c \
+	$(COMMON_DIR)/miniz/miniz_tinfl.c
+FW_RELEASE_DEPS := $(COMMON_DIR)/fw_release.h $(COMMON_DIR)/miniz/miniz.h \
+	$(COMMON_DIR)/../include/zz9000_capture_calibration.h
+
 .PHONY: test clean
 
-test: $(TARGET) $(CFG_TARGET) $(VCAP_TARGET) $(VCAP_CLIENT_TARGET) $(EDIT_TARGET) $(GEOMETRY_TARGET) $(CAPTURE_TARGET) $(CAPTURE_LIFECYCLE_TARGET) $(SAMPLING_CALIBRATION_TARGET) $(VCAP_SAMPLING_SCREEN_TARGET) $(ZZTOP_SETTINGS_TARGET)
+test: $(TARGET) $(CFG_TARGET) $(VCAP_TARGET) $(VCAP_CLIENT_TARGET) $(EDIT_TARGET) $(GEOMETRY_TARGET) $(CAPTURE_TARGET) $(CAPTURE_LIFECYCLE_TARGET) $(SAMPLING_CALIBRATION_TARGET) $(VCAP_SAMPLING_SCREEN_TARGET) $(ZZTOP_SETTINGS_TARGET) $(FW_RELEASE_TARGET)
 	$(TARGET)
 	$(CFG_TARGET)
 	$(VCAP_TARGET)
@@ -70,10 +78,16 @@ test: $(TARGET) $(CFG_TARGET) $(VCAP_TARGET) $(VCAP_CLIENT_TARGET) $(EDIT_TARGET
 	$(SAMPLING_CALIBRATION_TARGET)
 	$(VCAP_SAMPLING_SCREEN_TARGET)
 	$(ZZTOP_SETTINGS_TARGET)
+	$(FW_RELEASE_TARGET)
 
 $(TARGET): $(SOURCES) $(DEPS)
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(SOURCES)
+
+$(FW_RELEASE_TARGET): $(FW_RELEASE_SOURCES) $(FW_RELEASE_DEPS)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) -I$(COMMON_DIR) -I$(COMMON_DIR)/../include $(CFLAGS) -std=c99 -Werror \
+		-o $@ $(FW_RELEASE_SOURCES) -lz
 
 # -w: the shared Amiga source casts board addresses through integers, which
 # is correct on m68k and noisy on a 64-bit host.

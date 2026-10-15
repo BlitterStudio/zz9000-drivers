@@ -128,7 +128,8 @@ firmware, VideoCap, USB, SD, audio, and Ethernet diagnostics.
 `ZZFwUpdate` copies `BOOT.bin` or another root-level file to the microSD card
 over Zorro and keeps `BOOT.bak` rollback images. It requires firmware with the
 FWUP protocol. Use the [command-line tool manual](docs/cli-tools.md) for its
-backup and restore procedure.
+backup and restore procedure. ZZTop's Firmware page uses the same protocol and
+can also check GitHub for a newer firmware release and install it.
 
 ## Compatibility and status
 

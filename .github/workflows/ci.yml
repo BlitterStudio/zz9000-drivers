@@ -130,6 +130,11 @@ jobs:
       - name: Build ZZTop
         run: |
           ZZTop/build-gcc.sh
+      # Host tests cannot see m68k code-generation faults in the release
+      # archive extractor; run it natively under vamos in the same image.
+      - name: m68k release-archive extraction
+        run: |
+          common/tests/fw_release_m68k.sh
       - uses: actions/upload-artifact@v7
         with:
           name: ZZTop
