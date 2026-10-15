@@ -160,18 +160,19 @@ BOOL app_save(void)
 	app_pending(&p);
 	reboot = p.reboot;
 
-	if (p.card) {
-		if (!settings_validate(&bad, msg, sizeof(msg))) {
-			fe_status("%s", msg);
-			if (bad == CFG_MAC || bad == CFG_HDF)
-				fe_show(FE_PLACE_SYSTEM);
-			return FALSE;
-		}
-		if (!video_save_check(msg, sizeof(msg))) {
-			fe_status("%s", msg);
-			fe_show(FE_PLACE_CAPTURE);
-			return FALSE;
-		}
+	if (p.card && !settings_validate(&bad, msg, sizeof(msg))) {
+		fe_status("%s", msg);
+		if (bad == CFG_MAC || bad == CFG_HDF)
+			fe_show(FE_PLACE_SYSTEM);
+		return FALSE;
+	}
+	/* A cancelled or timed-out live request leaves the capture model
+	 * touched but unconfirmed with nothing staged: check live state too,
+	 * or Save (also from the quit requester) would report success. */
+	if ((p.card || p.live) && !video_save_check(msg, sizeof(msg))) {
+		fe_status("%s", msg);
+		fe_show(FE_PLACE_CAPTURE);
+		return FALSE;
 	}
 
 	fe_busy(TRUE);

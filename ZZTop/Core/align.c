@@ -176,10 +176,12 @@ static void reconcile(struct align_state *state)
 	}
 }
 
-/* Queue a restore, or let a second Escape explicitly report unknown state. */
+/* Queue a restore, or let a second Escape explicitly report unknown state.
+ * The second Escape gives up even while a request is still pending: a
+ * request the firmware never acknowledges must not trap the user here. */
 static void cancel(struct align_state *state)
 {
-	if (state->cancel_requested && state->pending_action == ALIGN_NONE) {
+	if (state->cancel_requested) {
 		state->unknown = TRUE;
 		state->done = TRUE;
 		return;
