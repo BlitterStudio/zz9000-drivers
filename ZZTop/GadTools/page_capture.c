@@ -596,7 +596,29 @@ static void tick(void)
 	gt_page_set_text(sweep_gadget, sweep_buffer);
 }
 
-/* Commit typed framing fields before save, revert, or a page switch decides state. */
+/* Commit a typed sampling phase, with the same range check and live
+ * confirmation as the field's own GADGETUP. */
+static void flush_phase(void)
+{
+	LONG entered;
+	int live;
+
+	if (!video_phase_state(&live, phase_reason, sizeof(phase_reason)))
+		return;
+	if (!field_value(phase_gadget, &entered) || entered < -1000 || entered > 1000) {
+		gt_status("Phase must be signed steps in this clock's range");
+		return;
+	}
+	if ((int)entered == live)
+		return;
+	if (video_set_phase((int)entered, TRUE, message_buffer, sizeof(message_buffer)))
+		gt_pending_changed();
+	else
+		gt_status("%s", message_buffer);
+}
+
+/* Commit typed phase and framing fields before save, revert, or a page
+ * switch decides state. */
 static void flush(void)
 {
 	BOOL h_auto;
@@ -609,6 +631,7 @@ static void flush(void)
 	LONG height;
 	BOOL changed;
 
+	flush_phase();
 	if (!cfg.supported)
 		return;
 	h_auto = gt_page_get(crop_h_auto_gadget, GTCB_Checked) != 0;

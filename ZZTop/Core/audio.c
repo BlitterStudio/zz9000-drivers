@@ -55,6 +55,9 @@ static BOOL available;
 static BOOL retryable;
 static BOOL dirty;
 static BOOL save_pending;
+/* Why an accepted-but-unconfirmed save (no reply, SD error at start) must
+ * end as a failure once it settles; NULL for an ordinary save. */
+static const char *save_unconfirmed;
 static BOOL calibration_pending;
 static BOOL log_on;
 static UWORD calibration_paula;
@@ -445,6 +448,10 @@ BOOL audio_retry(void)
 	if (!retryable)
 		return FALSE;
 	if (audio_open_control_plane()) {
+		/* The editor was unavailable until now, so nothing has been
+		 * edited: the live state just read is what Revert restores,
+		 * as after a successful start. */
+		revert_anchor = model;
 		audio_text(last_error, sizeof(last_error), "Audio control state ready");
 		return TRUE;
 	}
@@ -812,6 +819,7 @@ BOOL audio_save_start(char *msg, UWORD size)
 	ZZ9KAudioSceneSaveResultPayload result;
 	ZZ9KMailboxEntry reply;
 	ULONG status;
+	int call;
 
 	if (!dirty) {
 		audio_text(msg, size, "No audio changes");
@@ -824,8 +832,19 @@ BOOL audio_save_start(char *msg, UWORD size)
 	}
 	memset(&payload, 0, sizeof(payload));
 	zz9k_put_be32(payload.scene, model.active);
-	if (audio_mb_call(ZZ9K_OP_AUDIO_SCENE_SAVE, &payload,
-		sizeof(payload), &reply) != ZZ9K_STATUS_OK) {
+	call = audio_mb_call(ZZ9K_OP_AUDIO_SCENE_SAVE, &payload,
+		sizeof(payload), &reply);
+	if (call == ZZ9K_STATUS_TIMEOUT) {
+		/* The firmware may have accepted the save and still rewrite
+		 * ZZ9000.CFG: keep the caller's snapshot and let the poll
+		 * settle it, but never report this save as done. */
+		save_generation = edit_generation;
+		save_pending = TRUE;
+		save_unconfirmed = "Save not confirmed by the card - press Save again";
+		audio_text(msg, size, "Saving (no reply yet)...");
+		return TRUE;
+	}
+	if (call != ZZ9K_STATUS_OK) {
 		audio_text(msg, size, "Save failed: no firmware reply");
 		return FALSE;
 	}
@@ -834,17 +853,23 @@ BOOL audio_save_start(char *msg, UWORD size)
 	/* QUEUED and OK both mean the firmware accepted the save and may
 	 * rewrite ZZ9000.CFG. Report the start as accepted either way: the
 	 * caller keeps its file snapshot and settles the result through
-	 * audio_save_poll(), even when the first state query is late. */
+	 * audio_save_poll(), even when the first state query is late. An SD
+	 * write error may have left the file half-rewritten, so it is settled
+	 * the same way and always ends as a failure. */
 	if (status == ZZ9K_AUDIO_SCENE_SAVE_QUEUED ||
-		status == ZZ9K_AUDIO_SCENE_SAVE_OK) {
+		status == ZZ9K_AUDIO_SCENE_SAVE_OK ||
+		status == ZZ9K_AUDIO_SCENE_SAVE_IO_ERROR) {
 		save_generation = edit_generation;
 		save_pending = TRUE;
+		save_unconfirmed = status == ZZ9K_AUDIO_SCENE_SAVE_IO_ERROR ?
+			"Save failed: SD card write error" : NULL;
 		audio_text(msg, size, "Saving...");
 		return TRUE;
 	}
 	audio_text(msg, size, status == ZZ9K_AUDIO_SCENE_SAVE_BUSY ?
 		"Save busy - retry" : status == ZZ9K_AUDIO_SCENE_SAVE_REJECTED ?
-		"Save rejected: level over boundary" : "Save failed: SD card write error");
+		"Save rejected: level over boundary" :
+		"Save failed: unexpected firmware reply");
 	return FALSE;
 }
 
@@ -860,6 +885,11 @@ enum audio_save_state audio_save_poll(char *msg, UWORD size)
 	if (status == ZZ9K_AUDIO_SCENE_SAVE_QUEUED)
 		return AUDIO_SAVE_RUNNING;
 	save_pending = FALSE;
+	if (save_unconfirmed) {
+		audio_text(msg, size, save_unconfirmed);
+		save_unconfirmed = NULL;
+		return AUDIO_SAVE_FAILED;
+	}
 	if (status != ZZ9K_AUDIO_SCENE_SAVE_OK) {
 		audio_text(msg, size, status == ZZ9K_AUDIO_SCENE_SAVE_REJECTED ?
 			"Save rejected: level over boundary" : status == ZZ9K_AUDIO_SCENE_SAVE_IO_ERROR ?
