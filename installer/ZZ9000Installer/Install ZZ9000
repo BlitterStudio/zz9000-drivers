@@ -574,15 +574,8 @@
       (set #zz-drawer-used 1)
 
       (copyfiles
-         (prompt ("Install the ZZTop3 preview into %s/" #zz-drawer))
-         (help "ZZTop3 is the same control panel built with ReAction: a resizable window for screens of 640x480 or more. It needs the ReAction classes of AmigaOS 3.2 (or AmigaOS 3.5/3.9, or ClassAct on 3.1). It is a preview; ZZTop stays the default. Run one of the two at a time.")
-         (source "Tools/ZZTop3")
-         (infos)
-         (dest #zz-drawer))
-
-      (copyfiles
          (prompt ("Install the ZZTop manual into %s/" #zz-drawer))
-         (help "ZZTop.guide is the control-panel manual for ZZTop and ZZTop3: every page, the output/refresh table, picture alignment, the audio mixer, firmware install and restore, and how Save and Revert work. Open it with MultiView.")
+         (help "ZZTop.guide is the control-panel manual: every page, the output/refresh table, picture alignment, the audio mixer, firmware install and restore, and how Save and Revert work. Open it with MultiView.")
          (source "Docs/ZZTop.guide")
          (infos)
          (dest #zz-drawer))

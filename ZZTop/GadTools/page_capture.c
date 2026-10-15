@@ -411,7 +411,7 @@ static BOOL create(struct gt_page *page)
 	snprintf(crop_v_buffer, sizeof(crop_v_buffer), "0");
 	snprintf(width_buffer, sizeof(width_buffer), "0");
 	snprintf(height_buffer, sizeof(height_buffer), "0");
-	snprintf(sweep_buffer, sizeof(sweep_buffer), "Run 'Find best phase...' to test.");
+	snprintf(sweep_buffer, sizeof(sweep_buffer), "Run 'Find phase...' to test.");
 	gate_buffer[0] = '\0';
 	applied_buffer[0] = '\0';
 

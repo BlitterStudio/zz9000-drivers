@@ -10,24 +10,16 @@ native-video output and scanlines, calibrates the captured Amiga picture,
 controls the ZZ9000AX mixer, edits `ZZ9000.CFG` on the microSD card, and
 installs or restores firmware.
 
-Two front ends use the same core and write the same card file. Run one at a
-time.
-
-| Program | Front end | Requirements | Window |
-|---|---|---|---|
-| `ZZTop` | GadTools | AmigaOS 2.04 or later | Fixed layout with compact and minimal forms for small screens |
-| `ZZTop3` | ReAction | ReAction v44 classes and a public screen large enough for its layout | Resizable |
-
-`ZZTop3` is a preview until it has been qualified on hardware. It reports
-missing ReAction classes or an undersized screen before it opens a window. Use
-`ZZTop` in either case. Both programs require a detected, configured ZZ9000.
+ZZTop runs on AmigaOS 2.04 or later. It uses the screen's font and lays its
+window out for it, with compact and minimal forms for small screens such as
+PAL HighRes 640x256. It requires a detected, configured ZZ9000.
 `asl.library` is needed only when choosing a firmware file. `zz9k.library` is
 optional, although the audio controls need its advertised audio capability.
 
 ## Starting ZZTop
 
-Start `ZZTop` or `ZZTop3` from Workbench. Neither program has command-line
-options or Workbench ToolTypes.
+Start `ZZTop` from Workbench. It has no command-line options or Workbench
+ToolTypes.
 
 Choose a page from the list at the left. The normal list contains Status,
 Display, Audio, System, and Firmware. Enable **Settings > Advanced controls**
@@ -36,9 +28,9 @@ additional page. This choice is kept in `ENV:ZZTopAdvanced`; it is a program
 setting, not a ToolType.
 
 The selected page has a title and a short description. The footer has a status
-line, **Revert**, and **Save**. ReAction also provides **Project > About**,
-**Project > Quit**, **Edit > Save**, and **Edit > Revert**. Its shortcuts are
-`?`, `Q`, `S`, `R`, and `A` for Advanced controls.
+line, **Revert**, and **Save**. The menus provide **Project > About**,
+**Project > Quit**, **Edit > Save**, **Edit > Revert**, and **Settings >
+Advanced controls**, with the shortcuts `?`, `Q`, `S`, `R`, and `A`.
 
 ## Saving, reverting, and quitting
 
@@ -116,8 +108,8 @@ The page also provides these live controls:
 | **Darken** | Selects `Odd lines` or `Even lines`. |
 | **Picture** | Reports the current framing and sampling state. |
 | **Align picture...** | Opens a native PAL or NTSC Hires calibration screen. Arrow keys move one step, Shift plus an arrow moves 16 steps, Enter keeps the position, and Escape restores the position from before the screen opened. |
-| **Find best phase...** | Measures a C28 capture-engine test pattern, selects the middle of a clean range, and retests it. Keep the pattern screen in front. Enter keeps the result; Escape or Ctrl-C restores the previous phase. |
-| **Reset to automatic** | Returns framing, sampling phase, and capture geometry to automatic settings. |
+| **Find phase...** | Measures a C28 capture-engine test pattern, selects the middle of a clean range, and retests it. Keep the pattern screen in front. Enter keeps the result; Escape or Ctrl-C restores the previous phase. |
+| **Reset auto** | Returns framing, sampling phase, and capture geometry to automatic settings. |
 
 Live picture work needs firmware 2.8 with a matching bitstream. Alignment also
 needs stable native frames and a capture path that matches the staged output
@@ -138,7 +130,7 @@ when their live-capture capability is unavailable.
 | **Last phase sweep** | Result of the most recent phase search. `=` means every measured phase in the group was clean, `+` means mixed, `.` means dirty, and `|` marks the current phase. |
 | **Crop H** and **Crop V** | Signed crop values with an **Automatic** control. |
 | **Capture width** and **Capture height** | Width is `256..1280` in 16-pixel steps; height is `100..1024`. Each has an **Automatic** control. |
-| **Picture actions** | **Align picture...**, phase search, and reset actions are also available here. ReAction labels them **Find best phase...** and **Reset to automatic**; GadTools labels them **Find phase...** and **Reset auto**. |
+| **Picture actions** | **Align picture...**, **Find phase...**, and **Reset auto** are also available here. |
 
 Typed values are committed before changing page and before Save, Revert, or a
 quit decision. An Automatic crop, phase, width, or height clears its native
@@ -269,7 +261,5 @@ Save operation.
 
 ## History and status
 
-| Version | Current role |
-|---|---|
-| `ZZTop` | GadTools front end for smaller screens and systems without ReAction classes |
-| `ZZTop3` | ReAction front end using the same shared core, pages, controls, and settings file |
+ZZTop 3 replaces the earlier ZZTop 2 windows with one window of pages, a
+global Save and Revert, and a layout that fits a 640x256 screen.

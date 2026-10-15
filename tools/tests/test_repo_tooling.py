@@ -24,7 +24,6 @@ GENERATED_ARTIFACT_PATHS = (
     "ZZFwUpdate/ZZFwUpdate",
     "ZZScanlines/ZZScanlines",
     "ZZTop/ZZTop",
-    "ZZTop/ZZTop3",
     "net/ZZNetStats/ZZNetStats",
     "ZZDiag/ZZDiag",
     "ZZCapture/ZZCapture",
@@ -187,9 +186,7 @@ class RepoToolingTests(unittest.TestCase):
         import struct
 
         for relpath in ("ZZTop/ZZTop.info",
-                        "ZZTop/ZZTop3.info",
-                        "installer/ZZ9000Installer/Tools/ZZTop.info",
-                        "installer/ZZ9000Installer/Tools/ZZTop3.info"):
+                        "installer/ZZ9000Installer/Tools/ZZTop.info"):
             data = (ROOT / relpath).read_bytes()
             self.assertEqual(0xE310, struct.unpack(">H", data[0:2])[0])
             self.assertGreaterEqual(
@@ -505,7 +502,6 @@ class RepoToolingTests(unittest.TestCase):
             "mhizz9000.library",
             "zzusbhw.device",
             "ZZTop",
-            "ZZTop3",
             "ZZScanlines",
             "ZZFwUpdate",
             "ZZNetStats",
@@ -610,7 +606,6 @@ class RepoToolingTests(unittest.TestCase):
         package_script = self.read("tools/package-local.sh")
         tools = (
             "ZZTop",
-            "ZZTop3",
             "ZZScanlines",
             "ZZFwUpdate",
             "ZZNetStats",

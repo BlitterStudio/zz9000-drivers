@@ -126,9 +126,8 @@ jobs:
       # zz9000-sdk checkout on the host, then re-execs itself through
       # tools/amiga-docker.sh -- like the mhi/ahi jobs -- because the
       # audio pages are control-plane clients over the zz9k ABI. It builds
-      # both front ends over the shared core: ZZTop (GadTools) and ZZTop3
-      # (ReAction preview).
-      - name: Build ZZTop and ZZTop3
+      # the GadTools front end over the shared core.
+      - name: Build ZZTop
         run: |
           ZZTop/build-gcc.sh
       - uses: actions/upload-artifact@v7
@@ -136,7 +135,6 @@ jobs:
           name: ZZTop
           path: |
             ZZTop/ZZTop
-            ZZTop/ZZTop3
           if-no-files-found: error
 
   zzscanlines:
@@ -445,7 +443,6 @@ jobs:
           install -Dm644 artifacts/zz9000ax.audio/zz9000ax.audio       "$INST/Devs/AHI/zz9000ax.audio"
           install -Dm644 artifacts/ZZ9000AX/ZZ9000AX                   "$INST/Devs/AudioModes/ZZ9000AX"
           install -Dm755 artifacts/ZZTop/ZZTop                         "$INST/Tools/ZZTop"
-          install -Dm755 artifacts/ZZTop/ZZTop3                        "$INST/Tools/ZZTop3"
           install -Dm755 artifacts/ZZScanlines/ZZScanlines             "$INST/Tools/ZZScanlines"
           install -Dm755 artifacts/ZZFwUpdate/ZZFwUpdate                "$INST/Tools/ZZFwUpdate"
           install -Dm755 artifacts/ZZNetStats/ZZNetStats               "$INST/Tools/ZZNetStats"

@@ -23,7 +23,7 @@ shared-memory layout before SDK services are exposed.
 | [ZZ9000AX audio](ahi/README.md) | `zz9000ax.audio`, its AudioMode, and `mhizz9000.library` for PCM playback, recording, and hardware MP3 decoding. |
 | [Poseidon USB](usb-poseidon/README.md) | `zzusbhw.device` for the external Poseidon 4.5 USB stack. |
 | [SD-card boot](sd-boot/README.md) | `zzsd.device` in `BOOT.bin`, which boots an HDF file from the FAT-formatted microSD card. |
-| [ZZTop](ZZTop/README.md) | The GadTools `ZZTop` and ReAction `ZZTop3` control-panel editions, built on a shared core. |
+| [ZZTop](ZZTop/README.md) | The `ZZTop` control panel. |
 | [SDK runtime payloads](sdk/README.md) | `zz9k.library`, `mpega.library`, `zz9k-picture.datatype`, SDK tools, and ZZPlay. |
 | [AmiSSL provider](amissl/README.md) | The CPU-specific `amissl_v362.library` builds with supported ZZ9000 TLS crypto offload. |
 
@@ -45,10 +45,9 @@ ZZTop and ZZPlay install in `SYS:Utilities/ZZ9000/`. Expert installation can
 add that drawer to the command path by updating its `;BEGIN ZZ9000` block in
 `S:User-Startup`. Upgrades can remove the former `SYS:Tools/ZZTop` location.
 
-`ZZTop` runs on AmigaOS 2.04 or newer and fits a 640x256 screen. `ZZTop3`
-needs a 640x480 screen plus ReAction support from AmigaOS 3.2, AmigaOS 3.5/3.9,
-or ClassAct on AmigaOS 3.1. See the [ZZTop manual](ZZTop/README.md) for setup,
-configuration, and feature requirements.
+`ZZTop` runs on AmigaOS 2.04 or newer and fits a 640x256 screen. See the
+[ZZTop manual](ZZTop/README.md) for setup, configuration, and feature
+requirements.
 
 ## Picasso96 graphics
 
@@ -141,7 +140,6 @@ backup and restore procedure.
 | Display power management | Picasso96 DPMS needs firmware 2.7 or newer with the matching rebuilt bitstream. |
 | USB | Interrupt and ISO paths require the matched firmware 2.9 and `zzusbhw.device` 2.2 pair. The [USB manual](usb-poseidon/README.md) and [qualification matrix](docs/usb-qualification-matrix.md) record tested devices and pending qualification. |
 | Zorro II SDK services | Generation 1 supplies a 64 KiB host heap; generation 2 supplies a 16 KiB host heap and reserves 48 KiB for the audio direct ring. The [SDK manual](sdk/README.md) lists supported payloads, PIP limits, fallbacks, and qualification status. |
-| ZZTop3 | Preview edition pending hardware qualification. `ZZTop` remains the GadTools edition for smaller or older systems. |
 | ZZCapture calibration | `phase`, `check`, `startup`, and `calibrate` remain experimental A4000/C28 diagnostics. Follow the [ZZCapture manual](ZZCapture/README.md) before running them. |
 
 ## Building and releases

@@ -5,8 +5,7 @@
  *
  * The shared core (board, settings, video, audio, app) never touches a
  * toolkit. What it needs from the user interface is this small set of
- * services, implemented once per front end: the ReAction window
- * (ZZTop/ReAction, ZZTop3) and the GadTools window (ZZTop/GadTools, ZZTop).
+ * services, implemented by the GadTools window (ZZTop/GadTools).
  */
 #ifndef ZZTOP_FRONTEND_H
 #define ZZTOP_FRONTEND_H

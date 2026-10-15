@@ -15,7 +15,6 @@ PREFSFILE*
 ZZFwUpdate/ZZFwUpdate
 ZZScanlines/ZZScanlines
 ZZTop/ZZTop
-ZZTop/ZZTop3
 ahi/axtest/axtest
 ahi/duplextest/ZZAXDuplexTest
 ahi/driver/ZZ9000AX
@@ -35,7 +34,6 @@ amissl/out/
 
 # generated tools staged by tools/package-local.sh
 installer/ZZ9000Installer/Tools/ZZTop
-installer/ZZ9000Installer/Tools/ZZTop3
 installer/ZZ9000Installer/Tools/ZZScanlines
 installer/ZZ9000Installer/Tools/ZZFwUpdate
 installer/ZZ9000Installer/Tools/ZZNetStats

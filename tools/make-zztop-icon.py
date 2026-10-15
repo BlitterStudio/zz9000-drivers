@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright (C) 2026, Dimitris Panokostas / BlitterStudio
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Generate the classic AmigaOS icon for ZZTop and ZZTop3 (same artwork).
+"""Generate the classic AmigaOS icon for ZZTop.
 
 The .info files are committed binaries, so this script exists to make them
 reproducible and reviewable: run it and the committed bytes must come back
@@ -37,9 +37,7 @@ GTYP_BOOLGADGET = 0x0001
 # Written relative to the repository root.
 TARGETS = (
     "ZZTop/ZZTop.info",
-    "ZZTop/ZZTop3.info",
     "installer/ZZ9000Installer/Tools/ZZTop.info",
-    "installer/ZZ9000Installer/Tools/ZZTop3.info",
 )
 
 

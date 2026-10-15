@@ -40,11 +40,9 @@ fi
 
 export PATH=/opt/amiga/bin:"$PATH"
 
-# Two programs share one core (Core/: board, ZZ9000.CFG model, live video,
-# audio control plane, Save/Revert/Quit) and differ only in their user
-# interface:
-#   ZZTop   GadTools front end (Kickstart 2.04+, fits 640x256)
-#   ZZTop3  ReAction front end (AmigaOS 3.2 / 3.5-3.9 / ClassAct), preview
+# Core/ holds the logic (board, ZZ9000.CFG model, live video, audio control
+# plane, Save/Revert/Quit); GadTools/ is the user interface on top of it.
+# NO_INLINE_STDARG: the inline varargs macros warn on pointer tag values.
 common="../common/fwup_amiga.c ../common/fwup_client.c \
   ../common/zzcfg_amiga.c ../common/zz_vcap_live.c \
   ../common/zz_vcap_client.c ../common/zz_vcap_geometry.c"
@@ -55,9 +53,3 @@ libs="-lamiga -ldebug -noixemul -lm"
 # shellcheck disable=SC2086
 m68k-amigaos-gcc GadTools/*.c Core/*.c $common \
   $flags -IGadTools -o ZZTop $libs
-
-# NO_INLINE_STDARG (both): the ReAction object macros need real varargs
-# functions, and inline varargs macros warn on pointer tag values.
-# shellcheck disable=SC2086
-m68k-amigaos-gcc ReAction/*.c Core/*.c $common \
-  $flags -IReAction -o ZZTop3 $libs

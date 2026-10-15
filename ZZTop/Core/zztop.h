@@ -7,7 +7,7 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * Shared application surface. ZZTop is one ReAction window: a page list
+ * Shared application surface. ZZTop is one GadTools window: a page list
  * on the left and the selected page on the right. Hardware access lives
  * in board.c, the ZZ9000.CFG editor model in settings.c, live capture
  * calibration in video.c, the firmware audio control plane in audio.c;

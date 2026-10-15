@@ -51,7 +51,6 @@ install -Dm644 net/ZZ9000Net.device             "$inst/Devs/Networks/ZZ9000Net.d
 install -Dm644 ahi/driver/zz9000ax.audio        "$inst/Devs/AHI/zz9000ax.audio"
 install -Dm644 ahi/driver/ZZ9000AX              "$inst/Devs/AudioModes/ZZ9000AX"
 install -Dm755 ZZTop/ZZTop                      "$inst/Tools/ZZTop"
-install -Dm755 ZZTop/ZZTop3                     "$inst/Tools/ZZTop3"
 install -Dm755 ZZScanlines/ZZScanlines          "$inst/Tools/ZZScanlines"
 install -Dm755 ZZFwUpdate/ZZFwUpdate            "$inst/Tools/ZZFwUpdate"
 install -Dm755 net/ZZNetStats/ZZNetStats        "$inst/Tools/ZZNetStats"

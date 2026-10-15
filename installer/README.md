@@ -25,8 +25,8 @@ choices described below.
 
 At Installer user level 2 or higher, the script asks where to create the
 `ZZ9000` program drawer and where to put general manuals. The defaults are
-`SYS:Utilities/ZZ9000` and that same drawer. `ZZTop`, `ZZTop3`, `ZZPlay`, and
-their manuals always go in the program drawer.
+`SYS:Utilities/ZZ9000` and that same drawer. `ZZTop`, `ZZPlay`, and their
+manuals always go in the program drawer.
 
 ## What the script installs
 
@@ -39,7 +39,7 @@ their manuals always go in the program drawer.
 | AHI and MHI audio | `Devs/AHI/zz9000ax.audio`; `Devs/AudioModes/ZZ9000AX`; `Libs/MHI/mhizz9000.library` | Installs the AHI subdriver in `Devs:AHI/`, its AudioMode in `Devs:AudioModes/`, and the MHI library in `LIBS:MHI/`. |
 | SDK runtime | `Libs/zz9k.library`; `Libs/mpega.library`; `Classes/DataTypes/zz9k-picture.datatype`; `Storage/DataTypes/`; `Tools/zz9k-#?`; `Tools/ZZPlay#?` | Offered only when `zz9k.library` is in the release drawer. Installs `zz9k.library` and optional `mpega.library` in `LIBS:`, the datatype class in `SYS:Classes/DataTypes/`, JPEG/PNG descriptors in inactive `SYS:Storage/DataTypes/`, the `zz9k-*` commands in `C:`, and `ZZPlay` in the program drawer. |
 | Accelerated AmiSSL | `Libs/AmiSSL/68020-40/amissl_v362.library`; `Libs/AmiSSL/68060/amissl_v362.library` | Offered only when a staged build and `LIBS:AmiSSL/amissl_v362.library` already exist. Backs up the installed library once, then installs the chosen CPU build in `LIBS:AmiSSL/`. |
-| Control panels | `Tools/ZZTop`; `Tools/ZZTop3` | Installs both in the program drawer. `ZZTop` is the GadTools front end; `ZZTop3` is the ReAction preview. Run one at a time. |
+| Control panel | `Tools/ZZTop` | Installs in the program drawer. |
 | Command-line tools | `Tools/ZZScanlines`; `Tools/ZZFwUpdate`; `Tools/ZZNetStats`; `Tools/ZZDiag`; `Tools/ZZNetReady` | Installs each command in `C:`. |
 | Native capture diagnostic | `Tools/ZZCapture` | Optional. Installs in `C:` when selected. |
 
