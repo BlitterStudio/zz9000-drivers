@@ -1160,7 +1160,6 @@ static void about(void)
 	ui_ask("OK",
 		ZZTOP_NAME " " ZZTOP_RELEASE " (" ZZTOP_DATE ")\n"
 		"The ZZ9000 control panel.\n\n"
-		"Copyright 2016-2026 Lucie L. Hartmann, MNT Research GmbH\n"
 		"Copyright 2026 Dimitris Panokostas\n"
 		"Licensed under the GNU GPL v3 or later.");
 }
