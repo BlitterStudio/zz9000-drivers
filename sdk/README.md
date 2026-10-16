@@ -13,7 +13,7 @@ The drivers release includes selected end-user components built from the [`sdk/`
 | `zz9k-mp3` | `C:` | Low-level MP3 decode and transport diagnostic. |
 | `zz9k-cryptobench` | `C:` | Crypto-offload benchmark. |
 | `zz9k-archive` | `C:` | Archive listing, test, and extraction tool, including LHA/LZH paths where firmware supports them. |
-| `ZZPlay` and `ZZPlay.info` | `SYS:Utilities/ZZ9000/` by default | Workbench media player for MPEG-1/P96 video and MP3. The installer lets you select the parent drawer. |
+| `ZZPlay` and `ZZPlay.info` | `SYS:Utilities/ZZ9000/` by default | Workbench media player for MPEG-1/2, WebM and animated WebP video and MP3, FLAC and Ogg Vorbis audio, with an ARexx port for scripts. The installer lets you select the parent drawer. |
 
 ## Build and package
 

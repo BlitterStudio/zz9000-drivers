@@ -466,7 +466,7 @@
 
          (copyfiles
             (prompt ("Install ZZPlay into %s/" #zz-drawer))
-            (help "ZZPlay is the ZZ9000 media player: MPEG-1 video through the P96 video window or a dedicated fullscreen screen, and MP3 audio through MHI or AHI. Unlike the zz9k-* command-line tools it has a Workbench interface and an icon, so it goes in the ZZ9000 drawer with ZZTop where you can double-click it. It still accepts the same CLI arguments if you prefer running it from a Shell. Requires zz9k.library and the SDK-service firmware.")
+            (help "ZZPlay is the ZZ9000 media player: MPEG-1/2, WebM and animated WebP video in the P96 video window or fullscreen, and MP3, FLAC and Ogg Vorbis audio through MHI, AHI or ZZ9000AX. It has a Workbench interface and an icon, so it goes in the ZZ9000 drawer with ZZTop. It also takes CLI arguments from a Shell, and scripts can control it through its ARexx port, ZZPLAY. Requires zz9k.library and the SDK-service firmware.")
             (source "Tools")
             (pattern "ZZPlay#?")
             (dest #zz-drawer))
@@ -477,7 +477,7 @@
          ; the installer drawer people unpack and then delete.
          (copyfiles
             (prompt ("Install the ZZPlay manual into %s/" #zz-drawer))
-            (help "ZZPlay.guide documents the controls, the audio backends, fullscreen behaviour, ToolTypes and the command-line arguments — open it with MultiView. Docs/ZZPlay-project.info in this installer drawer is a project icon you can copy next to a media file so double-clicking it plays through ZZPlay.")
+            (help "ZZPlay.guide documents the player window, menus and keys, the settings, the audio backends, fullscreen video, the ARexx commands, ToolTypes and the command-line arguments. Open it with MultiView. Docs/ZZPlay-project.info in this installer drawer is a project icon you can copy next to a media file so double-clicking it plays through ZZPlay.")
             (source "Docs/ZZPlay.guide")
             (infos)
             (dest #zz-drawer))
