@@ -1,6 +1,6 @@
 #!/bin/sh
 # Build the zz9000-sdk user-facing payloads (zz9k.library, the accelerated
-# mpega.library, zz9k-picture.datatype + descriptors, and end-user CLI tools)
+# mpega.library, the picture and sound datatypes + descriptors, and end-user CLI tools)
 # by driving the SDK's own Docker build, then collect them into sdk/out/ in
 # installer layout.
 #
@@ -61,6 +61,7 @@ mkdir -p "$out/Libs" "$out/Classes/DataTypes" "$out/Storage/DataTypes" "$out/C" 
 cp "$pkg/Libs/zz9k.library"                       "$out/Libs/"
 cp "$pkg/Libs/mpega.library"                      "$out/Libs/"
 cp "$pkg/Classes/DataTypes/zz9k-picture.datatype" "$out/Classes/DataTypes/"
+cp "$pkg/Classes/DataTypes/zz9k-sound.datatype"   "$out/Classes/DataTypes/"
 cp -R "$pkg/Storage/DataTypes/."                  "$out/Storage/DataTypes/"
 # End-user CLI tools: runtime diagnostics plus the tools that exercise the
 # ZZ9000's accelerated features (image/video viewers, MP3, crypto bench,

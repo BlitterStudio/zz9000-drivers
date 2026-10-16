@@ -6,7 +6,8 @@ The drivers release includes selected end-user components built from the [`sdk/`
 | --- | --- | --- |
 | `zz9k.library` | `LIBS:` | AmigaOS gateway for SDK firmware services. |
 | `mpega.library` | `LIBS:` | Replacement MPEGA library that decodes MP3 on the card. |
-| `zz9k-picture.datatype` | `SYS:Classes/DataTypes/` | Hardware-accelerated picture DataType. |
+| `zz9k-picture.datatype` | `SYS:Classes/DataTypes/` | Picture DataType that decodes JPEG, PNG, and WebP on the card. |
+| `zz9k-sound.datatype` | `SYS:Classes/DataTypes/` | Sound DataType that decodes MP3, FLAC, and Ogg Vorbis on the card and plays them through the system `sound.datatype`. |
 | `ZZ9000-JPEG`, `ZZ9000-PNG`, `ZZ9000-WebP`, `ZZ9000-MP3`, `ZZ9000-FLAC`, and `ZZ9000-OggVorbis` descriptors | `SYS:Storage/DataTypes/` | Inactive DataType descriptors for explicit installation. |
 | `zz9k-info`, `zz9k-services` | `C:` | Board and service diagnostics. `zz9k-services --check-release` runs the SDK release check. |
 | `zz9k-view` | `C:` | JPEG, PNG, and WebP viewer. |

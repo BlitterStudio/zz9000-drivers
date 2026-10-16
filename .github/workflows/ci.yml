@@ -479,6 +479,8 @@ jobs:
           install -Dm644 artifacts/sdk-payloads/Libs/mpega.library     "$INST/Libs/mpega.library"
           install -Dm644 "artifacts/sdk-payloads/Classes/DataTypes/zz9k-picture.datatype" \
                                                                        "$INST/Classes/DataTypes/zz9k-picture.datatype"
+          install -Dm644 "artifacts/sdk-payloads/Classes/DataTypes/zz9k-sound.datatype" \
+                                                                       "$INST/Classes/DataTypes/zz9k-sound.datatype"
           mkdir -p "$INST/Storage/DataTypes"
           cp -R artifacts/sdk-payloads/Storage/DataTypes/.             "$INST/Storage/DataTypes/"
           # End-user CLI tools (diagnostics + feature tools) from sdk/build.sh.

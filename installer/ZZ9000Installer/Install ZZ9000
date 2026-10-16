@@ -399,12 +399,12 @@
 
 
 ; --------------------------------------------------------------------
-; SDK runtime (zz9k.library, accelerated mpega.library, picture datatype)
+; SDK runtime (zz9k.library, accelerated mpega.library, picture and sound datatypes)
 ; --------------------------------------------------------------------
 
 (if (exists "Libs/zz9k.library")
-   (if (askbool (prompt "Install the ZZ9000 SDK runtime?\n\nIncludes zz9k.library, ARM-accelerated mpega.library, and zz9k-picture.datatype. Requires SDK-service firmware.\n\nOn matched current Zorro 2 stacks, supported services share one 64 KiB host window. The 4 MiB profile supports a bounded ZZPlay video/PIP source; the 2 MiB profile does not.")
-                (help "zz9k.library exposes firmware services; mpega.library accelerates MP3 decoding; zz9k-picture.datatype accelerates images. JPEG/PNG descriptors are installed inactive under SYS:Storage/DataTypes. Zorro 2 clients share the 64 KiB host window and can contend; some low-level SDK diagnostics are not Zorro 2-safe."))
+   (if (askbool (prompt "Install the ZZ9000 SDK runtime?\n\nIncludes zz9k.library, ARM-accelerated mpega.library, zz9k-picture.datatype and zz9k-sound.datatype. Requires SDK-service firmware.\n\nOn matched current Zorro 2 stacks, supported services share one 64 KiB host window. The 4 MiB profile supports a bounded ZZPlay video/PIP source; the 2 MiB profile does not.")
+                (help "zz9k.library exposes firmware services; mpega.library accelerates MP3 decoding; zz9k-picture.datatype decodes JPEG, PNG and WebP images on the card; zz9k-sound.datatype decodes MP3, FLAC and Ogg Vorbis files on the card. The JPEG, PNG, WebP, MP3, FLAC and Ogg Vorbis descriptors are installed inactive under SYS:Storage/DataTypes. Zorro 2 clients share the 64 KiB host window and can contend; some low-level SDK diagnostics are not Zorro 2-safe."))
       (
          (set #newver   (getversion "Libs/zz9k.library"))
          (set #newmajor (/ #newver 65536))
@@ -440,20 +440,26 @@
 
          (copyfiles
             (prompt "Install zz9k-picture.datatype into SYS:Classes/DataTypes/")
-            (help "Hardware-accelerated picture datatype class.")
+            (help "Picture datatype class that decodes JPEG, PNG and WebP images on the ZZ9000. It is installed beside the system picture.datatype and does not replace it.")
             (source "Classes/DataTypes/zz9k-picture.datatype")
             (dest "SYS:Classes/DataTypes"))
 
          (copyfiles
-            (prompt "Stage the JPEG/PNG datatype descriptors into SYS:Storage/DataTypes/ (inactive)")
-            (help "The descriptors stay inactive in SYS:Storage/DataTypes until you move them to DEVS:DataTypes yourself - activating them routes JPEG/PNG decoding through the ZZ9000.")
+            (prompt "Install zz9k-sound.datatype into SYS:Classes/DataTypes/")
+            (help "Sound datatype class that decodes MP3, FLAC and Ogg Vorbis files on the ZZ9000 and hands the samples to the system sound.datatype for playback. It is installed beside the system sound.datatype and does not replace it.")
+            (source "Classes/DataTypes/zz9k-sound.datatype")
+            (dest "SYS:Classes/DataTypes"))
+
+         (copyfiles
+            (prompt "Stage the ZZ9000 datatype descriptors into SYS:Storage/DataTypes/ (inactive)")
+            (help "Installs the JPEG, PNG, WebP, MP3, FLAC and Ogg Vorbis descriptors. They stay inactive in SYS:Storage/DataTypes until you move the ones you want to DEVS:DataTypes yourself; each one you activate routes that format through the ZZ9000.")
             (source "Storage/DataTypes")
             (all)
             (dest "SYS:Storage/DataTypes"))
 
          (copyfiles
             (prompt "Install the ZZ9000 SDK command-line tools into C:")
-            (help "Diagnostics: zz9k-info (board/firmware details) and zz9k-services (firmware services + capability flags; zz9k-services --check-release runs the release smoke check). Feature tools: zz9k-view (ZZ9000-accelerated JPEG/PNG image viewer), zz9k-mp3 (ARM MP3 player), zz9k-cryptobench (crypto-offload benchmark) and zz9k-archive (accelerated archive extraction). All require zz9k.library and the SDK-service firmware. ZZPlay is installed separately into the ZZ9000 drawer because it is a Workbench application.")
+            (help "Diagnostics: zz9k-info (board/firmware details) and zz9k-services (firmware services + capability flags; zz9k-services --check-release runs the release smoke check). Feature tools: zz9k-view (accelerated JPEG, PNG and WebP viewer), zz9k-mp3 (ARM MP3 player), zz9k-cryptobench (crypto-offload benchmark) and zz9k-archive (accelerated archive extraction). All require zz9k.library and the SDK-service firmware. ZZPlay is installed separately into the ZZ9000 drawer because it is a Workbench application.")
             (source "Tools")
             (pattern "zz9k-#?")
             (dest "C:")

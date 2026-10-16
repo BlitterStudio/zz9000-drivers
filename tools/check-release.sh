@@ -62,6 +62,7 @@ if [ "$quick" -eq 0 ]; then
     check_file sdk/out/Libs/zz9k.library
     check_file sdk/out/Libs/mpega.library
     check_file sdk/out/Classes/DataTypes/zz9k-picture.datatype
+    check_file sdk/out/Classes/DataTypes/zz9k-sound.datatype
     check_file sdk/out/C/zz9k-info
     check_file sdk/out/C/zz9k-services
     check_file sdk/out/C/zz9k-view

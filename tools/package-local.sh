@@ -74,6 +74,8 @@ install -Dm644 sdk/out/Libs/zz9k.library        "$inst/Libs/zz9k.library"
 install -Dm644 sdk/out/Libs/mpega.library       "$inst/Libs/mpega.library"
 install -Dm644 sdk/out/Classes/DataTypes/zz9k-picture.datatype \
                                                 "$inst/Classes/DataTypes/zz9k-picture.datatype"
+install -Dm644 sdk/out/Classes/DataTypes/zz9k-sound.datatype \
+                                                "$inst/Classes/DataTypes/zz9k-sound.datatype"
 mkdir -p "$inst/Storage/DataTypes"
 cp -R sdk/out/Storage/DataTypes/.               "$inst/Storage/DataTypes/"
 # End-user CLI tools collected by sdk/build.sh (diagnostics + feature tools).
