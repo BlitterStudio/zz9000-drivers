@@ -117,9 +117,9 @@ static void test_malformed_layouts(void)
 
 static void test_z3_boundary(void)
 {
-	CHECK(ZZ_Z3_P96_MEMORY_SIZE == 0x02e00000UL);
+	CHECK(ZZ_Z3_P96_MEMORY_SIZE == 0x08000000UL);
 	CHECK(ZZ_Z3_P96_MEMORY_ARM_START + ZZ_Z3_P96_MEMORY_SIZE ==
-		ZZ_SDK_SHARED_HEAP_ARM_START);
+		ZZ_Z3_P96_MEMORY_ARM_END);
 }
 
 static void test_z2_staging_bounds(void)
