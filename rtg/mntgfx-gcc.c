@@ -116,9 +116,6 @@ char *gfxname = "ZZ9000";
 char dummies[128];
 
 #define CARDFLAG_ZORRO_3 1
-// Place scratch area right after framebuffer? Might be a horrible idea.
-#define Z3_GFXDATA_ADDR	(0x3200000 - 0x10000)
-#define Z3_TEMPLATE_ADDR (0x3210000 - 0x10000)
 #define ZZ_CARD_DATA_GFXDATA 0
 #define ZZ_CARD_DATA_VCAP_MODE 1
 #define ZZ_CARD_DATA_NSVSYNC 2
