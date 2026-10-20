@@ -66,13 +66,13 @@ struct DOSBase;
 #define __saveds__
 
 #define DEVICE_VERSION 2
-#define DEVICE_REVISION 13
+#define DEVICE_REVISION 14
 #define REQUIRED_FW_VERSION_MAJOR 2
-#define REQUIRED_FW_VERSION_MINOR 0
+#define REQUIRED_FW_VERSION_MINOR 9
 #define DEVICE_PRIORITY 0
 #define DEVICE_ID_STRING "$VER: ZZ9000.card+blitter " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
 #define DEVICE_NAME "ZZ9000.card"
-#define DEVICE_DATE "(29.09.2026)"
+#define DEVICE_DATE "(20.10.2026)"
 
 int __attribute__((no_reorder)) _start()
 {
@@ -903,7 +903,7 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 
 		if (fwrev_major < REQUIRED_FW_VERSION_MAJOR ||
 			(fwrev_major == REQUIRED_FW_VERSION_MAJOR && fwrev_minor < REQUIRED_FW_VERSION_MINOR)) {
-			char *alert = "\x00\x14\x14ZZ9000.card 2.0 needs at least firmware (BOOT.bin) 2.0.\x00\x00";
+			char *alert = "\x00\x14\x14ZZ9000.card 2.14 needs firmware (BOOT.bin) 2.9.0 or newer.\x00\x00";
 			DisplayAlert(RECOVERY_ALERT, (APTR)alert, 52);
 			goto cleanup;
 		}
