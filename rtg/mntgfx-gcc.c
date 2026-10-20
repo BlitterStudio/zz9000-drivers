@@ -865,11 +865,11 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 			}
 		} else {
 			/*
-			 * End P96-owned VRAM exactly where the firmware SDK shared
-			 * heap begins. The previous 0x02ff0000 size reached ARM
-			 * 0x031f0000 and overlapped the first 0x1f0000 bytes of that
-			 * heap; streaming PCM could therefore paint RTG pixels while
-			 * P96 writes corrupted audio samples in the opposite direction.
+			 * P96 manages MemorySize itself and never tells the
+			 * firmware what it placed there, so P96-owned VRAM ends at
+			 * the GFXData scratch where the firmware's host-visible
+			 * heap begins (memory_layout.h). The GFXData address is the
+			 * same on firmware before 2.9.0.
 			 */
 			b->MemorySize = ZZ_Z3_P96_MEMORY_SIZE;
 			b->CardFlags |= CARDFLAG_ZORRO_3;
