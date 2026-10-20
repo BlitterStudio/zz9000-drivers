@@ -3053,10 +3053,22 @@ BOOL SetSprite(__REGA0(struct BoardInfo *b), __REGD0(BOOL what), __REGD7(RGBFTYP
 	MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
 
 	/*
-	 * Keep the legacy ZZ9000 behavior here: the existing firmware/driver
-	 * path expects SetSprite() to assert hardware-sprite visibility even
-	 * when P96 passes FALSE during setup or screen transitions.
+	 * P96 calls SetSprite(FALSE) with the board's pixel format around every
+	 * pointer image change and screen transition, immediately followed by
+	 * SetSprite(TRUE). The firmware drops position updates while the sprite
+	 * is hidden, so honouring those calls historically left a stuck or
+	 * missing pointer; keep the sprite shown for them.
+	 *
+	 * When the pointer leaves this board (a native screen comes to the
+	 * front with DISPLAYCHAIN=NO), P96 instead calls SetSprite(FALSE,
+	 * RGBFB_NONE) and makes no other driver call; measured with rtg.library
+	 * 43.756 on an A4000. Hide the sprite then, otherwise it stays frozen on
+	 * the RTG output (issue #111). The next SetSprite(TRUE) shows it again.
 	 */
+	if (!what && format == RGBFB_NONE) {
+		zzwrite16(&registers->sprite_bitmap, 2);
+		return TRUE;
+	}
 	zzwrite16(&registers->sprite_bitmap, 1);
 	return TRUE;
 }
