@@ -41,6 +41,7 @@
 #include "offscreen_bitmap.h"
 #include "overlay_feature.h"
 #include "zz9000_hw.h"
+#include "cardmem_protocol.h"
 #include "videocap_mode.h"
 #include <clib/Picasso96_protos.h>
 #include <inline/Picasso96.h>
@@ -192,11 +193,10 @@ struct ZZZ2PIPAllocationRequest {
 static struct ZZZ2PIPAllocationRequest zz_z2_pip_request;
 static struct ZZBitMap *zz_z2_pip_bitmap = NULL;
 /* Card memory addressable from MemoryBase (autoconfig window minus the
- * 64 KB register space). b->MemorySize is SMALLER on Z3: it only caps
- * P96's own VRAM allocator, while the firmware surface heap for
- * off-screen bitmaps sits deliberately ABOVE it (board ~0x3310000+),
- * still inside the autoconfig window. Ownership/on-board checks must
- * bound Planes[0] against this, never against b->MemorySize. */
+ * 64 KB register space). Legacy Z3 firmware exposes only the P96 side of
+ * the split layout; capable firmware arbitrates the complete window for
+ * P96. Ownership/on-board checks always use this window, never a legacy
+ * MemorySize boundary. */
 static ULONG zz_card_window_size = 0;
 
 static inline volatile struct GFXData *zz_gfxdata(struct BoardInfo *b) {
@@ -498,6 +498,146 @@ static inline uint16_t planar_line_bytes_padded(SHORT w) {
 
 static inline void zzwrite16(volatile uint16_t* reg, uint16_t value) {
 	*reg = value;
+}
+
+static BOOL zz_cardmem_available(struct BoardInfo *b)
+{
+	return b && zz_gfxdata(b) &&
+		zz_cardmem_enabled((b->CardFlags & CARDFLAG_ZORRO_3) != 0,
+			(UWORD)b->CardData[ZZ_CARD_DATA_FW_CAPABILITIES]);
+}
+
+/* CARDMEM completion is firmware-owned u8_user[0]: clear it directly before
+ * the trigger, then invalidate the byte-write cache so a later non-CARDMEM
+ * command cannot reuse the firmware-written status as a cached zero. */
+
+static inline void zz_cardmem_status_clear(volatile struct GFXData *gd)
+{
+	gd->u8_user[0] = 0;
+	if (gfxdata_byte_cache.owner == gd)
+		gfxdata_byte_cache.valid &= ~(uint8)(1U << 0);
+}
+
+static APTR zz_cardmem_pointer(struct BoardInfo *b, uint32_t offset,
+	uint32_t size)
+{
+	uint32_t memory_size;
+
+	if (!b || !size)
+		return NULL;
+	memory_size = (uint32_t)b->MemorySize;
+	if (offset >= memory_size || size > memory_size - offset ||
+		offset > UINT32_MAX - (uint32_t)b->MemoryBase)
+		return NULL;
+	return (APTR)((uint32_t)b->MemoryBase + offset);
+}
+
+/* force and system are P96 relocation permissions: P96 decides which
+ * bitmaps may move before it asks this backend. The firmware operation
+ * therefore receives the same allocation request for all four cases. */
+APTR ZZ_AllocCardMem(__REGA0(struct BoardInfo *b), __REGD0(ULONG size),
+	__REGD1(BOOL force), __REGD2(BOOL system),
+	__REGD3(ULONG bytesperrow), __REGA1(struct ModeInfo *mode_info),
+	__REGD7(RGBFTYPE format))
+{
+	volatile struct GFXData *gd;
+	MNTZZ9KRegs *registers;
+	uint32_t rounded_size;
+	uint32_t alignment;
+	uint32_t offset;
+	APTR result;
+	BOOL accepted;
+
+	(void)mode_info;
+	if (!zz_cardmem_available(b)) {
+		KPrintF("P96H alloc unavailable\n");
+		return NULL;
+	}
+	rounded_size = zz_cardmem_round_size((uint32_t)size);
+	if (!rounded_size) {
+		KPrintF("P96H alloc reject s=%08lx\n", size);
+		return NULL;
+	}
+	alignment = zz_cardmem_alignment((uint32_t)bytesperrow,
+		(uint32_t)format);
+	gd = zz_gfxdata(b);
+	registers = (MNTZZ9KRegs *)b->RegisterBase;
+	zz_cardmem_marshal_alloc(gd->offset, rounded_size, alignment);
+	zz_cardmem_status_clear(gd);
+	zzwrite16(&registers->blitter_acc_op, ACC_OP_CARDMEM_ALLOC);
+	accepted = zz_cardmem_status_accepted(gd->u8_user[0]);
+	offset = zz_cardmem_unmarshal_reply(gd->offset);
+	result = accepted ? zz_cardmem_pointer(b, offset, rounded_size) : NULL;
+	KPrintF("P96H alloc s=%08lx a=%08lx f=%ld y=%ld b=%08lx m=%08lx q=%ld r=%08lx\n",
+		size, alignment, (LONG)force, (LONG)system, bytesperrow, format,
+		(LONG)accepted, (ULONG)result);
+	return result;
+}
+
+APTR ZZ_AllocCardMemAbs(__REGA0(struct BoardInfo *b), __REGD0(ULONG size),
+	__REGA1(char *target))
+{
+	volatile struct GFXData *gd;
+	MNTZZ9KRegs *registers;
+	uint32_t rounded_size;
+	uint32_t target_offset;
+	uint32_t reply;
+	BOOL accepted;
+
+	if (!zz_cardmem_available(b)) {
+		KPrintF("P96H abs unavailable\n");
+		return NULL;
+	}
+	rounded_size = zz_cardmem_round_size((uint32_t)size);
+	target_offset = (uint32_t)target - (uint32_t)b->MemoryBase;
+	if (!rounded_size || (uint32_t)target < (uint32_t)b->MemoryBase ||
+		!zz_cardmem_pointer(b, target_offset, rounded_size)) {
+		KPrintF("P96H abs reject t=%08lx s=%08lx\n",
+			(ULONG)target, size);
+		return NULL;
+	}
+	gd = zz_gfxdata(b);
+	registers = (MNTZZ9KRegs *)b->RegisterBase;
+	zz_cardmem_marshal_abs(gd->offset, target_offset, rounded_size);
+	zz_cardmem_status_clear(gd);
+	zzwrite16(&registers->blitter_acc_op, ACC_OP_CARDMEM_ALLOC_ABS);
+	accepted = zz_cardmem_status_accepted(gd->u8_user[0]);
+	reply = zz_cardmem_unmarshal_reply(gd->offset);
+	KPrintF("P96H abs t=%08lx s=%08lx q=%ld r=%08lx\n",
+		(ULONG)target, size, (LONG)accepted, reply);
+	return accepted && reply == target_offset ? target : NULL;
+}
+
+BOOL ZZ_FreeCardMem(__REGA0(struct BoardInfo *b), __REGA1(APTR membase))
+{
+	volatile struct GFXData *gd;
+	MNTZZ9KRegs *registers;
+	uint32_t offset;
+	uint32_t reply;
+	BOOL accepted;
+	if (!zz_cardmem_available(b)) {
+		KPrintF("P96H free unavailable\n");
+		return FALSE;
+	}
+	if ((uint32_t)membase < (uint32_t)b->MemoryBase) {
+		KPrintF("P96H free reject p=%08lx\n", (ULONG)membase);
+		return FALSE;
+	}
+	offset = (uint32_t)membase - (uint32_t)b->MemoryBase;
+	if (offset >= (uint32_t)b->MemorySize) {
+		KPrintF("P96H free reject p=%08lx\n", (ULONG)membase);
+		return FALSE;
+	}
+	gd = zz_gfxdata(b);
+	registers = (MNTZZ9KRegs *)b->RegisterBase;
+	zz_cardmem_store_be32(&gd->offset[0], offset);
+	zz_cardmem_status_clear(gd);
+	zzwrite16(&registers->blitter_acc_op, ACC_OP_CARDMEM_FREE);
+	accepted = zz_cardmem_status_accepted(gd->u8_user[0]);
+	reply = zz_cardmem_unmarshal_reply(gd->offset);
+	KPrintF("P96H free o=%08lx q=%ld r=%08lx\n",
+		offset, (LONG)accepted, reply);
+	return accepted && reply == 0;
 }
 
 static inline void zzwrite32(volatile uint16_t* reg, uint32_t value) {
@@ -864,15 +1004,13 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 				b->MemorySize = cd->cd_BoardSize-0x40000;
 			}
 		} else {
-			/*
-			 * P96 manages MemorySize itself and never tells the
-			 * firmware what it placed there, so P96-owned VRAM ends at
-			 * the GFXData scratch where the firmware's host-visible
-			 * heap begins (memory_layout.h). The GFXData address is the
-			 * same on firmware before 2.9.0.
-			 */
-			b->MemorySize = ZZ_Z3_P96_MEMORY_SIZE;
+/* Firmware without P96 card-memory support must retain the
+			 * split ownership boundary. Capable firmware arbitrates the
+			 * full board window, including the fixed GFXData and SDK
+			 * reservations, so P96 must expose that complete window. */
 			b->CardFlags |= CARDFLAG_ZORRO_3;
+			b->MemorySize = zz_cardmem_memory_size(1, fw_caps,
+				(uint32_t)zz_card_window_size, ZZ_Z3_P96_MEMORY_SIZE);
 			volatile struct GFXData *gd = (struct GFXData*)(((uint32_t)b->MemoryBase) + (uint32_t)Z3_GFXDATA_ADDR);
 			b->CardData[ZZ_CARD_DATA_GFXDATA] = (ULONG)gd;
 			memset((void *)gd, 0x00, sizeof(struct GFXData));
@@ -1024,8 +1162,17 @@ int __attribute__((used)) InitCard(__REGA0(struct BoardInfo* b), __REGA1(char **
 
 	b->MemoryClock = MEMORY_CLOCK_HZ;
 
-	//b->AllocCardMem = (void *)NULL;
-	//b->FreeCardMem = (void *)NULL;
+	if (zz_cardmem_available(b)) {
+		b->AllocCardMem = (void *)ZZ_AllocCardMem;
+		b->FreeCardMem = (void *)ZZ_FreeCardMem;
+		b->AllocCardMemAbs = (void *)ZZ_AllocCardMemAbs;
+		KPrintF("P96H install w=%08lx\n", b->MemorySize);
+	} else if (b->CardFlags & CARDFLAG_ZORRO_3) {
+		/* Keep the P96 defaults intact when old firmware owns the
+		 * legacy split layout. */
+		KPrintF("P96H default c=%04lx\n",
+			b->CardData[ZZ_CARD_DATA_FW_CAPABILITIES]);
+	}
 	b->SetSwitch = (void *)SetSwitch;
 	b->SetColorArray = (void *)SetColorArray;
 	b->SetDAC = (void *)SetDAC;
@@ -1064,7 +1211,6 @@ int __attribute__((used)) InitCard(__REGA0(struct BoardInfo* b), __REGA1(char **
 	b->BlitRectNoMaskComplete = (void *)BlitRectNoMaskComplete;
 	//b->EnableSoftSprite = (void *)NULL;
 
-	//b->AllocCardMemAbs = (void *)NULL;
 	b->SetSplitPosition = (void *)SetSplitPosition;
 	//b->ReInitMemory = (void *)NULL;
 	/* Stage A contract probe: logs + delegates to WriteYUVRectDefault

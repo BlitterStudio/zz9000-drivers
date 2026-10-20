@@ -5,7 +5,8 @@ BUILD_DIR ?= build
 TARGET := $(BUILD_DIR)/register_cache_test
 TARGETS := $(TARGET) $(BUILD_DIR)/p96_settings_test \
 	$(BUILD_DIR)/offscreen_bitmap_test $(BUILD_DIR)/overlay_feature_test \
-	$(BUILD_DIR)/memory_layout_test $(BUILD_DIR)/videocap_mode_test \
+	$(BUILD_DIR)/memory_layout_test $(BUILD_DIR)/cardmem_protocol_test \
+	$(BUILD_DIR)/acc_op_abi_test $(BUILD_DIR)/videocap_mode_test \
 	$(BUILD_DIR)/mode_timing_test $(BUILD_DIR)/custom_modeline_test
 
 .PHONY: test clean
@@ -16,6 +17,8 @@ test: $(TARGETS)
 	$(BUILD_DIR)/offscreen_bitmap_test
 	$(BUILD_DIR)/overlay_feature_test
 	$(BUILD_DIR)/memory_layout_test
+	$(BUILD_DIR)/cardmem_protocol_test
+	$(BUILD_DIR)/acc_op_abi_test
 	$(BUILD_DIR)/videocap_mode_test
 	$(BUILD_DIR)/mode_timing_test
 	$(BUILD_DIR)/custom_modeline_test
@@ -36,9 +39,19 @@ $(BUILD_DIR)/overlay_feature_test: overlay_feature_test.c ../overlay_feature.h
 	@mkdir -p $(BUILD_DIR)
 	$(CC) -Wall -Wextra $(CFLAGS) -I.. -o $@ overlay_feature_test.c
 
-$(BUILD_DIR)/memory_layout_test: memory_layout_test.c ../memory_layout.h
+$(BUILD_DIR)/memory_layout_test: memory_layout_test.c ../memory_layout.h \
+		../../include/zz9000_hw.h
 	@mkdir -p $(BUILD_DIR)
 	$(CC) -Wall -Wextra $(CFLAGS) -I.. -o $@ memory_layout_test.c
+
+$(BUILD_DIR)/cardmem_protocol_test: cardmem_protocol_test.c \
+		../cardmem_protocol.h ../memory_layout.h ../../include/zz9000_hw.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) -Wall -Wextra $(CFLAGS) -I.. -I../../include -o $@ cardmem_protocol_test.c
+
+$(BUILD_DIR)/acc_op_abi_test: acc_op_abi_test.c ../zz9000.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) -Wall -Wextra $(CFLAGS) -I.. -o $@ acc_op_abi_test.c
 
 $(BUILD_DIR)/videocap_mode_test: videocap_mode_test.c ../videocap_mode.h
 	@mkdir -p $(BUILD_DIR)

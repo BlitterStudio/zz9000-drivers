@@ -317,6 +317,14 @@ enum gfx_acc_op {
   ACC_OP_SET_BPP_CONVERSION_TABLE,
   ACC_OP_DRAW_LINE,
   ACC_OP_FILL_RECT,
+  /* Keep the shared accelerator ABI in lockstep with firmware. */
+  ACC_OP_DRAW_CIRCLE,
+  ACC_OP_FILL_CIRCLE,
+  ACC_OP_DRAW_FLAT_TRI,
+  ACC_OP_DRAW_TEX_TRI,
+  ACC_OP_CARDMEM_ALLOC,
+  ACC_OP_CARDMEM_ALLOC_ABS,
+  ACC_OP_CARDMEM_FREE,
   ACC_OP_NUM,
 };
 

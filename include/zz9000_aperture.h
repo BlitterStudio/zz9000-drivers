@@ -24,6 +24,11 @@
 #define ZZ_Z2_APERTURE_ACK_TOKEN_GEN2 0xa502U
 
 #define ZZ_FW_CAP_Z2_APERTURE_LAYOUT (1U << 2)
+/* Z3 shared P96 card-memory allocator capability.  This stays in the
+ * dependency-free contract header so native RTG layout tests can exercise
+ * the capability-gated layout without AmigaOS SDK headers. */
+#define ZZ_FW_CAP_P96_CARDMEM (1U << 13)
+
 
 #define ZZ_Z2_APERTURE_INFO_MAGIC_MASK      0xff000000UL
 #define ZZ_Z2_APERTURE_INFO_MAGIC           0x5a000000UL

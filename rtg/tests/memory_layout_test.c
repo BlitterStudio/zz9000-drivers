@@ -117,11 +117,26 @@ static void test_malformed_layouts(void)
 
 static void test_z3_boundary(void)
 {
-	/* Firmware memorymap.h: P96 VRAM ends at Z3_SCRATCH_ADDR, where the
-	 * firmware's host-visible heap starts. Any overlap lets P96 place a
-	 * screen over firmware-owned memory. */
+	/* Legacy firmware ends P96 VRAM at Z3_SCRATCH_ADDR, where the
+	 * firmware's host-visible heap starts. The capability-gated layout
+	 * test below covers the full-window allocator path. */
 	CHECK(ZZ_Z3_P96_MEMORY_ARM_END == 0x033F0000UL);
 	CHECK(Z3_GFXDATA_ADDR + 0x10000UL <= Z3_TEMPLATE_ADDR);
+}
+
+static void test_z3_cardmem_layout(void)
+{
+	const uint32_t window = 0x08000000UL;
+	const uint32_t legacy = ZZ_Z3_P96_MEMORY_SIZE;
+
+	CHECK(zz_cardmem_enabled(1, ZZ_FW_CAP_P96_CARDMEM));
+	CHECK(!zz_cardmem_enabled(0, ZZ_FW_CAP_P96_CARDMEM));
+	CHECK(!zz_cardmem_enabled(1, 0));
+	CHECK(zz_cardmem_memory_size(1, ZZ_FW_CAP_P96_CARDMEM,
+		window, legacy) == window);
+	CHECK(zz_cardmem_memory_size(1, 0, window, legacy) == legacy);
+	CHECK(zz_cardmem_memory_size(0, ZZ_FW_CAP_P96_CARDMEM,
+		window, legacy) == legacy);
 }
 
 static void test_z2_staging_bounds(void)
@@ -141,6 +156,7 @@ int main(void)
 	test_generation1_compatibility();
 	test_malformed_layouts();
 	test_z3_boundary();
+	test_z3_cardmem_layout();
 	test_z2_staging_bounds();
 
 	if (failures) {
