@@ -117,9 +117,11 @@ static void test_malformed_layouts(void)
 
 static void test_z3_boundary(void)
 {
-	CHECK(ZZ_Z3_P96_MEMORY_SIZE == 0x02e00000UL);
-	CHECK(ZZ_Z3_P96_MEMORY_ARM_START + ZZ_Z3_P96_MEMORY_SIZE ==
-		ZZ_SDK_SHARED_HEAP_ARM_START);
+	/* Firmware memorymap.h: P96 VRAM ends at Z3_SCRATCH_ADDR, where the
+	 * firmware's host-visible heap starts. Any overlap lets P96 place a
+	 * screen over firmware-owned memory. */
+	CHECK(ZZ_Z3_P96_MEMORY_ARM_END == 0x033F0000UL);
+	CHECK(Z3_GFXDATA_ADDR + 0x10000UL <= Z3_TEMPLATE_ADDR);
 }
 
 static void test_z2_staging_bounds(void)

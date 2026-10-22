@@ -66,13 +66,13 @@ struct DOSBase;
 #define __saveds__
 
 #define DEVICE_VERSION 2
-#define DEVICE_REVISION 13
+#define DEVICE_REVISION 14
 #define REQUIRED_FW_VERSION_MAJOR 2
-#define REQUIRED_FW_VERSION_MINOR 0
+#define REQUIRED_FW_VERSION_MINOR 9
 #define DEVICE_PRIORITY 0
 #define DEVICE_ID_STRING "$VER: ZZ9000.card+blitter " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
 #define DEVICE_NAME "ZZ9000.card"
-#define DEVICE_DATE "(29.09.2026)"
+#define DEVICE_DATE "(20.10.2026)"
 
 int __attribute__((no_reorder)) _start()
 {
@@ -116,9 +116,6 @@ char *gfxname = "ZZ9000";
 char dummies[128];
 
 #define CARDFLAG_ZORRO_3 1
-// Place scratch area right after framebuffer? Might be a horrible idea.
-#define Z3_GFXDATA_ADDR	(0x3200000 - 0x10000)
-#define Z3_TEMPLATE_ADDR (0x3210000 - 0x10000)
 #define ZZ_CARD_DATA_GFXDATA 0
 #define ZZ_CARD_DATA_VCAP_MODE 1
 #define ZZ_CARD_DATA_NSVSYNC 2
@@ -868,11 +865,11 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 			}
 		} else {
 			/*
-			 * End P96-owned VRAM exactly where the firmware SDK shared
-			 * heap begins. The previous 0x02ff0000 size reached ARM
-			 * 0x031f0000 and overlapped the first 0x1f0000 bytes of that
-			 * heap; streaming PCM could therefore paint RTG pixels while
-			 * P96 writes corrupted audio samples in the opposite direction.
+			 * P96 manages MemorySize itself and never tells the
+			 * firmware what it placed there, so P96-owned VRAM ends at
+			 * the GFXData scratch where the firmware's host-visible
+			 * heap begins (memory_layout.h). The GFXData address is the
+			 * same on firmware before 2.9.0.
 			 */
 			b->MemorySize = ZZ_Z3_P96_MEMORY_SIZE;
 			b->CardFlags |= CARDFLAG_ZORRO_3;
@@ -906,7 +903,7 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 
 		if (fwrev_major < REQUIRED_FW_VERSION_MAJOR ||
 			(fwrev_major == REQUIRED_FW_VERSION_MAJOR && fwrev_minor < REQUIRED_FW_VERSION_MINOR)) {
-			char *alert = "\x00\x14\x14ZZ9000.card 2.0 needs at least firmware (BOOT.bin) 2.0.\x00\x00";
+			char *alert = "\x00\x14\x14ZZ9000.card 2.14 needs firmware (BOOT.bin) 2.9.0 or newer.\x00\x00";
 			DisplayAlert(RECOVERY_ALERT, (APTR)alert, 52);
 			goto cleanup;
 		}
@@ -3056,10 +3053,22 @@ BOOL SetSprite(__REGA0(struct BoardInfo *b), __REGD0(BOOL what), __REGD7(RGBFTYP
 	MNTZZ9KRegs* registers = (MNTZZ9KRegs*)b->RegisterBase;
 
 	/*
-	 * Keep the legacy ZZ9000 behavior here: the existing firmware/driver
-	 * path expects SetSprite() to assert hardware-sprite visibility even
-	 * when P96 passes FALSE during setup or screen transitions.
+	 * P96 calls SetSprite(FALSE) with the board's pixel format around every
+	 * pointer image change and screen transition, immediately followed by
+	 * SetSprite(TRUE). The firmware drops position updates while the sprite
+	 * is hidden, so honouring those calls historically left a stuck or
+	 * missing pointer; keep the sprite shown for them.
+	 *
+	 * When the pointer leaves this board (a native screen comes to the
+	 * front with DISPLAYCHAIN=NO), P96 instead calls SetSprite(FALSE,
+	 * RGBFB_NONE) and makes no other driver call; measured with rtg.library
+	 * 43.756 on an A4000. Hide the sprite then, otherwise it stays frozen on
+	 * the RTG output (issue #111). The next SetSprite(TRUE) shows it again.
 	 */
+	if (!what && format == RGBFB_NONE) {
+		zzwrite16(&registers->sprite_bitmap, 2);
+		return TRUE;
+	}
 	zzwrite16(&registers->sprite_bitmap, 1);
 	return TRUE;
 }

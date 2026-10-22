@@ -50,6 +50,14 @@ add that drawer to the command path by updating its `;BEGIN ZZ9000` block in
 13 pixels. See the [ZZTop manual](ZZTop/README.md) for setup, configuration,
 and feature requirements.
 
+## 2.9.0 release
+
+`ZZ9000.card` 2.14 changes the Zorro III boundary between Picasso96-owned
+VRAM and firmware-owned memory. This is a matched update: firmware 2.9.0 and
+its matching bitstream are required. Install the firmware, bitstream,
+`ZZ9000.card`, and SDK payloads from the 2.9.0 release together; do not pair
+these drivers with an older firmware release.
+
 ## Picasso96 graphics
 
 Install Picasso96 before running the installer. It configures
@@ -141,6 +149,7 @@ can also check GitHub for a newer firmware release and install it.
 | Configuration | Firmware 2.3 or newer reads `ZZ9000.CFG`. |
 | Display power management | Picasso96 DPMS needs firmware 2.7 or newer with the matching rebuilt bitstream. |
 | USB | Interrupt and ISO paths require the matched firmware 2.9 and `zzusbhw.device` 2.2 pair. The [USB manual](usb-poseidon/README.md) and [qualification matrix](docs/usb-qualification-matrix.md) record tested devices and pending qualification. |
+| RTG 2.9.0 | `ZZ9000.card` 2.14 requires matching firmware 2.9.0 and its matching bitstream because it changes the Zorro III P96/firmware memory boundary. |
 | Zorro II SDK services | Generation 1 supplies a 64 KiB host heap; generation 2 supplies a 16 KiB host heap and reserves 48 KiB for the audio direct ring. The [SDK manual](sdk/README.md) lists supported payloads, PIP limits, fallbacks, and qualification status. |
 | ZZCapture calibration | `phase`, `check`, `startup`, and `calibrate` remain experimental A4000/C28 diagnostics. Follow the [ZZCapture manual](ZZCapture/README.md) before running them. |
 
