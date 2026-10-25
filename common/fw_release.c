@@ -3,6 +3,7 @@
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -523,6 +524,12 @@ enum {
     ZS_FINISHED
 };
 
+enum {
+    ZIP_ENTRY_NONE,
+    ZIP_ENTRY_BOOT,
+    ZIP_ENTRY_MODULE
+};
+
 static uint16_t le16(const uint8_t *p)
 {
     return (uint16_t)(p[0] | (p[1] << 8));
@@ -544,15 +551,26 @@ int fwrel_boot_header_ok(const uint8_t *head, size_t len)
            memcmp(head + 0x24, magic, 4) == 0;
 }
 
+struct fwrel_sha256 {
+    uint32_t state[8];
+    uint64_t bits;
+    uint8_t block[64];
+    size_t used;
+};
+
 struct fwrel_zip {
     int state;
     int result;
     fwrel_sink_fn sink;
+    fwrel_zip_entry_fn begin;
+    fwrel_zip_entry_fn end;
     void *ctx;
     uint8_t hdr[ZIP_LOCAL_BYTES];
     size_t hdr_have;
     size_t hdr_need;
     char name[256];
+    char entry_name[sizeof("ZZ9K/12345678.ZZM")];
+    char root[256];
     uint16_t flags;
     uint16_t method;
     uint32_t crc_expected;
@@ -561,10 +579,15 @@ struct fwrel_zip {
     uint16_t name_len;
     uint16_t extra_len;
     unsigned long skip;
+    int bundle;
     int target;
+    int found_boot;
     uint32_t crc;
     unsigned long out_total;
-    uint8_t head[FWREL_BOOT_HEADER_BYTES];
+    uint8_t head[FWREL_MODULE_HEADER_BYTES];
+    struct fwrel_sha256 sha256;
+    uint32_t module_image_size;
+    int module_header_ok;
     tinfl_decompressor inflater;
     size_t dict_ofs;
     uint8_t dict[TINFL_LZ_DICT_SIZE]; /* inflate window and output */
@@ -592,17 +615,143 @@ static uint32_t crc32_update(uint32_t crc, const uint8_t *data, size_t len)
     return ~crc;
 }
 
-struct fwrel_zip *fwrel_zip_new(fwrel_sink_fn sink, void *ctx)
+static uint32_t sha256_rotr(uint32_t value, unsigned bits)
 {
-    struct fwrel_zip *z = calloc(1, sizeof(*z));
+    return (value >> bits) | (value << (32u - bits));
+}
 
+static void sha256_block(struct fwrel_sha256 *sha, const uint8_t *data)
+{
+    static const uint32_t k[64] = {
+        0x428a2f98UL, 0x71374491UL, 0xb5c0fbcfUL, 0xe9b5dba5UL,
+        0x3956c25bUL, 0x59f111f1UL, 0x923f82a4UL, 0xab1c5ed5UL,
+        0xd807aa98UL, 0x12835b01UL, 0x243185beUL, 0x550c7dc3UL,
+        0x72be5d74UL, 0x80deb1feUL, 0x9bdc06a7UL, 0xc19bf174UL,
+        0xe49b69c1UL, 0xefbe4786UL, 0x0fc19dc6UL, 0x240ca1ccUL,
+        0x2de92c6fUL, 0x4a7484aaUL, 0x5cb0a9dcUL, 0x76f988daUL,
+        0x983e5152UL, 0xa831c66dUL, 0xb00327c8UL, 0xbf597fc7UL,
+        0xc6e00bf3UL, 0xd5a79147UL, 0x06ca6351UL, 0x14292967UL,
+        0x27b70a85UL, 0x2e1b2138UL, 0x4d2c6dfcUL, 0x53380d13UL,
+        0x650a7354UL, 0x766a0abbUL, 0x81c2c92eUL, 0x92722c85UL,
+        0xa2bfe8a1UL, 0xa81a664bUL, 0xc24b8b70UL, 0xc76c51a3UL,
+        0xd192e819UL, 0xd6990624UL, 0xf40e3585UL, 0x106aa070UL,
+        0x19a4c116UL, 0x1e376c08UL, 0x2748774cUL, 0x34b0bcb5UL,
+        0x391c0cb3UL, 0x4ed8aa4aUL, 0x5b9cca4fUL, 0x682e6ff3UL,
+        0x748f82eeUL, 0x78a5636fUL, 0x84c87814UL, 0x8cc70208UL,
+        0x90befffaUL, 0xa4506cebUL, 0xbef9a3f7UL, 0xc67178f2UL
+    };
+    uint32_t w[64], a, b, c, d, e, f, g, h;
+    unsigned i;
+
+    for (i = 0; i < 16; i++)
+        w[i] = ((uint32_t)data[i * 4] << 24) |
+               ((uint32_t)data[i * 4 + 1] << 16) |
+               ((uint32_t)data[i * 4 + 2] << 8) | data[i * 4 + 3];
+    for (; i < 64; i++) {
+        uint32_t s0 = sha256_rotr(w[i - 15], 7) ^ sha256_rotr(w[i - 15], 18) ^
+                      (w[i - 15] >> 3);
+        uint32_t s1 = sha256_rotr(w[i - 2], 17) ^ sha256_rotr(w[i - 2], 19) ^
+                      (w[i - 2] >> 10);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    a = sha->state[0]; b = sha->state[1]; c = sha->state[2]; d = sha->state[3];
+    e = sha->state[4]; f = sha->state[5]; g = sha->state[6]; h = sha->state[7];
+    for (i = 0; i < 64; i++) {
+        uint32_t s1 = sha256_rotr(e, 6) ^ sha256_rotr(e, 11) ^ sha256_rotr(e, 25);
+        uint32_t choose = (e & f) ^ (~e & g);
+        uint32_t t1 = h + s1 + choose + k[i] + w[i];
+        uint32_t s0 = sha256_rotr(a, 2) ^ sha256_rotr(a, 13) ^ sha256_rotr(a, 22);
+        uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
+        uint32_t t2 = s0 + majority;
+
+        h = g; g = f; f = e; e = d + t1;
+        d = c; c = b; b = a; a = t1 + t2;
+    }
+    sha->state[0] += a; sha->state[1] += b; sha->state[2] += c; sha->state[3] += d;
+    sha->state[4] += e; sha->state[5] += f; sha->state[6] += g; sha->state[7] += h;
+}
+
+static void sha256_init(struct fwrel_sha256 *sha)
+{
+    static const uint32_t initial[8] = {
+        0x6a09e667UL, 0xbb67ae85UL, 0x3c6ef372UL, 0xa54ff53aUL,
+        0x510e527fUL, 0x9b05688cUL, 0x1f83d9abUL, 0x5be0cd19UL
+    };
+
+    memcpy(sha->state, initial, sizeof(initial));
+    sha->bits = 0;
+    sha->used = 0;
+}
+
+static void sha256_update(struct fwrel_sha256 *sha, const uint8_t *data, size_t len)
+{
+    sha->bits += (uint64_t)len * 8u;
+    while (len) {
+        size_t n = sizeof(sha->block) - sha->used;
+        if (n > len) n = len;
+        memcpy(sha->block + sha->used, data, n);
+        sha->used += n;
+        data += n;
+        len -= n;
+        if (sha->used == sizeof(sha->block)) {
+            sha256_block(sha, sha->block);
+            sha->used = 0;
+        }
+    }
+}
+
+static void sha256_final(struct fwrel_sha256 *sha, uint8_t out[32])
+{
+    unsigned i;
+
+    sha->block[sha->used++] = 0x80;
+    if (sha->used > 56) {
+        memset(sha->block + sha->used, 0, sizeof(sha->block) - sha->used);
+        sha256_block(sha, sha->block);
+        sha->used = 0;
+    }
+    memset(sha->block + sha->used, 0, 56 - sha->used);
+    for (i = 0; i < 8; i++)
+        sha->block[56 + i] = (uint8_t)(sha->bits >> (56 - i * 8));
+    sha256_block(sha, sha->block);
+    for (i = 0; i < 8; i++) {
+        out[i * 4] = (uint8_t)(sha->state[i] >> 24);
+        out[i * 4 + 1] = (uint8_t)(sha->state[i] >> 16);
+        out[i * 4 + 2] = (uint8_t)(sha->state[i] >> 8);
+        out[i * 4 + 3] = (uint8_t)sha->state[i];
+    }
+}
+
+static struct fwrel_zip *zip_new(fwrel_zip_entry_fn begin, fwrel_sink_fn sink,
+                                 fwrel_zip_entry_fn end, void *ctx, int bundle)
+{
+    struct fwrel_zip *z;
+
+    if (!sink)
+        return NULL;
+    z = calloc(1, sizeof(*z));
     if (!z)
         return NULL;
     z->sink = sink;
+    z->begin = begin;
+    z->end = end;
     z->ctx = ctx;
+    z->bundle = bundle;
     z->state = ZS_LOCAL;
     z->hdr_need = ZIP_LOCAL_BYTES;
     return z;
+}
+
+struct fwrel_zip *fwrel_zip_new(fwrel_sink_fn sink, void *ctx)
+{
+    return zip_new(NULL, sink, NULL, ctx, 0);
+}
+
+struct fwrel_zip *fwrel_zip_new_bundle(fwrel_zip_entry_fn begin,
+                                       fwrel_sink_fn sink,
+                                       fwrel_zip_entry_fn end, void *ctx)
+{
+    return zip_new(begin, sink, end, ctx, 1);
 }
 
 void fwrel_zip_free(struct fwrel_zip *z)
@@ -633,13 +782,123 @@ static int is_target_name(const char *name)
            strcmp(slash + 1, "BOOT.bin") == 0;
 }
 
+static int module_name_ok(const char *name)
+{
+    size_t len = strlen(name);
+    size_t i;
+
+    if (len < 5 || len > 12 || strcmp(name + len - 4, ".ZZM") != 0)
+        return 0;
+    for (i = 0; i < len - 4; i++) {
+        char c = name[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'))
+            return 0;
+    }
+    return 1;
+}
+
+static int safe_bundle_path(const char *name)
+{
+    const char *part = name;
+
+    if (!*name || *name == '/' || strchr(name, '\\'))
+        return 0;
+    while (*part) {
+        const char *slash = strchr(part, '/');
+        size_t len = slash ? (size_t)(slash - part) : strlen(part);
+
+        if (!len || (len == 1 && part[0] == '.') ||
+            (len == 2 && part[0] == '.' && part[1] == '.'))
+            return 0;
+        if (!slash || !slash[1])
+            return 1;
+        part = slash + 1;
+    }
+    return 0;
+}
+
+/* Return the selected entry kind, ZIP_ENTRY_NONE, or -1 for an unsafe path. */
+static int bundle_target_name(struct fwrel_zip *z)
+{
+    const char *slash, *rest, *next;
+    size_t root_len;
+
+    if (!safe_bundle_path(z->name))
+        return -1;
+    slash = strchr(z->name, '/');
+    if (!slash)
+        return -1;
+    root_len = (size_t)(slash - z->name);
+    if (!z->root[0]) {
+        memcpy(z->root, z->name, root_len);
+        z->root[root_len] = '\0';
+    } else if (strlen(z->root) != root_len ||
+               memcmp(z->root, z->name, root_len) != 0) {
+        return -1;
+    }
+    rest = slash + 1;
+    if (!*rest)
+        return ZIP_ENTRY_NONE;
+    next = strchr(rest, '/');
+    if (!next) {
+        if (strcmp(rest, "BOOT.bin") != 0)
+            return ZIP_ENTRY_NONE;
+        if (z->found_boot)
+            return -1;
+        strcpy(z->entry_name, "BOOT.bin");
+        return ZIP_ENTRY_BOOT;
+    }
+    if (strncmp(rest, "ZZ9K/", 5) != 0)
+        return -1;
+    rest += 5;
+    if (!*rest)
+        return ZIP_ENTRY_NONE; /* ZZ9K directory entry */
+    if (strchr(rest, '/') || !module_name_ok(rest))
+        return -1;
+    snprintf(z->entry_name, sizeof(z->entry_name), "ZZ9K/%s", rest);
+    return ZIP_ENTRY_MODULE;
+}
+
+static int module_header_ok(const uint8_t *head, uint32_t *image_size)
+{
+    size_t i;
+    int terminated = 0;
+
+    if (memcmp(head, "ZZM1", 4) != 0 || le16(head + 4) != 128 ||
+        le16(head + 6) != 1)
+        return 0;
+    for (i = 0; i < 16; i++) {
+        uint8_t c = head[36 + i];
+        if (!c) {
+            if (!i)
+                return 0;
+            terminated = 1;
+        } else if (terminated ||
+                   !((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                     c == '_')) {
+            return 0;
+        }
+    }
+    if (!terminated)
+        return 0;
+    for (i = 84; i < FWREL_MODULE_HEADER_BYTES; i++)
+        if (head[i])
+            return 0;
+    *image_size = le32(head + 24);
+    return *image_size <= ULONG_MAX - FWREL_MODULE_HEADER_BYTES;
+}
+
 /* Emit inflated or stored bytes of the current entry. */
 static int zip_output(struct fwrel_zip *z, const uint8_t *data, size_t len)
 {
+    size_t image_offset = 0;
+
     if (!len)
         return 0;
+    if (len > ULONG_MAX - z->out_total)
+        return FWREL_ZIP_ERR_SIZE;
     z->crc = crc32_update(z->crc, data, len);
-    if (z->target) {
+    if (z->target == ZIP_ENTRY_BOOT) {
         if (z->out_total < FWREL_BOOT_HEADER_BYTES) {
             size_t n = FWREL_BOOT_HEADER_BYTES - z->out_total;
             if (n > len) n = len;
@@ -647,9 +906,30 @@ static int zip_output(struct fwrel_zip *z, const uint8_t *data, size_t len)
         }
         if (z->out_total + len > FWREL_BOOT_MAX_BYTES)
             return FWREL_ZIP_ERR_SIZE;
-        if (z->sink(z->ctx, data, len))
-            return FWREL_ZIP_ERR_WRITE;
+    } else if (z->target == ZIP_ENTRY_MODULE) {
+        if (z->out_total < FWREL_MODULE_HEADER_BYTES) {
+            size_t n = FWREL_MODULE_HEADER_BYTES - z->out_total;
+            if (n > len) n = len;
+            memcpy(z->head + z->out_total, data, n);
+            image_offset = n;
+            if (z->out_total + n == FWREL_MODULE_HEADER_BYTES) {
+                if (!module_header_ok(z->head, &z->module_image_size))
+                    return FWREL_ZIP_ERR_MODULE;
+                z->module_header_ok = 1;
+                sha256_init(&z->sha256);
+            }
+        }
+        if (z->module_header_ok) {
+            unsigned long limit = (unsigned long)FWREL_MODULE_HEADER_BYTES +
+                                  z->module_image_size;
+            if (z->out_total + len > limit)
+                return FWREL_ZIP_ERR_SIZE;
+            if (image_offset < len)
+                sha256_update(&z->sha256, data + image_offset, len - image_offset);
+        }
     }
+    if (z->target && z->sink(z->ctx, data, len))
+        return FWREL_ZIP_ERR_WRITE;
     z->out_total += len;
     return 0;
 }
@@ -661,11 +941,27 @@ static int zip_entry_done(struct fwrel_zip *z)
         return zip_fail(z, FWREL_ZIP_ERR_CRC);
     if (z->out_total != z->usize)
         return zip_fail(z, FWREL_ZIP_ERR_SIZE);
-    if (z->target) {
+    if (z->target == ZIP_ENTRY_BOOT) {
         if (z->out_total < FWREL_BOOT_MIN_BYTES)
             return zip_fail(z, FWREL_ZIP_ERR_SIZE);
         if (!fwrel_boot_header_ok(z->head, FWREL_BOOT_HEADER_BYTES))
             return zip_fail(z, FWREL_ZIP_ERR_HEADER);
+        z->found_boot = 1;
+    } else if (z->target == ZIP_ENTRY_MODULE) {
+        uint8_t digest[32];
+
+        if (!z->module_header_ok)
+            return zip_fail(z, FWREL_ZIP_ERR_MODULE);
+        if (z->out_total != (unsigned long)FWREL_MODULE_HEADER_BYTES +
+                            z->module_image_size)
+            return zip_fail(z, FWREL_ZIP_ERR_SIZE);
+        sha256_final(&z->sha256, digest);
+        if (memcmp(digest, z->head + 52, sizeof(digest)) != 0)
+            return zip_fail(z, FWREL_ZIP_ERR_MODULE);
+    }
+    if (z->target && z->end && z->end(z->ctx, z->entry_name))
+        return zip_fail(z, FWREL_ZIP_ERR_WRITE);
+    if (z->target && !z->bundle) {
         z->result = FWREL_ZIP_DONE;
         z->state = ZS_FINISHED;
         return FWREL_ZIP_DONE;
@@ -680,14 +976,22 @@ static int zip_entry_done(struct fwrel_zip *z)
 static int zip_begin_entry(struct fwrel_zip *z)
 {
     int descriptor = (z->flags & ZIP_FLAG_DESCRIPTOR) != 0;
+    int target;
 
-    z->target = is_target_name(z->name);
+    target = z->bundle ? bundle_target_name(z) :
+             (is_target_name(z->name) ? ZIP_ENTRY_BOOT : ZIP_ENTRY_NONE);
+    if (target < 0)
+        return zip_fail(z, FWREL_ZIP_ERR_FORMAT);
+    z->target = target;
     z->crc = 0;
     z->out_total = 0;
+    z->module_header_ok = 0;
     if (z->flags & ZIP_FLAG_ENCRYPTED)
         return zip_fail(z, FWREL_ZIP_ERR_UNSUPPORTED);
     if (!descriptor && (z->csize == 0xffffffffUL || z->usize == 0xffffffffUL))
         return zip_fail(z, FWREL_ZIP_ERR_UNSUPPORTED); /* ZIP64 */
+    if (z->target && z->begin && z->begin(z->ctx, z->entry_name))
+        return zip_fail(z, FWREL_ZIP_ERR_WRITE);
     if (z->method == ZIP_METHOD_DEFLATE) {
         tinfl_init(&z->inflater);
         z->dict_ofs = 0;
@@ -725,11 +1029,17 @@ int fwrel_zip_feed(struct fwrel_zip *z, const uint8_t *data, size_t len)
     while (z->state != ZS_FINISHED && (i < len || z->state == ZS_DATA)) {
         switch (z->state) {
         case ZS_LOCAL:
-            /* A central directory before BOOT.bin ends the search. */
+            /* A central directory ends a complete bundle. */
             if (z->hdr_have < 4) {
                 i += zip_collect(z, data + i, len - i);
-                if (z->hdr_have >= 4 && le32(z->hdr) == ZIP_CENTRAL_SIG)
+                if (z->hdr_have >= 4 && le32(z->hdr) == ZIP_CENTRAL_SIG) {
+                    if (z->bundle && z->found_boot) {
+                        z->result = FWREL_ZIP_DONE;
+                        z->state = ZS_FINISHED;
+                        return FWREL_ZIP_DONE;
+                    }
                     return zip_fail(z, FWREL_ZIP_ERR_NOT_FOUND);
+                }
                 if (z->hdr_have >= 4 && le32(z->hdr) != ZIP_LOCAL_SIG)
                     return zip_fail(z, FWREL_ZIP_ERR_FORMAT);
                 break;
@@ -859,9 +1169,10 @@ const char *fwrel_zip_strerror(int result)
     case FWREL_ZIP_ERR_NOT_FOUND:   return "no BOOT.bin in the archive";
     case FWREL_ZIP_ERR_INFLATE:     return "compressed data is corrupt";
     case FWREL_ZIP_ERR_CRC:         return "CRC-32 mismatch";
-    case FWREL_ZIP_ERR_SIZE:        return "unexpected BOOT.bin size";
+    case FWREL_ZIP_ERR_SIZE:        return "unexpected image size";
     case FWREL_ZIP_ERR_HEADER:      return "BOOT.bin is not a Zynq boot image";
     case FWREL_ZIP_ERR_WRITE:       return "cannot write the extracted image";
+    case FWREL_ZIP_ERR_MODULE:      return "invalid firmware module";
     default:                        return "unknown error";
     }
 }
