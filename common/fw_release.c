@@ -885,7 +885,7 @@ static int module_header_ok(const uint8_t *head, uint32_t *image_size)
         if (head[i])
             return 0;
     *image_size = le32(head + 24);
-    return *image_size <= ULONG_MAX - FWREL_MODULE_HEADER_BYTES;
+    return *image_size <= UINT32_MAX - FWREL_MODULE_HEADER_BYTES;
 }
 
 /* Emit inflated or stored bytes of the current entry. */
