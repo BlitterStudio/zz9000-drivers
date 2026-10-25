@@ -285,7 +285,7 @@ static int do_install_bundle(ULONG board, const char *boot_path) {
     struct cli_progress prog = { 0, -1 };
     char failed_name[FWUP_NAME_MAX + 1];
     UWORD st;
-    BOOL modules_skipped = FALSE;
+    int modules_skipped = 0;
 
     if (!fwup_probe_board(board)) {
         printf("ERROR: firmware does not support the FWUP file-push protocol\n");

@@ -25,7 +25,7 @@ struct fwup_bundle {
     char module_paths[FWUP_BUNDLE_MAX_MODULES][256];
     char module_names[FWUP_BUNDLE_MAX_MODULES][13];
     UWORD module_count;
-    BOOL module_dir_present;
+    int module_dir_present;
 };
 
 /* Discover BOOT.bin's sibling ZZ9K directory. A missing ZZ9K directory is
@@ -39,7 +39,7 @@ UWORD fwup_bundle_discover(const char *boot_path, struct fwup_bundle *bundle);
 UWORD fwup_bundle_install(ULONG board, const struct fwup_bundle *bundle,
                           UWORD fw_caps, fwup_progress_fn cb, void *ctx,
                           char *failed_name, ULONG failed_name_size,
-                          BOOL *modules_skipped);
+                          int *modules_skipped);
 
 /* Read the firmware feature bits used to select optional protocol paths. */
 UWORD fwup_board_capabilities(ULONG board);
