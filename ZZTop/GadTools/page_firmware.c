@@ -33,6 +33,7 @@ enum {
 	G_FILE,
 	G_INSTALL,
 	G_PROGRESS,
+	G_STATUS,
 	G_RESTORE,
 	G_RESTORE_NOTE,
 	G_MODULE_NOTE,
@@ -49,6 +50,7 @@ static struct Gadget *g_choose;
 static struct Gadget *g_file;
 static struct Gadget *g_install;
 static struct Gadget *g_progress;
+static struct Gadget *g_status;
 static struct Gadget *g_restore;
 static struct Gadget *g_restore_note;
 static struct Gadget *g_module_note;
