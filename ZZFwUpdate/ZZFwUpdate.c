@@ -16,7 +16,7 @@
  *   ZZFwUpdate sys:Storage/zz9000-fw.bin BOOT.bin
  *   ZZFwUpdate RESTORE [name] [-y]            -> promote saved backup
  *
- * A one-argument BOOT.bin or release directory installs ZZ9K/*.ZZM modules
+ * A one-argument BOOT.bin or release directory installs its ZZ9K modules
  * before BOOT.bin. Other source-file forms retain the root-file push mode.
  *
  * Build: m68k-amigaos-gcc -O2 -noixemul -I../include -I../common
@@ -155,7 +155,7 @@ static int streq_ci(const char *a, const char *b) {
 
 static int source_is_directory(const char *path) {
     struct FileInfoBlock info;
-    BPTR lock = Lock(path, ACCESS_READ);
+    BPTR lock = Lock((STRPTR)path, ACCESS_READ);
     int is_directory = 0;
 
     if (!lock) return 0;
