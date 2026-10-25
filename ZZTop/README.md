@@ -206,7 +206,9 @@ Fast RAM change takes effect at the next reboot.
 
 The Firmware page shows the installed firmware version and update-protocol
 status. Firmware that reports its patch level shows three numbers, such as
-`2.8.1`; older firmware shows `2.8`.
+`2.8.1`; older firmware shows `2.8`. Firmware with the module capability also
+lists every optional module and whether it loaded, is missing, or was rejected
+for its ABI, hash, or fixed slot.
 
 ### Updating online
 
@@ -217,13 +219,14 @@ status. Firmware that reports its patch level shows three numbers, such as
 2. Select **Check online**. ZZTop reads the latest firmware release from
    GitHub and shows it under **Latest**.
 3. Select **Download and install** and confirm. ZZTop downloads the release
-   archive for the selected board, extracts `BOOT.bin` to `T:`, checks its
-   CRC-32, size and Zynq boot header, then installs it like a chosen file.
-   Escape or the close gadget cancels the download. The temporary image is
-   deleted after a successful install. After a failed one it stays selected
-   for **Install** until it is installed, replaced by another download or
-   chosen file, or ZZTop quits.
-4. Power-cycle the Amiga to start the new firmware.
+   archive, extracts `BOOT.bin` and direct `ZZ9K/*.ZZM` entries to a bounded
+   temporary drawer in `T:`, and verifies `BOOT.bin` plus each module header
+   and image SHA-256. It uploads modules first and `BOOT.bin` last, then
+   removes the temporary drawer. Escape or the close gadget cancels the
+   download.
+4. Firmware without `ZZ_FW_CAP_FWUP_MODULE_DIR` receives only `BOOT.bin`.
+   Reboot, then run the install again to add the optional modules.
+5. Power-cycle the Amiga to start the new firmware.
 
 **Latest** shows the release tag and one of these results:
 
@@ -251,10 +254,12 @@ the previous firmware deletes it.
 
 ### Installing a file
 
-1. Select **Choose file...** and select a `bin`, `rom`, or `img` file.
-2. Select **Install**, confirm the request, and wait for the transfer to
-   finish. ZZTop promotes the selected file to `BOOT.bin` and saves the
-   previous image as `BOOT.bak`.
+1. Select **Choose file...** and select a release `BOOT.bin`.
+2. ZZTop finds valid modules in its sibling `ZZ9K/` drawer and lists the
+   files that will be installed. Select **Install**, confirm the request, and
+   wait for the complete transfer. Modules are installed first, then ZZTop
+   promotes the image to `BOOT.bin` and saves the previous image as
+   `BOOT.bak`. `ZZ9000.CFG` is never installed.
 3. Power-cycle the Amiga to start the new firmware.
 
 ### Restoring the previous firmware

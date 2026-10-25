@@ -133,11 +133,13 @@ is present and Ethernet has negotiated; `ZZNetStats` reports SANA-II counters
 and firmware receive-backlog and drop registers. `ZZDiag` reports board,
 firmware, VideoCap, USB, SD, audio, and Ethernet diagnostics.
 
-`ZZFwUpdate` copies `BOOT.bin` or another root-level file to the microSD card
-over Zorro and keeps `BOOT.bak` rollback images. It requires firmware with the
-FWUP protocol. Use the [command-line tool manual](docs/cli-tools.md) for its
-backup and restore procedure. ZZTop's Firmware page uses the same protocol and
-can also check GitHub for a newer firmware release and install it.
+`ZZFwUpdate` installs a `BOOT.bin` and, when it has a sibling `ZZ9K/` drawer,
+the release's optional `*.ZZM` modules. It sends modules first and `BOOT.bin`
+last, preserves the card's own `ZZ9000.CFG`, and keeps `BOOT.bak` rollback
+images. It requires firmware with the FWUP protocol. Use the
+[command-line tool manual](docs/cli-tools.md) for its backup and restore
+procedure. ZZTop's Firmware page uses the same protocol and can also check
+GitHub for a newer firmware release and install the complete bundle.
 
 ## Compatibility and status
 

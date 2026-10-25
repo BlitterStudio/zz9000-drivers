@@ -13,7 +13,7 @@ The SDK tools, when installed, are documented in `sdk.guide`.
 
 | Tool | What it does |
 | --- | --- |
-| `ZZFwUpdate` | Copies a local file to the card's FAT32 root, including `BOOT.bin`, and restores a saved backup. |
+| `ZZFwUpdate` | Installs a firmware release bundle or copies a local file to the card, and restores a saved backup. |
 | `ZZNetStats` | Reads SANA-II and firmware receive counters from `ZZ9000Net.device`. |
 | `ZZDiag` | Prints board, aperture, USB, video-capture, SD, audio, Ethernet, and scanline diagnostics. |
 | `ZZNetReady` | Returns an AmigaDOS status for a boot script that waits for Ethernet negotiation. |
@@ -22,15 +22,22 @@ The SDK tools, when installed, are documented in `sdk.guide`.
 ## ZZFwUpdate: firmware updates
 
 `ZZFwUpdate` transfers a local file to the ZZ9000 microSD card without
-removing it. A normal firmware update writes a new `BOOT.bin` and then
-requires a power cycle:
+removing it. Give it an unpacked firmware release drawer or its `BOOT.bin` to
+install the bundle. If a sibling `ZZ9K/` drawer contains valid `NAME.ZZM`
+files, it transfers those optional modules first and `BOOT.bin` last:
 
 ```text
-ZZFwUpdate RAM:BOOT.bin
+ZZFwUpdate RAM:zz9000-firmware-v2.9.0-zorro3
+ZZFwUpdate RAM:zz9000-firmware-v2.9.0-zorro3/BOOT.bin
 ```
 
-The command derives the card filename from the final component of the
-source path. Give a second argument to choose a different filename:
+`ZZ9000.CFG` from a release is never transferred. Firmware that does not
+advertise `ZZ_FW_CAP_FWUP_MODULE_DIR` receives `BOOT.bin` only. Reboot, then
+run the same command again to install the optional modules.
+
+The existing single-file form derives the card filename from the final
+component of the source path. Give a second argument to choose a different
+filename:
 
 ```text
 ZZFwUpdate SYS:Storage/zz9000-fw.bin BOOT.bin
@@ -40,12 +47,15 @@ ZZFwUpdate SYS:Storage/zz9000-fw.bin BOOT.bin
 
 | Form | Result |
 | --- | --- |
+| `ZZFwUpdate <release-drawer-or-BOOT.bin>` | Installs sibling `ZZ9K/*.ZZM` modules first when present, then copies `BOOT.bin` to the root. |
 | `ZZFwUpdate <source-file> [dest-name]` | Copies `source-file` to `0:/<dest-name>`. Without `dest-name`, uses the source basename. |
 | `ZZFwUpdate RESTORE [name] [-y\|FORCE]` | Promotes the saved backup for `name` to the active file. `name` defaults to `BOOT.bin`; `-y` and `FORCE` skip confirmation. |
 
-`dest-name` and the restore name must contain 1–64 characters from `A-Z`,
-`a-z`, `0-9`, `.`, `_`, and `-`. The command writes only the FAT32 root.
-A leading slash, a path, and a volume prefix are rejected by the CLI.
+`dest-name` and the restore name are either an existing root filename of 1–64
+characters from `A-Z`, `a-z`, `0-9`, `.`, `_`, and `-`, or a module target
+exactly `ZZ9K/NAME.ZZM`, with an uppercase 1–8 character `NAME` made from
+`A-Z`, `0-9`, and `_`. A leading slash, a volume prefix, other directories,
+and deeper paths are rejected by the CLI.
 
 During a transfer, it prints the card address, source and destination, then
 byte and percentage progress. On success it prints the bytes written and,
