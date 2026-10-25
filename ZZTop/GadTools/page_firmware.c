@@ -622,7 +622,7 @@ static void gadget(UWORD id, UWORD code)
 		static char picked[sizeof(path)];
 
 		if (fwup_supported && gt_pick_file("Select firmware BOOT.bin",
-			"#?.(bin|rom|img)", picked, sizeof(picked))) {
+			"BOOT.bin", picked, sizeof(picked))) {
 			memcpy(path, picked, sizeof(path));
 			snprintf(file_text, sizeof(file_text), "%s", (const char *)FilePart((CONST_STRPTR)path));
 			gt_page_set_text(g_file, file_text);
