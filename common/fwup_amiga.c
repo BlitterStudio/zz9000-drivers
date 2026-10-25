@@ -193,7 +193,7 @@ UWORD fwup_bundle_discover(const char *boot_path, struct fwup_bundle *bundle) {
     memcpy(bundle->boot_path, boot_path, strlen(boot_path) + 1);
     if (!amiga_bundle_dir(boot_path, module_dir, sizeof(module_dir)))
         return FWUP_ERR_FILE;
-    dir_lock = Lock(module_dir, ACCESS_READ);
+    dir_lock = Lock((STRPTR)module_dir, ACCESS_READ);
     if (!dir_lock) return FWUP_OK;
 
     fib = (struct FileInfoBlock *)AllocMem(sizeof(*fib), MEMF_PUBLIC);
