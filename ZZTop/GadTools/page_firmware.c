@@ -239,7 +239,7 @@ static void download_progress(void *ctx, ULONG done, LONG total)
 static BOOL install_bundle(const struct fwup_bundle *bundle, const char *tag)
 {
 	char failed_name[FWUP_MODULE_FILENAME_MAX + 1];
-	BOOL modules_skipped = FALSE;
+	int modules_skipped = FALSE;
 	UWORD st;
 
 	transfer_active = TRUE;
