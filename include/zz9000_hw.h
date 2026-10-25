@@ -90,6 +90,10 @@
  * ZZ_FWUP_STATUS_MIRROR_OFFSET, the last longword of the boot ROM window
  * (see common/fwup_client.h). */
 #define ZZ_FW_CAP_FWUP_STATUS_MIRROR (1U << 11)
+#define ZZ_FW_CAP_FW_VERSION_PATCH (1U << 12)
+/* Bit 13 is reserved for the shared-heap prototype. */
+#define ZZ_FW_CAP_FWUP_MODULE_DIR (1U << 14)
+#define ZZ_FW_CAP_FIRMWARE_MODULES (1U << 15)
 #define ZZ_FWUP_STATUS_MIRROR_OFFSET 0x7FFC
 #define ZZ_REG_AUDIO_CONFIG      0xF4
 #define ZZ_REG_AUDIO_RX_STATUS   0xF6
