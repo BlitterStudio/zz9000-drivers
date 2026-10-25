@@ -312,7 +312,7 @@ static void amiga_progress(void *ctx, const char *target, uint32_t done,
 UWORD fwup_bundle_install(ULONG board, const struct fwup_bundle *bundle,
                           UWORD fw_caps, fwup_progress_fn cb, void *ctx,
                           char *failed_name, ULONG failed_name_size,
-                          BOOL *modules_skipped) {
+                          int *modules_skipped) {
     struct fwup_bundle_files files;
     struct fwup_io io;
     struct fwup_bundle_result result;

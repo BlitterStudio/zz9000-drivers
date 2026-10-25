@@ -118,7 +118,7 @@ struct fwup_bundle_result {
     char failed_module[FWUP_MODULE_FILENAME_MAX + 1];
 };
 
-/* Install all valid sibling ZZ9K/*.ZZM files before BOOT.bin. fw_caps is
+/* Install all valid sibling ZZ9K module files before BOOT.bin. fw_caps is
  * ZZ_REG_FW_CAPABILITIES; without bit 14 this installs BOOT.bin only and
  * reports FWUP_BUNDLE_BOOT_ONLY_NO_MODULE_DIR. */
 uint16_t fwup_install_bundle(struct fwup_io *io, uint16_t fw_caps,
