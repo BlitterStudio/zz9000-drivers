@@ -160,9 +160,9 @@ in-window video (ZZPlay's dedicated fullscreen screen still plays).
 
 ## Project menu
 
-- **Update Firmware…** copies a firmware image to the SD card as
-  `BOOT.bin`, keeping the previous image as `BOOT.bak`. Power-cycle
-  afterwards so the card boots it.
+- **Update Firmware…** selects an unpacked release `BOOT.bin`. When it has a
+  sibling `ZZ9K/` drawer, ZZTop installs its `*.ZZM` modules first and
+  `BOOT.bin` last, keeping `ZZ9000.CFG` unchanged. Power-cycle afterwards.
 - **Restore Backup…** promotes `BOOT.bak` back to `BOOT.bin` after a
   confirmation. It talks to the running firmware, so it recovers an
   update that boots but misbehaves; a card that does not boot at all
@@ -186,71 +186,19 @@ remove `ZZ9K_INT2`, `ZZ9K_MAC` and the legacy video variables when you
 migrate to `ZZ9000.CFG`.
 ## Firmware
 
-The Firmware page shows the installed firmware version and update-protocol
-status. Firmware that reports its patch level shows three numbers, such as
-`2.8.1`; older firmware shows `2.8`. Firmware with the module capability also
-lists every optional module and whether it loaded, is missing, or was rejected
-for its ABI, hash, or fixed slot.
+For a 2.9.0 update, unpack the firmware zip on the Amiga, then select its
+`BOOT.bin` with **Update Firmware…**. ZZTop discovers a sibling `ZZ9K/`
+drawer and installs every valid module first, then `BOOT.bin`; it never
+installs the release `ZZ9000.CFG`.
 
-### Updating online
+If the running firmware lacks `ZZ_FW_CAP_FWUP_MODULE_DIR`, ZZTop installs
+only `BOOT.bin` and tells you to power-cycle and run the same update again.
+After the bridge firmware has booted, the second run installs the modules.
 
-1. Check that **Board** names the right firmware build. ZZTop selects the
-   build the card is running when the firmware identifies it (2.8 or later);
-   otherwise it selects the plain Zorro II or Zorro III build. The A500 and
-   A500+ builds are interchangeable.
-2. Select **Check online**. ZZTop reads the latest firmware release from
-   GitHub and shows it under **Latest**.
-3. Select **Download and install** and confirm. ZZTop downloads the release
-   archive, extracts `BOOT.bin` and direct `ZZ9K/*.ZZM` entries to a bounded
-   temporary drawer in `T:`, and verifies `BOOT.bin` plus each module header
-   and image SHA-256. It uploads modules first and `BOOT.bin` last, then
-   removes the temporary drawer. Escape or the close gadget cancels the
-   download.
-4. Firmware without `ZZ_FW_CAP_FWUP_MODULE_DIR` receives only `BOOT.bin`.
-   Reboot, then run the install again to add the optional modules.
-5. Power-cycle the Amiga to start the new firmware.
-
-**Latest** shows the release tag and one of these results:
-
-| Result | Meaning |
-|---|---|
-| `update available` | The release is newer than the installed firmware. |
-| `installed` | The installed firmware is the latest release. |
-| `may be newer` | The card cannot report its patch level and the release is a patch release of the same `major.minor`. |
-| `older than installed` | The card runs a newer development build. |
-
-Pre-releases are never offered. The archive's `ZZ9000.CFG` is not installed;
-the card keeps its own settings file. ZZTop refuses an image for the other
-Zorro bus and asks again before installing a build other than the running
-one. Firmware older than 2.8 cannot report its build, so ZZTop then asks
-before installing anything other than the plain Zorro II or Zorro III build.
-A build for the wrong machine may not start, and recovery then needs the
-microSD card in another computer.
-
-The download needs up to 4 MB free in `T:`. GitHub limits anonymous release
-queries to 60 per hour from one address; ZZTop reports when the limit is hit.
-After an online install ZZTop stores the release tag in
-`ENVARC:ZZTopFirmware`, so firmware that cannot report its patch level still
-compares exactly after the next boot. Installing a chosen file or restoring
-the previous firmware deletes it.
-
-### Installing a file
-
-1. Select **Choose file...** and select a release `BOOT.bin`.
-2. ZZTop finds valid modules in its sibling `ZZ9K/` drawer and lists the
-   files that will be installed. Select **Install**, confirm the request, and
-   wait for the complete transfer. Modules are installed first, then ZZTop
-   promotes the image to `BOOT.bin` and saves the previous image as
-   `BOOT.bak`. `ZZ9000.CFG` is never installed.
-3. Power-cycle the Amiga to start the new firmware.
-
-### Restoring the previous firmware
-
-**Restore previous firmware** promotes `BOOT.bak` to `BOOT.bin`. This discards
-the current `BOOT.bin` and leaves no backup. It works only while the card can
+**Restore Backup…** promotes `BOOT.bak` to `BOOT.bin`. This discards the
+current `BOOT.bin` and leaves no backup. It works only while the card can
 boot and communicate with ZZTop; restore an unbootable card's microSD card on
-another computer. Transfers and restore are disabled until the updater probe
-succeeds, and during a transfer.
+another computer.
 
 ## Diagnostics
 
