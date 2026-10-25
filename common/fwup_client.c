@@ -29,9 +29,32 @@ static int valid_dest_char(char c) {
            c == '.' || c == '_' || c == '-';
 }
 
-int fwup_name_valid(const char *name) {
+static int valid_module_char(char c) {
+    return (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
+int fwup_module_name_valid(const char *name) {
     size_t len, i;
+
     if (!name) return 0;
+    len = strlen(name);
+    if (len < 5 || len > FWUP_MODULE_FILENAME_MAX ||
+        strcmp(name + len - 4, ".ZZM") != 0) return 0;
+    if (len - 4 > FWUP_MODULE_NAME_MAX) return 0;
+    for (i = 0; i < len - 4; i++) {
+        if (!valid_module_char(name[i])) return 0;
+    }
+    return 1;
+}
+
+int fwup_name_valid(const char *name) {
+    static const char module_prefix[] = "ZZ9K/";
+    size_t len, i;
+
+    if (!name) return 0;
+    if (strncmp(name, module_prefix, sizeof(module_prefix) - 1) == 0)
+        return fwup_module_name_valid(name + sizeof(module_prefix) - 1);
     len = strlen(name);
     if (len == 0 || len > FWUP_NAME_MAX) return 0;
     for (i = 0; i < len; i++) {
@@ -53,9 +76,10 @@ const char *fwup_strerror(uint16_t status) {
     case FWUP_ERR_UNKNOWN:   return "unknown FWUP command";
     case FWUP_ERR_NO_BACKUP: return "no backup file found to restore";
     case FWUP_ERR_RESTORE:   return "firmware restore (rename) failed";
-    case FWUP_ERR_FILE:      return "cannot read the source file";
-    case FWUP_ERR_NOMEM:     return "out of memory";
+    case FWUP_ERR_BUNDLE:    return "invalid firmware module bundle";
     case FWUP_ERR_CONFIG_SIZE: return "configuration exceeds file size limit";
+    case FWUP_ERR_NOMEM:     return "out of memory";
+    case FWUP_ERR_FILE:      return "cannot read the source file";
     case FWUP_STATUS_BUSY:   return "timed out waiting for firmware";
     default:                 return "unknown error";
     }
@@ -145,12 +169,14 @@ uint16_t fwup_open(struct fwup_io *io, const char *dest_name) {
 }
 
 uint16_t fwup_write_chunk(struct fwup_io *io, const void *data, uint16_t len) {
+    uint8_t *buffer;
+
     if (len == 0 || len > FWUP_CHUNK_BYTES) return FWUP_ERR_LEN;
-    memcpy(io->buffer(io), data, len);
+    buffer = io->buffer(io);
+    if (data != buffer) memcpy(buffer, data, len);
     io->write_len(io, len);
     return run_command(io, FWUP_CMD_WRITE);
 }
-
 uint16_t fwup_close(struct fwup_io *io) {
     return run_command(io, FWUP_CMD_CLOSE);
 }
@@ -163,4 +189,181 @@ uint16_t fwup_restore(struct fwup_io *io, const char *target) {
     if (!fwup_name_valid(target)) return FWUP_ERR_BAD_NAME;
     stage_name(io, target);
     return run_command(io, FWUP_CMD_RESTORE);
+}
+
+struct bundle_module {
+    char name[FWUP_MODULE_FILENAME_MAX + 1];
+    uint32_t size;
+};
+
+struct bundle_modules {
+    struct bundle_module entries[FWUP_BUNDLE_MODULE_MAX];
+    unsigned count;
+    uint16_t status;
+};
+
+static int module_name_has_extension(const char *name) {
+    size_t len;
+
+    if (!name) return 0;
+    len = strlen(name);
+    return len >= 4 && strcmp(name + len - 4, ".ZZM") == 0;
+}
+
+static int collect_module(void *ctx, const char *name, uint32_t size) {
+    struct bundle_modules *modules = (struct bundle_modules *)ctx;
+    struct bundle_module entry;
+    unsigned i;
+
+    if (!module_name_has_extension(name)) return 0;
+    if (!fwup_module_name_valid(name)) {
+        modules->status = FWUP_ERR_BAD_NAME;
+        return -1;
+    }
+    if (modules->count == FWUP_BUNDLE_MODULE_MAX) {
+        modules->status = FWUP_ERR_BUNDLE;
+        return -1;
+    }
+
+    memcpy(entry.name, name, strlen(name) + 1);
+    entry.size = size;
+    for (i = modules->count; i > 0 &&
+         strcmp(entry.name, modules->entries[i - 1].name) < 0; i--)
+        modules->entries[i] = modules->entries[i - 1];
+    modules->entries[i] = entry;
+    modules->count++;
+    return 0;
+}
+
+static int make_module_dir(const char *boot_path, char *dir) {
+    const char *last = NULL;
+    const char *p;
+    size_t prefix;
+
+    if (!boot_path) return 0;
+    for (p = boot_path; *p; p++) {
+        if (*p == '/' || *p == ':' || *p == '\\') last = p;
+    }
+    prefix = last ? (size_t)(last - boot_path + 1) : 0;
+    if (prefix + 5 >= FWUP_HOST_PATH_MAX) return 0;
+    if (prefix) memcpy(dir, boot_path, prefix);
+    memcpy(dir + prefix, "ZZ9K/", 6);
+    return 1;
+}
+
+static int make_module_path(char *path, const char *dir, const char *name) {
+    size_t dir_len = strlen(dir);
+    size_t name_len = strlen(name);
+
+    if (dir_len + name_len >= FWUP_HOST_PATH_MAX) return 0;
+    memcpy(path, dir, dir_len);
+    memcpy(path + dir_len, name, name_len + 1);
+    return 1;
+}
+
+static uint16_t send_bundle_file(struct fwup_io *io,
+                                 const struct fwup_bundle_files *files,
+                                 const char *host_path, const char *target,
+                                 uint32_t *done, uint32_t total,
+                                 fwup_bundle_progress_fn progress, void *ctx) {
+    void *file;
+    uint16_t used, st;
+
+    if (files->open(files->ctx, host_path, &file) != 0) return FWUP_ERR_FILE;
+    st = fwup_open(io, target);
+    if (st != FWUP_OK) {
+        files->close(files->ctx, file);
+        return st;
+    }
+
+    for (;;) {
+        if (files->read(files->ctx, file, io->buffer(io), FWUP_CHUNK_BYTES,
+                        &used) != 0) {
+            st = FWUP_ERR_FILE;
+            break;
+        }
+        if (used == 0) {
+            st = FWUP_OK;
+            break;
+        }
+        st = fwup_write_chunk(io, io->buffer(io), used);
+        if (st != FWUP_OK) break;
+        *done += used;
+        if (progress) progress(ctx, target, *done, total);
+    }
+
+    if (st == FWUP_OK) st = fwup_close(io);
+    if (st != FWUP_OK) fwup_abort(io);
+    files->close(files->ctx, file);
+    return st;
+}
+
+uint16_t fwup_install_bundle(struct fwup_io *io, uint16_t fw_caps,
+                             const char *boot_host_path,
+                             const struct fwup_bundle_files *files,
+                             fwup_bundle_progress_fn progress, void *ctx,
+                             struct fwup_bundle_result *result) {
+    struct bundle_modules modules;
+    char module_dir[FWUP_HOST_PATH_MAX];
+    char module_path[FWUP_HOST_PATH_MAX];
+    char target[FWUP_MODULE_TARGET_MAX + 1];
+    uint32_t boot_size, total, done;
+    unsigned i;
+    int listed;
+    uint16_t st;
+
+    if (!io || !boot_host_path || !files || !files->list_dir ||
+        !files->file_size || !files->open || !files->read || !files->close)
+        return FWUP_ERR_FILE;
+
+    if (result) {
+        result->status = FWUP_OK;
+        result->outcome = FWUP_BUNDLE_INSTALLED;
+        result->failed_module[0] = '\0';
+    }
+    if (files->file_size(files->ctx, boot_host_path, &boot_size) != 0)
+        return FWUP_ERR_FILE;
+    total = boot_size;
+    done = 0;
+    modules.count = 0;
+    modules.status = FWUP_OK;
+
+    if ((fw_caps & (1U << 14)) != 0) {
+        if (!make_module_dir(boot_host_path, module_dir)) return FWUP_ERR_FILE;
+        listed = files->list_dir(files->ctx, module_dir, collect_module, &modules);
+        if (listed < 0) return modules.status != FWUP_OK ?
+                          modules.status : FWUP_ERR_FILE;
+        for (i = 0; i < modules.count; i++) {
+            if (total > 0xffffffffUL - modules.entries[i].size)
+                return FWUP_ERR_BUNDLE;
+            total += modules.entries[i].size;
+        }
+    } else if (result) {
+        result->outcome = FWUP_BUNDLE_BOOT_ONLY_NO_MODULE_DIR;
+    }
+
+    if (progress) progress(ctx, "", done, total);
+    for (i = 0; i < modules.count; i++) {
+        if (!make_module_path(module_path, module_dir, modules.entries[i].name))
+            return FWUP_ERR_FILE;
+        memcpy(target, "ZZ9K/", 5);
+        memcpy(target + 5, modules.entries[i].name,
+               strlen(modules.entries[i].name) + 1);
+        st = send_bundle_file(io, files, module_path, target, &done, total,
+                              progress, ctx);
+        if (st != FWUP_OK) {
+            if (result) {
+                result->status = st;
+                result->outcome = FWUP_BUNDLE_MODULE_FAILED;
+                memcpy(result->failed_module, modules.entries[i].name,
+                       strlen(modules.entries[i].name) + 1);
+            }
+            return st;
+        }
+    }
+
+    st = send_bundle_file(io, files, boot_host_path, "BOOT.bin", &done, total,
+                          progress, ctx);
+    if (result) result->status = st;
+    return st;
 }

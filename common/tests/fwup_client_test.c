@@ -21,6 +21,8 @@ static int           sim_dumb;        /* old firmware: every status reads OK */
 static uint16_t      sim_status;
 static int           sim_open;
 static char          sim_name[128];
+static char          sim_open_names[16][128];
+static unsigned      sim_open_count;
 static unsigned char sim_file[SIM_FILE_MAX];
 static size_t        sim_file_len;
 static uint16_t      sim_pending_len;
@@ -42,6 +44,7 @@ static void sim_reset(void) {
     sim_status = FWUP_OK;
     sim_open = 0;
     sim_name[0] = '\0';
+    sim_open_count = 0;
     sim_file_len = 0;
     sim_pending_len = 0;
     sim_have_backup = 0;
@@ -95,6 +98,10 @@ static void sim_write_cmd(struct fwup_io *io, uint16_t cmd) {
     case FWUP_CMD_OPEN:
         if (!fwup_name_valid((const char *)sim_buffer)) { sim_status = FWUP_ERR_BAD_NAME; break; }
         strcpy(sim_name, (const char *)sim_buffer);
+        if (sim_open_count < 16) {
+            strcpy(sim_open_names[sim_open_count], sim_name);
+            sim_open_count++;
+        }
         sim_open = 1;
         sim_file_len = 0;
         sim_status = FWUP_OK;
@@ -150,13 +157,21 @@ static int g_fails = 0;
     } while (0)
 
 static void test_name_valid(void) {
+    char toolong[FWUP_NAME_MAX + 2];
+
     printf("test_name_valid\n");
-    CHECK(fwup_name_valid("BOOT.bin"), "BOOT.bin accepted");
-    CHECK(fwup_name_valid("a_b-c.123"), "[A-Za-z0-9._-] accepted");
+    CHECK(fwup_name_valid("BOOT.bin"), "legacy root target accepted");
+    CHECK(fwup_name_valid("a_b-c.123"), "legacy root charset accepted");
+    CHECK(fwup_name_valid("ZZ9K/AUDIO_2.ZZM"), "module target accepted");
+    CHECK(fwup_module_name_valid("A.ZZM"), "short module name accepted");
+    CHECK(fwup_module_name_valid("ABCDEFGH.ZZM"), "eight-char module accepted");
+    CHECK(!fwup_name_valid("ZZ9K/audio.ZZM"), "lowercase module rejected");
+    CHECK(!fwup_name_valid("OTHER/A.ZZM"), "other subdirectory rejected");
+    CHECK(!fwup_name_valid("ZZ9K/A.BAK"), "module backup target rejected");
+    CHECK(!fwup_module_name_valid("ABCDEFGHI.ZZM"), "long module name rejected");
     CHECK(!fwup_name_valid(""), "empty rejected");
     CHECK(!fwup_name_valid("has space.bin"), "space rejected");
     CHECK(!fwup_name_valid("sub/dir.bin"), "slash rejected");
-    char toolong[FWUP_NAME_MAX + 2];
     memset(toolong, 'a', sizeof(toolong) - 1);
     toolong[sizeof(toolong) - 1] = '\0';
     CHECK(!fwup_name_valid(toolong), "over 64 chars rejected");
@@ -218,6 +233,171 @@ static void test_restore(void) {
     sim_reset();
     sim_have_backup = 0;
     CHECK(fwup_restore(&sim_io, "BOOT.bin") == FWUP_ERR_NO_BACKUP, "restore reports missing backup");
+}
+
+/* ---- bundle host-file seam ---- */
+
+struct test_source {
+    const char *path;
+    const char *data;
+};
+
+struct test_reader {
+    const struct test_source *source;
+    size_t offset;
+};
+
+static const struct test_source bundle_sources[] = {
+    { "release/BOOT.bin", "boot" },
+    { "release/ZZ9K/BETA.ZZM", "beta" },
+    { "release/ZZ9K/ALPHA.ZZM", "alpha" }
+};
+static const char *bundle_entries[] = {
+    "BETA.ZZM", "ZZ9000.CFG", "ALPHA.ZZM"
+};
+static struct test_reader bundle_reader;
+static unsigned bundle_list_calls;
+static uint32_t bundle_progress_done;
+static uint32_t bundle_progress_total;
+
+static const struct test_source *bundle_source(const char *path) {
+    size_t i;
+
+    for (i = 0; i < sizeof(bundle_sources) / sizeof(bundle_sources[0]); i++) {
+        if (strcmp(bundle_sources[i].path, path) == 0) return &bundle_sources[i];
+    }
+    return NULL;
+}
+
+static int bundle_visit_dir(void *ctx, const char *path,
+                            fwup_bundle_visit_fn visit, void *visit_ctx) {
+    size_t i;
+
+    (void)ctx;
+    bundle_list_calls++;
+    if (strcmp(path, "release/ZZ9K/") != 0) return -1;
+    for (i = 0; i < sizeof(bundle_entries) / sizeof(bundle_entries[0]); i++) {
+        const char *name = bundle_entries[i];
+        const struct test_source *source;
+        char source_path[64];
+
+        snprintf(source_path, sizeof(source_path), "release/ZZ9K/%s", name);
+        source = bundle_source(source_path);
+        if (visit(visit_ctx, name,
+                  source ? (uint32_t)strlen(source->data) : 0) != 0)
+            return -1;
+    }
+    return 1;
+}
+
+static int bundle_file_size(void *ctx, const char *path, uint32_t *size) {
+    const struct test_source *source;
+
+    (void)ctx;
+    source = bundle_source(path);
+    if (!source) return -1;
+    *size = (uint32_t)strlen(source->data);
+    return 0;
+}
+
+static int bundle_open(void *ctx, const char *path, void **file) {
+    const struct test_source *source;
+
+    (void)ctx;
+    source = bundle_source(path);
+    if (!source) return -1;
+    bundle_reader.source = source;
+    bundle_reader.offset = 0;
+    *file = &bundle_reader;
+    return 0;
+}
+
+static int bundle_read(void *ctx, void *file, uint8_t *buffer,
+                       uint16_t capacity, uint16_t *used) {
+    struct test_reader *reader = (struct test_reader *)file;
+    size_t remaining;
+
+    (void)ctx;
+    remaining = strlen(reader->source->data) - reader->offset;
+    if (remaining > capacity) remaining = capacity;
+    memcpy(buffer, reader->source->data + reader->offset, remaining);
+    reader->offset += remaining;
+    *used = (uint16_t)remaining;
+    return 0;
+}
+
+static void bundle_close(void *ctx, void *file) {
+    (void)ctx;
+    (void)file;
+}
+
+static void bundle_progress(void *ctx, const char *target, uint32_t done,
+                            uint32_t total) {
+    (void)ctx;
+    (void)target;
+    bundle_progress_done = done;
+    bundle_progress_total = total;
+}
+
+static const struct fwup_bundle_files bundle_files = {
+    bundle_visit_dir, bundle_file_size, bundle_open, bundle_read, bundle_close,
+    NULL
+};
+
+static void test_bundle_order_and_cfg_exclusion(void) {
+    struct fwup_bundle_result result;
+
+    printf("test_bundle_order_and_cfg_exclusion\n");
+    sim_reset();
+    bundle_list_calls = 0;
+    bundle_progress_done = 0;
+    bundle_progress_total = 0;
+    CHECK(fwup_install_bundle(&sim_io, 1U << 14, "release/BOOT.bin",
+                              &bundle_files, bundle_progress, NULL, &result) ==
+          FWUP_OK, "bundle install succeeds");
+    CHECK(bundle_list_calls == 1, "module directory discovered once");
+    CHECK(sim_open_count == 3, "two modules and BOOT opened");
+    CHECK(strcmp(sim_open_names[0], "ZZ9K/ALPHA.ZZM") == 0,
+          "modules install in name order");
+    CHECK(strcmp(sim_open_names[1], "ZZ9K/BETA.ZZM") == 0,
+          "second module follows first");
+    CHECK(strcmp(sim_open_names[2], "BOOT.bin") == 0, "BOOT installs last");
+    CHECK(bundle_progress_done == 13 && bundle_progress_total == 13,
+          "progress aggregates module and boot bytes");
+    CHECK(result.outcome == FWUP_BUNDLE_INSTALLED, "module bundle outcome");
+}
+
+static void test_bundle_module_failure_stops_boot(void) {
+    struct fwup_bundle_result result;
+
+    printf("test_bundle_module_failure_stops_boot\n");
+    sim_reset();
+    sim_fail_write = 1;
+    CHECK(fwup_install_bundle(&sim_io, 1U << 14, "release/BOOT.bin",
+                              &bundle_files, NULL, NULL, &result) ==
+          FWUP_ERR_WRITE, "module failure returned");
+    CHECK(result.outcome == FWUP_BUNDLE_MODULE_FAILED,
+          "module failure outcome reported");
+    CHECK(strcmp(result.failed_module, "ALPHA.ZZM") == 0,
+          "failed module identity reported");
+    CHECK(sim_open_count == 1 && strcmp(sim_open_names[0], "ZZ9K/ALPHA.ZZM") == 0,
+          "BOOT not opened after module failure");
+}
+
+static void test_bundle_without_module_capability(void) {
+    struct fwup_bundle_result result;
+
+    printf("test_bundle_without_module_capability\n");
+    sim_reset();
+    bundle_list_calls = 0;
+    CHECK(fwup_install_bundle(&sim_io, 0, "release/BOOT.bin", &bundle_files,
+                              NULL, NULL, &result) == FWUP_OK,
+          "boot-only fallback succeeds");
+    CHECK(bundle_list_calls == 0, "fallback does not inspect module directory");
+    CHECK(sim_open_count == 1 && strcmp(sim_open_names[0], "BOOT.bin") == 0,
+          "fallback sends BOOT only");
+    CHECK(result.outcome == FWUP_BUNDLE_BOOT_ONLY_NO_MODULE_DIR,
+          "fallback outcome exposed");
 }
 
 /* With a mirror the client learns every result from it and never reads
@@ -293,6 +473,9 @@ int main(void) {
     test_mirror_waits_for_new_sequence();
     test_mirror_first_publication_after_invalid_word();
     test_mirror_frozen_times_out_without_register();
+    test_bundle_order_and_cfg_exclusion();
+    test_bundle_module_failure_stops_boot();
+    test_bundle_without_module_capability();
     printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails ? 1 : 0;
 }
