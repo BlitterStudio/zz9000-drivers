@@ -35,11 +35,16 @@ struct fwonline_release {
 BOOL fwonline_check(int variant, const struct fwonline_hooks *hooks,
 	struct fwonline_release *out, BOOL *cancelled, char *msg, ULONG size);
 
-/* Download the release image for `variant`, extract BOOT.bin to `path`
- * and verify it. A failed or cancelled download deletes `path`. */
-BOOL fwonline_download(const char *tag, int variant, const char *path,
-	const struct fwonline_hooks *hooks, BOOL *cancelled, char *msg,
-	ULONG size);
+/* Download one release ZIP, extract its verified bundle into a fresh bounded
+ * T: drawer, and return the full path of its BOOT.bin in `boot_path`.
+ * A failed or cancelled download removes the drawer. The caller must call
+ * fwonline_remove_bundle after installing or declining the downloaded bundle. */
+BOOL fwonline_download(const char *tag, int variant, char *boot_path,
+	ULONG boot_path_size, const struct fwonline_hooks *hooks,
+	BOOL *cancelled, char *msg, ULONG size);
+
+/* Remove the private T: drawer created by fwonline_download. */
+void fwonline_remove_bundle(const char *boot_path);
 
 /* Installed version as ZZTop knows it: major.minor from the card, the
  * patch from the card when it reports one, otherwise from the record of

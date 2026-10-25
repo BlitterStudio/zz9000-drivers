@@ -168,17 +168,139 @@ struct download_sink {
 	struct sink_base base;
 	struct fwrel_zip *zip;
 	BPTR file;
+	char directory[256];
 	int zip_result;
 	ULONG received;
 	ULONG reported;
 	LONG total;
 };
 
-static int write_image(void *ctx, const uint8_t *data, size_t len)
+static BOOL bundle_directory(const char *boot_path, char *directory,
+	ULONG directory_size)
+{
+	const char *last;
+	ULONG len;
+
+	if (!boot_path)
+		return FALSE;
+	last = strrchr(boot_path, '/');
+	if (!last)
+		return FALSE;
+	len = (ULONG)(last - boot_path);
+	if (len == 0 || len >= directory_size)
+		return FALSE;
+	memcpy(directory, boot_path, len);
+	directory[len] = '\0';
+	return TRUE;
+}
+
+/* Remove only files inside a private download drawer whose BOOT.bin path we
+ * created. This leaves no online payload behind after any outcome. */
+void fwonline_remove_bundle(const char *boot_path)
+{
+	char directory[256];
+	char module_directory[256];
+	char member[256];
+	BPTR lock;
+	struct FileInfoBlock *fib;
+
+	if (!bundle_directory(boot_path, directory, sizeof(directory)))
+		return;
+	snprintf(module_directory, sizeof(module_directory), "%s/ZZ9K", directory);
+	lock = Lock((CONST_STRPTR)module_directory, ACCESS_READ);
+	if (lock) {
+		fib = AllocVec(sizeof(*fib), MEMF_ANY);
+		if (fib && Examine(lock, fib)) {
+			while (ExNext(lock, fib)) {
+				if (fib->fib_DirEntryType >= 0)
+					continue;
+				snprintf(member, sizeof(member), "%s/%s", module_directory,
+					fib->fib_FileName);
+				DeleteFile((CONST_STRPTR)member);
+			}
+		}
+		if (fib)
+			FreeVec(fib);
+		UnLock(lock);
+	}
+	DeleteFile((CONST_STRPTR)module_directory);
+	DeleteFile((CONST_STRPTR)boot_path);
+	DeleteFile((CONST_STRPTR)directory);
+}
+
+static BOOL make_bundle_directory(char *boot_path, ULONG boot_path_size,
+	char *directory, ULONG directory_size)
+{
+	struct DateStamp stamp;
+	BPTR created = 0;
+	ULONG attempt;
+
+	DateStamp(&stamp);
+	for (attempt = 0; attempt < 16; attempt++) {
+		snprintf(directory, directory_size,
+			"T:ZZTop-fw-%08lx-%08lx-%08lx-%02lx",
+			(unsigned long)stamp.ds_Days, (unsigned long)stamp.ds_Minute,
+			(unsigned long)stamp.ds_Tick, (unsigned long)attempt);
+		if (strlen(directory) >= directory_size ||
+			strlen(directory) + sizeof("/BOOT.bin") > boot_path_size)
+			return FALSE;
+		created = CreateDir((CONST_STRPTR)directory);
+		if (created)
+			break;
+	}
+	if (!created)
+		return FALSE;
+	UnLock(created);
+	snprintf(boot_path, boot_path_size, "%s/BOOT.bin", directory);
+	return TRUE;
+}
+
+static int begin_bundle_entry(void *ctx, const char *path)
+{
+	struct download_sink *s = ctx;
+	char target[256];
+	char module_directory[256];
+	BPTR lock;
+
+	if (s->file ||
+		snprintf(target, sizeof(target), "%s/%s", s->directory, path) >=
+			(int)sizeof(target))
+		return -1;
+	if (strcmp(path, "BOOT.bin") != 0) {
+		if (snprintf(module_directory, sizeof(module_directory), "%s/ZZ9K",
+			s->directory) >= (int)sizeof(module_directory))
+			return -1;
+		lock = Lock((CONST_STRPTR)module_directory, ACCESS_READ);
+		if (lock)
+			UnLock(lock);
+		else {
+			lock = CreateDir((CONST_STRPTR)module_directory);
+			if (!lock)
+				return -1;
+			UnLock(lock);
+		}
+	}
+	s->file = Open((CONST_STRPTR)target, MODE_NEWFILE);
+	return s->file ? 0 : -1;
+}
+
+static int write_bundle_entry(void *ctx, const uint8_t *data, size_t len)
 {
 	struct download_sink *s = ctx;
 
-	return Write(s->file, (APTR)data, (LONG)len) != (LONG)len;
+	return !s->file || Write(s->file, (APTR)data, (LONG)len) != (LONG)len;
+}
+
+static int end_bundle_entry(void *ctx, const char *path)
+{
+	struct download_sink *s = ctx;
+
+	(void)path;
+	if (!s->file)
+		return -1;
+	Close(s->file);
+	s->file = 0;
+	return 0;
 }
 
 static int download_begin(void *ctx, LONG total)
@@ -207,9 +329,9 @@ static int download_data(void *ctx, const UBYTE *data, ULONG len)
 	return s->zip_result == FWREL_ZIP_MORE ? 0 : -1;
 }
 
-BOOL fwonline_download(const char *tag, int variant, const char *path,
-	const struct fwonline_hooks *hooks, BOOL *cancelled, char *msg,
-	ULONG size)
+BOOL fwonline_download(const char *tag, int variant, char *boot_path,
+	ULONG boot_path_size, const struct fwonline_hooks *hooks,
+	BOOL *cancelled, char *msg, ULONG size)
 {
 	static char url[sizeof(DOWNLOAD_URL) + 160];
 	struct download_sink s;
@@ -221,25 +343,29 @@ BOOL fwonline_download(const char *tag, int variant, const char *path,
 	BOOL ok = FALSE;
 
 	*cancelled = FALSE;
-	if (!fwrel_asset_name(tag, variant, asset, sizeof(asset))) {
+	if (!boot_path || boot_path_size == 0 ||
+		!fwrel_asset_name(tag, variant, asset, sizeof(asset))) {
 		snprintf(msg, size, "%s", "No release image for this board");
 		return FALSE;
 	}
+	boot_path[0] = '\0';
 	snprintf(url, sizeof(url), "%s%s/%s", DOWNLOAD_URL, tag, asset);
 
 	memset(&s, 0, sizeof(s));
 	s.base.hooks = hooks;
 	s.total = -1;
 	s.zip_result = FWREL_ZIP_MORE;
-	s.zip = fwrel_zip_new(write_image, &s);
-	if (!s.zip) {
-		snprintf(msg, size, "%s", "Not enough memory");
+	if (!make_bundle_directory(boot_path, boot_path_size, s.directory,
+		sizeof(s.directory))) {
+		snprintf(msg, size, "%s", "Cannot create temporary directory in T:");
 		return FALSE;
 	}
-	s.file = Open((CONST_STRPTR)path, MODE_NEWFILE);
-	if (!s.file) {
-		fwrel_zip_free(s.zip);
-		snprintf(msg, size, "Cannot create %s", path);
+	s.zip = fwrel_zip_new_bundle(begin_bundle_entry, write_bundle_entry,
+		end_bundle_entry, &s);
+	if (!s.zip) {
+		snprintf(msg, size, "%s", "Not enough memory");
+		fwonline_remove_bundle(boot_path);
+		boot_path[0] = '\0';
 		return FALSE;
 	}
 	sink.begin = download_begin;
@@ -248,7 +374,8 @@ BOOL fwonline_download(const char *tag, int variant, const char *path,
 	sink.ctx = &s;
 	result = https_get(url, "application/octet-stream", &sink, &status,
 		err, sizeof(err));
-	Close(s.file);
+	if (s.file)
+		Close(s.file);
 
 	if (result == HTTPS_STOPPED && s.zip_result == FWREL_ZIP_DONE) {
 		ok = TRUE;
@@ -259,9 +386,7 @@ BOOL fwonline_download(const char *tag, int variant, const char *path,
 		snprintf(msg, size, "%s has no %s image", tag,
 			fwrel_variant_name(variant));
 	} else if (result == HTTPS_SINK_FAILED || result == HTTPS_OK) {
-		/* The archive failed to verify, or ended before BOOT.bin
-		 * was complete. */
-		snprintf(msg, size, "Downloaded image rejected: %s",
+		snprintf(msg, size, "Downloaded bundle rejected: %s",
 			s.zip_result == FWREL_ZIP_ERR_WRITE ?
 			"cannot write it (is the disk full?)" :
 			fwrel_zip_strerror(s.zip_result));
@@ -269,7 +394,9 @@ BOOL fwonline_download(const char *tag, int variant, const char *path,
 		describe_failure(result, status, err, "download", msg, size);
 	}
 	fwrel_zip_free(s.zip);
-	if (!ok)
-		DeleteFile((CONST_STRPTR)path);
+	if (!ok) {
+		fwonline_remove_bundle(boot_path);
+		boot_path[0] = '\0';
+	}
 	return ok;
 }
