@@ -39,17 +39,19 @@ Advanced controls**, with the shortcuts `?`, `Q`, `S`, `R`, and `A`.
 
 ## Saving, reverting, and quitting
 
-Changes have one of two effects.
+Changes have one of three effects.
 
 | Effect | Settings |
 |---|---|
 | Live | Scanlines, live picture alignment and sampling, capture geometry where supported, and audio controls |
-| After a power cycle | Native-output profile, sampling mode, interrupt, MAC address, SD-card boot image, RTG options, and Fast RAM |
+| After a reboot | Fast RAM |
+| After a power cycle | Native-output profile, sampling mode, interrupt, MAC address, SD-card boot image, and RTG options |
 
 **Save** first validates pending MAC, HDF, and capture values. It saves audio,
 repairs any non-audio settings that the firmware audio save replaced, rereads
 `ZZ9000.CFG`, merges only the changed non-audio fields, then writes the merged
-file. The status line identifies settings that need a power cycle.
+file. The status line says reboot when only Fast RAM changed, and power-cycle
+when any other boot-time setting changed.
 
 **Revert** restores the saved live capture, scanline, and audio state, then
 reloads the settings file. It reports a restore failure instead of pretending
@@ -179,8 +181,9 @@ blocks other audio edits until the card acknowledges the paired calibration.
 
 ## System
 
-System settings apply after a power cycle and are disabled when firmware
-configuration support is unavailable.
+System settings other than Fast RAM apply after a power cycle. Fast RAM
+applies after a reboot. The page is disabled when firmware configuration
+support is unavailable.
 
 | Group | Controls and settings |
 |---|---|
@@ -188,7 +191,7 @@ configuration support is unavailable.
 | Network | **Use the card's built-in address** or enter a MAC address as `aa:bb:cc:dd:ee:ff` (hyphens are also accepted). |
 | SD card boot | **Boot from an SD card image** and an image filename in the microSD root. An empty setting leaves the firmware default, `zz9000.hdf`; disabled boot writes `hdf = off`. |
 | Graphics | **Off-screen bitmaps in card memory (for incompatible software)** and **Video overlay window (needed by in-window ZZPlay)**. Both default to on. |
-| Memory | **Zorro III Fast RAM**, with an effective-state message from the boot result. |
+| Memory | **Zorro III Fast RAM**, with a status that shows On, Off, a pending reboot, or a fail-closed boot result. |
 
 `ENV:ZZ9K_INT2` and a valid `ENV:ZZ9K_MAC` override their card-file values.
 For either, select **Use it** to adopt the value or **Remove** to delete both
@@ -197,7 +200,7 @@ then firmware default.
 
 Fast RAM is fail-closed. The firmware leaves it disabled after a malformed,
 truncated, missing, unreadable, slow, or failed configuration read. A saved
-Fast RAM change takes effect at the next cold boot.
+Fast RAM change takes effect at the next reboot.
 
 ## Firmware
 

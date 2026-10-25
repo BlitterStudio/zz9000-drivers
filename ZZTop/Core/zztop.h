@@ -26,7 +26,7 @@
  * Save/Revert buttons and the Quit decision. */
 struct app_pending {
 	UWORD card;     /* ZZ9000.CFG fields edited but not saved */
-	UWORD reboot;   /* ...of which take effect only at the next cold boot */
+	UWORD reboot;   /* ...of which wait for the next boot */
 	BOOL live;      /* live hardware differs from what Revert restores */
 	BOOL audio;     /* firmware audio scene state differs from its save */
 };

@@ -370,6 +370,133 @@ UWORD settings_reboot_count(void)
 	return count_bits(cfg.dirty & CFG_REBOOT_FIELDS);
 }
 
+UWORD settings_power_cycle_count(void)
+{
+	return count_bits(cfg.dirty & CFG_POWER_CYCLE_FIELDS);
+}
+
+const char *settings_system_note(void)
+{
+	if (!cfg.supported)
+		return "These settings need firmware 2.3+.";
+	return "Other settings: power-cycle. Fast RAM: reboot.";
+}
+
+static const char *fast_ram_outcome_text(UWORD outcome)
+{
+	switch (outcome) {
+	case ZZ_CFG_FAST_RAM_OUTCOME_OFF:       return "off";
+	case ZZ_CFG_FAST_RAM_OUTCOME_ABSENT:    return "not configured";
+	case ZZ_CFG_FAST_RAM_OUTCOME_INVALID:   return "invalid config";
+	case ZZ_CFG_FAST_RAM_OUTCOME_TRUNCATED: return "truncated config";
+	case ZZ_CFG_FAST_RAM_OUTCOME_MEDIA_ERR: return "SD error";
+	case ZZ_CFG_FAST_RAM_OUTCOME_TIMEOUT:   return "boot timeout";
+	default:                                return "boot gate";
+	}
+}
+
+static int fast_ram_saved_on(void)
+{
+	return cfg.saved.fast_ram_present && !cfg.saved.fast_ram_invalid &&
+		cfg.saved.fast_ram;
+}
+
+/* A read failure or a poisoned line. OFF and ABSENT are clean decisions. */
+static int fast_ram_outcome_failed(UWORD outcome)
+{
+	return outcome == ZZ_CFG_FAST_RAM_OUTCOME_INVALID ||
+		outcome == ZZ_CFG_FAST_RAM_OUTCOME_TRUNCATED ||
+		outcome == ZZ_CFG_FAST_RAM_OUTCOME_MEDIA_ERR ||
+		outcome == ZZ_CFG_FAST_RAM_OUTCOME_TIMEOUT;
+}
+
+void settings_fast_ram_status(char *status, UWORD status_size,
+	char *note, UWORD note_size)
+{
+	if (note && note_size)
+		note[0] = '\0';
+	if (!status || status_size == 0)
+		return;
+	status[0] = '\0';
+
+	if (!cfg.supported) {
+		snprintf(status, status_size, "%s",
+			"Unavailable (no config support)");
+		return;
+	}
+	if (cfg.fast_ram_state == ZZCFG_FAST_RAM_UNAVAILABLE) {
+		snprintf(status, status_size, "%s",
+			"Unavailable on this firmware");
+		if (note && note_size)
+			snprintf(note, note_size, "%s",
+				"Fast RAM needs FW boot gate support.");
+		return;
+	}
+	/* The outcome register is the last boot. Fail-closed results stay
+	 * visible even if the file has since been rewritten. */
+	if (cfg.fast_ram_state == ZZCFG_FAST_RAM_WITHHELD ||
+			fast_ram_outcome_failed(cfg.fast_ram_outcome)) {
+		if (cfg.fast_ram_state == ZZCFG_FAST_RAM_WITHHELD) {
+			snprintf(status, status_size, "Withheld (%s)",
+				fast_ram_outcome_text(cfg.fast_ram_outcome));
+			if (note && note_size)
+				snprintf(note, note_size, "%s",
+					"Boot gate withheld memory for safety.");
+		} else {
+			snprintf(status, status_size, "Disabled (%s)",
+				fast_ram_outcome_text(cfg.fast_ram_outcome));
+		}
+		return;
+	}
+	if (note && note_size)
+		snprintf(note, note_size, "%s", "Takes effect after reboot.");
+	if (cfg.fast_ram_state == ZZCFG_FAST_RAM_ENABLED) {
+		if (fast_ram_saved_on())
+			snprintf(status, status_size, "On%s",
+				cfg.fast_ram_outcome == ZZ_CFG_FAST_RAM_OUTCOME_BAK_ON ?
+				" (backup)" : "");
+		else
+			snprintf(status, status_size, "%s",
+				"On now; off after reboot");
+		return;
+	}
+	if (cfg.fast_ram_outcome != ZZ_CFG_FAST_RAM_OUTCOME_OFF &&
+			cfg.fast_ram_outcome != ZZ_CFG_FAST_RAM_OUTCOME_ABSENT) {
+		snprintf(status, status_size, "Disabled (%s)",
+			fast_ram_outcome_text(cfg.fast_ram_outcome));
+		return;
+	}
+	if (fast_ram_saved_on()) {
+		snprintf(status, status_size, "%s", "Off now; on after reboot");
+		return;
+	}
+	if (cfg.fast_ram_outcome == ZZ_CFG_FAST_RAM_OUTCOME_OFF) {
+		snprintf(status, status_size, "%s", "Off");
+		return;
+	}
+	snprintf(status, status_size, "Disabled (%s)",
+		fast_ram_outcome_text(cfg.fast_ram_outcome));
+}
+
+void settings_saved_message(char *msg, UWORD size)
+{
+	UWORD reboot = settings_reboot_count();
+	UWORD power = settings_power_cycle_count();
+
+	if (!msg || size == 0)
+		return;
+	if (power)
+		snprintf(msg, size,
+			"Saved. Power-cycle the Amiga to apply %u "
+			"boot-time setting%s.",
+			(unsigned)reboot, reboot == 1 ? "" : "s");
+	else if (reboot)
+		snprintf(msg, size, "%s",
+			"Saved. Reboot the Amiga to apply Fast RAM.");
+	else
+		snprintf(msg, size, "%s", "Saved.");
+}
+
 /* ------------------------------------------------------------------ */
 /* Validation and save                                                 */
 
