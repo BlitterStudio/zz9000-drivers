@@ -256,12 +256,14 @@ static inline uint32_t zz9000_read_z2_aperture_verified(
     ULONG board_addr, uint32_t board_size, uint16_t *fw_caps_io,
     int *verified, int *resamples)
 {
-    uint32_t descriptor = zz9000_read_reg32(
-        board_addr, ZZ_REG_Z2_APERTURE_INFO_HI);
+    uint32_t descriptor;
     int attempts = 5;
     int unstable = 0;
     int caps_unstable = 0;
 
+    (void)board_size;
+    descriptor = zz9000_read_reg32(
+        board_addr, ZZ_REG_Z2_APERTURE_INFO_HI);
     if (verified) {
         *verified = 0;
     }
