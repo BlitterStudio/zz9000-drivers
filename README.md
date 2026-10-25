@@ -307,6 +307,13 @@ adjusted.
 - **Done** in Capture stages an accepted preview in Scandoubler; **Save** is
   the only action that writes `ZZ9000.CFG`. A cold boot later reproduces the
   saved pair.
+`ZZFwUpdate` installs a `BOOT.bin` and, when it has a sibling `ZZ9K/` drawer,
+the release's optional `*.ZZM` modules. It sends modules first and `BOOT.bin`
+last, preserves the card's own `ZZ9000.CFG`, and keeps `BOOT.bak` rollback
+images. It requires firmware with the FWUP protocol. Use the
+[command-line tool manual](docs/cli-tools.md) for its backup and restore
+procedure. ZZTop's Firmware page uses the same protocol and can also check
+GitHub for a newer firmware release and install the complete bundle.
 
 Capture Cancel, Scandoubler Reload, and closing the Scandoubler window
 restore their owning live snapshots before discarding an unsaved preview; the
