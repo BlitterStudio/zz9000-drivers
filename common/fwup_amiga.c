@@ -6,10 +6,9 @@
 #include <exec/types.h>
 #include <exec/memory.h>
 #include <dos/dos.h>
+#include <proto/dos.h>
 #include <proto/exec.h>
 #include <string.h>
-
-#include <exec/types.h>
 
 #include "zz9000_hw.h"
 #include "fwup_client.h"
@@ -210,9 +209,9 @@ UWORD fwup_bundle_discover(const char *boot_path, struct fwup_bundle *bundle) {
     bundle->module_dir_present = TRUE;
     while (ExNext(dir_lock, fib)) {
         if (fib->fib_DirEntryType >= 0 ||
-            !amiga_module_extension(fib->fib_FileName))
+            !amiga_module_extension((const char *)fib->fib_FileName))
             continue;
-        if (!fwup_module_name_valid(fib->fib_FileName)) {
+        if (!fwup_module_name_valid((const char *)fib->fib_FileName)) {
             FreeMem(fib, sizeof(*fib));
             UnLock(dir_lock);
             return FWUP_ERR_BAD_NAME;
@@ -222,7 +221,8 @@ UWORD fwup_bundle_discover(const char *boot_path, struct fwup_bundle *bundle) {
             UnLock(dir_lock);
             return FWUP_ERR_BUNDLE;
         }
-        if (!bundle_insert_module(bundle, module_dir, fib->fib_FileName)) {
+        if (!bundle_insert_module(bundle, module_dir,
+                (const char *)fib->fib_FileName)) {
             FreeMem(fib, sizeof(*fib));
             UnLock(dir_lock);
             return FWUP_ERR_FILE;
