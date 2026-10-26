@@ -29,6 +29,11 @@ const char *modules_state_text(ULONG state)
 	case ZZ9K_MODULE_REJECTED_ABI: return "rejected: ABI";
 	case ZZ9K_MODULE_REJECTED_HASH: return "rejected: hash";
 	case ZZ9K_MODULE_REJECTED_SLOT: return "rejected: slot";
+	case ZZ9K_MODULE_REJECTED_SERVICE: return "rejected: service";
+	case ZZ9K_MODULE_FAULTED: return "faulted";
+	case ZZ9K_MODULE_AVAILABLE: return "available";
+	case ZZ9K_MODULE_LOADING: return "loading";
+	case ZZ9K_MODULE_LOAD_FAILED: return "load failed";
 	default: return "unknown";
 	}
 }
