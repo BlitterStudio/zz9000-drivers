@@ -14,8 +14,9 @@ ZZTop/build-gcc.sh
 "$amiga_docker" ZZScanlines m68k-amigaos-gcc -O2 -noixemul -I../include \
     -o ZZScanlines ZZScanlines.c -lamiga
 "$amiga_docker" ZZFwUpdate m68k-amigaos-gcc -O2 -noixemul -Wall -Wextra \
-    -I../include -I../common -o ZZFwUpdate ZZFwUpdate.c \
-    ../common/fwup_amiga.c ../common/fwup_client.c -lamiga
+    -Wstack-usage=2048 -Werror -I../include -I../common \
+    -o ZZFwUpdate ZZFwUpdate.c ../common/fwup_amiga.c \
+    ../common/fwup_client.c -lamiga
 "$amiga_docker" usb-poseidon ./build.sh
 "$amiga_docker" sd-boot ./build.sh
 "$amiga_docker" net make
