@@ -48,7 +48,8 @@ common="../common/fwup_amiga.c ../common/fwup_client.c \
   ../common/zz_vcap_client.c ../common/zz_vcap_geometry.c \
   ../common/fw_release.c"
 flags="-m68030 -O2 -DNO_INLINE_STDARG -I../common -I../include -Izz9k-headers -ICore \
-  -Wall -Wextra -Wno-unused-parameter -Wstack-usage=2048 -Werror"
+  -Wall -Wextra -Wno-unused-parameter"
+stack_flags="-Wstack-usage=8192 -Werror"
 libs="-lamiga -ldebug -noixemul -lm"
 
 # The release-archive inflater has its own compile rule (see the script).
@@ -59,4 +60,4 @@ sh ../common/miniz/build-m68k.sh "$objdir/miniz_tinfl.o" $flags
 
 # shellcheck disable=SC2086
 m68k-amigaos-gcc GadTools/*.c Core/*.c $common "$objdir/miniz_tinfl.o" \
-  $flags -IGadTools -o ZZTop $libs
+  $flags $stack_flags -IGadTools -o ZZTop $libs
