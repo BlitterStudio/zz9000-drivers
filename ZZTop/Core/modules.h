@@ -1,5 +1,5 @@
 /*
- * Firmware module status model for the ZZTop Firmware page.
+ * Firmware module status model for the ZZTop Modules page.
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
