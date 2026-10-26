@@ -33,6 +33,8 @@ static uint8_t *board_buffer(struct fwup_io *io) {
 static uint32_t board_read_mirror(struct fwup_io *io) {
     return *(volatile ULONG *)((ULONG)io->ctx + ZZ_FWUP_STATUS_MIRROR_OFFSET);
 }
+/* Delay one 50 Hz tick between mirror polls and around legacy status
+ * accesses, so old core-0 FWUP receivers can finish FatFs work first. */
 static void board_idle(struct fwup_io *io) {
     (void)io;
     Delay(1);
