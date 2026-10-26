@@ -31,6 +31,7 @@
 #include <proto/exec.h>
 #include <proto/expansion.h>
 #include <proto/dos.h>
+#include <exec/tasks.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -45,6 +46,25 @@ static const char version[] __attribute__((used)) =
     "$VER: ZZFwUpdate " ZZFWUPDATE_VERSION " (" ZZFWUPDATE_DATE ")\r\n";
 
 #define FWUP_TICKS_PER_SECOND 50UL
+#define ZZFWUPDATE_MIN_STACK 8192UL
+
+/* This libnix startup does not consume a stack-size symbol, so reject an
+ * unsafe Shell/Workbench launch before entering DOS or FWUP call chains. */
+static int stack_ready(void) {
+    struct Task *task = FindTask(NULL);
+
+    if (!task || (uintptr_t)task->tc_SPUpper <= (uintptr_t)task->tc_SPLower ||
+        (uintptr_t)task->tc_SPUpper - (uintptr_t)task->tc_SPLower <
+            ZZFWUPDATE_MIN_STACK) {
+        printf("ERROR: ZZFwUpdate needs at least %lu bytes of stack; run "
+               "Stack %lu and try again.\n",
+               (unsigned long)ZZFWUPDATE_MIN_STACK,
+               (unsigned long)ZZFWUPDATE_MIN_STACK);
+        return 0;
+    }
+    return 1;
+}
+
 
 /* The shared client is the authority for root names and module targets. */
 static int validate_dest_name(const char *name) {
@@ -282,8 +302,8 @@ static int do_push(ULONG board, const char *src_path, const char *dest_name) {
 
 static int do_install_bundle(ULONG board, const char *boot_path) {
     static struct fwup_bundle bundle;
+    static char failed_name[FWUP_NAME_MAX + 1];
     struct cli_progress prog = { 0, -1 };
-    char failed_name[FWUP_NAME_MAX + 1];
     UWORD st;
     int modules_skipped = 0;
 
@@ -328,11 +348,13 @@ static int do_install_bundle(ULONG board, const char *boot_path) {
 }
 
 int main(int argc, char *argv[]) {
+    static char release_boot_path[256];
     const char *src_path;
     const char *dest_name;
-    char release_boot_path[256];
     int install_bundle = 0;
     ULONG board;
+
+    if (!stack_ready()) return 20;
     /* Restore mode: ZZFwUpdate RESTORE [name] [-y] */
     if (argc >= 2 && streq_ci(argv[1], "RESTORE")) {
         const char *target = NULL;

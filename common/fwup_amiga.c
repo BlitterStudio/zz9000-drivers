@@ -128,6 +128,10 @@ UWORD fwup_send_file(ULONG board, const char *src_path, const char *dest_name,
     Close(fh);
     return st;
 }
+
+/* Discovery is synchronous with the single FWUP transfer protocol.  Keep the
+ * sibling-directory path out of the small Shell stack used by ZZFwUpdate. */
+static char bundle_discovery_dir[256];
 static int amiga_bundle_dir(const char *boot_path, char *dir,
                             ULONG dir_size) {
     const char *last = NULL;
@@ -183,7 +187,6 @@ static int bundle_insert_module(struct fwup_bundle *bundle, const char *dir,
 UWORD fwup_bundle_discover(const char *boot_path, struct fwup_bundle *bundle) {
     BPTR boot, dir_lock;
     struct FileInfoBlock *fib;
-    char module_dir[256];
 
     if (!boot_path || !bundle || strlen(boot_path) >= sizeof(bundle->boot_path))
         return FWUP_ERR_FILE;
@@ -193,9 +196,10 @@ UWORD fwup_bundle_discover(const char *boot_path, struct fwup_bundle *bundle) {
 
     memset(bundle, 0, sizeof(*bundle));
     memcpy(bundle->boot_path, boot_path, strlen(boot_path) + 1);
-    if (!amiga_bundle_dir(boot_path, module_dir, sizeof(module_dir)))
+    if (!amiga_bundle_dir(boot_path, bundle_discovery_dir,
+                          sizeof(bundle_discovery_dir)))
         return FWUP_ERR_FILE;
-    dir_lock = Lock((STRPTR)module_dir, ACCESS_READ);
+    dir_lock = Lock((STRPTR)bundle_discovery_dir, ACCESS_READ);
     if (!dir_lock) return FWUP_OK;
 
     fib = (struct FileInfoBlock *)AllocMem(sizeof(*fib), MEMF_PUBLIC);
@@ -223,7 +227,7 @@ UWORD fwup_bundle_discover(const char *boot_path, struct fwup_bundle *bundle) {
             UnLock(dir_lock);
             return FWUP_ERR_BUNDLE;
         }
-        if (!bundle_insert_module(bundle, module_dir,
+        if (!bundle_insert_module(bundle, bundle_discovery_dir,
                 (const char *)fib->fib_FileName)) {
             FreeMem(fib, sizeof(*fib));
             UnLock(dir_lock);

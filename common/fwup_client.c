@@ -245,6 +245,17 @@ struct bundle_modules {
     uint16_t status;
 };
 
+/* FWUP is serialized by the one shared board buffer and protocol state, so
+ * this workspace cannot be used concurrently.  Keeping it static prevents
+ * a release install from consuming a 3.5 KiB Amiga Shell stack frame. */
+struct bundle_workspace {
+    struct bundle_modules modules;
+    char module_dir[FWUP_HOST_PATH_MAX];
+    char module_path[FWUP_HOST_PATH_MAX];
+    char target[FWUP_MODULE_TARGET_MAX + 1];
+};
+static struct bundle_workspace bundle_workspace;
+
 static int module_name_has_extension(const char *name) {
     size_t len;
 
@@ -346,10 +357,8 @@ uint16_t fwup_install_bundle(struct fwup_io *io, uint16_t fw_caps,
                              const struct fwup_bundle_files *files,
                              fwup_bundle_progress_fn progress, void *ctx,
                              struct fwup_bundle_result *result) {
-    struct bundle_modules modules;
-    char module_dir[FWUP_HOST_PATH_MAX];
-    char module_path[FWUP_HOST_PATH_MAX];
-    char target[FWUP_MODULE_TARGET_MAX + 1];
+    struct bundle_workspace *workspace = &bundle_workspace;
+    struct bundle_modules *modules = &workspace->modules;
     uint32_t boot_size, total, done;
     unsigned i;
     int listed;
@@ -368,38 +377,41 @@ uint16_t fwup_install_bundle(struct fwup_io *io, uint16_t fw_caps,
         return FWUP_ERR_FILE;
     total = boot_size;
     done = 0;
-    modules.count = 0;
-    modules.status = FWUP_OK;
+    modules->count = 0;
+    modules->status = FWUP_OK;
 
     if ((fw_caps & (1U << 14)) != 0) {
-        if (!make_module_dir(boot_host_path, module_dir)) return FWUP_ERR_FILE;
-        listed = files->list_dir(files->ctx, module_dir, collect_module, &modules);
-        if (listed < 0) return modules.status != FWUP_OK ?
-                          modules.status : FWUP_ERR_FILE;
-        for (i = 0; i < modules.count; i++) {
-            if (total > 0xffffffffUL - modules.entries[i].size)
+        if (!make_module_dir(boot_host_path, workspace->module_dir))
+            return FWUP_ERR_FILE;
+        listed = files->list_dir(files->ctx, workspace->module_dir,
+                                 collect_module, modules);
+        if (listed < 0) return modules->status != FWUP_OK ?
+                          modules->status : FWUP_ERR_FILE;
+        for (i = 0; i < modules->count; i++) {
+            if (total > 0xffffffffUL - modules->entries[i].size)
                 return FWUP_ERR_BUNDLE;
-            total += modules.entries[i].size;
+            total += modules->entries[i].size;
         }
     } else if (result) {
         result->outcome = FWUP_BUNDLE_BOOT_ONLY_NO_MODULE_DIR;
     }
 
     if (progress) progress(ctx, "", done, total);
-    for (i = 0; i < modules.count; i++) {
-        if (!make_module_path(module_path, module_dir, modules.entries[i].name))
+    for (i = 0; i < modules->count; i++) {
+        if (!make_module_path(workspace->module_path, workspace->module_dir,
+                              modules->entries[i].name))
             return FWUP_ERR_FILE;
-        memcpy(target, "ZZ9K/", 5);
-        memcpy(target + 5, modules.entries[i].name,
-               strlen(modules.entries[i].name) + 1);
-        st = send_bundle_file(io, files, module_path, target, &done, total,
-                              progress, ctx);
+        memcpy(workspace->target, "ZZ9K/", 5);
+        memcpy(workspace->target + 5, modules->entries[i].name,
+               strlen(modules->entries[i].name) + 1);
+        st = send_bundle_file(io, files, workspace->module_path,
+                              workspace->target, &done, total, progress, ctx);
         if (st != FWUP_OK) {
             if (result) {
                 result->status = st;
                 result->outcome = FWUP_BUNDLE_MODULE_FAILED;
-                memcpy(result->failed_module, modules.entries[i].name,
-                       strlen(modules.entries[i].name) + 1);
+                memcpy(result->failed_module, modules->entries[i].name,
+                       strlen(modules->entries[i].name) + 1);
             }
             return st;
         }
