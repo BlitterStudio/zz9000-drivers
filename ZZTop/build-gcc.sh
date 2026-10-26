@@ -43,7 +43,7 @@ export PATH=/opt/amiga/bin:"$PATH"
 # Core/ holds the logic (board, ZZ9000.CFG model, live video, audio control
 # plane, Save/Revert/Quit); GadTools/ is the user interface on top of it.
 # NO_INLINE_STDARG: the inline varargs macros warn on pointer tag values.
-common="../common/fwup_amiga.c ../common/fwup_client.c \
+common="../common/amiga_stack.c ../common/fwup_amiga.c ../common/fwup_client.c \
   ../common/zzcfg_amiga.c ../common/zz_vcap_live.c \
   ../common/zz_vcap_client.c ../common/zz_vcap_geometry.c \
   ../common/fw_release.c"
