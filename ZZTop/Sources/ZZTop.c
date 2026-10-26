@@ -39,6 +39,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "amiga_stack.h"
 #include "zz9000.h"
 #include "fwup_amiga.h"
 #include "zzcfg_amiga.h"
@@ -6258,7 +6259,7 @@ VOID gadtoolsWindow(VOID) {
 	}
 }
 
-int main(void) {
+static int zztop_main(void) {
 	if (NULL == (IntuitionBase = OpenLibrary((CONST_STRPTR)"intuition.library", 37))) {
 		errorMessage("Requires V37 intuition.library");
 		return 0;
@@ -6331,4 +6332,13 @@ int main(void) {
 	CloseLibrary(IntuitionBase);
 
 	return 0;
+}
+
+static int zztop_entry(void *ctx) {
+	(void)ctx;
+	return zztop_main();
+}
+
+int main(void) {
+	return amiga_stack_run("ZZTop", 16384UL, zztop_entry, NULL);
 }

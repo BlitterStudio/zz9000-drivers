@@ -31,10 +31,10 @@
 #include <proto/exec.h>
 #include <proto/expansion.h>
 #include <proto/dos.h>
-#include <exec/tasks.h>
 #include <stdio.h>
 #include <string.h>
 
+#include "amiga_stack.h"
 #include "zz9000_hw.h"
 #include "fwup_client.h"
 #include "fwup_amiga.h"
@@ -46,24 +46,7 @@ static const char version[] __attribute__((used)) =
     "$VER: ZZFwUpdate " ZZFWUPDATE_VERSION " (" ZZFWUPDATE_DATE ")\r\n";
 
 #define FWUP_TICKS_PER_SECOND 50UL
-#define ZZFWUPDATE_MIN_STACK 8192UL
-
-/* This libnix startup does not consume a stack-size symbol, so reject an
- * unsafe Shell/Workbench launch before entering DOS or FWUP call chains. */
-static int stack_ready(void) {
-    struct Task *task = FindTask(NULL);
-
-    if (!task || (uintptr_t)task->tc_SPUpper <= (uintptr_t)task->tc_SPLower ||
-        (uintptr_t)task->tc_SPUpper - (uintptr_t)task->tc_SPLower <
-            ZZFWUPDATE_MIN_STACK) {
-        printf("ERROR: ZZFwUpdate needs at least %lu bytes of stack; run "
-               "Stack %lu and try again.\n",
-               (unsigned long)ZZFWUPDATE_MIN_STACK,
-               (unsigned long)ZZFWUPDATE_MIN_STACK);
-        return 0;
-    }
-    return 1;
-}
+#define ZZFWUPDATE_STACK_BYTES 16384UL
 
 
 /* The shared client is the authority for root names and module targets. */
@@ -347,14 +330,13 @@ static int do_install_bundle(ULONG board, const char *boot_path) {
     return 1;
 }
 
-int main(int argc, char *argv[]) {
+static int updater_main(int argc, char *argv[]) {
     static char release_boot_path[256];
     const char *src_path;
-    const char *dest_name;
+    const char *dest_name = "";
     int install_bundle = 0;
     ULONG board;
 
-    if (!stack_ready()) return 20;
     /* Restore mode: ZZFwUpdate RESTORE [name] [-y] */
     if (argc >= 2 && streq_ci(argv[1], "RESTORE")) {
         const char *target = NULL;
@@ -424,4 +406,24 @@ int main(int argc, char *argv[]) {
     if (install_bundle)
         return do_install_bundle(board, src_path);
     return do_push(board, src_path, dest_name);
+}
+
+struct updater_args {
+    int argc;
+    char **argv;
+};
+
+static int updater_entry(void *ctx) {
+    struct updater_args *args = (struct updater_args *)ctx;
+
+    return updater_main(args->argc, args->argv);
+}
+
+int main(int argc, char *argv[]) {
+    struct updater_args args;
+
+    args.argc = argc;
+    args.argv = argv;
+    return amiga_stack_run("ZZFwUpdate", ZZFWUPDATE_STACK_BYTES,
+                           updater_entry, &args);
 }
