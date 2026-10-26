@@ -1371,7 +1371,7 @@ SAVEDS void frame_proc() {
   wmask = SIGBREAKF_CTRL_F | SIGBREAKF_CTRL_C;
 
   struct Task *self = FindTask(NULL);
-  struct zznet_rx_drain drain;
+  struct zznet_rx_drain drain = {0};
   struct zznet_rx_state rx_state;
   USHORT fw_version = *(volatile USHORT *)(ZZ9K_REGS + ZZ_REG_FW_VERSION);
   zznet_rx_reset(&rx_state, fw_version);
