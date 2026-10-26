@@ -7,10 +7,26 @@
 
 #include "fwup_client.h"
 
-/* Roughly matches SD-boot's poll budget — each FatFs write can stall for
- * tens of ms on a slow SD card, so a small counter wouldn't survive a
- * real card under load. */
+/* A non-yielding caller retains the original poll-count timeout. Board
+ * callers yield between status reads, so use a bounded 30-second deadline
+ * instead of stretching that count into many hours. */
 #define FWUP_POLL_LIMIT 2000000UL
+#ifndef FWUP_LEGACY_POLL_IDLES
+#define FWUP_LEGACY_POLL_IDLES 1500UL /* about 30 s of one-tick yields */
+#endif
+
+/* A 2.8.1 receiver runs FWUP FatFs operations in its core-0 Zorro service
+ * loop. Keep its ARM-serviced status register untouched while that work
+ * starts, then poll it at one-tick intervals. */
+#ifndef FWUP_LEGACY_OPEN_QUIET_TICKS
+#define FWUP_LEGACY_OPEN_QUIET_TICKS 100UL /* 2 s: stale TMP unlink */
+#endif
+#ifndef FWUP_LEGACY_WRITE_QUIET_TICKS
+#define FWUP_LEGACY_WRITE_QUIET_TICKS 2UL /* 40 ms: two typical 16 KiB writes */
+#endif
+#ifndef FWUP_LEGACY_CLOSE_QUIET_TICKS
+#define FWUP_LEGACY_CLOSE_QUIET_TICKS 50UL /* 1 s: sync/rename/backup */
+#endif
 
 /* Mirror polling: spin on the card-memory longword first (each read is a
  * short Zorro III cycle that never waits on the ARM), then yield between
@@ -86,14 +102,27 @@ const char *fwup_strerror(uint16_t status) {
 }
 
 /* The firmware sets STATUS = 0xFFFF when it accepts a command and clears
- * it to the result once the FatFs call returns. */
+ * it to the result once the FatFs call returns.  Board transports provide
+ * idle, which makes this safe for legacy core-0 receivers; simple host
+ * transports retain the historical tight polling behavior. */
 static uint16_t poll_status(struct fwup_io *io) {
-    unsigned long budget = FWUP_POLL_LIMIT;
+    unsigned long budget;
     uint16_t st;
-    do {
+
+    if (!io->idle) {
+        budget = FWUP_POLL_LIMIT;
+        do {
+            st = io->read_status(io);
+            if (st != FWUP_STATUS_BUSY) return st;
+        } while (--budget);
+        return FWUP_STATUS_BUSY;
+    }
+
+    for (budget = 0; budget < FWUP_LEGACY_POLL_IDLES; budget++) {
         st = io->read_status(io);
         if (st != FWUP_STATUS_BUSY) return st;
-    } while (--budget);
+        io->idle(io);
+    }
     return FWUP_STATUS_BUSY;
 }
 
@@ -128,11 +157,25 @@ static uint16_t poll_mirror(struct fwup_io *io, uint32_t before) {
     return FWUP_STATUS_BUSY;
 }
 
+static unsigned long legacy_quiet_ticks(uint16_t cmd) {
+    switch (cmd) {
+    case FWUP_CMD_OPEN:  return FWUP_LEGACY_OPEN_QUIET_TICKS;
+    case FWUP_CMD_WRITE: return FWUP_LEGACY_WRITE_QUIET_TICKS;
+    case FWUP_CMD_CLOSE: return FWUP_LEGACY_CLOSE_QUIET_TICKS;
+    default:             return 0;
+    }
+}
+
+static void idle_ticks(struct fwup_io *io, unsigned long ticks) {
+    while (ticks-- != 0) io->idle(io);
+}
+
 static uint16_t run_command(struct fwup_io *io, uint16_t cmd) {
     uint32_t before;
 
     if (!io->read_mirror) {
         io->write_cmd(io, cmd);
+        if (io->idle) idle_ticks(io, legacy_quiet_ticks(cmd));
         return poll_status(io);
     }
     before = io->read_mirror(io);

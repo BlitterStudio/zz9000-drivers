@@ -35,6 +35,10 @@ static int           sim_mirror_frozen;  /* mirror never advances */
 static unsigned      sim_mirror_delay;   /* mirror reads before it advances */
 static unsigned      sim_mirror_reads;
 static unsigned      sim_register_reads;
+static unsigned long sim_ticks;
+static unsigned long sim_status_read_ticks[16];
+static unsigned      sim_status_read_count;
+static unsigned long sim_busy_until;
 static uint16_t      sim_mirror_pending; /* status not yet published */
 static int           sim_mirror_has_pending;
 static uint8_t       sim_buffer[FWUP_CHUNK_BYTES + 256];
@@ -56,6 +60,9 @@ static void sim_reset(void) {
     sim_mirror_delay = 0;
     sim_mirror_reads = 0;
     sim_register_reads = 0;
+    sim_ticks = 0;
+    sim_status_read_count = 0;
+    sim_busy_until = 0;
     sim_mirror_has_pending = 0;
     memset(sim_buffer, 0, sizeof(sim_buffer));
 }
@@ -63,7 +70,10 @@ static void sim_reset(void) {
 static uint16_t sim_read_status(struct fwup_io *io) {
     (void)io;
     sim_register_reads++;
-    return sim_status;
+    if (sim_status_read_count < sizeof(sim_status_read_ticks) /
+                                sizeof(sim_status_read_ticks[0]))
+        sim_status_read_ticks[sim_status_read_count++] = sim_ticks;
+    return sim_ticks < sim_busy_until ? FWUP_STATUS_BUSY : sim_status;
 }
 
 static void sim_publish(uint16_t status) {
@@ -89,6 +99,7 @@ static uint32_t sim_read_mirror(struct fwup_io *io) {
 }
 static void     sim_write_len(struct fwup_io *io, uint16_t len) { (void)io; sim_pending_len = len; }
 static uint8_t *sim_buffer_ptr(struct fwup_io *io) { (void)io; return sim_buffer; }
+static void sim_idle(struct fwup_io *io) { (void)io; sim_ticks++; }
 
 static void sim_write_cmd(struct fwup_io *io, uint16_t cmd) {
     (void)io;
@@ -144,6 +155,11 @@ static struct fwup_io sim_io = {
 static struct fwup_io sim_mirror_io = {
     sim_read_status, sim_write_cmd, sim_write_len, sim_buffer_ptr, NULL,
     sim_read_mirror, NULL
+};
+
+static struct fwup_io sim_polite_io = {
+    sim_read_status, sim_write_cmd, sim_write_len, sim_buffer_ptr, NULL,
+    NULL, sim_idle
 };
 
 /* ---- tiny test harness ---- */
@@ -400,6 +416,23 @@ static void test_bundle_without_module_capability(void) {
           "fallback outcome exposed");
 }
 
+/* Legacy board polling must leave core 0 alone long enough for OPEN to
+ * unlink a stale temporary file, then issue status reads one tick apart. */
+static void test_legacy_poll_is_polite(void) {
+    printf("test_legacy_poll_is_polite\n");
+    sim_reset();
+    sim_busy_until = 103; /* OPEN quiet period (100) plus three poll ticks */
+    CHECK(fwup_open(&sim_polite_io, "BOOT.bin") == FWUP_OK,
+          "legacy open completes after its quiet window");
+    CHECK(sim_status_read_count == 4, "status recorder captured each poll");
+    CHECK(sim_status_read_ticks[0] == 100,
+          "first status read follows the two-second OPEN quiet window");
+    CHECK(sim_status_read_ticks[1] == sim_status_read_ticks[0] + 1 &&
+          sim_status_read_ticks[2] == sim_status_read_ticks[1] + 1 &&
+          sim_status_read_ticks[3] == sim_status_read_ticks[2] + 1,
+          "busy status reads are separated by one idle tick");
+}
+
 /* With a mirror the client learns every result from it and never reads
  * the status register, which would hold the Amiga's bus cycle while the
  * firmware's FatFs call runs. */
@@ -469,6 +502,7 @@ int main(void) {
     test_full_send();
     test_write_error();
     test_restore();
+    test_legacy_poll_is_polite();
     test_mirror_send_never_reads_register();
     test_mirror_waits_for_new_sequence();
     test_mirror_first_publication_after_invalid_word();
