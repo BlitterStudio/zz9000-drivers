@@ -27,10 +27,11 @@ Start `ZZTop` from Workbench. It has no command-line options or Workbench
 ToolTypes.
 
 Choose a page from the list at the left. The normal list contains Status,
-Display, Audio, System, and Firmware. Enable **Settings > Advanced controls**
-to add Capture and Scenes as indented child pages, and Diagnostics as an
-additional page. This choice is kept in `ENV:ZZTopAdvanced`; it is a program
-setting, not a ToolType.
+Display, Audio, System, Firmware, and its indented Modules child page. Firmware
+without module-status support disables its Modules page. Enable **Settings >
+Advanced controls** to add Capture and Scenes as indented child pages, and
+Diagnostics as an additional page. This choice is kept in `ENV:ZZTopAdvanced`;
+it is a program setting, not a ToolType.
 
 The selected page has a title and a short description. The footer has a status
 line, **Revert**, and **Save**. The menus provide **Project > About**,
@@ -206,9 +207,7 @@ Fast RAM change takes effect at the next reboot.
 
 The Firmware page shows the installed firmware version and update-protocol
 status. Firmware that reports its patch level shows three numbers, such as
-`2.8.1`; older firmware shows `2.8`. Firmware with the module capability also
-lists every optional module and whether it loaded, is missing, or was rejected
-for its ABI, hash, or fixed slot.
+`2.8.1`; older firmware shows `2.8`.
 
 ### Updating online
 
@@ -269,6 +268,14 @@ the current `BOOT.bin` and leaves no backup. It works only while the card can
 boot and communicate with ZZTop; restore an unbootable card's microSD card on
 another computer. Transfers and restore are disabled until the updater probe
 succeeds, and during a transfer.
+
+## Modules
+
+Modules is an indented child page under Firmware. It lists each optional
+module's name, version, and state: loaded, missing, or rejected: ABI, hash, or
+slot. Use **Refresh** to reread the firmware manifest. Changes to `ZZ9K/` take
+effect after a reboot. The page disables its refresh control when the firmware
+does not advertise module-status support.
 
 ## Diagnostics
 

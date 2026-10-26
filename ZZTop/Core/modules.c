@@ -1,5 +1,5 @@
 /*
- * Firmware module status model for the ZZTop Firmware page.
+ * Firmware module status model for the ZZTop Modules page.
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -26,9 +26,9 @@ const char *modules_state_text(ULONG state)
 	switch (state) {
 	case ZZ9K_MODULE_LOADED: return "loaded";
 	case ZZ9K_MODULE_MISSING: return "missing";
-	case ZZ9K_MODULE_REJECTED_ABI: return "rejected ABI";
-	case ZZ9K_MODULE_REJECTED_HASH: return "rejected hash";
-	case ZZ9K_MODULE_REJECTED_SLOT: return "rejected slot";
+	case ZZ9K_MODULE_REJECTED_ABI: return "rejected: ABI";
+	case ZZ9K_MODULE_REJECTED_HASH: return "rejected: hash";
+	case ZZ9K_MODULE_REJECTED_SLOT: return "rejected: slot";
 	default: return "unknown";
 	}
 }

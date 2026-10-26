@@ -12,6 +12,7 @@ extern struct gt_page gt_page_audio;
 extern struct gt_page gt_page_tuning;
 extern struct gt_page gt_page_system;
 extern struct gt_page gt_page_firmware;
+extern struct gt_page gt_page_modules;
 extern struct gt_page gt_page_diag;
 
 struct gt_page *gt_pages[GT_PAGE_COUNT] = {
@@ -22,5 +23,6 @@ struct gt_page *gt_pages[GT_PAGE_COUNT] = {
 	&gt_page_tuning,
 	&gt_page_system,
 	&gt_page_firmware,
+	&gt_page_modules,
 	&gt_page_diag
 };

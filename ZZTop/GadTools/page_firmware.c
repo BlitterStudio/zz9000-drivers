@@ -17,7 +17,6 @@
 #include "fwonline.h"
 #include "fwup_amiga.h"
 #include "fwup_client.h"
-#include "modules.h"
 #include "gt.h"
 
 #define P GT_PAGE_FIRMWARE
@@ -35,9 +34,7 @@ enum {
 	G_PROGRESS,
 	G_STATUS,
 	G_RESTORE,
-	G_RESTORE_NOTE,
-	G_MODULE_NOTE,
-	G_MODULE_BASE = 40
+	G_RESTORE_NOTE
 };
 
 static struct Gadget *g_installed;
@@ -53,8 +50,6 @@ static struct Gadget *g_progress;
 static struct Gadget *g_status;
 static struct Gadget *g_restore;
 static struct Gadget *g_restore_note;
-static struct Gadget *g_module_note;
-static struct Gadget *g_modules[MODULE_STATUS_MAX];
 
 static char installed[32];
 static char path[256];
@@ -65,9 +60,6 @@ static char file_text[96] = "No file chosen";
 static char progress_text[40] = "Progress: 0 KB";
 static char status_note[96] = "";
 static char restore_note[96] = "Promotes BOOT.bak while card still boots.";
-static char module_note[96];
-static char module_text[MODULE_STATUS_MAX][96];
-static UWORD module_count;
 
 static const char *variant_choices[FWREL_VARIANT_COUNT + 1];
 static int variant = FWREL_VARIANT_ZORRO3;   /* chosen release image */
@@ -141,35 +133,6 @@ static void message_append(ULONG *used, const char *fmt, ...)
 		*used += (ULONG)written;
 }
 
-/* Query the fixed module manifest before creating its display fields. */
-static void load_modules(void)
-{
-	const struct module_list *list;
-	UWORD i;
-
-	module_count = 0;
-	module_note[0] = '\0';
-	memset(module_text, 0, sizeof(module_text));
-	if ((board.fw_caps & ZZ_FW_CAP_FIRMWARE_MODULES) == 0)
-		return;
-	if (!modules_refresh()) {
-		snprintf(module_note, sizeof(module_note), "%s", modules_status_text());
-		return;
-	}
-	list = modules_current();
-	module_count = list->count;
-	for (i = 0; i < module_count; i++) {
-		const struct module_status *entry = &list->entries[i];
-
-		snprintf(module_text[i], sizeof(module_text[i]),
-			"%s  id %lu  v%lu  %s", entry->name,
-			(unsigned long)entry->id, (unsigned long)entry->version,
-			modules_state_text(entry->state));
-	}
-	if (module_count == 0)
-		snprintf(module_note, sizeof(module_note), "%s",
-			"No optional modules in the firmware manifest.");
-}
 
 /* Describe the last check result for the chosen image. */
 static void render_latest(void)
@@ -528,7 +491,7 @@ static BOOL create(struct gt_page *page)
 {
 	struct gt_form f;
 	static const char *const fw_labels[] = {
-		"Installed", "Latest", "Board", "Module", NULL
+		"Installed", "Latest", "Board", NULL
 	};
 	WORD left, width;
 	WORD check_w, update_w, choose_w, inst_w, rest_w;
@@ -548,9 +511,6 @@ static BOOL create(struct gt_page *page)
 				FWREL_VARIANT_ZORRO2;
 	}
 	variant_shown = -1;
-	load_modules();
-	memset(g_modules, 0, sizeof(g_modules));
-	g_module_note = NULL;
 
 	gt_page_begin(page);
 	gt_form_init(&f, page, fw_labels);
@@ -584,21 +544,9 @@ static BOOL create(struct gt_page *page)
 	g_restore = gt_add_button(page, G_RESTORE, left, 8, rest_w, "Restore previous firmware");
 	g_restore_note = gt_add_note(page, G_RESTORE_NOTE, left, 9, width, restore_note);
 
-	if (module_note[0]) {
-		g_module_note = gt_add_note(page, G_MODULE_NOTE, left, 10, width,
-			module_note);
-		page->rows = 11;
-	} else {
-		for (i = 0; i < module_count; i++)
-			g_modules[i] = gt_form_field(&f, G_MODULE_BASE + i,
-				(UWORD)(10 + i), "Module", module_text[i]);
-		page->rows = (UWORD)(10 + module_count);
-	}
 	return g_installed && g_support && g_latest && g_variant && g_check &&
 		g_update && g_choose && g_file && g_install && g_progress &&
-		g_status && g_restore && g_restore_note &&
-		(!module_note[0] || g_module_note != NULL) &&
-		(module_note[0] || module_count == 0 || g_modules[module_count - 1] != NULL);
+		g_status && g_restore && g_restore_note;
 }
 
 /* Probe firmware update support when this page is shown. */
