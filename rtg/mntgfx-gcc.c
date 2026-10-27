@@ -507,6 +507,23 @@ static BOOL zz_cardmem_available(struct BoardInfo *b)
 			(UWORD)b->CardData[ZZ_CARD_DATA_FW_CAPABILITIES]);
 }
 
+/* Firmware reserves the legacy P96 range on every reset. Read back the
+ * token so a driver never expands MemorySize unless firmware accepted the
+ * Z3-only ownership hand-off. */
+static BOOL zz_cardmem_announce(struct BoardInfo *b)
+{
+	MNTZZ9KRegs *registers;
+
+	if (!b || !b->RegisterBase ||
+		!(b->CardFlags & CARDFLAG_ZORRO_3) ||
+		!((UWORD)b->CardData[ZZ_CARD_DATA_FW_CAPABILITIES] &
+		  ZZ_FW_CAP_P96_CARDMEM))
+		return FALSE;
+	registers = (MNTZZ9KRegs *)b->RegisterBase;
+	zzwrite16(&registers->cardmem_protocol, ZZ_REG_ZZ_CARDMEM_TOKEN);
+	return registers->cardmem_protocol == ZZ_REG_ZZ_CARDMEM_TOKEN;
+}
+
 /* CARDMEM completion is firmware-owned u8_user[0]: clear it directly before
  * the trigger, then invalidate the byte-write cache so a later non-CARDMEM
  * command cannot reuse the firmware-written status as a cached zero. */
@@ -1004,16 +1021,19 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 				b->MemorySize = cd->cd_BoardSize-0x40000;
 			}
 		} else {
-/* Firmware without P96 card-memory support must retain the
-			 * split ownership boundary. Capable firmware arbitrates the
-			 * full board window, including the fixed GFXData and SDK
-			 * reservations, so P96 must expose that complete window. */
+			/* Start in the 2.9.0 split layout. The matched driver expands
+			 * P96 only after firmware accepts a Z3-only CARDMEM ownership
+			 * announcement; a missing readback keeps the firmware-only
+			 * interval protected across every Amiga reset. */
 			b->CardFlags |= CARDFLAG_ZORRO_3;
-			b->MemorySize = zz_cardmem_memory_size(1, fw_caps,
-				(uint32_t)zz_card_window_size, ZZ_Z3_P96_MEMORY_SIZE);
-			volatile struct GFXData *gd = (struct GFXData*)(((uint32_t)b->MemoryBase) + (uint32_t)Z3_GFXDATA_ADDR);
+			volatile struct GFXData *gd = (struct GFXData*)
+				(((uint32_t)b->MemoryBase) + (uint32_t)Z3_GFXDATA_ADDR);
 			b->CardData[ZZ_CARD_DATA_GFXDATA] = (ULONG)gd;
 			memset((void *)gd, 0x00, sizeof(struct GFXData));
+			if (zz_cardmem_announce(b))
+				b->MemorySize = (uint32_t)zz_card_window_size;
+			else
+				b->MemorySize = ZZ_Z3_P96_MEMORY_SIZE;
 			/* Announce the conditional-clear protocol: after this
 			 * token the firmware honors u8_user[3] as a per-allocation
 			 * no-clear flag (see ZZ_AllocBitMap). Older firmware

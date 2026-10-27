@@ -83,8 +83,8 @@ typedef volatile struct MNTZZ9KRegs {
   u16 blitter_dma_op; // 5a
   u16 blitter_acc_op; // 5c
   u16 blitter_set_split_pos; // 5e
-  u16 set_feature_status;
-  u16 un_62;
+  u16 set_feature_status; // 60
+  u16 cardmem_protocol; // 62
   u16 un_64;
   u16 un_66;
   u16 un_68;
@@ -179,7 +179,8 @@ enum zz_reg_offsets {
   REG_ZZ_SET_SPLIT_POS  = 0x5E,
 
   REG_ZZ_SET_FEATURE    = 0x60,
-  REG_ZZ_UNUSED_REG62   = 0x62,
+  /* Matched Z3 CARDMEM ownership announcement and readback. */
+  REG_ZZ_CARDMEM_PROTOCOL = 0x62,
   REG_ZZ_UNUSED_REG64   = 0x64,
   REG_ZZ_UNUSED_REG66   = 0x66,
   REG_ZZ_UNUSED_REG68   = 0x68,
@@ -273,6 +274,9 @@ enum zz_reg_offsets {
 
 /* Token for REG_ZZ_ALLOC_CLEAR_PROTOCOL (must match firmware zz_regs.h). */
 #define ZZ_REG_ZZ_ALLOC_CLEAR_TOKEN 0x5AC1U
+
+/* Token for REG_ZZ_CARDMEM_PROTOCOL (must match firmware zz_regs.h). */
+#define ZZ_REG_ZZ_CARDMEM_TOKEN 0xC96DU
 
 enum zz9k_card_features {
   CARD_FEATURE_NONE,
