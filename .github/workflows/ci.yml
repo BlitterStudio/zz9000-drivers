@@ -66,6 +66,7 @@ jobs:
             firmware_ref=$CANDIDATE_REF
           else
             firmware_ref=master
+          fi
           printf 'ref=%s\n' "$firmware_ref" >> "$GITHUB_OUTPUT"
       - name: Checkout firmware (for shared contracts)
         uses: actions/checkout@v6
