@@ -13,7 +13,7 @@ SAMPLING_CALIBRATION_TARGET := $(BUILD_DIR)/sampling_calibration_test
 EDIT_TARGET := $(BUILD_DIR)/zz_vcap_edit_test
 GEOMETRY_TARGET := $(BUILD_DIR)/zz_vcap_geometry_test
 VCAP_SAMPLING_SCREEN_TARGET := $(BUILD_DIR)/vcap_sampling_screen_test
-ZZGAMMA_PARSE_TARGET := $(BUILD_DIR)/zzgamma_parse_test
+GAMMA_TARGET := $(BUILD_DIR)/zz9000_gamma_test
 
 CPPFLAGS += -I$(COMMON_DIR)
 
@@ -25,6 +25,7 @@ DEPS := $(COMMON_DIR)/fwup_client.h
 CFG_SOURCES := zzcfg_test.c $(COMMON_DIR)/zzcfg_amiga.c \
 	$(COMMON_DIR)/fwup_client.c stubs/fwup_stub.c
 CFG_DEPS := $(COMMON_DIR)/zzcfg_amiga.h $(COMMON_DIR)/../include/zzcfg_query.h \
+	$(COMMON_DIR)/../include/zz9000_gamma.h \
 	$(COMMON_DIR)/fwup_client.h $(COMMON_DIR)/fwup_amiga.h
 CFG_CPPFLAGS := -Istubs -I$(COMMON_DIR) -I$(COMMON_DIR)/../include \
 	-DZZCFG_TEST_IO -DZZCFG_POLL_LIMIT=32UL
@@ -67,13 +68,13 @@ FW_RELEASE_DEPS := $(COMMON_DIR)/fw_release.h $(COMMON_DIR)/miniz/miniz.h \
 
 .PHONY: test clean
 
-test: $(TARGET) $(CFG_TARGET) $(VCAP_TARGET) $(VCAP_CLIENT_TARGET) $(EDIT_TARGET) $(ZZGAMMA_PARSE_TARGET) $(GEOMETRY_TARGET) $(CAPTURE_TARGET) $(CAPTURE_LIFECYCLE_TARGET) $(SAMPLING_CALIBRATION_TARGET) $(VCAP_SAMPLING_SCREEN_TARGET) $(ZZTOP_SETTINGS_TARGET) $(FW_RELEASE_TARGET)
+test: $(TARGET) $(CFG_TARGET) $(VCAP_TARGET) $(VCAP_CLIENT_TARGET) $(EDIT_TARGET) $(GAMMA_TARGET) $(GEOMETRY_TARGET) $(CAPTURE_TARGET) $(CAPTURE_LIFECYCLE_TARGET) $(SAMPLING_CALIBRATION_TARGET) $(VCAP_SAMPLING_SCREEN_TARGET) $(ZZTOP_SETTINGS_TARGET) $(FW_RELEASE_TARGET)
 	$(TARGET)
 	$(CFG_TARGET)
 	$(VCAP_TARGET)
 	$(VCAP_CLIENT_TARGET)
 	$(EDIT_TARGET)
-	$(ZZGAMMA_PARSE_TARGET)
+	$(GAMMA_TARGET)
 	$(GEOMETRY_TARGET)
 	$(CAPTURE_TARGET)
 	$(CAPTURE_LIFECYCLE_TARGET)
@@ -113,12 +114,13 @@ $(EDIT_TARGET): $(EDIT_SOURCES) $(EDIT_DEPS)
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(EDIT_CPPFLAGS) $(CFLAGS) -std=c99 -Werror -o $@ $(EDIT_SOURCES)
 
-# The ZZGamma CLI's argument parser is a portable header shared with the
-# m68k tool; these checks pin it to the firmware's parse_gamma rules.
-$(ZZGAMMA_PARSE_TARGET): zzgamma_parse_test.c \
-		../../ZZGamma/zzgamma_parse.h
+# Output-gamma helpers shared by ZZGamma, the CFG editor model and ZZTop's
+# Display page: parser (pinned to the firmware's parse_gamma), slider
+# level mapping and readout text.
+$(GAMMA_TARGET): zz9000_gamma_test.c $(COMMON_DIR)/../include/zz9000_gamma.h
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -std=c99 -Werror -o $@ zzgamma_parse_test.c
+	$(CC) -I$(COMMON_DIR)/../include $(CFLAGS) -std=c99 -Werror -o $@ \
+		zz9000_gamma_test.c
 
 $(GEOMETRY_TARGET): $(GEOMETRY_SOURCES) $(GEOMETRY_DEPS)
 	@mkdir -p $(BUILD_DIR)

@@ -15,6 +15,7 @@
 #include "board.h"
 #include "fw_release.h"
 #include "zz9000_capture_calibration.h"
+#include "zzcfg_query.h"
 
 struct board board;
 
@@ -166,6 +167,23 @@ void board_set_scanline_mode(UWORD mode)
 void board_set_scanline_parity(UWORD parity)
 {
 	board_write16(ZZ_SCANLINE_PARITY_REG, parity & 0x1);
+}
+
+UWORD board_gamma(void)
+{
+	if (!board_has_cfg())
+		return 0;
+	return zzcfg_query((ULONG)board.regs, ZZ_CFG_KEY_GAMMA, NULL);
+}
+
+void board_set_gamma(UWORD hundredths)
+{
+	/* USER1 is the feature selector the RTG driver's blits also use:
+	 * keep another task from slipping a blit between the two writes. */
+	Forbid();
+	board_write16(ZZ_REG_USER1, ZZ_CARD_FEATURE_GAMMA);
+	board_write16(ZZ_REG_SET_FEATURE, hundredths);
+	Permit();
 }
 
 ULONG board_register_probe(UWORD reads)

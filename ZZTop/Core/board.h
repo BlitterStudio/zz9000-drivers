@@ -78,6 +78,14 @@ UWORD board_scanline_parity(void);
 void board_set_scanline_mode(UWORD mode);
 void board_set_scanline_parity(UWORD parity);
 
+/* Output gamma LUT (live, firmware issue #130). board_gamma reads config
+ * key 35: the applied gamma in hundredths, 0 when the firmware or the
+ * loaded bitstream has no LUT (or before firmware 2.3). board_set_gamma
+ * sends CARD_FEATURE_GAMMA like the ZZGamma CLI; call it only when
+ * board_gamma() is nonzero. */
+UWORD board_gamma(void);
+void board_set_gamma(UWORD hundredths);
+
 /* Re-read the identity registers `reads` times and count mismatches
  * plus impossible values: a read-only Zorro bus integrity probe. */
 ULONG board_register_probe(UWORD reads);

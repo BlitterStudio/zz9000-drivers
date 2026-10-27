@@ -251,5 +251,5 @@ When the firmware or the loaded bitstream has no gamma LUT it prints an
 explanation and exits with `WARN` (5).
 
 `ZZGamma` changes the live setting only. To keep a value across a power
-cycle, write `gamma = 1.80` to `ZZ9000.CFG`; ZZTop's Save command
-carries the key through when it is present in the file.
+cycle, write `gamma = 1.80` to `ZZ9000.CFG`, or set it with the **Gamma**
+slider on ZZTop's Display page and press Save.

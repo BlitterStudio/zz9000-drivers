@@ -20,6 +20,7 @@
 #include "board.h"
 #include "fwup_client.h"
 #include "settings.h"
+#include "zz9000_gamma.h"
 
 struct settings_state cfg;
 
@@ -30,8 +31,9 @@ static char raw_text[ZZCFG_MAX_SIZE + 1];
 /* Reading                                                             */
 
 /* Editor defaults under the card file: what the hardware does when a
- * key is absent. Scanlines follow the live generator (the config applied
- * it at boot; ZZScanlines or a previous session may have changed it). */
+ * key is absent. Scanlines and gamma follow the live hardware (the config
+ * applied them at boot; ZZScanlines, ZZGamma or a previous session may
+ * have changed them). */
 static void values_defaults(struct zzcfg_values *v)
 {
 	memset(v, 0, sizeof(*v));
@@ -43,6 +45,9 @@ static void values_defaults(struct zzcfg_values *v)
 	v->videocap_crop_v = ZZCFG_VIDEOCAP_CROP_V_COMPAT;
 	v->scanline_mode = board_scanline_mode();
 	v->scanline_parity = board_scanline_parity();
+	v->gamma = board_gamma();
+	if (!v->gamma)
+		v->gamma = ZZGAMMA_HUNDREDTHS_IDENTITY;
 	/* ZZ9000.card enables both when the key is absent, and the
 	 * generator writes every supported key. */
 	v->offscreen_bitmaps = 1;
@@ -101,6 +106,7 @@ BOOL settings_present(const struct zzcfg_values *v, enum cfg_field f)
 	case CFG_SAMPLE:      return v->videocap_sample_present != 0;
 	case CFG_SCAN_MODE:   return v->scanline_mode_present != 0;
 	case CFG_SCAN_PARITY: return v->scanline_parity_present != 0;
+	case CFG_GAMMA:       return v->gamma_present != 0;
 	case CFG_CROP_H:      return v->videocap_crop_h_present != 0;
 	case CFG_CROP_V:      return v->videocap_crop_v_present != 0;
 	case CFG_PHASE_E7M:   return v->videocap_phase_present != 0;
@@ -121,6 +127,7 @@ LONG settings_value(const struct zzcfg_values *v, enum cfg_field f)
 	case CFG_SAMPLE:      return v->videocap_sample;
 	case CFG_SCAN_MODE:   return v->scanline_mode;
 	case CFG_SCAN_PARITY: return v->scanline_parity;
+	case CFG_GAMMA:       return v->gamma;
 	case CFG_CROP_H:      return v->videocap_crop_h;
 	case CFG_CROP_V:      return v->videocap_crop_v;
 	case CFG_PHASE_E7M:   return v->videocap_phase;
@@ -177,6 +184,10 @@ static void field_copy(struct zzcfg_values *dst,
 	case CFG_SCAN_PARITY:
 		dst->scanline_parity = src->scanline_parity;
 		dst->scanline_parity_present = src->scanline_parity_present;
+		break;
+	case CFG_GAMMA:
+		dst->gamma = src->gamma;
+		dst->gamma_present = src->gamma_present;
 		break;
 	case CFG_CROP_H:
 		dst->videocap_crop_h = src->videocap_crop_h;
@@ -257,6 +268,10 @@ void settings_set(enum cfg_field f, LONG value)
 		v->scanline_parity = (UWORD)value;
 		v->scanline_parity_present = 1;
 		break;
+	case CFG_GAMMA:
+		v->gamma = (UWORD)value;
+		v->gamma_present = 1;
+		break;
 	case CFG_CROP_H:
 		v->videocap_crop_h = (UWORD)value;
 		v->videocap_crop_h_present = 1;
@@ -325,6 +340,7 @@ void settings_clear(enum cfg_field f)
 	case CFG_SAMPLE:      v->videocap_sample_present = 0; break;
 	case CFG_SCAN_MODE:   v->scanline_mode_present = 0; break;
 	case CFG_SCAN_PARITY: v->scanline_parity_present = 0; break;
+	case CFG_GAMMA:       v->gamma_present = 0; break;
 	case CFG_CROP_H:      v->videocap_crop_h_present = 0; break;
 	case CFG_CROP_V:      v->videocap_crop_v_present = 0; break;
 	case CFG_PHASE_E7M:   v->videocap_phase_present = 0; break;

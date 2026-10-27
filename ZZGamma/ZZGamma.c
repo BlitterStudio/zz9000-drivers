@@ -18,7 +18,7 @@
  * its feature toggles.
  *
  * The live setting is not persisted: to keep it, write
- * gamma = x.xx to ZZ9000.CFG (ZZTop's Settings preserves the key).
+ * gamma = x.xx to ZZ9000.CFG, or set it on ZZTop's Display page and Save.
  *
  * Build: m68k-amigaos-gcc -O2 -noixemul -I../include
  *        -o ZZGamma ZZGamma.c -lamiga
@@ -35,7 +35,7 @@
 
 #include "zz9000_hw.h"
 #include "zzcfg_query.h"
-#include "zzgamma_parse.h"
+#include "zz9000_gamma.h"
 
 static void print_gamma(UWORD hundredths)
 {

@@ -1,5 +1,5 @@
 /*
- * ZZTop GadTools Display page: output, scanlines and picture controls.
+ * ZZTop GadTools Display page: output, scanlines, gamma and picture controls.
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -14,6 +14,7 @@
 #include "settings.h"
 #include "video.h"
 #include "gt.h"
+#include "zz9000_gamma.h"
 
 #define P GT_PAGE_DISPLAY
 
@@ -32,7 +33,9 @@ enum {
 	G_ALIGN,
 	G_FIND,
 	G_AUTO,
-	G_PICTURE_NOTE
+	G_PICTURE_NOTE,
+	G_GAMMA,
+	G_GAMMA_VALUE
 };
 
 static const char *const output_names[] = {
@@ -79,6 +82,8 @@ static struct Gadget *env_note_gadget;
 static struct Gadget *framing_gadget;
 static struct Gadget *sampling_gadget;
 static struct Gadget *picture_note_gadget;
+static struct Gadget *gamma_gadget;
+static struct Gadget *gamma_value_gadget;
 
 static UWORD output_map[ZZCFG_VCAP_OUTPUT_COUNT];
 static UWORD refresh_map[ZZCFG_VCAP_REFRESH_COUNT];
@@ -100,6 +105,11 @@ static char framing_text[64];
 static char sampling_text[64];
 static char picture_note_text[128];
 static char action_text[128];
+/* Gamma readout ("1.80", "Off", or why the slider is disabled). */
+static char gamma_text[16];
+/* Slider level last applied or shown; -1 forces the next sync to set it. */
+static WORD gamma_level = -1;
+static BOOL gamma_available;
 
 /* Return the first supported refresh setting for one output mode. */
 static UWORD first_refresh(UWORD output)
@@ -273,13 +283,52 @@ static void refresh_picture(void)
 	gt_page_set_text(picture_note_gadget, picture_note_text);
 }
 
+/* Show the edited gamma, or disable the slider when the card has no
+ * gamma LUT (config key 35 reads 0: old firmware or bitstream). */
+static void gamma_sync(void)
+{
+	gamma_available = board_gamma() != 0;
+	gt_page_set_disabled(gamma_gadget, !gamma_available);
+	if (!gamma_available) {
+		snprintf(gamma_text, sizeof(gamma_text), "%s", "Not available");
+		gt_page_set_text(gamma_value_gadget, gamma_text);
+		return;
+	}
+	gamma_level = (WORD)zzgamma_level_from_hundredths(cfg.edit.gamma);
+	GT_SetGadgetAttrs(gamma_gadget, gt_render_window(gamma_gadget), NULL,
+		GTSL_Level, (ULONG)gamma_level,
+		TAG_END);
+	zzgamma_format(cfg.edit.gamma, gamma_text);
+	gt_page_set_text(gamma_value_gadget, gamma_text);
+}
+
+/* Apply a slider level live and stage it for Save, like the scanline
+ * cycles: a chosen 1.00 is written as an explicit gamma = 1.00. */
+static void gamma_apply(WORD level)
+{
+	UWORD hundredths;
+
+	if (!gamma_available || level == gamma_level)
+		return;
+	hundredths = (UWORD)zzgamma_hundredths_from_level(level);
+	gamma_level = level;
+	board_set_gamma(hundredths);
+	if (cfg.supported)
+		settings_set(CFG_GAMMA, hundredths);
+	zzgamma_format(hundredths, gamma_text);
+	gt_page_set_text(gamma_value_gadget, gamma_text);
+	if (board_gamma() != hundredths)
+		gt_status("The card did not apply gamma %s", gamma_text);
+}
+
 /* Create the compact, fixed display page gadget chain. */
 static BOOL create(struct gt_page *page)
 {
 	struct gt_form f;
 	static const char *const top_labels[] = { "Output", "Refresh", NULL };
 	WORD left, width, half, third;
-	WORD style_lbl_w, darken_lbl_w, frame_lbl_w, samp_lbl_w;
+	WORD style_lbl_w, darken_lbl_w, gamma_lbl_w, frame_lbl_w, samp_lbl_w;
+	WORD gamma_val_w;
 	WORD use_w, rem_w, env_note_w;
 	struct NewGadget ng;
 	struct TagItem scan_tags[] = {
@@ -291,6 +340,14 @@ static BOOL create(struct gt_page *page)
 	struct TagItem parity_tags[] = {
 		{ GTCY_Labels, (ULONG)parity_names },
 		{ GTCY_Active, 0 },
+		{ GA_RelVerify, TRUE },
+		{ TAG_DONE, 0 }
+	};
+	struct TagItem gamma_tags[] = {
+		{ GTSL_Min, 0 },
+		{ GTSL_Max, ZZGAMMA_SLIDER_MAX_LEVEL },
+		{ GTSL_Level, (ZZGAMMA_HUNDREDTHS_IDENTITY - ZZGAMMA_HUNDREDTHS_MIN) /
+			ZZGAMMA_SLIDER_STEP },
 		{ GA_RelVerify, TRUE },
 		{ TAG_DONE, 0 }
 	};
@@ -317,6 +374,8 @@ static BOOL create(struct gt_page *page)
 	framing_text[0] = '\0';
 	sampling_text[0] = '\0';
 	picture_note_text[0] = '\0';
+	gamma_text[0] = '\0';
+	gamma_level = -1;
 
 	gt_page_begin(page);
 	gt_form_init(&f, page, top_labels);
@@ -358,11 +417,24 @@ static BOOL create(struct gt_page *page)
 	ng.ng_GadgetID = GT_GID(1, G_PARITY);
 	parity_gadget = gt_page_add(page, CYCLE_KIND, &ng, parity_tags);
 
-	/* Row 6: Picture readouts (Framing & Sampling) */
+	/* Row 6: Gamma slider and its readout */
+	gamma_lbl_w = (WORD)(gt_text_width("Gamma") + MAX_WORD(6, gt_layout.font_x));
+	gamma_val_w = (WORD)(gt_text_width("Not available") +
+		2 * MAX_WORD(6, gt_layout.font_x));
+	ng.ng_LeftEdge = (WORD)(left + gamma_lbl_w);
+	ng.ng_TopEdge = gt_row(6);
+	ng.ng_Width = (WORD)(width - gamma_lbl_w - gamma_val_w - 8);
+	ng.ng_GadgetText = (STRPTR)"Gamma";
+	ng.ng_GadgetID = GT_GID(1, G_GAMMA);
+	gamma_gadget = gt_page_add(page, SLIDER_KIND, &ng, gamma_tags);
+	gamma_value_gadget = gt_add_note(page, G_GAMMA_VALUE,
+		(WORD)(left + width - gamma_val_w), 6, gamma_val_w, gamma_text);
+
+	/* Row 7: Picture readouts (Framing & Sampling) */
 	frame_lbl_w = (WORD)(gt_text_width("Framing") + MAX_WORD(6, gt_layout.font_x));
 	samp_lbl_w = (WORD)(gt_text_width("Sampling") + MAX_WORD(6, gt_layout.font_x));
 	ng.ng_LeftEdge = (WORD)(left + frame_lbl_w);
-	ng.ng_TopEdge = gt_row(6);
+	ng.ng_TopEdge = gt_row(7);
 	ng.ng_Width = (WORD)(half - frame_lbl_w);
 	ng.ng_GadgetText = (STRPTR)"Framing";
 	ng.ng_GadgetID = GT_GID(1, G_FRAMING);
@@ -374,19 +446,20 @@ static BOOL create(struct gt_page *page)
 	ng.ng_GadgetID = GT_GID(1, G_SAMPLING);
 	sampling_gadget = gt_page_add(page, TEXT_KIND, &ng, samp_tags);
 
-	/* Row 7: Buttons */
-	align_gadget = gt_add_button(page, G_ALIGN, left, 7, third, "Align picture...");
-	find_gadget = gt_add_button(page, G_FIND, (WORD)(left + third + 4), 7, third, "Find phase...");
+	/* Row 8: Buttons */
+	align_gadget = gt_add_button(page, G_ALIGN, left, 8, third, "Align picture...");
+	find_gadget = gt_add_button(page, G_FIND, (WORD)(left + third + 4), 8, third, "Find phase...");
 	auto_gadget = gt_add_button(page, G_AUTO, (WORD)(left + third * 2 + 8),
-		7, (WORD)(width - third * 2 - 8), "Reset auto");
+		8, (WORD)(width - third * 2 - 8), "Reset auto");
 
-	/* Row 8: Picture note */
-	picture_note_gadget = gt_add_note(page, G_PICTURE_NOTE, left, 8, width, picture_note_text);
+	/* Row 9: Picture note */
+	picture_note_gadget = gt_add_note(page, G_PICTURE_NOTE, left, 9, width, picture_note_text);
 
-	page->rows = 9;
+	page->rows = 10;
 	return output_gadget && refresh_gadget && description_gadget &&
 		refresh_note_gadget && env_note_gadget && env_use_gadget &&
 		env_remove_gadget && scan_gadget && parity_gadget &&
+		gamma_gadget && gamma_value_gadget &&
 		framing_gadget && sampling_gadget && align_gadget &&
 		find_gadget && auto_gadget && picture_note_gadget;
 }
@@ -407,6 +480,7 @@ static void sync(void)
 	GT_SetGadgetAttrs(parity_gadget, gt_render_window(parity_gadget), NULL,
 		GTCY_Active, (ULONG)cfg.edit.scanline_parity,
 		TAG_END);
+	gamma_sync();
 	if (!config_ok) {
 		snprintf(refresh_note_text, sizeof(refresh_note_text), "%s",
 			"Output settings need FW 2.3+. Scanlines work live.");
@@ -470,6 +544,9 @@ static void gadget(UWORD id, UWORD code)
 				settings_set(CFG_SCAN_PARITY, code);
 		}
 		break;
+	case G_GAMMA:
+		gamma_apply((WORD)code);
+		break;
 	case G_ALIGN:
 		video_align(action_text, sizeof(action_text));
 		gt_status("%s", action_text);
@@ -504,9 +581,20 @@ static void gadget(UWORD id, UWORD code)
 	sync();
 }
 
-/* Poll live picture state at two hertz while the page is visible. */
+/* Poll live picture state at two hertz while the page is visible, and
+ * follow a gamma drag at the full tick rate (GadTools reports only the
+ * release to the page). */
 static void tick(void)
 {
+	LONG level;
+
+	if (gamma_available) {
+		level = (LONG)gt_page_get(gamma_gadget, GTSL_Level);
+		if (level != gamma_level) {
+			gamma_apply((WORD)level);
+			gt_pending_changed();
+		}
+	}
 	if (gt_ticks() % 5 == 0)
 		refresh_picture();
 }
@@ -514,11 +602,11 @@ static void tick(void)
 struct gt_page gt_page_display = {
 	"Display",
 	"Native video",
-	"Scandoubler output, scanlines and picture alignment.",
+	"Scandoubler output, scanlines, gamma and picture alignment.",
 	0,
 	NULL,
 	NULL,
-	9,
+	10,
 	create,
 	NULL,
 	NULL,
