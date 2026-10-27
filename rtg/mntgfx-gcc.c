@@ -508,43 +508,20 @@ static BOOL zz_cardmem_available(struct BoardInfo *b)
 	return b && zz_gfxdata(b) && b->CardData[ZZ_CARD_DATA_CARDMEM_OWNED];
 }
 
-/* Prototype hardware-test report on the card UART (REG_ZZ_PRINT_CHR 0xF0,
- * REG_ZZ_PRINT_HEX 0xF2): one line per FindCard with the capability word
- * the driver saw and the handoff readback. Remove before merging. */
-static void zz_cardmem_report(struct BoardInfo *b, UWORD caps, UWORD readback)
-{
-	volatile UWORD *chr = (volatile UWORD *)((uint8_t *)b->RegisterBase + 0xf0);
-	volatile UWORD *hex = (volatile UWORD *)((uint8_t *)b->RegisterBase + 0xf2);
-	const char *s;
-
-	for (s = "[card] cardmem caps="; *s; s++)
-		*chr = (UBYTE)*s;
-	*hex = caps;
-	for (s = " readback="; *s; s++)
-		*chr = (UBYTE)*s;
-	*hex = readback;
-	*chr = '\n';
-}
-
 /* Firmware reserves the legacy P96 range on every reset. Read back the
  * token so a driver never expands MemorySize unless firmware accepted the
  * Z3-only ownership hand-off. */
 static BOOL zz_cardmem_announce(struct BoardInfo *b)
 {
 	MNTZZ9KRegs *registers;
-	UWORD caps;
-	UWORD readback = 0;
 
-	if (!b || !b->RegisterBase || !(b->CardFlags & CARDFLAG_ZORRO_3))
+	if (!b || !b->RegisterBase ||
+		!zz_cardmem_enabled((b->CardFlags & CARDFLAG_ZORRO_3) != 0,
+			(UWORD)b->CardData[ZZ_CARD_DATA_FW_CAPABILITIES]))
 		return FALSE;
-	caps = (UWORD)b->CardData[ZZ_CARD_DATA_FW_CAPABILITIES];
 	registers = (MNTZZ9KRegs *)b->RegisterBase;
-	if (zz_cardmem_enabled(1, caps)) {
-		zzwrite16(&registers->cardmem_protocol, ZZ_REG_ZZ_CARDMEM_TOKEN);
-		readback = registers->cardmem_protocol;
-	}
-	zz_cardmem_report(b, caps, readback);
-	return readback == ZZ_REG_ZZ_CARDMEM_TOKEN;
+	zzwrite16(&registers->cardmem_protocol, ZZ_REG_ZZ_CARDMEM_TOKEN);
+	return registers->cardmem_protocol == ZZ_REG_ZZ_CARDMEM_TOKEN;
 }
 
 /* CARDMEM completion is firmware-owned u8_user[0]: clear it directly before
