@@ -139,10 +139,11 @@ int fwrel_chunked_feed(struct fwrel_chunked *c, const uint8_t *data,
 #define FWREL_BOOT_MIN_BYTES   65536UL
 #define FWREL_BOOT_MAX_BYTES   (32UL * 1024UL * 1024UL)
 #define FWREL_BOOT_HEADER_BYTES 0x28u
+#define FWREL_MODULE_HEADER_BYTES 128u
 
 enum fwrel_zip_result {
     FWREL_ZIP_MORE = 0,       /* feed more input */
-    FWREL_ZIP_DONE = 1,       /* BOOT.bin extracted and verified */
+    FWREL_ZIP_DONE = 1,       /* selected entries extracted and verified */
     FWREL_ZIP_ERR_FORMAT = -1,
     FWREL_ZIP_ERR_UNSUPPORTED = -2,
     FWREL_ZIP_ERR_NOT_FOUND = -3,
@@ -150,22 +151,42 @@ enum fwrel_zip_result {
     FWREL_ZIP_ERR_CRC = -5,
     FWREL_ZIP_ERR_SIZE = -6,
     FWREL_ZIP_ERR_HEADER = -7,
-    FWREL_ZIP_ERR_WRITE = -8
+    FWREL_ZIP_ERR_WRITE = -8,
+    FWREL_ZIP_ERR_MODULE = -9
 };
 
-/* Streaming reader for a release ZIP: walks local file headers, inflates
- * the first entry named BOOT.bin (at the root or in one directory) into
- * the sink, then checks its CRC-32, size and Zynq boot header. Later
- * entries are never read. Inflation uses the vendored miniz tinfl. */
+/* Streaming release-ZIP readers use the vendored miniz tinfl inflater.
+ * The legacy reader stops after its verified BOOT.bin; the bundle reader
+ * runs through the archive's central directory. */
 struct fwrel_zip;
 
-/* NULL when out of memory. */
+/* NULL when out of memory. This legacy single-image reader accepts BOOT.bin
+ * at the archive root or under one directory. */
 struct fwrel_zip *fwrel_zip_new(fwrel_sink_fn sink, void *ctx);
+
+/* The bundle reader passes each selected member's safe relative destination
+ * ("BOOT.bin" or "ZZ9K/NAME.ZZM") to `begin` before its bytes reach `sink`.
+ * `end` follows successful ZIP integrity checks and image validation. Module
+ * validation requires the fixed 128-byte ZZM1 little-endian header, a
+ * matching exact file length, zero reserved bytes, and SHA-256 of its image.
+ * A nonzero callback result aborts with FWREL_ZIP_ERR_WRITE. `begin` and
+ * `end` may be NULL. Callers can keep per-member state between these
+ * callbacks and the sink. */
+typedef int (*fwrel_zip_entry_fn)(void *ctx, const char *path);
+
+/* Extract only dir/BOOT.bin and direct dir/ZZ9K/NAME.ZZM members from one
+ * top-level release directory. NAME is 1..8 uppercase [A-Z0-9_]. Invalid,
+ * traversing, or deeper paths are rejected. BOOT.bin is required; CFG and
+ * other direct files are ignored. */
+struct fwrel_zip *fwrel_zip_new_bundle(fwrel_zip_entry_fn begin,
+                                       fwrel_sink_fn sink,
+                                       fwrel_zip_entry_fn end, void *ctx);
+
 /* Returns an fwrel_zip_result; DONE and errors are sticky. */
 int fwrel_zip_feed(struct fwrel_zip *z, const uint8_t *data, size_t len);
 /* Release the reader and its inflate state; NULL is ignored. */
 void fwrel_zip_free(struct fwrel_zip *z);
-/* Bytes of BOOT.bin written to the sink so far. */
+/* Bytes of the selected entry written to the sink so far. */
 unsigned long fwrel_zip_written(const struct fwrel_zip *z);
 const char *fwrel_zip_strerror(int result);
 

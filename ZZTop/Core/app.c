@@ -151,14 +151,14 @@ static BOOL save_audio(void)
 BOOL app_save(void)
 {
 	static char msg[96];
+	static char apply[96];
 	struct app_pending p;
 	enum cfg_field bad;
 	BOOL ok = TRUE;
-	UWORD reboot;
 
 	fe_flush();
 	app_pending(&p);
-	reboot = p.reboot;
+	settings_saved_message(apply, sizeof(apply));
 
 	if (p.card && !settings_validate(&bad, msg, sizeof(msg))) {
 		fe_status("%s", msg);
@@ -196,14 +196,8 @@ BOOL app_save(void)
 	if (ok) app_init();   /* the running state is now the saved state */
 	fe_busy(FALSE);
 
-	if (ok) {
-		if (reboot)
-			fe_status("Saved. Power-cycle the Amiga to apply %u "
-				"boot-time setting%s.", (unsigned)reboot,
-				reboot == 1 ? "" : "s");
-		else
-			fe_status("Saved.");
-	}
+	if (ok)
+		fe_status("%s", apply);
 	app_models_changed();
 	return ok;
 }

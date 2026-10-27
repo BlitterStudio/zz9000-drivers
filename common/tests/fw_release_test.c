@@ -357,6 +357,36 @@ static void make_boot(void) {
 
 static const char cfg[] = "videocap_profile = filtered_60\n";
 
+static unsigned char module[FWREL_MODULE_HEADER_BYTES + 12];
+
+static void put_le16(unsigned char *p, unsigned value) {
+    p[0] = (unsigned char)value;
+    p[1] = (unsigned char)(value >> 8);
+}
+
+static void put_le32(unsigned char *p, unsigned long value) {
+    put_le16(p, (unsigned)(value & 0xffffu));
+    put_le16(p + 2, (unsigned)(value >> 16));
+}
+
+static void make_module(void) {
+    static const unsigned char digest[32] = {
+        0xcd, 0x67, 0xb6, 0x48, 0x17, 0xd6, 0x34, 0x25,
+        0xee, 0xdf, 0x4c, 0x6b, 0xfa, 0xeb, 0x2b, 0xcb,
+        0xbd, 0xc1, 0x53, 0xcc, 0xd3, 0xeb, 0x6f, 0x9a,
+        0xce, 0x2e, 0x26, 0x42, 0xc1, 0x0b, 0x9e, 0x5d
+    };
+
+    memset(module, 0, sizeof(module));
+    memcpy(module, "ZZM1", 4);
+    put_le16(module + 4, FWREL_MODULE_HEADER_BYTES);
+    put_le16(module + 6, 1);
+    put_le32(module + 24, 12);
+    memcpy(module + 36, "VIDEO", 6);
+    memcpy(module + 52, digest, sizeof(digest));
+    memcpy(module + FWREL_MODULE_HEADER_BYTES, "module image", 12);
+}
+
 static void build_release_zip(int boot_kind, unsigned long crc_override) {
     zip_len = 0;
     add_entry("zz9000-firmware-v2.8.1-zorro3/", (const unsigned char *)"", 0,
@@ -366,6 +396,59 @@ static void build_release_zip(int boot_kind, unsigned long crc_override) {
     add_entry("zz9000-firmware-v2.8.1-zorro3/ZZ9000.CFG",
               (const unsigned char *)cfg, sizeof(cfg) - 1, ENTRY_DEFLATE, 0);
     end_zip();
+}
+
+static char bundle_started[4][20];
+static char bundle_finished[4][20];
+static size_t bundle_start_count;
+static size_t bundle_finish_count;
+
+static int bundle_begin(void *ctx, const char *path) {
+    (void)ctx;
+    if (bundle_start_count >= sizeof(bundle_started) / sizeof(bundle_started[0]))
+        return 1;
+    strcpy(bundle_started[bundle_start_count++], path);
+    return 0;
+}
+
+static int bundle_end(void *ctx, const char *path) {
+    (void)ctx;
+    if (bundle_finish_count >= sizeof(bundle_finished) / sizeof(bundle_finished[0]))
+        return 1;
+    strcpy(bundle_finished[bundle_finish_count++], path);
+    return 0;
+}
+
+static void build_bundle_zip(void) {
+    zip_len = 0;
+    add_entry("zz9000-firmware-v2.8.1-zorro3/", (const unsigned char *)"", 0,
+              ENTRY_STORE, 0);
+    add_entry("zz9000-firmware-v2.8.1-zorro3/ZZ9K/",
+              (const unsigned char *)"", 0, ENTRY_STORE, 0);
+    add_entry("zz9000-firmware-v2.8.1-zorro3/ZZ9K/VIDEO.ZZM", module,
+              sizeof(module), ENTRY_DEFLATE, 0);
+    add_entry("zz9000-firmware-v2.8.1-zorro3/BOOT.bin", boot, sizeof(boot),
+              ENTRY_DEFLATE, 0);
+    add_entry("zz9000-firmware-v2.8.1-zorro3/ZZ9000.CFG",
+              (const unsigned char *)cfg, sizeof(cfg) - 1, ENTRY_DEFLATE, 0);
+    end_zip();
+}
+
+static int bundle_run(size_t step) {
+    struct fwrel_zip *z = fwrel_zip_new_bundle(bundle_begin, sink, bundle_end,
+                                                NULL);
+    size_t i;
+    int rc = FWREL_ZIP_MORE;
+
+    sink_len = 0;
+    bundle_start_count = 0;
+    bundle_finish_count = 0;
+    for (i = 0; i < zip_len && rc == FWREL_ZIP_MORE; i += step) {
+        size_t n = zip_len - i < step ? zip_len - i : step;
+        rc = fwrel_zip_feed(z, zip_buf + i, n);
+    }
+    fwrel_zip_free(z);
+    return rc;
 }
 
 /* Feed zip_buf in `step`-byte pieces; returns the final result. */
@@ -436,6 +519,46 @@ static void test_zip_extract(void) {
     sink_fail_at = (size_t)-1;
 }
 
+static void test_bundle_extract(void) {
+    printf("test_bundle_extract\n");
+    make_boot();
+    make_module();
+    build_bundle_zip();
+    CHECK(bundle_run(29) == FWREL_ZIP_DONE &&
+          bundle_start_count == 2 && bundle_finish_count == 2 &&
+          strcmp(bundle_started[0], "ZZ9K/VIDEO.ZZM") == 0 &&
+          strcmp(bundle_started[1], "BOOT.bin") == 0 &&
+          strcmp(bundle_finished[0], "ZZ9K/VIDEO.ZZM") == 0 &&
+          strcmp(bundle_finished[1], "BOOT.bin") == 0 &&
+          sink_len == sizeof(module) + sizeof(boot) &&
+          memcmp(sink_buf, module, sizeof(module)) == 0 &&
+          memcmp(sink_buf + sizeof(module), boot, sizeof(boot)) == 0,
+          "bundle selects only verified modules and BOOT");
+
+    module[52] ^= 1;
+    build_bundle_zip();
+    CHECK(bundle_run(4096) == FWREL_ZIP_ERR_MODULE, "module SHA-256 checked");
+    make_module();
+
+    zip_len = 0;
+    add_entry("release/BOOT.bin", boot, sizeof(boot), ENTRY_DEFLATE, 0);
+    add_entry("release/ZZ9K/BAD-NAME.ZZM", module, sizeof(module),
+              ENTRY_DEFLATE, 0);
+    end_zip();
+    CHECK(bundle_run(4096) == FWREL_ZIP_ERR_FORMAT, "invalid module name rejected");
+
+    zip_len = 0;
+    add_entry("release/ZZ9K/deep/VIDEO.ZZM", module, sizeof(module),
+              ENTRY_DEFLATE, 0);
+    end_zip();
+    CHECK(bundle_run(4096) == FWREL_ZIP_ERR_FORMAT, "deep module path rejected");
+
+    zip_len = 0;
+    add_entry("release/../BOOT.bin", boot, sizeof(boot), ENTRY_DEFLATE, 0);
+    end_zip();
+    CHECK(bundle_run(4096) == FWREL_ZIP_ERR_FORMAT, "traversal rejected");
+}
+
 static void test_zip_rejects(void) {
     printf("test_zip_rejects\n");
 
@@ -487,6 +610,7 @@ int main(void) {
     test_http_head();
     test_chunked();
     test_zip_extract();
+    test_bundle_extract();
     test_zip_rejects();
     printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails ? 1 : 0;

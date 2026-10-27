@@ -489,7 +489,7 @@ static int test_flood_drain_yields_after_budget(void)
 {
 	struct fw f;
 	struct framer fr;
-	struct zznet_rx_drain drain;
+	struct zznet_rx_drain drain = {0};
 	int pri = ZZNET_FRAMER_PRI, next;
 	unsigned frames, at_high = 0, at_low = 0, switches = 0, i;
 
@@ -539,7 +539,7 @@ static int test_burst_within_budget_never_yields(void)
 {
 	struct fw f;
 	struct framer fr;
-	struct zznet_rx_drain drain;
+	struct zznet_rx_drain drain = {0};
 	unsigned i;
 
 	fw_init(&f, FW_28);

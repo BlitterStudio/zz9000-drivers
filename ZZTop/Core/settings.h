@@ -43,11 +43,14 @@ enum cfg_field {
 
 #define CFG_BIT(f) (1UL << (f))
 
-/* Fields that only take effect at the next cold boot. Scanlines and the
- * capture calibration fields also drive live hardware. */
+/* Fields that wait for the next boot. Fast RAM is re-read on every Amiga
+ * reset, so a warm reboot applies it. The others are applied only when the
+ * card itself restarts. Scanlines and the capture calibration fields also
+ * drive live hardware. */
 #define CFG_REBOOT_FIELDS (CFG_BIT(CFG_PROFILE) | CFG_BIT(CFG_SAMPLE) | \
 	CFG_BIT(CFG_INT2) | CFG_BIT(CFG_MAC) | CFG_BIT(CFG_HDF) | \
 	CFG_BIT(CFG_OFFSCREEN) | CFG_BIT(CFG_OVERLAY) | CFG_BIT(CFG_FAST_RAM))
+#define CFG_POWER_CYCLE_FIELDS (CFG_REBOOT_FIELDS & ~CFG_BIT(CFG_FAST_RAM))
 
 /* ENV: variables the drivers apply over the card file. */
 #define CFG_ENV_INT2   0x0001   /* ENV:ZZ9K_INT2 */
@@ -85,6 +88,19 @@ LONG settings_value(const struct zzcfg_values *v, enum cfg_field f);
 
 UWORD settings_dirty_count(void);
 UWORD settings_reboot_count(void);
+UWORD settings_power_cycle_count(void);
+
+/* System-page note. Fast RAM is called out because a reboot applies it. */
+const char *settings_system_note(void);
+
+/* Fast RAM status and note for the System page. The boot outcome stays
+ * the authority for a fail-closed result. A saved preference that differs
+ * from a clean on/off outcome is pending until the next reboot. */
+void settings_fast_ram_status(char *status, UWORD status_size,
+	char *note, UWORD note_size);
+
+/* Save status line from the dirty bits still pending. Call before save. */
+void settings_saved_message(char *msg, UWORD size);
 
 /* Check the pending text fields with the firmware's own rules. Returns
  * FALSE with *bad and a message for the first invalid one. */

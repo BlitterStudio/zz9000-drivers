@@ -43,12 +43,13 @@ export PATH=/opt/amiga/bin:"$PATH"
 # Core/ holds the logic (board, ZZ9000.CFG model, live video, audio control
 # plane, Save/Revert/Quit); GadTools/ is the user interface on top of it.
 # NO_INLINE_STDARG: the inline varargs macros warn on pointer tag values.
-common="../common/fwup_amiga.c ../common/fwup_client.c \
+common="../common/amiga_stack.c ../common/fwup_amiga.c ../common/fwup_client.c \
   ../common/zzcfg_amiga.c ../common/zz_vcap_live.c \
   ../common/zz_vcap_client.c ../common/zz_vcap_geometry.c \
   ../common/fw_release.c"
 flags="-m68030 -O2 -DNO_INLINE_STDARG -I../common -I../include -Izz9k-headers -ICore \
   -Wall -Wextra -Wno-unused-parameter"
+stack_flags="-Wstack-usage=8192 -Werror"
 libs="-lamiga -ldebug -noixemul -lm"
 
 # The release-archive inflater has its own compile rule (see the script).
@@ -59,4 +60,4 @@ sh ../common/miniz/build-m68k.sh "$objdir/miniz_tinfl.o" $flags
 
 # shellcheck disable=SC2086
 m68k-amigaos-gcc GadTools/*.c Core/*.c $common "$objdir/miniz_tinfl.o" \
-  $flags -IGadTools -o ZZTop $libs
+  $flags $stack_flags -IGadTools -o ZZTop $libs

@@ -72,27 +72,6 @@ static char fast_ram_status_text[64];
 static char fast_ram_note_text[96];
 static BOOL mac_custom;
 
-/* Translate a Fast RAM boot outcome into concise status text. */
-static const char *fast_ram_outcome(UWORD outcome)
-{
-	switch (outcome) {
-	case ZZ_CFG_FAST_RAM_OUTCOME_OFF:
-		return "off";
-	case ZZ_CFG_FAST_RAM_OUTCOME_ABSENT:
-		return "not configured";
-	case ZZ_CFG_FAST_RAM_OUTCOME_INVALID:
-		return "invalid config";
-	case ZZ_CFG_FAST_RAM_OUTCOME_TRUNCATED:
-		return "truncated config";
-	case ZZ_CFG_FAST_RAM_OUTCOME_MEDIA_ERR:
-		return "SD error";
-	case ZZ_CFG_FAST_RAM_OUTCOME_TIMEOUT:
-		return "boot timeout";
-	default:
-		return "boot gate";
-	}
-}
-
 /* Commit the current MAC controls into the editable settings model. */
 static void commit_mac(void)
 {
@@ -178,11 +157,8 @@ static void sync_controls(void)
 	gt_page_set_disabled(g_overlay, !enabled);
 	gt_page_set_disabled(g_fast_ram, !enabled || !fast_available);
 
-	if (!enabled)
-		snprintf(supported_text, sizeof(supported_text), "%s", "These settings need firmware 2.3+.");
-	else
-		snprintf(supported_text, sizeof(supported_text), "%s",
-			"All settings take effect after power-cycle.");
+	snprintf(supported_text, sizeof(supported_text), "%s",
+		settings_system_note());
 	gt_page_set_text(g_supported, supported_text);
 
 	snprintf(int_help_text, sizeof(int_help_text), "%s",
@@ -204,29 +180,9 @@ static void sync_controls(void)
 	}
 	gt_page_set_text(g_mac_env, mac_env_text);
 
-	if (!enabled) {
-		snprintf(fast_ram_status_text, sizeof(fast_ram_status_text), "%s",
-			"Unavailable (no config support)");
-		fast_ram_note_text[0] = '\0';
-	} else if (!fast_available) {
-		snprintf(fast_ram_status_text, sizeof(fast_ram_status_text), "%s",
-			"Unavailable on this firmware");
-		snprintf(fast_ram_note_text, sizeof(fast_ram_note_text), "%s",
-			"Fast RAM needs FW boot gate support.");
-	} else if (cfg.fast_ram_state == ZZCFG_FAST_RAM_ENABLED) {
-		snprintf(fast_ram_status_text, sizeof(fast_ram_status_text), "Effective: enabled%s",
-			cfg.fast_ram_outcome == ZZ_CFG_FAST_RAM_OUTCOME_BAK_ON ? " (backup)" : "");
-		fast_ram_note_text[0] = '\0';
-	} else if (cfg.fast_ram_state == ZZCFG_FAST_RAM_WITHHELD) {
-		snprintf(fast_ram_status_text, sizeof(fast_ram_status_text), "Withheld (%s)",
-			fast_ram_outcome(cfg.fast_ram_outcome));
-		snprintf(fast_ram_note_text, sizeof(fast_ram_note_text), "%s",
-			"Boot gate withheld memory for safety.");
-	} else {
-		snprintf(fast_ram_status_text, sizeof(fast_ram_status_text), "Disabled (%s)",
-			fast_ram_outcome(cfg.fast_ram_outcome));
-		fast_ram_note_text[0] = '\0';
-	}
+	settings_fast_ram_status(fast_ram_status_text,
+		sizeof(fast_ram_status_text), fast_ram_note_text,
+		sizeof(fast_ram_note_text));
 	gt_page_set_text(g_fast_ram_status, fast_ram_status_text);
 	gt_page_set_text(g_fast_ram_note, fast_ram_note_text);
 }

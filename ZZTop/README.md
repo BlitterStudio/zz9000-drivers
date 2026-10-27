@@ -27,10 +27,11 @@ Start `ZZTop` from Workbench. It has no command-line options or Workbench
 ToolTypes.
 
 Choose a page from the list at the left. The normal list contains Status,
-Display, Audio, System, and Firmware. Enable **Settings > Advanced controls**
-to add Capture and Scenes as indented child pages, and Diagnostics as an
-additional page. This choice is kept in `ENV:ZZTopAdvanced`; it is a program
-setting, not a ToolType.
+Display, Audio, System, Firmware, and its indented Modules child page. Firmware
+without module-status support disables its Modules page. Enable **Settings >
+Advanced controls** to add Capture and Scenes as indented child pages, and
+Diagnostics as an additional page. This choice is kept in `ENV:ZZTopAdvanced`;
+it is a program setting, not a ToolType.
 
 The selected page has a title and a short description. The footer has a status
 line, **Revert**, and **Save**. The menus provide **Project > About**,
@@ -39,17 +40,19 @@ Advanced controls**, with the shortcuts `?`, `Q`, `S`, `R`, and `A`.
 
 ## Saving, reverting, and quitting
 
-Changes have one of two effects.
+Changes have one of three effects.
 
 | Effect | Settings |
 |---|---|
 | Live | Scanlines, live picture alignment and sampling, capture geometry where supported, and audio controls |
-| After a power cycle | Native-output profile, sampling mode, interrupt, MAC address, SD-card boot image, RTG options, and Fast RAM |
+| After a reboot | Fast RAM |
+| After a power cycle | Native-output profile, sampling mode, interrupt, MAC address, SD-card boot image, and RTG options |
 
 **Save** first validates pending MAC, HDF, and capture values. It saves audio,
 repairs any non-audio settings that the firmware audio save replaced, rereads
 `ZZ9000.CFG`, merges only the changed non-audio fields, then writes the merged
-file. The status line identifies settings that need a power cycle.
+file. The status line says reboot when only Fast RAM changed, and power-cycle
+when any other boot-time setting changed.
 
 **Revert** restores the saved live capture, scanline, and audio state, then
 reloads the settings file. It reports a restore failure instead of pretending
@@ -179,8 +182,9 @@ blocks other audio edits until the card acknowledges the paired calibration.
 
 ## System
 
-System settings apply after a power cycle and are disabled when firmware
-configuration support is unavailable.
+System settings other than Fast RAM apply after a power cycle. Fast RAM
+applies after a reboot. The page is disabled when firmware configuration
+support is unavailable.
 
 | Group | Controls and settings |
 |---|---|
@@ -188,7 +192,7 @@ configuration support is unavailable.
 | Network | **Use the card's built-in address** or enter a MAC address as `aa:bb:cc:dd:ee:ff` (hyphens are also accepted). |
 | SD card boot | **Boot from an SD card image** and an image filename in the microSD root. An empty setting leaves the firmware default, `zz9000.hdf`; disabled boot writes `hdf = off`. |
 | Graphics | **Off-screen bitmaps in card memory (for incompatible software)** and **Video overlay window (needed by in-window ZZPlay)**. Both default to on. |
-| Memory | **Zorro III Fast RAM**, with an effective-state message from the boot result. |
+| Memory | **Zorro III Fast RAM**, with a status that shows On, Off, a pending reboot, or a fail-closed boot result. |
 
 `ENV:ZZ9K_INT2` and a valid `ENV:ZZ9K_MAC` override their card-file values.
 For either, select **Use it** to adopt the value or **Remove** to delete both
@@ -197,7 +201,7 @@ then firmware default.
 
 Fast RAM is fail-closed. The firmware leaves it disabled after a malformed,
 truncated, missing, unreadable, slow, or failed configuration read. A saved
-Fast RAM change takes effect at the next cold boot.
+Fast RAM change takes effect at the next reboot.
 
 ## Firmware
 
@@ -214,13 +218,14 @@ status. Firmware that reports its patch level shows three numbers, such as
 2. Select **Check online**. ZZTop reads the latest firmware release from
    GitHub and shows it under **Latest**.
 3. Select **Download and install** and confirm. ZZTop downloads the release
-   archive for the selected board, extracts `BOOT.bin` to `T:`, checks its
-   CRC-32, size and Zynq boot header, then installs it like a chosen file.
-   Escape or the close gadget cancels the download. The temporary image is
-   deleted after a successful install. After a failed one it stays selected
-   for **Install** until it is installed, replaced by another download or
-   chosen file, or ZZTop quits.
-4. Power-cycle the Amiga to start the new firmware.
+   archive, extracts `BOOT.bin` and direct `ZZ9K/*.ZZM` entries to a bounded
+   temporary drawer in `T:`, and verifies `BOOT.bin` plus each module header
+   and image SHA-256. It uploads modules first and `BOOT.bin` last, then
+   removes the temporary drawer. Escape or the close gadget cancels the
+   download.
+4. Firmware without `ZZ_FW_CAP_FWUP_MODULE_DIR` receives only `BOOT.bin`.
+   Reboot, then run the install again to add the optional modules.
+5. Power-cycle the Amiga to start the new firmware.
 
 **Latest** shows the release tag and one of these results:
 
@@ -248,10 +253,12 @@ the previous firmware deletes it.
 
 ### Installing a file
 
-1. Select **Choose file...** and select a `bin`, `rom`, or `img` file.
-2. Select **Install**, confirm the request, and wait for the transfer to
-   finish. ZZTop promotes the selected file to `BOOT.bin` and saves the
-   previous image as `BOOT.bak`.
+1. Select **Choose file...** and select a release `BOOT.bin`.
+2. ZZTop finds valid modules in its sibling `ZZ9K/` drawer and lists the
+   files that will be installed. Select **Install**, confirm the request, and
+   wait for the complete transfer. Modules are installed first, then ZZTop
+   promotes the image to `BOOT.bin` and saves the previous image as
+   `BOOT.bak`. `ZZ9000.CFG` is never installed.
 3. Power-cycle the Amiga to start the new firmware.
 
 ### Restoring the previous firmware
@@ -261,6 +268,14 @@ the current `BOOT.bin` and leaves no backup. It works only while the card can
 boot and communicate with ZZTop; restore an unbootable card's microSD card on
 another computer. Transfers and restore are disabled until the updater probe
 succeeds, and during a transfer.
+
+## Modules
+
+Modules is an indented child page under Firmware. It lists each optional
+module's name, version, and state: loaded, missing, or rejected: ABI, hash, or
+slot. Use **Refresh** to reread the firmware manifest. Changes to `ZZ9K/` take
+effect after a reboot. The page disables its refresh control when the firmware
+does not advertise module-status support.
 
 ## Diagnostics
 

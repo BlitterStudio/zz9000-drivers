@@ -30,11 +30,18 @@ static void check(int cond, const char *what)
 	}
 }
 
-/* ---- simulated card file ---- */
+/* ---- simulated card file and boot registers ---- */
 
 static char card[ZZCFG_MAX_SIZE + 1];
 static UWORD card_status;
 static int reset_pending, read_pending, saves_seen;
+static UWORD query_key;
+static UWORD query_values[ZZ_CFG_KEY_FAST_RAM_OUTCOME + 1];
+static UWORD query_present[ZZ_CFG_KEY_FAST_RAM_OUTCOME + 1];
+/* Last-boot Fast RAM decision. Stays put across a save: the firmware
+ * does not re-evaluate the outcome register until the next reset. */
+static UWORD boot_outcome_present, boot_outcome;
+static UWORD boot_pref_present, boot_pref;
 
 static void card_set(const char *text)
 {
@@ -58,9 +65,26 @@ static void card_sync_saves(void)
 	}
 }
 
+static void apply_boot_query(void)
+{
+	memset(query_values, 0, sizeof(query_values));
+	memset(query_present, 0, sizeof(query_present));
+	query_key = 0;
+	query_present[ZZ_CFG_KEY_FAST_RAM_OUTCOME] = boot_outcome_present;
+	query_values[ZZ_CFG_KEY_FAST_RAM_OUTCOME] = boot_outcome;
+	query_present[ZZ_CFG_KEY_FAST_RAM] = boot_pref_present;
+	query_values[ZZ_CFG_KEY_FAST_RAM] = boot_pref;
+}
+
 UWORD zzcfg_test_reg_read(ULONG b, ULONG offset)
 {
 	(void)b;
+	if (offset == ZZ_REG_CONFIG_KEY)
+		return query_key <= ZZ_CFG_KEY_FAST_RAM_OUTCOME ?
+			query_values[query_key] : 0;
+	if (offset == ZZ_REG_CONFIG_PRESENT)
+		return query_key <= ZZ_CFG_KEY_FAST_RAM_OUTCOME ?
+			query_present[query_key] : 0;
 	if (offset == ZZ_REG_CONFIG_FILE) {
 		card_sync_saves();
 		if (reset_pending) {
@@ -81,6 +105,10 @@ UWORD zzcfg_test_reg_read(ULONG b, ULONG offset)
 void zzcfg_test_reg_write(ULONG b, ULONG offset, UWORD value)
 {
 	(void)b;
+	if (offset == ZZ_REG_CONFIG_KEY) {
+		query_key = value;
+		return;
+	}
 	if (offset != ZZ_REG_CONFIG_FILE) return;
 	if (value == 0) reset_pending = 1;
 	else if (value == 1) read_pending = 1;
@@ -124,7 +152,7 @@ static int has_line(const char *text, const char *line)
 	return 0;
 }
 
-static void reset(const char *text)
+static void load(const char *text)
 {
 	memset(&board, 0, sizeof(board));
 	board.fw_version = 0x0208;
@@ -132,7 +160,25 @@ static void reset(const char *text)
 	card_set(text);
 	card_sync_saves();
 	saves_seen = 0;
+	apply_boot_query();
 	settings_load();
+}
+
+static void reset(const char *text)
+{
+	boot_outcome_present = 0;
+	boot_outcome = 0;
+	boot_pref_present = 0;
+	boot_pref = 0;
+	load(text);
+}
+
+static void boot_fast_ram(UWORD outcome, int preference_on)
+{
+	boot_outcome_present = 1;
+	boot_outcome = outcome;
+	boot_pref_present = preference_on ? 1 : 0;
+	boot_pref = preference_on ? 1 : 0;
 }
 
 /* ---- tests ---- */
@@ -262,6 +308,105 @@ static void test_guard_survives_failed_post_save_read(void)
 	check(!guard.valid, "guard cleared once repaired");
 }
 
+static void status_of(char *status, char *note)
+{
+	settings_fast_ram_status(status, 64, note, 96);
+}
+
+static void test_fast_ram_status_shows_pending_after_save(void)
+{
+	char status[64], note[96], msg[96];
+
+	boot_fast_ram(ZZ_CFG_FAST_RAM_OUTCOME_OFF, 0);
+	load("fast_ram = off\n");
+	status_of(status, note);
+	check(strcmp(status, "Off") == 0, "clean off reads Off");
+	check(strstr(note, "reboot") != NULL, "Fast RAM note says reboot");
+	check(strstr(note, "power-cycle") == NULL,
+		"Fast RAM note does not say power-cycle");
+
+	settings_set(CFG_FAST_RAM, 1);
+	status_of(status, note);
+	check(strcmp(status, "Off") == 0,
+		"unsaved checkbox does not pretend the file changed");
+	settings_saved_message(msg, sizeof(msg));
+	check(strcmp(msg, "Saved. Reboot the Amiga to apply Fast RAM.") == 0,
+		"Fast RAM alone says reboot");
+	check(strstr(msg, "Power-cycle") == NULL,
+		"Fast RAM alone does not say power-cycle");
+
+	check(settings_save() == FWUP_OK, "Fast RAM save succeeds");
+	status_of(status, note);
+	check(strcmp(status, "Off now; on after reboot") == 0,
+		"saved on while the boot gate is off is pending");
+	check(strstr(status, "Disabled") == NULL,
+		"pending on is not left as Disabled");
+
+	boot_fast_ram(ZZ_CFG_FAST_RAM_OUTCOME_ENABLED, 1);
+	load("fast_ram = on\n");
+	status_of(status, note);
+	check(strcmp(status, "On") == 0, "enabled and saved on reads On");
+
+	boot_fast_ram(ZZ_CFG_FAST_RAM_OUTCOME_BAK_ON, 1);
+	load("fast_ram = on\n");
+	status_of(status, note);
+	check(strcmp(status, "On (backup)") == 0,
+		"backup recovery still reads as on");
+
+	boot_fast_ram(ZZ_CFG_FAST_RAM_OUTCOME_ENABLED, 1);
+	load("fast_ram = off\n");
+	status_of(status, note);
+	check(strcmp(status, "On now; off after reboot") == 0,
+		"saved off while Fast RAM is on is pending");
+
+	boot_fast_ram(ZZ_CFG_FAST_RAM_OUTCOME_ABSENT, 0);
+	load("int2 = off\nhdf = game.hdf\n");
+	status_of(status, note);
+	check(strcmp(status, "Disabled (not configured)") == 0,
+		"absent key keeps the not-configured result");
+	settings_set(CFG_FAST_RAM, 1);
+	check(settings_save() == FWUP_OK, "save over an absent key succeeds");
+	status_of(status, note);
+	check(strcmp(status, "Off now; on after reboot") == 0,
+		"saved on over an absent key is pending");
+
+	boot_fast_ram(ZZ_CFG_FAST_RAM_OUTCOME_INVALID, 1);
+	load("fast_ram = on\n");
+	status_of(status, note);
+	check(strcmp(status, "Withheld (invalid config)") == 0,
+		"invalid boot outcome stays withheld");
+	check(strstr(status, "after reboot") == NULL,
+		"invalid outcome is not reported as pending on");
+
+	boot_fast_ram(ZZ_CFG_FAST_RAM_OUTCOME_MEDIA_ERR, 0);
+	load("fast_ram = on\n");
+	status_of(status, note);
+	check(strcmp(status, "Disabled (SD error)") == 0,
+		"SD error stays visible after a later on in the file");
+
+	boot_fast_ram(ZZ_CFG_FAST_RAM_OUTCOME_TIMEOUT, 1);
+	load("fast_ram = on\n");
+	status_of(status, note);
+	check(strcmp(status, "Withheld (boot timeout)") == 0,
+		"boot timeout stays withheld");
+
+	reset("int2 = off\nfast_ram = off\n");
+	settings_set(CFG_INT2, 1);
+	settings_saved_message(msg, sizeof(msg));
+	check(strcmp(msg,
+		"Saved. Power-cycle the Amiga to apply 1 boot-time setting.") == 0,
+		"INT2 alone still says power-cycle");
+	settings_set(CFG_FAST_RAM, 1);
+	settings_saved_message(msg, sizeof(msg));
+	check(strcmp(msg,
+		"Saved. Power-cycle the Amiga to apply 2 boot-time settings.") == 0,
+		"Fast RAM mixed with INT2 keeps power-cycle");
+	check(strstr(settings_system_note(), "Fast RAM: reboot.") != NULL,
+		"system note says Fast RAM needs a reboot");
+	check(strstr(settings_system_note(), "power-cycle") != NULL,
+		"system note still says power-cycle for the other settings");
+}
+
 int main(void)
 {
 	test_dirty_tracks_value_not_touch();
@@ -271,6 +416,7 @@ int main(void)
 	test_guard_leaves_untouched_file_alone();
 	test_guard_refuses_unreadable_card();
 	test_guard_survives_failed_post_save_read();
+	test_fast_ram_status_shows_pending_after_save();
 	if (failures) {
 		printf("zztop_settings_test: %d failure(s)\n", failures);
 		return 1;

@@ -8,6 +8,7 @@
 #include <libraries/gadtools.h>
 #include <proto/dos.h>
 #include <proto/gadtools.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -52,9 +53,6 @@ static struct Gadget *g_restore_note;
 
 static char installed[32];
 static char path[256];
-/* Release tag of `path` when it is a verified online download kept for an
- * Install retry; empty for a file the user chose. */
-static char path_tag[32];
 static char message[400];
 static char support_text[96] = "Checking update support...";
 static char latest_text[96] = "Not checked";
@@ -115,6 +113,26 @@ static void set_progress(const char *text)
 	snprintf(progress_text, sizeof(progress_text), "%s", text);
 	gt_page_set_text(g_progress, progress_text);
 }
+
+/* Append an install-confirmation line without ever stepping past message. */
+static void message_append(ULONG *used, const char *fmt, ...)
+{
+	ULONG remaining;
+	va_list ap;
+	int written;
+
+	if (*used >= sizeof(message))
+		return;
+	remaining = sizeof(message) - *used;
+	va_start(ap, fmt);
+	written = vsnprintf(message + *used, remaining, fmt, ap);
+	va_end(ap);
+	if (written < 0 || (ULONG)written >= remaining)
+		*used = sizeof(message) - 1;
+	else
+		*used += (ULONG)written;
+}
+
 
 /* Describe the last check result for the chosen image. */
 static void render_latest(void)
@@ -181,10 +199,12 @@ static void download_progress(void *ctx, ULONG done, LONG total)
 	show_progress("Downloaded ", done, total);
 }
 
-/* Push `image` to the card as BOOT.bin. `tag` names the release it came
- * from (NULL for a file the user chose). Returns TRUE on success. */
-static BOOL install_image(const char *image, const char *tag)
+/* Transfer a previously inspected release bundle. Modules go first; a module
+ * failure leaves BOOT.bin untouched. */
+static BOOL install_bundle(const struct fwup_bundle *bundle, const char *tag)
 {
+	char failed_name[FWUP_MODULE_FILENAME_MAX + 1];
+	int modules_skipped = FALSE;
 	UWORD st;
 
 	transfer_active = TRUE;
@@ -193,52 +213,77 @@ static BOOL install_image(const char *image, const char *tag)
 	set_progress("0 KB");
 	set_status("Installing...");
 	gt_busy(TRUE);
-	st = fwup_send_file((ULONG)board.regs, image, "BOOT.bin", progress, NULL);
+	st = fwup_bundle_install((ULONG)board.regs, bundle,
+		fwup_board_capabilities((ULONG)board.regs), progress, NULL,
+		failed_name, sizeof(failed_name), &modules_skipped);
 	gt_busy(FALSE);
 	transfer_active = FALSE;
 	update_gate();
 	if (st == FWUP_OK) {
 		fwonline_record_install(tag);
 		set_progress("Installed");
-		set_status("Installed. Power-cycle the Amiga to start it.");
-		gt_status("Firmware installed; power-cycle the Amiga.");
+		if (modules_skipped) {
+			set_status("BOOT.bin installed. Reboot, then run install again for modules.");
+			gt_status("Firmware installed; reboot, then run install again for modules.");
+		} else {
+			set_status("Installed. Power-cycle the Amiga to start it.");
+			gt_status("Firmware installed; power-cycle the Amiga.");
+		}
 		return TRUE;
 	}
-	snprintf(message, sizeof(message), "Firmware install failed: %s (0x%04x)",
-		fwup_strerror(st), (unsigned)st);
+	if (failed_name[0]) {
+		snprintf(message, sizeof(message), "Module %s failed: %s (0x%04x). "
+			"BOOT.bin was not installed.", failed_name, fwup_strerror(st),
+			(unsigned)st);
+	} else {
+		snprintf(message, sizeof(message), "Firmware install failed: %s (0x%04x)",
+			fwup_strerror(st), (unsigned)st);
+	}
 	set_status("Install failed.");
 	gt_ask("OK", "%s", message);
-	gt_status("Firmware install failed: %s", fwup_strerror(st));
+	gt_status("%s", message);
 	return FALSE;
 }
 
-/* A verified online download kept after a failed flash (path_tag set) is
- * ZZTop's own temporary file: it lives only as long as it is the
- * selection. A successful flash, a new download, another chosen file and
- * quitting all delete it. */
-static void drop_kept_image(void)
-{
-	if (!path_tag[0])
-		return;
-	DeleteFile((CONST_STRPTR)path);
-	path[0] = '\0';
-	path_tag[0] = '\0';
-	snprintf(file_text, sizeof(file_text), "%s", "No file chosen");
-	gt_page_set_text(g_file, file_text);
-	update_gate();
-}
 
-/* Install the chosen file after confirmation. */
+/* Describe and confirm every file a manual bundle install can change. */
 static void install(void)
 {
+	struct fwup_bundle bundle;
+	ULONG used;
+	UWORD i;
+	UWORD st;
+	UWORD caps;
+
 	if (!path[0] || !fwup_supported || transfer_active)
 		return;
-	if (gt_ask("Install|Cancel",
-		"Install %s as BOOT.bin?\n\nCurrent image kept as BOOT.bak.\nPower-cycle Amiga afterwards.",
-		FilePart((CONST_STRPTR)path)) != 1)
+	st = fwup_bundle_discover(path, &bundle);
+	if (st != FWUP_OK) {
+		snprintf(message, sizeof(message), "Cannot prepare firmware bundle: %s",
+			fwup_strerror(st));
+		set_status("Bundle not installed.");
+		gt_ask("OK", "%s", message);
 		return;
-	if (install_image(path, path_tag[0] ? path_tag : NULL))
-		drop_kept_image();
+	}
+	message[0] = '\0';
+	used = 0;
+	message_append(&used, "Install BOOT.bin from %s?\n\n",
+		FilePart((CONST_STRPTR)path));
+	if (bundle.module_count) {
+		message_append(&used, "Modules installed first:\n");
+		for (i = 0; i < bundle.module_count; i++)
+			message_append(&used, "%s\n", bundle.module_names[i]);
+	} else {
+		message_append(&used, "No optional modules found.\n");
+	}
+	caps = fwup_board_capabilities((ULONG)board.regs);
+	if (bundle.module_count && (caps & ZZ_FW_CAP_FWUP_MODULE_DIR) == 0)
+		message_append(&used, "\nThis firmware will install BOOT.bin only. "
+			"Reboot, then run the install again for modules.\n");
+	if (gt_ask("Install|Cancel", "%s\nCurrent image kept as BOOT.bak.\n"
+		"Power-cycle Amiga afterwards.", message) != 1)
+		return;
+	(void)install_bundle(&bundle, NULL);
 }
 
 static int wait_keep_running(void *ctx)
@@ -323,14 +368,16 @@ static BOOL confirm_variant(void)
 		fwrel_variant_name(variant)) == 1;
 }
 
-/* Download the checked release for the chosen board, then install it. */
+/* Download the checked release bundle for the chosen board, then install it. */
 static void update_online(void)
 {
 	struct fe_wait wait;
 	struct fwonline_hooks hooks;
+	struct fwup_bundle bundle;
 	BOOL cancel = FALSE, cancelled;
 	BOOL ok;
-	static char image[64];
+	UWORD st;
+	static char image[256];
 	const char *question;
 
 	if (!release_known || !fwup_supported || transfer_active)
@@ -345,7 +392,7 @@ static void update_online(void)
 		question = "The card runs newer firmware than %s. Install %s anyway?";
 		break;
 	default:
-		question = "Download %s and install it as BOOT.bin?";
+		question = "Download and install %s?";
 		break;
 	}
 	snprintf(message, sizeof(message), question, release.tag, release.tag);
@@ -354,10 +401,7 @@ static void update_online(void)
 		fwrel_variant_label(variant)) != 1)
 		return;
 
-	/* The new download replaces any kept one, even under the same name. */
-	drop_kept_image();
-	snprintf(image, sizeof(image), "T:ZZ9000-%s-%s-BOOT.bin", release.tag,
-		fwrel_variant_name(variant));
+	image[0] = '\0';
 	transfer_active = TRUE;
 	update_gate();
 	set_progress("Connecting...");
@@ -367,8 +411,8 @@ static void update_online(void)
 	hooks.ctx = &wait;
 	fe_wait_begin(&wait, &cancel);
 	gt_busy(TRUE);
-	ok = fwonline_download(release.tag, variant, image, &hooks, &cancelled,
-		message, sizeof(message));
+	ok = fwonline_download(release.tag, variant, image, sizeof(image), &hooks,
+		&cancelled, message, sizeof(message));
 	/* A key queued after the last read (or while the final chunk was
 	 * inflated) has not been polled yet; poll once more before deciding
 	 * to flash. */
@@ -380,7 +424,8 @@ static void update_online(void)
 	/* Escape in the last poll of a complete download still cancels: the
 	 * user asked not to flash. */
 	if (ok && cancel) {
-		DeleteFile((CONST_STRPTR)image);
+		fwonline_remove_bundle(image);
+		image[0] = '\0';
 		ok = FALSE;
 		cancelled = TRUE;
 		snprintf(message, sizeof(message), "%s", "Download cancelled");
@@ -394,16 +439,18 @@ static void update_online(void)
 		gt_status("%s", message);
 		return;
 	}
-	if (install_image(image, release.tag)) {
-		DeleteFile((CONST_STRPTR)image);
-		return;
+	st = fwup_bundle_discover(image, &bundle);
+	if (st != FWUP_OK) {
+		snprintf(message, sizeof(message), "Downloaded bundle cannot be installed: %s",
+			fwup_strerror(st));
+		set_status("Install failed.");
+		gt_ask("OK", "%s", message);
+		gt_status("%s", message);
+	} else {
+		(void)install_bundle(&bundle, release.tag);
 	}
-	/* Keep the verified image so Install can retry without the network. */
-	snprintf(path, sizeof(path), "%s", image);
-	snprintf(path_tag, sizeof(path_tag), "%s", release.tag);
-	snprintf(file_text, sizeof(file_text), "%s", (const char *)FilePart((CONST_STRPTR)path));
-	gt_page_set_text(g_file, file_text);
-	update_gate();
+	fwonline_remove_bundle(image);
+	image[0] = '\0';
 }
 
 /* Restore the card's backup firmware after user confirmation. */
@@ -443,7 +490,9 @@ static void restore(void)
 static BOOL create(struct gt_page *page)
 {
 	struct gt_form f;
-	static const char *const fw_labels[] = { "Installed", "Latest", "Board", NULL };
+	static const char *const fw_labels[] = {
+		"Installed", "Latest", "Board", NULL
+	};
 	WORD left, width;
 	WORD check_w, update_w, choose_w, inst_w, rest_w;
 	int i;
@@ -495,7 +544,6 @@ static BOOL create(struct gt_page *page)
 	g_restore = gt_add_button(page, G_RESTORE, left, 8, rest_w, "Restore previous firmware");
 	g_restore_note = gt_add_note(page, G_RESTORE_NOTE, left, 9, width, restore_note);
 
-	page->rows = 10;
 	return g_installed && g_support && g_latest && g_variant && g_check &&
 		g_update && g_choose && g_file && g_install && g_progress &&
 		g_status && g_restore && g_restore_note;
@@ -518,16 +566,12 @@ static void gadget(UWORD id, UWORD code)
 	} else if (id == G_UPDATE) {
 		update_online();
 	} else if (id == G_CHOOSE) {
-		/* A cancelled or too-long pick must not disturb the current
-		 * image or its release tag. */
+		/* A cancelled or too-long pick must not disturb the current image. */
 		static char picked[sizeof(path)];
 
-		if (fwup_supported && gt_pick_file("Select firmware file to install",
-			"#?.(bin|rom|img)", picked, sizeof(picked))) {
-			if (path_tag[0] && strcmp(picked, path) != 0)
-				DeleteFile((CONST_STRPTR)path);
+		if (fwup_supported && gt_pick_file("Select firmware BOOT.bin",
+			"BOOT.bin", picked, sizeof(picked))) {
 			memcpy(path, picked, sizeof(path));
-			path_tag[0] = '\0';
 			snprintf(file_text, sizeof(file_text), "%s", (const char *)FilePart((CONST_STRPTR)path));
 			gt_page_set_text(g_file, file_text);
 			gt_status("Firmware image selected: %s", FilePart((CONST_STRPTR)path));
@@ -557,13 +601,6 @@ static void sync(void)
 	update_gate();
 }
 
-/* Remove a kept online download when ZZTop quits. */
-static void cleanup(void)
-{
-	if (path_tag[0])
-		DeleteFile((CONST_STRPTR)path);
-}
-
 struct gt_page gt_page_firmware = {
 	"Firmware",
 	"Firmware",
@@ -579,5 +616,5 @@ struct gt_page gt_page_firmware = {
 	NULL,
 	sync,
 	NULL,
-	cleanup
+	NULL
 };

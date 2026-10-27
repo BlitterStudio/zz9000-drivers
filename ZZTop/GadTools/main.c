@@ -12,6 +12,7 @@
 
 #include <stdio.h>
 
+#include "amiga_stack.h"
 #include "audio.h"
 #include "board.h"
 #include "settings.h"
@@ -66,7 +67,7 @@ static void zz9k_library_open(void)
 }
 
 /* Initialise the shared core then run the small-screen GadTools frontend. */
-int main(void)
+static int zztop_main(void)
 {
 	IntuitionBase = (struct IntuitionBase *)OpenLibrary(
 		(CONST_STRPTR)"intuition.library", 37);
@@ -113,4 +114,15 @@ out:
 		CloseLibrary((struct Library *)GfxBase);
 	CloseLibrary((struct Library *)IntuitionBase);
 	return 0;
+}
+
+static int zztop_entry(void *ctx)
+{
+	(void)ctx;
+	return zztop_main();
+}
+
+int main(void)
+{
+	return amiga_stack_run("ZZTop", 32768UL, zztop_entry, NULL);
 }
