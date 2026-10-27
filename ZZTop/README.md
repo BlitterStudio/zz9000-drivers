@@ -315,6 +315,7 @@ Automatic are omitted or commented out when saved.
 | `videocap_height` | `100..1024`, or Automatic |
 | `scanline_mode` | `0..3` |
 | `scanline_parity` | `0` or `1` |
+| `gamma` | `0.20..5.00` output gamma; carried through from the file, set live with `ZZGamma` |
 | `int2`, `offscreen_bitmaps`, `video_overlay`, `fast_ram` | `on` or `off` |
 | `mac` | Six hexadecimal octets separated by `:` or `-` |
 | `hdf` | Image filename in the microSD root, or `off` |

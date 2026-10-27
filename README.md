@@ -18,7 +18,7 @@ shared-memory layout before SDK services are exposed.
 | [Installer](installer/README.md) | The Commodore Installer drawer, release layout, and end-user installation flow. |
 | [Picasso96 graphics](#picasso96-graphics) | `ZZ9000.card`, monitor settings, acceleration, DPMS, P96 video overlay, and custom modelines. |
 | [Networking](#networking-and-diagnostics) | `ZZ9000Net.device`, the optional Roadshow `ZZ9000Net` template, `ZZNetReady`, and `ZZNetStats`. |
-| [Board and command-line tools](docs/cli-tools.md) | `ZZDiag`, `ZZFwUpdate`, `ZZScanlines`, and their command-line reference. |
+| [Board and command-line tools](docs/cli-tools.md) | `ZZDiag`, `ZZFwUpdate`, `ZZScanlines`, `ZZGamma`, and their command-line reference. |
 | [ZZCapture](ZZCapture/README.md) | Native-video timing observation and experimental A4000/C28 capture diagnostics. |
 | [ZZ9000AX audio](ahi/README.md) | `zz9000ax.audio`, its AudioMode, and `mhizz9000.library` for PCM playback, recording, and hardware MP3 decoding. |
 | [Poseidon USB](usb-poseidon/README.md) | `zzusbhw.device` for the external Poseidon 4.5 USB stack. |

@@ -2,7 +2,7 @@ AMIGA_IMAGE ?= sacredbanana/amiga-compiler:m68k-amigaos
 AMIGA_DOCKER = ./tools/amiga-docker.sh
 
 .PHONY: all build-all package-local check-release quality rtg-tests mhi-tests \
-	net-tests rtg zztop zzscanlines zzfwupdate usb-poseidon sd-boot net \
+	net-tests rtg zztop zzscanlines zzgamma zzfwupdate usb-poseidon sd-boot net \
 	ZZNetStats mhi ahi ahi-duplextest ZZDiag ZZCapture sdk amissl
 
 all: build-all
@@ -41,6 +41,11 @@ zzscanlines:
 	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) ZZScanlines \
 		m68k-amigaos-gcc -O2 -noixemul -I../include \
 		-o ZZScanlines ZZScanlines.c -lamiga
+
+zzgamma:
+	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) ZZGamma \
+		m68k-amigaos-gcc -O2 -noixemul -I../include \
+		-o ZZGamma ZZGamma.c -lamiga
 
 zzfwupdate:
 	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) ZZFwUpdate \

@@ -99,6 +99,11 @@ struct zzcfg_values {
     UWORD scanline_parity;   /* 0-1 */
     UWORD scanline_mode_present;
     UWORD scanline_parity_present;
+    /* Output gamma in hundredths, 20..500; carried through exactly
+     * when parsed so a Settings save never drops a live filter setup.
+     * Absent means identity (1.00) and stays commented out. */
+    UWORD gamma;
+    UWORD gamma_present;
     UWORD int2;              /* 0-1 */
     /* Feature kill-switches. Both default ON in ZZ9000.card when the key is
      * absent, so these must default to 1 here too: Settings writes these

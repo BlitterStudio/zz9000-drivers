@@ -6,8 +6,9 @@
 # ZZ9000 command-line tools
 
 The standard installer places `ZZFwUpdate`, `ZZNetStats`, `ZZDiag`,
-`ZZNetReady`, and `ZZScanlines` in `C:`. They update files on the card,
-inspect the network and board, gate network startup, and set scanlines.
+`ZZNetReady`, `ZZScanlines`, and `ZZGamma` in `C:`. They update files on
+the card, inspect the network and board, gate network startup, and set
+scanlines and output gamma.
 `ZZCapture` is an optional diagnostic with its own `ZZCapture.guide`.
 The SDK tools, when installed, are documented in `sdk.guide`.
 
@@ -18,6 +19,7 @@ The SDK tools, when installed, are documented in `sdk.guide`.
 | `ZZDiag` | Prints board, aperture, USB, video-capture, SD, audio, Ethernet, and scanline diagnostics. |
 | `ZZNetReady` | Returns an AmigaDOS status for a boot script that waits for Ethernet negotiation. |
 | `ZZScanlines` | Changes the active scandoubler scanline mode and parity. |
+| `ZZGamma` | Sets the output gamma filter live, or prints the current gamma. |
 
 ## ZZFwUpdate: firmware updates
 
@@ -226,3 +228,28 @@ modes.
 write `scanline_mode` and `scanline_parity` to `ZZ9000.CFG`; ZZTop's Save
 command writes those keys. The firmware accepts mode values `0`–`3` and
 parity values `0`–`1`.
+
+## ZZGamma: output gamma
+
+`ZZGamma` sets the video formatter's output gamma live, or prints the
+current setting when called without arguments.
+
+```text
+ZZGamma
+ZZGamma 1.8
+ZZGamma 0.75
+ZZGamma OFF
+```
+
+| Argument | Values |
+| --- | --- |
+| `value` | Gamma `0.20`–`5.00` with one or two decimals (`1.8`, `0.75`, `2`). Values above `1.00` brighten, values below `1.00` darken. |
+| `OFF` | Returns to `1.00` (identity curve, filter off). |
+
+The command prints the value it reads back, for example `Gamma 1.80`.
+When the firmware or the loaded bitstream has no gamma LUT it prints an
+explanation and exits with `WARN` (5).
+
+`ZZGamma` changes the live setting only. To keep a value across a power
+cycle, write `gamma = 1.80` to `ZZ9000.CFG`; ZZTop's Save command
+carries the key through when it is present in the file.

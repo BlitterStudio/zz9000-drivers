@@ -52,6 +52,7 @@ if [ "$quick" -eq 0 ]; then
     check_file sd-boot/zzsd.device
     check_exec ZZTop/ZZTop
     check_exec ZZScanlines/ZZScanlines
+    check_exec ZZGamma/ZZGamma
     check_exec ZZFwUpdate/ZZFwUpdate
     check_exec net/ZZNetStats/ZZNetStats
     check_exec ZZDiag/ZZDiag
@@ -109,6 +110,7 @@ tracked_artifacts=$(
         sd-boot/boot-rom/boot.bin \
         ZZFwUpdate/ZZFwUpdate \
         ZZScanlines/ZZScanlines \
+        ZZGamma/ZZGamma \
         ZZTop/ZZTop \
         net/ZZNetStats/ZZNetStats \
         ZZDiag/ZZDiag \

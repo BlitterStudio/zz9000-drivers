@@ -586,6 +586,38 @@ void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v)
                 v->scanline_parity = (UWORD)(value[0] - '0');
                 v->scanline_parity_present = 1;
             }
+        } else if (zzcfg_str_eq_ci(key, "gamma")) {
+            /* Mirrors the firmware's parse_gamma: one optional fraction
+             * of at most two digits, 0.20..5.00, held in hundredths. */
+            long whole = 0, frac = 0, hundredths;
+            int digits = 0, seen_dot = 0, ok = 1;
+            const char *p = value;
+
+            if (!*p) ok = 0;
+            while (ok && *p) {
+                if (*p == '.') {
+                    if (seen_dot) ok = 0;
+                    else seen_dot = 1;
+                } else if (*p >= '0' && *p <= '9') {
+                    if (seen_dot) {
+                        if (++digits > 2) ok = 0;
+                        else frac = frac * 10 + (*p - '0');
+                    } else {
+                        whole = whole * 10 + (*p - '0');
+                        if (whole > 5) ok = 0;
+                    }
+                } else {
+                    ok = 0;
+                }
+                p++;
+            }
+            if (seen_dot && digits == 0) ok = 0;
+            if (ok && digits == 1) frac *= 10; /* "1.8" = "1.80" */
+            hundredths = ok ? whole * 100 + frac : -1;
+            if (hundredths >= 20 && hundredths <= 500) {
+                v->gamma = (UWORD)hundredths;
+                v->gamma_present = 1;
+            }
         } else if (zzcfg_str_eq_ci(key, "int2")) {
             if (zzcfg_str_eq_ci(value, "on") || zzcfg_str_eq_ci(value, "1"))
                 v->int2 = 1;
@@ -1035,6 +1067,7 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
         "%svideocap_height = %u\n"
         "%sscanline_mode = %u\n"
         "%sscanline_parity = %u\n"
+        "%sgamma = %u.%02u\n"
         "int2 = %s\n"
         "%s"
         "offscreen_bitmaps = %s\n"
@@ -1055,6 +1088,9 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
         (unsigned)(v->scanline_mode & 3),
         v->scanline_parity_present ? "" : "#",
         (unsigned)(v->scanline_parity & 1),
+        v->gamma_present ? "" : "#",
+        (unsigned)((v->gamma_present ? v->gamma : 100U) / 100U),
+        (unsigned)((v->gamma_present ? v->gamma : 100U) % 100U),
         v->int2 ? "on" : "off",
         fast_ram_config,
         v->offscreen_bitmaps ? "on" : "off",

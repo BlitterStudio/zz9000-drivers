@@ -595,13 +595,19 @@
              (help "Previous ZZ9000 releases installed ZZTop into SYS:Tools. Leaving it there means you have two copies and the stale one will not match this release.")
              (infos)))
 
-      ; The four C: tools install without further confirmation: the section
+      ; The C: tools install without further confirmation: the section
       ; question above already named them, and one page per tool just adds
       ; clicks. Each copy still lists separately in the procedure log.
       (copyfiles
          (prompt "Install ZZScanlines into C:")
          (help "CLI front-end for the ZZ9000's scanline bitstream (classic / soft / gradient patterns with parity control). Requires firmware 2.0.0 or later.")
          (source "Tools/ZZScanlines")
+         (dest "C:"))
+
+      (copyfiles
+         (prompt "Install ZZGamma into C:")
+         (help "Sets the output gamma of the ZZ9000's video formatter live (0.20-5.00, 1.00 or OFF = off; above 1.00 brightens, below darkens). Not saved across reboots: write gamma = x.xx to ZZ9000.CFG to keep a setting. Requires firmware and a bitstream with the gamma LUT; older stacks report it as unavailable.")
+         (source "Tools/ZZGamma")
          (dest "C:"))
 
       (copyfiles

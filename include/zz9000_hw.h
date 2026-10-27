@@ -119,6 +119,10 @@
  * captured words (16-aligned, 256..1280; height 100..1024). 0 restores
  * the automatic window. Gated by ZZ_FW_CAP_VIDEOCAP_GEOMETRY. */
 #define ZZ_CARD_FEATURE_VIDEOCAP_GEOMETRY 5
+/* Runtime output gamma (ZZGamma): value is gamma in hundredths,
+ * 20..500; 0 or 100 switch the filter off. Gated by the bitstream's
+ * gamma LUT (REG7 bit 30) and reported by config key 35. */
+#define ZZ_CARD_FEATURE_GAMMA 6
 
 /* ZZ9000.CFG interface (firmware >= 2.3, issue #33). Key ids, file
  * statuses and the client API live in common/zzcfg_amiga.h. */

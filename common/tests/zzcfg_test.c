@@ -121,7 +121,7 @@ static const char *firmware_keys[] = {
     "videocap_profile", "videocap_sample", "videocap_crop_h",
     "videocap_crop_v", "videocap_phase", "videocap_c28_phase",
     "videocap_width", "videocap_height",
-    "scanline_mode", "scanline_parity", "int2", "mac",
+    "scanline_mode", "scanline_parity", "gamma", "int2", "mac",
     "offscreen_bitmaps", "video_overlay", "hdf", NULL
 };
 
@@ -286,6 +286,51 @@ static void test_native_key_presence(void)
           boot.videocap_sample == 0 && boot.scanline_mode == 0 &&
           boot.scanline_parity == 0,
           "explicit legacy profile and zero values remain active");
+}
+
+static void test_gamma(void)
+{
+    static const char *bad[] = {
+        "0.10", "5.01", "6", "1.805", "1.", "1..8", "high", "1.8x"
+    };
+    struct zzcfg_values staged, reloaded;
+    char text[ZZCFG_MAX_SIZE], input[64];
+    UWORD len;
+    unsigned i;
+
+    /* gamma = 1.8 parses to 180 and renders with two decimals */
+    memset(&staged, 0, sizeof(staged));
+    zzcfg_parse_text("gamma = 1.8\n",
+        (UWORD)strlen("gamma = 1.8\n"), &staged);
+    check(staged.gamma_present && staged.gamma == 180,
+          "gamma 1.8 parses to 180 hundredths");
+    len = zzcfg_generate(&staged, text, sizeof(text));
+    check(len > 0 && has_exact_line(text, "gamma = 1.80"),
+          "gamma renders with two decimals");
+    memset(&reloaded, 0, sizeof(reloaded));
+    zzcfg_parse_text(text, len, &reloaded);
+    check(reloaded.gamma_present && reloaded.gamma == 180,
+          "gamma survives a generate->parse round trip");
+
+    /* absent stays commented out as the identity, never activated */
+    memset(&staged, 0, sizeof(staged));
+    len = zzcfg_generate(&staged, text, sizeof(text));
+    check(len > 0 && has_exact_line(text, "#gamma = 1.00"),
+          "absent gamma saves as the commented identity");
+    memset(&reloaded, 0, sizeof(reloaded));
+    zzcfg_parse_text(text, len, &reloaded);
+    check(!reloaded.gamma_present,
+          "a commented gamma line does not activate the key");
+
+    /* malformed or out-of-range values leave the key absent, so a
+     * later save drops the bad line instead of inventing a value */
+    for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        memset(&staged, 0, sizeof(staged));
+        snprintf(input, sizeof(input), "gamma = %s\n", bad[i]);
+        zzcfg_parse_text(input, (UWORD)strlen(input), &staged);
+        check(!staged.gamma_present,
+              "invalid gamma value leaves the key absent");
+    }
 }
 
 /* Issue #131: the Settings HDF field shows what firmware boots, and
@@ -579,6 +624,7 @@ int main(void)
     int i;
 
     test_native_key_presence();
+    test_gamma();
     test_fast_ram_status();
     test_hdf_gadget_off();
     test_capture_phase_preservation();

@@ -280,6 +280,10 @@ enum zz9k_card_features {
   CARD_FEATURE_NONSTANDARD_VSYNC,
   CARD_FEATURE_VIDEO_OVERLAY,
   CARD_FEATURE_DPMS,
+  /* Entries 5 and 6 mirror firmware zz_regs.h so numeric identities
+   * stay aligned; the RTG driver itself does not send them. */
+  CARD_FEATURE_VIDEOCAP_GEOMETRY,
+  CARD_FEATURE_GAMMA,
   CARD_FEATURE_NUM,
 };
 
