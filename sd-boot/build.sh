@@ -28,7 +28,8 @@ write_c_array() {
       {
         for (i = 1; i <= NF; i++) {
           if (n % 12 == 0) printf "  "
-          printf "0x%s, ", $i
+          else printf " "
+          printf "0x%s,", $i
           n++
           if (n % 12 == 0) printf "\n"
         }

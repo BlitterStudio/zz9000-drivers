@@ -74,13 +74,17 @@ The driver and firmware use the shared buffer at
 | Register | Offset | Direction | Purpose |
 |---|---:|---|---|
 | `BOOT_CMD` | `0xC2` | Write | Packed 16-bit command. Bits 3:0 select `GETINFO` (`1`) or `LOADFS` for filesystem slots 0–7 (`2`–`9`); bits 15:4 are the `LOADFS` chunk index. The current firmware exports at most four filesystem slots. |
-| `BOOT_STATUS` | `0xC4` | Read | `0xFFFF` while a command runs, `0` on success, and another value on error. |
+| `BOOT_STATUS` | `0xC4` | Read | `0xFFFF` while a command runs, `0` on success, `0xFFFE` when no HDF is configured or open, and another value on error. |
 | `SDBLK_TX_HI` | `0xB4` | Write | Upper 16 bits of the block number for a write. |
 | `SDBLK_TX_LO` | `0xB6` | Write | Lower 16 bits of the block number; writing it starts the transfer. |
 | `SDBLK_RX_HI` | `0xB8` | Write | Upper 16 bits of the block number for a read. |
 | `SDBLK_RX_LO` | `0xBA` | Write | Lower 16 bits of the block number; writing it starts the transfer. |
 | `SD_STATUS` | `0xBC` | Read/write | Write the number of blocks for the next transfer. Read `0xFFFF` while busy, `0` on success, or a nonzero firmware error code. |
 
+
+The quiet no-HDF path requires this ROM and firmware that returns `0xFFFE`.
+Older firmware returns `0xFFFF` for this case, so the ROM keeps the existing
+failure message for that combination.
 Each transfer contains 1–48 512-byte blocks, or at most 24 KiB. The driver
 splits larger I/O requests into those transfers.
 
