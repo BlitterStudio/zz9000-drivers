@@ -13,6 +13,8 @@ cd "$repo_root"
 ZZTop/build-gcc.sh
 "$amiga_docker" ZZScanlines m68k-amigaos-gcc -O2 -noixemul -I../include \
     -o ZZScanlines ZZScanlines.c -lamiga
+"$amiga_docker" ZZGamma m68k-amigaos-gcc -O2 -noixemul -I../include \
+    -o ZZGamma ZZGamma.c -lamiga
 "$amiga_docker" ZZFwUpdate m68k-amigaos-gcc -O2 -noixemul -Wall -Wextra \
     -Wstack-usage=2048 -Werror -I../include -I../common \
     -o ZZFwUpdate ZZFwUpdate.c ../common/amiga_stack.c \

@@ -6,9 +6,9 @@
 # ZZTop 3
 
 ZZTop is the ZZ9000 Workbench control panel. It shows card health, changes
-native-video output and scanlines, calibrates the captured Amiga picture,
-controls the ZZ9000AX mixer, edits `ZZ9000.CFG` on the microSD card, and
-installs or restores firmware.
+native-video output, scanlines and output gamma, calibrates the captured
+Amiga picture, controls the ZZ9000AX mixer, edits `ZZ9000.CFG` on the microSD
+card, and installs or restores firmware.
 
 ZZTop runs on AmigaOS 3.0 or later. It uses the screen's font and lays its
 window out for it, with compact and minimal forms for small screens: NTSC
@@ -44,7 +44,7 @@ Changes have one of three effects.
 
 | Effect | Settings |
 |---|---|
-| Live | Scanlines, live picture alignment and sampling, capture geometry where supported, and audio controls |
+| Live | Scanlines, output gamma, live picture alignment and sampling, capture geometry where supported, and audio controls |
 | After a reboot | Fast RAM |
 | After a power cycle | Native-output profile, sampling mode, interrupt, MAC address, SD-card boot image, and RTG options |
 
@@ -54,7 +54,7 @@ repairs any non-audio settings that the firmware audio save replaced, rereads
 file. The status line says reboot when only Fast RAM changed, and power-cycle
 when any other boot-time setting changed.
 
-**Revert** restores the saved live capture, scanline, and audio state, then
+**Revert** restores the saved live capture, scanline, gamma, and audio state, then
 reloads the settings file. It reports a restore failure instead of pretending
 that the previous state is known.
 
@@ -114,6 +114,7 @@ The page also provides these live controls:
 |---|---|
 | **Scanlines** | Selects `Off`, `Classic`, `Soft`, or `Gradient`. |
 | **Darken** | Selects `Odd lines` or `Even lines`. |
+| **Gamma** | Sets the output gamma `0.20`–`5.00` in `0.05` steps while you drag; the readout shows the value, or `Off` at `1.00`. Save writes `gamma = x.xx`, including an explicit `1.00` once you have moved it. The slider is disabled and reads `Not available` when the firmware or the loaded bitstream has no gamma LUT. |
 | **Picture** | Reports the current framing and sampling state. |
 | **Align picture...** | Opens a native PAL or NTSC Hires calibration screen. Arrow keys move one step, Shift plus an arrow moves 16 steps, Enter keeps the position, and Escape restores the position from before the screen opened. |
 | **Find phase...** | Measures a C28 capture-engine test pattern, selects the middle of a clean range, and retests it. Keep the pattern screen in front. Enter keeps the result; Escape or Ctrl-C restores the previous phase. |
@@ -315,6 +316,7 @@ Automatic are omitted or commented out when saved.
 | `videocap_height` | `100..1024`, or Automatic |
 | `scanline_mode` | `0..3` |
 | `scanline_parity` | `0` or `1` |
+| `gamma` | `0.20..5.00`; set live on the Display page or with `ZZGamma` |
 | `int2`, `offscreen_bitmaps`, `video_overlay`, `fast_ram` | `on` or `off` |
 | `mac` | Six hexadecimal octets separated by `:` or `-` |
 | `hdf` | Image filename in the microSD root, or `off` |

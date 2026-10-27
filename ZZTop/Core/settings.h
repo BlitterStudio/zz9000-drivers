@@ -38,6 +38,7 @@ enum cfg_field {
 	CFG_OFFSCREEN,
 	CFG_OVERLAY,
 	CFG_FAST_RAM,
+	CFG_GAMMA,          /* gamma, hundredths; live like the scanlines */
 	CFG_FIELD_COUNT
 };
 
@@ -45,8 +46,8 @@ enum cfg_field {
 
 /* Fields that wait for the next boot. Fast RAM is re-read on every Amiga
  * reset, so a warm reboot applies it. The others are applied only when the
- * card itself restarts. Scanlines and the capture calibration fields also
- * drive live hardware. */
+ * card itself restarts. Scanlines, gamma and the capture calibration
+ * fields also drive live hardware. */
 #define CFG_REBOOT_FIELDS (CFG_BIT(CFG_PROFILE) | CFG_BIT(CFG_SAMPLE) | \
 	CFG_BIT(CFG_INT2) | CFG_BIT(CFG_MAC) | CFG_BIT(CFG_HDF) | \
 	CFG_BIT(CFG_OFFSCREEN) | CFG_BIT(CFG_OVERLAY) | CFG_BIT(CFG_FAST_RAM))

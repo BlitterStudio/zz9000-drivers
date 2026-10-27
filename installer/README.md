@@ -40,7 +40,7 @@ manuals always go in the program drawer.
 | SDK runtime | `Libs/zz9k.library`; `Libs/mpega.library`; `Classes/DataTypes/zz9k-picture.datatype`; `Classes/DataTypes/zz9k-sound.datatype`; `Storage/DataTypes/`; `Tools/zz9k-#?`; `Tools/ZZPlay#?` | Offered only when `zz9k.library` is in the release drawer. Installs `zz9k.library` and optional `mpega.library` in `LIBS:`, the picture and sound datatype classes in `SYS:Classes/DataTypes/`, the JPEG, PNG, WebP, MP3, FLAC, and Ogg Vorbis descriptors in inactive `SYS:Storage/DataTypes/`, the `zz9k-*` commands in `C:`, and `ZZPlay` in the program drawer. |
 | Accelerated AmiSSL | `Libs/AmiSSL/68020-40/amissl_v362.library`; `Libs/AmiSSL/68060/amissl_v362.library` | Offered only when a staged build and `LIBS:AmiSSL/amissl_v362.library` already exist. Backs up the installed library once, then installs the chosen CPU build in `LIBS:AmiSSL/`. |
 | Control panel | `Tools/ZZTop` | Installs in the program drawer. |
-| Command-line tools | `Tools/ZZScanlines`; `Tools/ZZFwUpdate`; `Tools/ZZNetStats`; `Tools/ZZDiag`; `Tools/ZZNetReady` | Installs each command in `C:`. |
+| Command-line tools | `Tools/ZZScanlines`; `Tools/ZZGamma`; `Tools/ZZFwUpdate`; `Tools/ZZNetStats`; `Tools/ZZDiag`; `Tools/ZZNetReady` | Installs each command in `C:`. |
 | Native capture diagnostic | `Tools/ZZCapture` | Optional. Installs in `C:` when selected. |
 
 When `ZZTop` or `ZZPlay` is installed, the final prompt defaults to adding the

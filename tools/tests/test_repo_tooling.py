@@ -23,6 +23,7 @@ GENERATED_ARTIFACT_PATHS = (
     "sd-boot/boot-rom/boot.bin",
     "ZZFwUpdate/ZZFwUpdate",
     "ZZScanlines/ZZScanlines",
+    "ZZGamma/ZZGamma",
     "ZZTop/ZZTop",
     "net/ZZNetStats/ZZNetStats",
     "ZZDiag/ZZDiag",
@@ -503,6 +504,7 @@ class RepoToolingTests(unittest.TestCase):
             "zzusbhw.device",
             "ZZTop",
             "ZZScanlines",
+            "ZZGamma",
             "ZZFwUpdate",
             "ZZNetStats",
             "ZZDiag",
@@ -607,6 +609,7 @@ class RepoToolingTests(unittest.TestCase):
         tools = (
             "ZZTop",
             "ZZScanlines",
+            "ZZGamma",
             "ZZFwUpdate",
             "ZZNetStats",
             "ZZDiag",

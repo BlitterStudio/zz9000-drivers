@@ -11,6 +11,7 @@
 #include "fwup_client.h"
 #include "fwup_amiga.h"
 #include "zzcfg_amiga.h"
+#include "zz9000_gamma.h"
 
 /* Matches the FWUP client's poll budget: a raw read is one small FatFs
  * read, but a slow card under load can still stall for tens of ms. */
@@ -586,6 +587,14 @@ void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v)
                 v->scanline_parity = (UWORD)(value[0] - '0');
                 v->scanline_parity_present = 1;
             }
+        } else if (zzcfg_str_eq_ci(key, "gamma")) {
+            /* Same rules as the firmware's parse_gamma. */
+            int hundredths;
+
+            if (zzgamma_parse_value(value, &hundredths)) {
+                v->gamma = (UWORD)hundredths;
+                v->gamma_present = 1;
+            }
         } else if (zzcfg_str_eq_ci(key, "int2")) {
             if (zzcfg_str_eq_ci(value, "on") || zzcfg_str_eq_ci(value, "1"))
                 v->int2 = 1;
@@ -1035,6 +1044,7 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
         "%svideocap_height = %u\n"
         "%sscanline_mode = %u\n"
         "%sscanline_parity = %u\n"
+        "%sgamma = %u.%02u\n"
         "int2 = %s\n"
         "%s"
         "offscreen_bitmaps = %s\n"
@@ -1055,6 +1065,11 @@ UWORD zzcfg_generate(const struct zzcfg_values *v, char *out, UWORD outsz)
         (unsigned)(v->scanline_mode & 3),
         v->scanline_parity_present ? "" : "#",
         (unsigned)(v->scanline_parity & 1),
+        v->gamma_present ? "" : "#",
+        (unsigned)((v->gamma_present ? v->gamma :
+            ZZGAMMA_HUNDREDTHS_IDENTITY) / 100U),
+        (unsigned)((v->gamma_present ? v->gamma :
+            ZZGAMMA_HUNDREDTHS_IDENTITY) % 100U),
         v->int2 ? "on" : "off",
         fast_ram_config,
         v->offscreen_bitmaps ? "on" : "off",

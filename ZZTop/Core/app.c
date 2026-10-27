@@ -31,9 +31,10 @@
  * wall clock so slow mailbox replies count too. */
 #define AUDIO_SAVE_TIMEOUT_TICKS (TICKS_PER_SECOND * 15)
 
-/* Scanline registers as they were when ZZTop opened or last saved:
- * Revert and Discard put them back to exactly this. */
-static UWORD scan_mode_anchor, scan_parity_anchor;
+/* Scanline registers and the applied gamma as they were when ZZTop
+ * opened or last saved: Revert and Discard put them back to exactly
+ * this. A gamma anchor of 0 means the card has no gamma LUT. */
+static UWORD scan_mode_anchor, scan_parity_anchor, gamma_anchor;
 
 /* An audio save in flight or a repair still owed (see file comment). */
 static struct settings_guard guard;
@@ -43,19 +44,21 @@ void app_init(void)
 {
 	scan_mode_anchor = board_scanline_mode();
 	scan_parity_anchor = board_scanline_parity();
+	gamma_anchor = board_gamma();
 }
 
-static BOOL scanlines_live_pending(void)
+static BOOL display_live_pending(void)
 {
 	return board_scanline_mode() != scan_mode_anchor ||
-		board_scanline_parity() != scan_parity_anchor;
+		board_scanline_parity() != scan_parity_anchor ||
+		(gamma_anchor && board_gamma() != gamma_anchor);
 }
 
 void app_pending(struct app_pending *out)
 {
 	out->card = settings_dirty_count();
 	out->reboot = settings_reboot_count();
-	out->live = scanlines_live_pending() || video_live_pending();
+	out->live = display_live_pending() || video_live_pending();
 	/* An unfinished audio save transaction keeps Save available. */
 	out->audio = audio_pending() || audio_save_running || guard.valid;
 }
@@ -234,6 +237,8 @@ BOOL app_revert(void)
 	}
 	board_set_scanline_mode(scan_mode_anchor);
 	board_set_scanline_parity(scan_parity_anchor);
+	if (gamma_anchor && board_gamma() != gamma_anchor)
+		board_set_gamma(gamma_anchor);
 	if (ok && audio_pending() && !audio_revert(msg, sizeof(msg))) {
 		fe_status("%s", msg);
 		ok = FALSE;

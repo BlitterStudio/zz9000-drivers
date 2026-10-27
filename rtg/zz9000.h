@@ -180,7 +180,7 @@ enum zz_reg_offsets {
 
   REG_ZZ_SET_FEATURE    = 0x60,
   REG_ZZ_UNUSED_REG62   = 0x62,
-  REG_ZZ_UNUSED_REG64   = 0x64,
+  REG_ZZ_GAMMA          = 0x64, /* write-only: gamma in hundredths */
   REG_ZZ_UNUSED_REG66   = 0x66,
   REG_ZZ_UNUSED_REG68   = 0x68,
   REG_ZZ_UNUSED_REG6A   = 0x6A,

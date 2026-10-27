@@ -158,6 +158,22 @@ jobs:
           path: ZZScanlines/ZZScanlines
           if-no-files-found: error
 
+  zzgamma:
+    name: ZZGamma
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build ZZGamma
+        run: |
+          docker run --rm -v "$PWD":/src -w /src/ZZGamma "$AMIGA_IMAGE" \
+            m68k-amigaos-gcc -O2 -noixemul -I../include \
+            -o ZZGamma ZZGamma.c -lamiga
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ZZGamma
+          path: ZZGamma/ZZGamma
+          if-no-files-found: error
+
   zzfwupdate:
     name: ZZFwUpdate
     runs-on: ubuntu-latest
@@ -407,7 +423,7 @@ jobs:
 
   release:
     name: Package installer
-    needs: [host-checks, rtg, zztop, zzscanlines, zzfwupdate, usb-poseidon, sd-boot, net, ZZNetStats, ZZDiag, ZZNetReady, zzcapture, mhi, ahi, sdk, amissl]
+    needs: [host-checks, rtg, zztop, zzscanlines, zzgamma, zzfwupdate, usb-poseidon, sd-boot, net, ZZNetStats, ZZDiag, ZZNetReady, zzcapture, mhi, ahi, sdk, amissl]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -450,6 +466,7 @@ jobs:
           install -Dm644 artifacts/ZZ9000AX/ZZ9000AX                   "$INST/Devs/AudioModes/ZZ9000AX"
           install -Dm755 artifacts/ZZTop/ZZTop                         "$INST/Tools/ZZTop"
           install -Dm755 artifacts/ZZScanlines/ZZScanlines             "$INST/Tools/ZZScanlines"
+          install -Dm755 artifacts/ZZGamma/ZZGamma                     "$INST/Tools/ZZGamma"
           install -Dm755 artifacts/ZZFwUpdate/ZZFwUpdate                "$INST/Tools/ZZFwUpdate"
           install -Dm755 artifacts/ZZNetStats/ZZNetStats               "$INST/Tools/ZZNetStats"
           install -Dm755 artifacts/ZZDiag/ZZDiag                       "$INST/Tools/ZZDiag"

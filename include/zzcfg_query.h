@@ -77,6 +77,12 @@
 #define ZZ_CFG_KEY_VCAP_GEOMETRY_REGS           36
 #define ZZ_CFG_VCAP_GEOMETRY_REGS_ABI           1U
 
+/* Applied output gamma in hundredths (firmware issue #130): runtime
+ * state, not file content. 0 = old firmware or a bitstream without
+ * the LUT stage, 100 = identity (filter off), 20..500 = applied. */
+#define ZZ_CONFIG_KEY_GAMMA        35
+#define ZZ_CFG_KEY_GAMMA           ZZ_CONFIG_KEY_GAMMA
+
 /* ZZ_CFG_KEY_FAST_RAM_OUTCOME values (mirror firmware zz_fastram_outcome). */
 #define ZZ_CFG_FAST_RAM_OUTCOME_PENDING   0
 #define ZZ_CFG_FAST_RAM_OUTCOME_ENABLED   1

@@ -124,11 +124,14 @@ UBYTE zzcfg_test_buffer_read(ULONG b, UWORD offset)
 
 struct board board;
 static UWORD live_scan_mode = 2, live_scan_parity = 1;
+/* Applied gamma from config key 35; 0 = no LUT on this card. */
+static UWORD live_gamma = 180;
 
 BOOL board_has_cfg(void) { return TRUE; }
 BOOL board_has_cap(UWORD bit) { return (board.fw_caps & bit) != 0; }
 UWORD board_scanline_mode(void) { return live_scan_mode; }
 UWORD board_scanline_parity(void) { return live_scan_parity; }
+UWORD board_gamma(void) { return live_gamma; }
 
 /* ---- dos doubles: no ENV: variables ---- */
 
@@ -407,6 +410,46 @@ static void test_fast_ram_status_shows_pending_after_save(void)
 		"system note still says power-cycle for the other settings");
 }
 
+/* Gamma is a live field like the scanlines: the live value sits behind an
+ * absent key, a slider move writes it explicitly, and it never asks for a
+ * reboot. */
+static void test_gamma_live_field(void)
+{
+	live_gamma = 180;
+	reset("int2 = off\n");
+	check(!cfg.edit.gamma_present && cfg.edit.gamma == 180,
+		"absent gamma shows the live value");
+	settings_set(CFG_INT2, 1);
+	check(settings_save() == FWUP_OK, "unrelated save succeeds");
+	check(!has_line(card, "gamma = 1.80"),
+		"live gamma default is not persisted unless edited");
+
+	reset("int2 = off\n");
+	settings_set(CFG_GAMMA, 180);
+	check(settings_dirty_count() == 1, "explicit gamma over absent is dirty");
+	check(settings_reboot_count() == 0, "gamma applies live, no reboot");
+	check(settings_save() == FWUP_OK, "gamma save succeeds");
+	check(has_line(card, "gamma = 1.80"), "edited gamma written");
+
+	reset("gamma = 1.50\n");
+	check(cfg.edit.gamma_present && cfg.edit.gamma == 150,
+		"file gamma is loaded");
+	settings_set(CFG_GAMMA, 180);
+	settings_set(CFG_GAMMA, 150);
+	check(settings_dirty_count() == 0,
+		"moving gamma back to the saved value clears the edit");
+	settings_set(CFG_GAMMA, 100);
+	check(settings_save() == FWUP_OK, "identity gamma save succeeds");
+	check(has_line(card, "gamma = 1.00"),
+		"a chosen 1.00 is written explicitly");
+
+	live_gamma = 0;
+	reset("int2 = off\n");
+	check(cfg.edit.gamma == 100,
+		"a card without the gamma LUT defaults to identity");
+	live_gamma = 180;
+}
+
 int main(void)
 {
 	test_dirty_tracks_value_not_touch();
@@ -417,6 +460,7 @@ int main(void)
 	test_guard_refuses_unreadable_card();
 	test_guard_survives_failed_post_save_read();
 	test_fast_ram_status_shows_pending_after_save();
+	test_gamma_live_field();
 	if (failures) {
 		printf("zztop_settings_test: %d failure(s)\n", failures);
 		return 1;
