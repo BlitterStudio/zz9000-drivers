@@ -44,6 +44,9 @@
 #define ZZSD_BOOTCMD_CHUNK_SHIFT 4
 
 #define SD_STATUS_BUSY    0xFFFF
+/* GETINFO completed normally, but no HDF is configured or open. Keep this
+ * distinct from SD_STATUS_BUSY (0xFFFF) and real command failures. */
+#define SD_BOOT_STATUS_NO_HDF   0xFFFE
 
 #define SDERRF_TIMEOUT   (1 << 7)
 #define SDERRF_PARAM     (1 << 6)

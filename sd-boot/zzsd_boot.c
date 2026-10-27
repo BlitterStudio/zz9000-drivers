@@ -462,19 +462,23 @@ void zzsd_boot_init(void *boardaddr, struct SDBase *sdb, struct ConfigDev *cd) {
     struct sd_boot_info *shared;
     struct sd_boot_info *info;
     uint32_t timeout;
+    uint16_t status;
 
-    debugstr(boardaddr, "Scanning for RDB...\r\n");
     boot_cmd = (volatile uint16_t *)((uint8_t *)boardaddr + ZZSD_BOOT_CMD);
     boot_status = (volatile uint16_t *)((uint8_t *)boardaddr + ZZSD_BOOT_STATUS);
 
     *boot_cmd = ZZSD_BOOTCMD_GETINFO;
     timeout = 500000;
     while (*boot_status == SD_STATUS_BUSY && timeout > 0) timeout--;
+    status = *boot_status;
 
-    if (timeout == 0 || *boot_status != 0) {
+    if (timeout == 0 || status != 0) {
+        if (timeout != 0 && status == SD_BOOT_STATUS_NO_HDF) return;
         debugstr(boardaddr, "Boot info failed.\r\n");
         return;
     }
+
+    debugstr(boardaddr, "Scanning for RDB...\r\n");
 
     CacheClearU();
     shared = (struct sd_boot_info *)((uint8_t *)boardaddr + ZZSD_BUFFER_OFFSET);
