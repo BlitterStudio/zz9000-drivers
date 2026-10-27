@@ -126,17 +126,9 @@ static void test_z3_boundary(void)
 
 static void test_z3_cardmem_layout(void)
 {
-	const uint32_t window = 0x08000000UL;
-	const uint32_t legacy = ZZ_Z3_P96_MEMORY_SIZE;
-
 	CHECK(zz_cardmem_enabled(1, ZZ_FW_CAP_P96_CARDMEM));
 	CHECK(!zz_cardmem_enabled(0, ZZ_FW_CAP_P96_CARDMEM));
 	CHECK(!zz_cardmem_enabled(1, 0));
-	CHECK(zz_cardmem_memory_size(1, ZZ_FW_CAP_P96_CARDMEM,
-		window, legacy) == window);
-	CHECK(zz_cardmem_memory_size(1, 0, window, legacy) == legacy);
-	CHECK(zz_cardmem_memory_size(0, ZZ_FW_CAP_P96_CARDMEM,
-		window, legacy) == legacy);
 }
 
 static void test_z2_staging_bounds(void)

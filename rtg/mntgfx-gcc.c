@@ -132,6 +132,9 @@ char dummies[128];
 #define ZZ_CARD_DATA_FW_CAPABILITIES 12
 /* Refused SetGC requests must not reach scanout through later panning. */
 #define ZZ_CARD_DATA_GC_REJECTED 13
+/* Non-zero only after this FindCard's CARDMEM token was read back from
+ * the firmware; the capability bit alone does not hand memory over. */
+#define ZZ_CARD_DATA_CARDMEM_OWNED 14
 /* first firmware whose surface allocator really frees (major<<8|minor) */
 #define OFFSCREEN_BITMAPS_MIN_FWREV 0x0204
 /* first firmware with OP_VIDEO_OVERLAY + the shadow-scanout compositor */
@@ -502,9 +505,25 @@ static inline void zzwrite16(volatile uint16_t* reg, uint16_t value) {
 
 static BOOL zz_cardmem_available(struct BoardInfo *b)
 {
-	return b && zz_gfxdata(b) &&
-		zz_cardmem_enabled((b->CardFlags & CARDFLAG_ZORRO_3) != 0,
-			(UWORD)b->CardData[ZZ_CARD_DATA_FW_CAPABILITIES]);
+	return b && zz_gfxdata(b) && b->CardData[ZZ_CARD_DATA_CARDMEM_OWNED];
+}
+
+/* Prototype hardware-test report on the card UART (REG_ZZ_PRINT_CHR 0xF0,
+ * REG_ZZ_PRINT_HEX 0xF2): one line per FindCard with the capability word
+ * the driver saw and the handoff readback. Remove before merging. */
+static void zz_cardmem_report(struct BoardInfo *b, UWORD caps, UWORD readback)
+{
+	volatile UWORD *chr = (volatile UWORD *)((uint8_t *)b->RegisterBase + 0xf0);
+	volatile UWORD *hex = (volatile UWORD *)((uint8_t *)b->RegisterBase + 0xf2);
+	const char *s;
+
+	for (s = "[card] cardmem caps="; *s; s++)
+		*chr = (UBYTE)*s;
+	*hex = caps;
+	for (s = " readback="; *s; s++)
+		*chr = (UBYTE)*s;
+	*hex = readback;
+	*chr = '\n';
 }
 
 /* Firmware reserves the legacy P96 range on every reset. Read back the
@@ -513,15 +532,19 @@ static BOOL zz_cardmem_available(struct BoardInfo *b)
 static BOOL zz_cardmem_announce(struct BoardInfo *b)
 {
 	MNTZZ9KRegs *registers;
+	UWORD caps;
+	UWORD readback = 0;
 
-	if (!b || !b->RegisterBase ||
-		!(b->CardFlags & CARDFLAG_ZORRO_3) ||
-		!((UWORD)b->CardData[ZZ_CARD_DATA_FW_CAPABILITIES] &
-		  ZZ_FW_CAP_P96_CARDMEM))
+	if (!b || !b->RegisterBase || !(b->CardFlags & CARDFLAG_ZORRO_3))
 		return FALSE;
+	caps = (UWORD)b->CardData[ZZ_CARD_DATA_FW_CAPABILITIES];
 	registers = (MNTZZ9KRegs *)b->RegisterBase;
-	zzwrite16(&registers->cardmem_protocol, ZZ_REG_ZZ_CARDMEM_TOKEN);
-	return registers->cardmem_protocol == ZZ_REG_ZZ_CARDMEM_TOKEN;
+	if (zz_cardmem_enabled(1, caps)) {
+		zzwrite16(&registers->cardmem_protocol, ZZ_REG_ZZ_CARDMEM_TOKEN);
+		readback = registers->cardmem_protocol;
+	}
+	zz_cardmem_report(b, caps, readback);
+	return readback == ZZ_REG_ZZ_CARDMEM_TOKEN;
 }
 
 /* CARDMEM completion is firmware-owned u8_user[0]: clear it directly before
@@ -962,6 +985,7 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 	b->CardData[ZZ_CARD_DATA_PIP_SIZE] = 0;
 	b->CardData[ZZ_CARD_DATA_FW_CAPABILITIES] = 0;
 	b->CardData[ZZ_CARD_DATA_GC_REJECTED] = 0;
+	b->CardData[ZZ_CARD_DATA_CARDMEM_OWNED] = 0;
 	zz_overlay_hooks_enabled = FALSE;
 	memset(&zz_z2_pip_request, 0, sizeof(zz_z2_pip_request));
 	zz_z2_pip_bitmap = NULL;
@@ -1030,10 +1054,12 @@ int __attribute__((used)) FindCard(__REGA0(struct BoardInfo* b)) {
 				(((uint32_t)b->MemoryBase) + (uint32_t)Z3_GFXDATA_ADDR);
 			b->CardData[ZZ_CARD_DATA_GFXDATA] = (ULONG)gd;
 			memset((void *)gd, 0x00, sizeof(struct GFXData));
-			if (zz_cardmem_announce(b))
+			if (zz_cardmem_announce(b)) {
+				b->CardData[ZZ_CARD_DATA_CARDMEM_OWNED] = 1;
 				b->MemorySize = (uint32_t)zz_card_window_size;
-			else
+			} else {
 				b->MemorySize = ZZ_Z3_P96_MEMORY_SIZE;
+			}
 			/* Announce the conditional-clear protocol: after this
 			 * token the firmware honors u8_user[3] as a per-allocation
 			 * no-clear flag (see ZZ_AllocBitMap). Older firmware

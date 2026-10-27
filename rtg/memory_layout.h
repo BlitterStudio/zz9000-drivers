@@ -24,14 +24,6 @@ static inline int zz_cardmem_enabled(int z3, uint16_t firmware_capabilities)
 	return z3 && (firmware_capabilities & ZZ_FW_CAP_P96_CARDMEM) != 0;
 }
 
-static inline uint32_t zz_cardmem_memory_size(int z3,
-	uint16_t firmware_capabilities, uint32_t card_window_size,
-	uint32_t legacy_size)
-{
-	return zz_cardmem_enabled(z3, firmware_capabilities) ?
-		card_window_size : legacy_size;
-}
-
 static inline int zz_z2_staging_fits(uint32_t prefix, uint32_t unit_size,
 	uint32_t count)
 {
