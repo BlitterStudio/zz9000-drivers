@@ -10,13 +10,14 @@
  * the register protocol and the file push live in the shared client.
  *
  * Typical use:
- *   ZZFwUpdate ram:BOOT.bin                  -> writes 0:/BOOT.bin
- *   ZZFwUpdate ram:BOOT.bin BOOT.bin         -> same, explicit dest name
+ *   ZZFwUpdate ram:BOOT.bin                  -> installs release bundle
+ *   ZZFwUpdate ram:ZZ9000-3.0/               -> installs its release bundle
+ *   ZZFwUpdate ram:BOOT.bin BOOT.bin          -> writes one file explicitly
  *   ZZFwUpdate sys:Storage/zz9000-fw.bin BOOT.bin
- *   ZZFwUpdate RESTORE [name] [-y]           -> promote saved backup
+ *   ZZFwUpdate RESTORE [name] [-y]            -> promote saved backup
  *
- * Filename rules on the SD side: flat root, [A-Za-z0-9._-], max 64
- * chars. The firmware will reject anything else with FWUP_ERR_BAD_NAME.
+ * A one-argument BOOT.bin or release directory installs its ZZ9K modules
+ * before BOOT.bin. Other source-file forms retain the root-file push mode.
  *
  * Build: m68k-amigaos-gcc -O2 -noixemul -I../include -I../common
  *        -o ZZFwUpdate ZZFwUpdate.c ../common/fwup_amiga.c \
@@ -33,47 +34,30 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "amiga_stack.h"
 #include "zz9000_hw.h"
 #include "fwup_client.h"
 #include "fwup_amiga.h"
 
-#define ZZFWUPDATE_VERSION "2.3"
-#define ZZFWUPDATE_DATE    "07.08.2026"
+#define ZZFWUPDATE_VERSION "2.4"
+#define ZZFWUPDATE_DATE    "25.10.2026"
 
 static const char version[] __attribute__((used)) =
     "$VER: ZZFwUpdate " ZZFWUPDATE_VERSION " (" ZZFWUPDATE_DATE ")\r\n";
 
 #define FWUP_TICKS_PER_SECOND 50UL
+#define ZZFWUPDATE_STACK_BYTES 16384UL
 
-static int valid_dest_char(char c) {
-    return (c >= 'A' && c <= 'Z') ||
-           (c >= 'a' && c <= 'z') ||
-           (c >= '0' && c <= '9') ||
-           c == '.' || c == '_' || c == '-';
-}
 
-/* CLI pre-check with friendly, position-specific messages. The shared
- * client validates again (fwup_name_valid) as a safety net. */
+/* The shared client is the authority for root names and module targets. */
 static int validate_dest_name(const char *name) {
-    size_t len = strlen(name);
-    size_t i;
+    if (fwup_name_valid(name))
+        return 1;
 
-    if (len == 0 || len > FWUP_NAME_MAX) {
-        printf("ERROR: destination name must be 1..%d chars\n", FWUP_NAME_MAX);
-        return 0;
-    }
-
-    for (i = 0; i < len; i++) {
-        if (!valid_dest_char(name[i])) {
-            printf("ERROR: destination name may only contain "
-                   "A-Z, a-z, 0-9, '.', '_' and '-'\n");
-            printf("       Bad character at position %lu\n",
-                   (unsigned long)(i + 1));
-            return 0;
-        }
-    }
-
-    return 1;
+    printf("ERROR: destination must be a root filename "
+           "([A-Za-z0-9._-]{1,64})\n");
+    printf("       or ZZ9K/NAME.ZZM (NAME is [A-Z0-9_]{1,8})\n");
+    return 0;
 }
 
 /* Strip any AmigaDOS volume/path prefix so the user can pass
@@ -172,6 +156,38 @@ static int streq_ci(const char *a, const char *b) {
     return *a == '\0' && *b == '\0';
 }
 
+static int source_is_directory(const char *path) {
+    struct FileInfoBlock info;
+    BPTR lock = Lock((STRPTR)path, ACCESS_READ);
+    int is_directory = 0;
+
+    if (!lock) return 0;
+    if (Examine(lock, &info) && info.fib_DirEntryType > 0)
+        is_directory = 1;
+    UnLock(lock);
+    return is_directory;
+}
+
+static int make_release_boot_path(const char *directory, char *boot_path,
+                                  size_t boot_path_size) {
+    size_t directory_len = strlen(directory);
+    const char *separator = "/";
+    int length;
+
+    if (directory_len > 0 &&
+        (directory[directory_len - 1] == '/' ||
+         directory[directory_len - 1] == ':'))
+        separator = "";
+
+    length = snprintf(boot_path, boot_path_size, "%s%sBOOT.bin", directory,
+                      separator);
+    return length >= 0 && (size_t)length < boot_path_size;
+}
+
+static int is_boot_image_path(const char *path) {
+    return streq_ci(basename_amigados(path), "BOOT.bin");
+}
+
 /* Returns 1 if the user confirmed. A non-interactive stdin (EOF) counts
  * as "no", so a scripted run without -y safely declines rather than
  * silently restoring. */
@@ -267,9 +283,58 @@ static int do_push(ULONG board, const char *src_path, const char *dest_name) {
     return 1;
 }
 
-int main(int argc, char *argv[]) {
+static int do_install_bundle(ULONG board, const char *boot_path) {
+    static struct fwup_bundle bundle;
+    static char failed_name[FWUP_NAME_MAX + 1];
+    struct cli_progress prog = { 0, -1 };
+    UWORD st;
+    int modules_skipped = 0;
+
+    if (!fwup_probe_board(board)) {
+        printf("ERROR: firmware does not support the FWUP file-push protocol\n");
+        printf("       Update BOOT.bin to a firmware build with FWUP support.\n");
+        return 1;
+    }
+
+    st = fwup_bundle_discover(boot_path, &bundle);
+    if (st != FWUP_OK) {
+        printf("ERROR: cannot read %s\n", boot_path);
+        return 1;
+    }
+
+    printf("ZZ9000 at 0x%08lx, installing release from %s\n",
+           (unsigned long)board, boot_path);
+    flush_stdout();
+
+    failed_name[0] = '\0';
+    st = fwup_bundle_install(board, &bundle, fwup_board_capabilities(board),
+                             cli_progress_cb, &prog, failed_name,
+                             sizeof(failed_name), &modules_skipped);
+    printf("\n");
+
+    if (st == FWUP_OK) {
+        printf("Done. Firmware bundle installed.\n");
+        if (modules_skipped)
+            printf("Reboot, then run ZZFwUpdate again to install firmware modules.\n");
+        return 0;
+    }
+
+    if (failed_name[0]) {
+        printf("ERROR: module %s failed: %s (0x%04x)\n", failed_name,
+               fwup_strerror(st), st);
+    } else if (st == FWUP_ERR_FILE) {
+        printf("ERROR: cannot read %s\n", boot_path);
+    } else {
+        print_cmd_error("bundle transfer", st);
+    }
+    return 1;
+}
+
+static int updater_main(int argc, char *argv[]) {
+    static char release_boot_path[256];
     const char *src_path;
-    const char *dest_name;
+    const char *dest_name = "";
+    int install_bundle = 0;
     ULONG board;
 
     /* Restore mode: ZZFwUpdate RESTORE [name] [-y] */
@@ -301,24 +366,36 @@ int main(int argc, char *argv[]) {
     }
 
     if (argc < 2 || argc > 3 || argv[1][0] == '?') {
-        printf("Usage: %s <source-file> [dest-name]\n", argv[0]);
+        printf("Usage: %s <BOOT.bin|release-dir|source-file> [dest-name]\n",
+               argv[0]);
         printf("       %s RESTORE [name] [-y]\n", argv[0]);
-        printf("  source-file : AmigaDOS path of the file to push\n");
-        printf("                (e.g. ram:BOOT.bin)\n");
-        printf("  dest-name   : filename on the SD card; defaults to\n");
-        printf("                source basename. Must match\n");
-        printf("                [A-Za-z0-9._-]{1,64} on a flat root.\n");
+        printf("  BOOT.bin/release-dir without dest-name installs its ZZ9K modules\n");
+        printf("  before BOOT.bin. A source-file [dest-name] pushes one file.\n");
+        printf("  dest-name   : root filename, or ZZ9K/NAME.ZZM for a module.\n");
         printf("  RESTORE     : promote the saved backup back to the active\n");
         printf("                firmware [name] (default BOOT.bin). -y skips\n");
         printf("                the confirmation prompt.\n");
         return 0;
     }
 
-    src_path  = argv[1];
-    dest_name = (argc == 3) ? argv[2] : basename_amigados(src_path);
+    src_path = argv[1];
+    if (argc == 2 && source_is_directory(src_path)) {
+        if (!make_release_boot_path(src_path, release_boot_path,
+                                    sizeof(release_boot_path))) {
+            printf("ERROR: release directory path is too long\n");
+            return 1;
+        }
+        src_path = release_boot_path;
+        install_bundle = 1;
+    } else if (argc == 2 && is_boot_image_path(src_path)) {
+        install_bundle = 1;
+    }
 
-    if (!validate_dest_name(dest_name))
-        return 1;
+    if (!install_bundle) {
+        dest_name = (argc == 3) ? argv[2] : basename_amigados(src_path);
+        if (!validate_dest_name(dest_name))
+            return 1;
+    }
 
     board = zz9000_find_board(NULL);
     if (!board) {
@@ -326,5 +403,27 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    if (install_bundle)
+        return do_install_bundle(board, src_path);
     return do_push(board, src_path, dest_name);
+}
+
+struct updater_args {
+    int argc;
+    char **argv;
+};
+
+static int updater_entry(void *ctx) {
+    struct updater_args *args = (struct updater_args *)ctx;
+
+    return updater_main(args->argc, args->argv);
+}
+
+int main(int argc, char *argv[]) {
+    struct updater_args args;
+
+    args.argc = argc;
+    args.argv = argv;
+    return amiga_stack_run("ZZFwUpdate", ZZFWUPDATE_STACK_BYTES,
+                           updater_entry, &args);
 }

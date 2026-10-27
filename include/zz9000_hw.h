@@ -86,6 +86,15 @@
 #define ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P_50 (1U << 4)
 #define ZZ_FW_CAP_VIDEOCAP_SOURCE_SYNC (1U << 5)
 #define ZZ_FW_CAP_VIDEOCAP_SCANOUT_ORIGIN (1U << 6)
+/* Completed FWUP commands are mirrored as one longword at
+ * ZZ_FWUP_STATUS_MIRROR_OFFSET, the last longword of the boot ROM window
+ * (see common/fwup_client.h). */
+#define ZZ_FW_CAP_FWUP_STATUS_MIRROR (1U << 11)
+#define ZZ_FW_CAP_FW_VERSION_PATCH (1U << 12)
+/* Bit 13 is reserved for the shared-heap prototype. */
+#define ZZ_FW_CAP_FWUP_MODULE_DIR (1U << 14)
+#define ZZ_FW_CAP_FIRMWARE_MODULES (1U << 15)
+#define ZZ_FWUP_STATUS_MIRROR_OFFSET 0x7FFC
 #define ZZ_REG_AUDIO_CONFIG      0xF4
 #define ZZ_REG_AUDIO_RX_STATUS   0xF6
 #define ZZ_REG_AUDIO_TX_STATUS   0xF8
@@ -232,12 +241,14 @@ static inline uint32_t zz9000_read_z2_aperture_verified(
     ULONG board_addr, uint32_t board_size, uint16_t *fw_caps_io,
     int *verified, int *resamples)
 {
-    uint32_t descriptor = zz9000_read_reg32(
-        board_addr, ZZ_REG_Z2_APERTURE_INFO_HI);
+    uint32_t descriptor;
     int attempts = 5;
     int unstable = 0;
     int caps_unstable = 0;
 
+    (void)board_size;
+    descriptor = zz9000_read_reg32(
+        board_addr, ZZ_REG_Z2_APERTURE_INFO_HI);
     if (verified) {
         *verified = 0;
     }

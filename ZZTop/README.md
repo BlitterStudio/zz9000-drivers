@@ -160,9 +160,9 @@ in-window video (ZZPlay's dedicated fullscreen screen still plays).
 
 ## Project menu
 
-- **Update Firmware…** copies a firmware image to the SD card as
-  `BOOT.bin`, keeping the previous image as `BOOT.bak`. Power-cycle
-  afterwards so the card boots it.
+- **Update Firmware…** selects an unpacked release `BOOT.bin`. When it has a
+  sibling `ZZ9K/` drawer, ZZTop installs its `*.ZZM` modules first and
+  `BOOT.bin` last, keeping `ZZ9000.CFG` unchanged. Power-cycle afterwards.
 - **Restore Backup…** promotes `BOOT.bak` back to `BOOT.bin` after a
   confirmation. It talks to the running firmware, so it recovers an
   update that boots but misbehaves; a card that does not boot at all
@@ -184,3 +184,71 @@ Precedence is always `ENV:` variable first, then the config file, then
 the built-in default. A lingering ENV variable hides the saved value, so
 remove `ZZ9K_INT2`, `ZZ9K_MAC` and the legacy video variables when you
 migrate to `ZZ9000.CFG`.
+## Firmware
+
+For a 2.9.0 update, unpack the firmware zip on the Amiga, then select its
+`BOOT.bin` with **Update Firmware…**. ZZTop discovers a sibling `ZZ9K/`
+drawer and installs every valid module first, then `BOOT.bin`; it never
+installs the release `ZZ9000.CFG`.
+
+If the running firmware lacks `ZZ_FW_CAP_FWUP_MODULE_DIR`, ZZTop installs
+only `BOOT.bin` and tells you to power-cycle and run the same update again.
+After the bridge firmware has booted, the second run installs the modules.
+
+**Restore Backup…** promotes `BOOT.bak` to `BOOT.bin`. This discards the
+current `BOOT.bin` and leaves no backup. It works only while the card can
+boot and communicate with ZZTop; restore an unbootable card's microSD card on
+another computer.
+
+## Diagnostics
+
+Diagnostics is an advanced page for observation and safe checks.
+
+- **Board** shows the Zorro revision, board address, FPGA temperature, and its
+  session range.
+- **Raw registers** lists hardware and firmware versions, capability bits,
+  temperature, `VCCAUX`, `VCCINT`, USB, SD-card and SD-boot states, scanline
+  mode and parity, video-capture statistics, audio configuration, and updater
+  status.
+- **Capabilities** lists video profile, live adjustment, 1080p, 50 Hz, sync,
+  scanout-origin, geometry, geometry acknowledgement, and statistics support,
+  plus SDK audio-control and metering support.
+- **Run bus probe** reads the identity register eight times and reports the
+  result.
+- **Reset temperature range** clears the session temperature range.
+- **Audio control-plane debug log (`T:zztop-audio.log`)** enables or disables
+  the audio debug log.
+
+Dynamic register and temperature values refresh twice per second.
+
+## Settings file fields
+
+ZZTop reads and writes the following current non-audio fields. Values marked
+Automatic are omitted or commented out when saved.
+
+| Field | Values |
+|---|---|
+| `videocap_profile` | `full_60`, `full_exact`, `filtered_60`, `filtered_pal`, `filtered_pal_exact`, `filtered_ntsc_exact`, `centered_1080p_60`, `centered_1080p_50`, `centered_1080p_match` |
+| Legacy native-video fields | `videocap_mode = pal|800x600`, `videocap_shres = full|filter`, `nonstandard_vsync = off|pal|ntsc` |
+| `videocap_sample` | `average`, `even`, `odd` |
+| `videocap_crop_h`, `videocap_crop_v` | `0..4095`, or Automatic |
+| `videocap_phase` | `-255..255`, or Automatic |
+| `videocap_c28_phase` | `-896..895`, or Automatic |
+| `videocap_width` | `256..1280`, in 16-pixel steps, or Automatic |
+| `videocap_height` | `100..1024`, or Automatic |
+| `scanline_mode` | `0..3` |
+| `scanline_parity` | `0` or `1` |
+| `int2`, `offscreen_bitmaps`, `video_overlay`, `fast_ram` | `on` or `off` |
+| `mac` | Six hexadecimal octets separated by `:` or `-` |
+| `hdf` | Image filename in the microSD root, or `off` |
+
+The firmware audio save owns `audio_active`, `audio_baseline`,
+`audio_ceiling_paula`, `audio_ceiling_ax`, and the eight scene groups
+`audio_scene<N>_{lpf,eq01,eq23,eq45,eq67,eq89,out,pan,nm1..nm8}` for
+zero-based `N=0..7`. ZZTop preserves these fields while completing a shared
+Save operation.
+
+## History and status
+
+ZZTop 3 replaces the earlier ZZTop 2 windows with one window of pages, a
+global Save and Revert, and a layout that fits screens down to 640x200.

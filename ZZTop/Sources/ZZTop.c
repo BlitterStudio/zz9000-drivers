@@ -39,6 +39,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "amiga_stack.h"
 #include "zz9000.h"
 #include "fwup_amiga.h"
 #include "zzcfg_amiga.h"
@@ -51,8 +52,8 @@
 #include <proto/zz9k.h>
 #include <math.h>
 
-#define ZZTOP_RELEASE "2.11"
-#define ZZTOP_DATE    "29.09.2026"
+#define ZZTOP_RELEASE "2.12"
+#define ZZTOP_DATE    "25.10.2026"
 
 static const char version[] __attribute__((used)) =
 	"$VER: ZZTop " ZZTOP_RELEASE " (" ZZTOP_DATE ")\r\n";
@@ -935,6 +936,12 @@ static void fw_progress(void *ctx, ULONG done, LONG total)
 	zztop_set_text_display(win, MYGAD_FW_STATUS, buf);
 }
 
+/* The bundle descriptor is deliberately static: a Workbench launch has only
+ * the icon-selected stack, while it holds up to 16 sibling module paths. */
+static struct fwup_bundle fw_bundle;
+static char fw_failed_name[FWUP_MODULE_FILENAME_MAX + 1];
+static int fw_modules_skipped;
+
 static void do_fw_update(struct Window *win)
 {
 	/* File-scope static scratch, matching the Settings/Scandoubler/Audio
@@ -945,6 +952,7 @@ static void do_fw_update(struct Window *win)
 	static char path[256];
 	static char msg[400];
 	UWORD st;
+	UWORD caps;
 
 	if (!fwup_probe_board((ULONG)zz_regs)) {
 		errorMessage("This firmware does not support the file-push protocol.\n"
@@ -953,27 +961,68 @@ static void do_fw_update(struct Window *win)
 	}
 	if (!fw_pick_file(path, sizeof(path)))
 		return;
+	st = fwup_bundle_discover(path, &fw_bundle);
+	if (st != FWUP_OK) {
+		snprintf(msg, sizeof(msg), "Cannot prepare firmware bundle:\n%s (0x%04x)",
+			fwup_strerror(st), (unsigned)st);
+		errorMessage(msg);
+		return;
+	}
+	caps = fwup_board_capabilities((ULONG)zz_regs);
 
 	/* Confirm with the filename only, never the full path: EasyRequest
 	 * never wraps, and long drawers wrecked the confirmation requester
 	 * even with the old 40-column wrap (#95 plus the 2026-09
 	 * very-long-path report). The ASL picker this file was just chosen
 	 * from already showed the full path. */
-	snprintf(msg, sizeof(msg),
-		"Upload %s to the ZZ9000 as BOOT.bin?\n\n"
-		"Power-cycle the Amiga afterwards to boot the new firmware.",
-		FilePart((CONST_STRPTR)path));
+	if (fw_bundle.module_count &&
+		(caps & ZZ_FW_CAP_FWUP_MODULE_DIR) == 0) {
+		snprintf(msg, sizeof(msg),
+			"Upload %s as BOOT.bin?\n\n"
+			"This firmware cannot install %u optional module(s) yet.\n"
+			"Reboot, then run this install again for modules.",
+			FilePart((CONST_STRPTR)path), (unsigned)fw_bundle.module_count);
+	} else if (fw_bundle.module_count) {
+		snprintf(msg, sizeof(msg),
+			"Upload %s with %u optional module(s)?\n\n"
+			"Modules are installed first; BOOT.bin is last.\n"
+			"Power-cycle the Amiga afterwards to boot the new firmware.",
+			FilePart((CONST_STRPTR)path), (unsigned)fw_bundle.module_count);
+	} else {
+		snprintf(msg, sizeof(msg),
+			"Upload %s to the ZZ9000 as BOOT.bin?\n\n"
+			"Power-cycle the Amiga afterwards to boot the new firmware.",
+			FilePart((CONST_STRPTR)path));
+	}
 	if (!fw_confirm(msg))
 		return;
 
+	fw_failed_name[0] = '\0';
+	fw_modules_skipped = FALSE;
 	zztop_set_text_display(win, MYGAD_FW_STATUS, "Updating...");
-	st = fwup_send_file((ULONG)zz_regs, path, "BOOT.bin", fw_progress, win);
+	st = fwup_bundle_install((ULONG)zz_regs, &fw_bundle, caps, fw_progress,
+		win, fw_failed_name, sizeof(fw_failed_name), &fw_modules_skipped);
 	if (st == FWUP_OK) {
-		zztop_set_text_display(win, MYGAD_FW_STATUS, "Updated - power-cycle to boot");
-		errorMessage("Firmware uploaded as BOOT.bin.\nPower-cycle the Amiga to boot it.");
+		if (fw_modules_skipped) {
+			zztop_set_text_display(win, MYGAD_FW_STATUS,
+				"BOOT.bin updated - reboot, then run again for modules");
+			errorMessage("Firmware uploaded as BOOT.bin.\n"
+				"Power-cycle, then run this install again for modules.");
+		} else {
+			zztop_set_text_display(win, MYGAD_FW_STATUS,
+				"Updated - power-cycle to boot");
+			errorMessage("Firmware bundle uploaded.\n"
+				"Power-cycle the Amiga to boot it.");
+		}
 	} else {
-		snprintf(msg, sizeof(msg), "Firmware update failed:\n%s (0x%04x)",
-			fwup_strerror(st), (unsigned)st);
+		if (fw_failed_name[0]) {
+			snprintf(msg, sizeof(msg),
+				"Module %s failed:\n%s (0x%04x)\n\nBOOT.bin was not changed.",
+				fw_failed_name, fwup_strerror(st), (unsigned)st);
+		} else {
+			snprintf(msg, sizeof(msg), "Firmware update failed:\n%s (0x%04x)",
+				fwup_strerror(st), (unsigned)st);
+		}
 		zztop_set_text_display(win, MYGAD_FW_STATUS, "Update failed");
 		errorMessage(msg);
 	}
@@ -6210,7 +6259,7 @@ VOID gadtoolsWindow(VOID) {
 	}
 }
 
-int main(void) {
+static int zztop_main(void) {
 	if (NULL == (IntuitionBase = OpenLibrary((CONST_STRPTR)"intuition.library", 37))) {
 		errorMessage("Requires V37 intuition.library");
 		return 0;
@@ -6283,4 +6332,13 @@ int main(void) {
 	CloseLibrary(IntuitionBase);
 
 	return 0;
+}
+
+static int zztop_entry(void *ctx) {
+	(void)ctx;
+	return zztop_main();
+}
+
+int main(void) {
+	return amiga_stack_run("ZZTop", 16384UL, zztop_entry, NULL);
 }
