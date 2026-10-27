@@ -101,6 +101,11 @@ const char *fwup_strerror(uint16_t status) {
     }
 }
 
+uint16_t fwup_directory_enumeration_status(int32_t error,
+                                           int32_t exhausted_error) {
+    return error == exhausted_error ? FWUP_OK : FWUP_ERR_FILE;
+}
+
 /* The firmware sets STATUS = 0xFFFF when it accepts a command and clears
  * it to the result once the FatFs call returns.  Board transports provide
  * idle, which makes this safe for legacy core-0 receivers; simple host

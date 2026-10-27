@@ -83,6 +83,9 @@ struct fwup_io {
 int         fwup_module_name_valid(const char *name); /* NAME.ZZM, NAME [A-Z0-9_]{1,8} */
 int         fwup_name_valid(const char *name); /* legacy root name, or ZZ9K/NAME.ZZM */
 const char *fwup_strerror(uint16_t status);
+/* Map a platform directory scan's final error to the FWUP status. */
+uint16_t    fwup_directory_enumeration_status(int32_t error,
+                                              int32_t exhausted_error);
 
 /* Portable host-file seam for a firmware bundle. list_dir returns 1 when
  * the directory was enumerated, 0 when it does not exist, and -1 on error.

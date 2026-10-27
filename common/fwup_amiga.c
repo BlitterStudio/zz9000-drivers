@@ -129,9 +129,6 @@ UWORD fwup_send_file(ULONG board, const char *src_path, const char *dest_name,
     return st;
 }
 
-/* Discovery is synchronous with the single FWUP transfer protocol.  Keep the
- * sibling-directory path out of the small Shell stack used by ZZFwUpdate. */
-static char bundle_discovery_dir[256];
 static int amiga_bundle_dir(const char *boot_path, char *dir,
                             ULONG dir_size) {
     const char *last = NULL;
@@ -187,20 +184,25 @@ static int bundle_insert_module(struct fwup_bundle *bundle, const char *dir,
 UWORD fwup_bundle_discover(const char *boot_path, struct fwup_bundle *bundle) {
     BPTR boot, dir_lock;
     struct FileInfoBlock *fib;
+    LONG error;
 
-    if (!boot_path || !bundle || strlen(boot_path) >= sizeof(bundle->boot_path))
-        return FWUP_ERR_FILE;
+    if (!boot_path || !bundle) return FWUP_ERR_FILE;
+    memset(bundle, 0, sizeof(*bundle));
+    if (strlen(boot_path) >= sizeof(bundle->boot_path)) return FWUP_ERR_FILE;
     boot = Open((STRPTR)boot_path, MODE_OLDFILE);
     if (!boot) return FWUP_ERR_FILE;
     Close(boot);
 
-    memset(bundle, 0, sizeof(*bundle));
     memcpy(bundle->boot_path, boot_path, strlen(boot_path) + 1);
-    if (!amiga_bundle_dir(boot_path, bundle_discovery_dir,
-                          sizeof(bundle_discovery_dir)))
+    if (!amiga_bundle_dir(boot_path, bundle->module_dir,
+                          sizeof(bundle->module_dir)))
         return FWUP_ERR_FILE;
-    dir_lock = Lock((STRPTR)bundle_discovery_dir, ACCESS_READ);
-    if (!dir_lock) return FWUP_OK;
+    dir_lock = Lock((STRPTR)bundle->module_dir, ACCESS_READ);
+    if (!dir_lock) {
+        bundle->directory_error = IoErr();
+        return bundle->directory_error == ERROR_OBJECT_NOT_FOUND ?
+               FWUP_OK : FWUP_ERR_FILE;
+    }
 
     fib = (struct FileInfoBlock *)AllocMem(sizeof(*fib), MEMF_PUBLIC);
     if (!fib) {
@@ -208,6 +210,7 @@ UWORD fwup_bundle_discover(const char *boot_path, struct fwup_bundle *bundle) {
         return FWUP_ERR_NOMEM;
     }
     if (!Examine(dir_lock, fib)) {
+        bundle->directory_error = IoErr();
         FreeMem(fib, sizeof(*fib));
         UnLock(dir_lock);
         return FWUP_ERR_FILE;
@@ -227,12 +230,20 @@ UWORD fwup_bundle_discover(const char *boot_path, struct fwup_bundle *bundle) {
             UnLock(dir_lock);
             return FWUP_ERR_BUNDLE;
         }
-        if (!bundle_insert_module(bundle, bundle_discovery_dir,
+        if (!bundle_insert_module(bundle, bundle->module_dir,
                 (const char *)fib->fib_FileName)) {
             FreeMem(fib, sizeof(*fib));
             UnLock(dir_lock);
             return FWUP_ERR_FILE;
         }
+    }
+    error = IoErr();
+    if (fwup_directory_enumeration_status(error, ERROR_NO_MORE_ENTRIES) !=
+        FWUP_OK) {
+        bundle->directory_error = error;
+        FreeMem(fib, sizeof(*fib));
+        UnLock(dir_lock);
+        return FWUP_ERR_FILE;
     }
     FreeMem(fib, sizeof(*fib));
     UnLock(dir_lock);

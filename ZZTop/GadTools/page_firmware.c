@@ -245,6 +245,22 @@ static BOOL install_bundle(const struct fwup_bundle *bundle, const char *tag)
 	return FALSE;
 }
 
+static void describe_bundle_discovery_failure(const char *prefix,
+	const struct fwup_bundle *bundle, UWORD status)
+{
+	char fault[128];
+
+	if (!bundle->directory_error) {
+		snprintf(message, sizeof(message), "%s: %s", prefix,
+			fwup_strerror(status));
+		return;
+	}
+	Fault(bundle->directory_error, (STRPTR)"", (STRPTR)fault, sizeof(fault));
+	snprintf(message, sizeof(message),
+		"%s: cannot scan module drawer %s (DOS error %ld): %s", prefix,
+		bundle->module_dir, (long)bundle->directory_error, fault);
+}
+
 
 /* Describe and confirm every file a manual bundle install can change. */
 static void install(void)
@@ -259,8 +275,8 @@ static void install(void)
 		return;
 	st = fwup_bundle_discover(path, &bundle);
 	if (st != FWUP_OK) {
-		snprintf(message, sizeof(message), "Cannot prepare firmware bundle: %s",
-			fwup_strerror(st));
+		describe_bundle_discovery_failure("Cannot prepare firmware bundle",
+			&bundle, st);
 		set_status("Bundle not installed.");
 		gt_ask("OK", "%s", message);
 		return;
@@ -441,8 +457,8 @@ static void update_online(void)
 	}
 	st = fwup_bundle_discover(image, &bundle);
 	if (st != FWUP_OK) {
-		snprintf(message, sizeof(message), "Downloaded bundle cannot be installed: %s",
-			fwup_strerror(st));
+		describe_bundle_discovery_failure(
+			"Downloaded bundle cannot be installed", &bundle, st);
 		set_status("Install failed.");
 		gt_ask("OK", "%s", message);
 		gt_status("%s", message);

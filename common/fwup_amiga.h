@@ -22,14 +22,17 @@ typedef void (*fwup_progress_fn)(void *ctx, ULONG done, LONG total);
 #define FWUP_BUNDLE_MAX_MODULES 16
 struct fwup_bundle {
     char boot_path[256];
+    char module_dir[256];
     char module_paths[FWUP_BUNDLE_MAX_MODULES][256];
     char module_names[FWUP_BUNDLE_MAX_MODULES][13];
     UWORD module_count;
+    LONG directory_error;
     int module_dir_present;
 };
 
 /* Discover BOOT.bin's sibling ZZ9K directory. A missing ZZ9K directory is
- * valid and yields an empty bundle. */
+ * valid and yields an empty bundle. Other directory errors are recorded in
+ * directory_error for the caller to report. */
 UWORD fwup_bundle_discover(const char *boot_path, struct fwup_bundle *bundle);
 
 /* Installs modules before BOOT.bin. Firmware without

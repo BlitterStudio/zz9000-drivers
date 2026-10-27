@@ -298,7 +298,13 @@ static int do_install_bundle(ULONG board, const char *boot_path) {
 
     st = fwup_bundle_discover(boot_path, &bundle);
     if (st != FWUP_OK) {
-        printf("ERROR: cannot read %s\n", boot_path);
+        if (bundle.directory_error) {
+            printf("ERROR: cannot scan module drawer %s (DOS error %ld):\n",
+                   bundle.module_dir, (long)bundle.directory_error);
+            PrintFault(bundle.directory_error, (STRPTR)bundle.module_dir);
+        } else {
+            printf("ERROR: cannot read %s\n", boot_path);
+        }
         return 1;
     }
 

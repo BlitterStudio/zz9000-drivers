@@ -273,6 +273,7 @@ static const char *bundle_entries[] = {
 };
 static struct test_reader bundle_reader;
 static unsigned bundle_list_calls;
+static int bundle_list_fail_after = -1;
 static uint32_t bundle_progress_done;
 static uint32_t bundle_progress_total;
 
@@ -302,6 +303,7 @@ static int bundle_visit_dir(void *ctx, const char *path,
         if (visit(visit_ctx, name,
                   source ? (uint32_t)strlen(source->data) : 0) != 0)
             return -1;
+        if ((int)i == bundle_list_fail_after) return -1;
     }
     return 1;
 }
@@ -381,6 +383,27 @@ static void test_bundle_order_and_cfg_exclusion(void) {
     CHECK(bundle_progress_done == 13 && bundle_progress_total == 13,
           "progress aggregates module and boot bytes");
     CHECK(result.outcome == FWUP_BUNDLE_INSTALLED, "module bundle outcome");
+}
+
+static void test_bundle_directory_enumeration_error_stops_install(void) {
+    struct fwup_bundle_result result;
+
+    printf("test_bundle_directory_enumeration_error_stops_install\n");
+    sim_reset();
+    bundle_list_fail_after = 0;
+    CHECK(fwup_install_bundle(&sim_io, 1U << 14, "release/BOOT.bin",
+                              &bundle_files, NULL, NULL, &result) ==
+          FWUP_ERR_FILE, "directory enumeration error returned");
+    CHECK(sim_open_count == 0, "directory error transfers no files");
+    bundle_list_fail_after = -1;
+}
+
+static void test_bundle_directory_end_status(void) {
+    printf("test_bundle_directory_end_status\n");
+    CHECK(fwup_directory_enumeration_status(232, 232) == FWUP_OK,
+          "end-of-directory error accepted");
+    CHECK(fwup_directory_enumeration_status(216, 232) == FWUP_ERR_FILE,
+          "directory error rejected");
 }
 
 static void test_bundle_module_failure_stops_boot(void) {
@@ -510,6 +533,8 @@ int main(void) {
     test_bundle_order_and_cfg_exclusion();
     test_bundle_module_failure_stops_boot();
     test_bundle_without_module_capability();
+    test_bundle_directory_enumeration_error_stops_install();
+    test_bundle_directory_end_status();
     printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails ? 1 : 0;
 }
