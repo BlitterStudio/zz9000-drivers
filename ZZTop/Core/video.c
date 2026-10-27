@@ -66,8 +66,21 @@ static void io_delay(void *ctx, unsigned ticks)
 	Delay(ticks);
 }
 
+/* Keep other tasks off the bus between the writes of one command. */
+static void io_lock(void *ctx)
+{
+	(void)ctx;
+	Forbid();
+}
+
+static void io_unlock(void *ctx)
+{
+	(void)ctx;
+	Permit();
+}
+
 static const struct zz_vcap_io card_io = {
-	NULL, io_read16, io_write16, io_delay, NULL, NULL
+	NULL, io_read16, io_write16, io_delay, NULL, NULL, io_lock, io_unlock
 };
 
 /* Copy a bounded plain-language message for the caller. */

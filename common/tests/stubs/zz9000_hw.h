@@ -21,6 +21,8 @@
 #define ZZ_REG_USER1             0x40
 #define ZZ_REG_USER2             0x42
 #define ZZ_REG_SET_FEATURE       0x60
+#define ZZ_REG_VCAP_GEOMETRY_WIDTH  0xA8
+#define ZZ_REG_VCAP_GEOMETRY_COMMIT 0xAA
 #define ZZ_FW_CAP_VIDEOCAP_PROFILE (1U << 0)
 #define ZZ_FW_CAP_VIDEOCAP_LIVE    (1U << 1)
 #define ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P (1U << 3)

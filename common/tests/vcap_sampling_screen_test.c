@@ -367,6 +367,8 @@ static struct zz_vcap_io mock_io(void)
     io.delay = mock_delay;
     io.control_ctx = 0;
     io.keep_running = 0; /* vcap_sampling_run installs its own. */
+    io.lock = 0;
+    io.unlock = 0;
     return io;
 }
 

@@ -11,7 +11,9 @@
 
 /* Ordered 16-bit MMIO, matching the existing FWUP injected-IO convention.
  * keep_running may service GUI cancellation/source ownership; restoration
- * ignores it so a cancelled experiment can still restore its entry state. */
+ * ignores it so a cancelled experiment can still restore its entry state.
+ * lock/unlock (Forbid()/Permit() on AmigaOS, may be NULL) bracket a
+ * multi-register command so no other task can write between its parts. */
 struct zz_vcap_io {
     void *ctx;
     uint16_t (*read16)(void *ctx, uint32_t offset);
@@ -19,6 +21,8 @@ struct zz_vcap_io {
     void (*delay)(void *ctx, unsigned ticks);
     void *control_ctx;
     int (*keep_running)(void *control_ctx);
+    void (*lock)(void *ctx);
+    void (*unlock)(void *ctx);
 };
 
 enum zz_vcap_result {

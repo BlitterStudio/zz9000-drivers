@@ -25,6 +25,35 @@ static int query(const struct zz_vcap_io *io, uint16_t key, uint16_t *value)
     return 1;
 }
 
+/* Firmware after 2.9.0 has write-only geometry registers and reports this
+ * key. 2.9.0 reports it absent and only decodes the card-feature sequence. */
+static int dedicated_registers(const struct zz_vcap_io *io)
+{
+    uint16_t abi;
+    return query(io, ZZ_CFG_KEY_VCAP_GEOMETRY_REGS, &abi) &&
+        abi == ZZ_CFG_VCAP_GEOMETRY_REGS_ABI;
+}
+
+/* One request under the caller's lock, so another task's writes cannot land
+ * between its parts. */
+static void write_request(const struct zz_vcap_io *io, int registers,
+    uint16_t width, uint16_t height)
+{
+    if (io->lock) io->lock(io->ctx);
+    if (registers) {
+        io->write16(io->ctx, ZZ_REG_VCAP_GEOMETRY_WIDTH, width);
+        io->write16(io->ctx, ZZ_REG_VCAP_GEOMETRY_COMMIT, height);
+    } else {
+        /* 2.9.0 firmware: this overwrites USER1/USER2, which the RTG driver
+         * caches as blitter operands. Nothing on the Amiga side can repair
+         * that cache; newer firmware avoids it with the registers above. */
+        io->write16(io->ctx, ZZ_REG_USER2, width);
+        io->write16(io->ctx, ZZ_REG_USER1, ZZ_CARD_FEATURE_VIDEOCAP_GEOMETRY);
+        io->write16(io->ctx, ZZ_REG_SET_FEATURE, height);
+    }
+    if (io->unlock) io->unlock(io->ctx);
+}
+
 enum zz_vcap_result zz_vcap_geometry_read(const struct zz_vcap_io *io,
     struct zz_vcap_geometry_state *state)
 {
@@ -83,9 +112,7 @@ enum zz_vcap_result zz_vcap_geometry_apply(const struct zz_vcap_io *io,
         before.requested_width == width && before.requested_height == height)
         return ZZ_VCAP_OK;
     expected = (uint16_t)(before.request_serial + 1U);
-    io->write16(io->ctx, ZZ_REG_USER2, width);
-    io->write16(io->ctx, ZZ_REG_USER1, ZZ_CARD_FEATURE_VIDEOCAP_GEOMETRY);
-    io->write16(io->ctx, ZZ_REG_SET_FEATURE, height);
+    write_request(io, dedicated_registers(io), width, height);
     for (tick = 0; tick < GEOMETRY_WAIT_TICKS; ++tick) {
         if (!restoring && io->keep_running && !io->keep_running(io->control_ctx))
             return ZZ_VCAP_CANCELLED;

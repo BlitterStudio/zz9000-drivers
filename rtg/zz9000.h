@@ -218,8 +218,9 @@ enum zz_reg_offsets {
   REG_ZZ_ARM_ARGV6      = 0xA2,
   REG_ZZ_ARM_ARGV7      = 0xA4,
   REG_ZZ_UNUSED_REGA6   = 0xA6,
-  REG_ZZ_UNUSED_REGA8   = 0xA8,
-  REG_ZZ_UNUSED_REGAA   = 0xAA,
+  /* write-only capture-geometry width stage / height commit (ZZTop) */
+  REG_ZZ_VCAP_GEOMETRY_WIDTH  = 0xA8,
+  REG_ZZ_VCAP_GEOMETRY_COMMIT = 0xAA,
   REG_ZZ_UNUSED_REGAC   = 0xAC,
   REG_ZZ_UNUSED_REGAE   = 0xAE,
 
