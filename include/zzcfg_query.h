@@ -70,6 +70,12 @@
 #define ZZ_CFG_VCAP_GEOMETRY_STATUS_APPLIED_VALID 1U
 #define ZZ_CFG_VCAP_GEOMETRY_STATUS_PENDING       2U
 #define ZZ_CFG_VCAP_GEOMETRY_STATUS_REJECTED      4U
+/* Present when the firmware decodes ZZ_REG_VCAP_GEOMETRY_WIDTH/COMMIT
+ * (value ZZ_CFG_VCAP_GEOMETRY_REGS_ABI); 2.9.0 reports it absent and only
+ * has the ZZ_CARD_FEATURE_VIDEOCAP_GEOMETRY sequence. Key 35 is reserved
+ * for the output gamma query. */
+#define ZZ_CFG_KEY_VCAP_GEOMETRY_REGS           36
+#define ZZ_CFG_VCAP_GEOMETRY_REGS_ABI           1U
 
 /* ZZ_CFG_KEY_FAST_RAM_OUTCOME values (mirror firmware zz_fastram_outcome). */
 #define ZZ_CFG_FAST_RAM_OUTCOME_PENDING   0

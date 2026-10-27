@@ -110,15 +110,27 @@
 #define ZZ_REG_AUDIO_TX_STATUS   0xF8
 #define ZZ_REG_DEBUG             0xFC
 
-/* Feature toggles (write ZZ_REG_USER1 = feature id, then the value here). */
+/* Feature toggles (write ZZ_REG_USER1 = feature id, then the value here).
+ * The RTG driver caches USER1/USER2 as blitter operands and skips writes it
+ * thinks repeat the card's value, so a tool that writes them leaves later
+ * blits with the wrong operands. */
 #define ZZ_REG_USER1             0x40
 #define ZZ_REG_USER2             0x42
 #define ZZ_REG_SET_FEATURE       0x60
 #define ZZ_CARD_FEATURE_NONSTANDARD_VSYNC 2
-/* Capture-window override: value packs (height << 16) | width in
- * captured words (16-aligned, 256..1280; height 100..1024). 0 restores
- * the automatic window. Gated by ZZ_FW_CAP_VIDEOCAP_GEOMETRY. */
+/* Capture-window override, 2.9.0 sequence: width in ZZ_REG_USER2, this
+ * feature id in ZZ_REG_USER1, height through ZZ_REG_SET_FEATURE (captured
+ * words, 16-aligned 256..1280; source lines 100..1024; 0 = automatic).
+ * Gated by ZZ_FW_CAP_VIDEOCAP_GEOMETRY. It leaves the RTG driver's cached
+ * USER1/USER2 wrong; use it only when ZZ_CFG_KEY_VCAP_GEOMETRY_REGS is
+ * absent. */
 #define ZZ_CARD_FEATURE_VIDEOCAP_GEOMETRY 5
+/* Capture-window override on its own write-only registers (firmware that
+ * reports ZZ_CFG_KEY_VCAP_GEOMETRY_REGS): stage the width, then write the
+ * height to COMMIT, which applies the pair. A commit with no staged width
+ * is rejected. Reads at these offsets return unrelated data. */
+#define ZZ_REG_VCAP_GEOMETRY_WIDTH  0xA8
+#define ZZ_REG_VCAP_GEOMETRY_COMMIT 0xAA
 
 /* ZZ9000.CFG interface (firmware >= 2.3, issue #33). Key ids, file
  * statuses and the client API live in common/zzcfg_amiga.h. */

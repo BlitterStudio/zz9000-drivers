@@ -114,7 +114,7 @@ static int capture_keep_running(void *ctx)
 
 static struct zz_vcap_io capture_io = {
     &board, capture_read16, capture_write16, capture_delay,
-    0, capture_keep_running
+    0, capture_keep_running, 0, 0
 };
 
 static ULONG read32(ULONG reg)

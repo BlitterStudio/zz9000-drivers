@@ -19,13 +19,25 @@ enum completion {
 };
 
 struct geometry_model {
-    uint16_t value[35];
+    uint16_t value[ZZ_CFG_KEY_VCAP_GEOMETRY_REGS + 1];
     uint16_t key, staged_width, feature;
     uint16_t resolved_width, resolved_height;
     unsigned queries, writes, delays, keep_calls, keep_until;
     unsigned present, completion;
     uint16_t capabilities;
+    /* ZZ_CFG_KEY_VCAP_GEOMETRY_REGS answer; 0 models 2.9.0 (key absent). */
+    uint16_t regs_abi;
+    unsigned reg_staged;
+    uint16_t reg_width;
+    unsigned locked, locks, unlocks, unlocked_writes;
+    /* Every write to a geometry command register, in order. */
+    uint32_t log_offset[8];
+    uint16_t log_value[8];
+    unsigned log_len;
 };
+
+/* Firmware generation the suite runs against; main() runs it for both. */
+static uint16_t firmware_regs_abi;
 
 static void model_complete(struct geometry_model *model)
 {
@@ -67,15 +79,47 @@ static uint16_t model_read16(void *ctx, uint32_t offset)
         return model->capabilities;
     if (offset == ZZ_REG_CONFIG_KEY)
         return model->value[model->key];
-    if (offset == ZZ_REG_CONFIG_KEY + 2U)
+    if (offset == ZZ_REG_CONFIG_KEY + 2U) {
+        if (model->key == ZZ_CFG_KEY_VCAP_GEOMETRY_REGS)
+            return model->regs_abi ? 1 : 0;
         return model->present ? 1 : 0;
+    }
     return 0;
+}
+
+static int command_register(uint32_t offset)
+{
+    return offset == ZZ_REG_USER1 || offset == ZZ_REG_USER2 ||
+        offset == ZZ_REG_SET_FEATURE || offset == ZZ_REG_VCAP_GEOMETRY_WIDTH ||
+        offset == ZZ_REG_VCAP_GEOMETRY_COMMIT;
+}
+
+static void model_accept(struct geometry_model *model, uint16_t width,
+    uint16_t height)
+{
+    ++model->writes;
+    model->value[ZZ_CFG_KEY_VCAP_GEOMETRY_REQUEST_WIDTH] = width;
+    model->value[ZZ_CFG_KEY_VCAP_GEOMETRY_REQUEST_HEIGHT] = height;
+    ++model->value[ZZ_CFG_KEY_VCAP_GEOMETRY_REQUEST_SERIAL];
+    /* Firmware accepts a fresh request before it is applied, which clears
+     * any previous sticky rejection. */
+    model->value[ZZ_CFG_KEY_VCAP_GEOMETRY_STATUS] =
+        ZZ_VCAP_GEOMETRY_STATUS_PENDING;
 }
 
 static void model_write16(void *ctx, uint32_t offset, uint16_t value)
 {
     struct geometry_model *model = ctx;
 
+    if (command_register(offset)) {
+        if (!model->locked)
+            ++model->unlocked_writes;
+        if (model->log_len < 8U) {
+            model->log_offset[model->log_len] = offset;
+            model->log_value[model->log_len] = value;
+        }
+        ++model->log_len;
+    }
     if (offset == ZZ_REG_CONFIG_KEY) {
         model->key = value;
         if (value >= ZZ_CFG_KEY_VCAP_GEOMETRY_REQUEST_WIDTH &&
@@ -87,14 +131,18 @@ static void model_write16(void *ctx, uint32_t offset, uint16_t value)
         model->feature = value;
     } else if (offset == ZZ_REG_SET_FEATURE &&
         model->feature == ZZ_CARD_FEATURE_VIDEOCAP_GEOMETRY) {
-        ++model->writes;
-        model->value[ZZ_CFG_KEY_VCAP_GEOMETRY_REQUEST_WIDTH] = model->staged_width;
-        model->value[ZZ_CFG_KEY_VCAP_GEOMETRY_REQUEST_HEIGHT] = value;
-        ++model->value[ZZ_CFG_KEY_VCAP_GEOMETRY_REQUEST_SERIAL];
-        /* Firmware accepts a fresh request before it is applied, which clears
-         * any previous sticky rejection. */
-        model->value[ZZ_CFG_KEY_VCAP_GEOMETRY_STATUS] =
-            ZZ_VCAP_GEOMETRY_STATUS_PENDING;
+        model_accept(model, model->staged_width, value);
+    } else if (offset == ZZ_REG_VCAP_GEOMETRY_WIDTH && model->regs_abi) {
+        model->reg_width = value;
+        model->reg_staged = 1;
+    } else if (offset == ZZ_REG_VCAP_GEOMETRY_COMMIT && model->regs_abi) {
+        /* A staged width serves one commit; a bare commit is rejected. */
+        if (model->reg_staged)
+            model_accept(model, model->reg_width, value);
+        else
+            model->value[ZZ_CFG_KEY_VCAP_GEOMETRY_STATUS] |=
+                ZZ_VCAP_GEOMETRY_STATUS_REJECTED;
+        model->reg_staged = 0;
     }
 }
 
@@ -115,6 +163,22 @@ static int model_keep_running(void *ctx)
     return ++model->keep_calls <= model->keep_until;
 }
 
+static void model_lock(void *ctx)
+{
+    struct geometry_model *model = ctx;
+    CHECK(!model->locked);
+    model->locked = 1;
+    ++model->locks;
+}
+
+static void model_unlock(void *ctx)
+{
+    struct geometry_model *model = ctx;
+    CHECK(model->locked);
+    model->locked = 0;
+    ++model->unlocks;
+}
+
 static struct zz_vcap_io model_io(struct geometry_model *model)
 {
     struct zz_vcap_io io;
@@ -124,6 +188,8 @@ static struct zz_vcap_io model_io(struct geometry_model *model)
     io.delay = model_delay;
     io.control_ctx = model;
     io.keep_running = model_keep_running;
+    io.lock = model_lock;
+    io.unlock = model_unlock;
     return io;
 }
 
@@ -137,6 +203,8 @@ static void model_init(struct geometry_model *model)
     model->keep_until = ~0U;
     model->value[ZZ_CFG_KEY_VCAP_GEOMETRY_STATUS] =
         ZZ_VCAP_GEOMETRY_STATUS_APPLIED_VALID;
+    model->regs_abi = firmware_regs_abi;
+    model->value[ZZ_CFG_KEY_VCAP_GEOMETRY_REGS] = firmware_regs_abi;
 }
 
 static void model_state(struct geometry_model *model, uint16_t requested_width,
@@ -284,13 +352,126 @@ static void test_request_bounds(void)
     CHECK(model.writes == 0);
 }
 
+static void check_write(const struct geometry_model *model, unsigned at,
+    uint32_t offset, uint16_t value)
+{
+    CHECK(model->log_len > at && at < 8U);
+    if (model->log_len > at && at < 8U)
+        CHECK(model->log_offset[at] == offset && model->log_value[at] == value);
+}
+
+/* Pins the bus sequence for each firmware generation: the dedicated registers
+ * when the firmware reports them, the 2.9.0 feature sequence otherwise, each
+ * request under one lock. */
+static void test_write_sequence(void)
+{
+    struct geometry_model model;
+    struct zz_vcap_io io;
+    const int registers = firmware_regs_abi == ZZ_CFG_VCAP_GEOMETRY_REGS_ABI;
+
+    model_init(&model);
+    model.resolved_width = 640;
+    model.resolved_height = 512;
+    io = model_io(&model);
+    CHECK(zz_vcap_geometry_apply(&io, 640, 512, 0) == ZZ_VCAP_OK);
+    CHECK(model.writes == 1);
+    CHECK(model.locks == 1 && model.unlocks == 1 && !model.locked);
+    CHECK(model.unlocked_writes == 0);
+    if (registers) {
+        CHECK(model.log_len == 2);
+        check_write(&model, 0, ZZ_REG_VCAP_GEOMETRY_WIDTH, 640);
+        check_write(&model, 1, ZZ_REG_VCAP_GEOMETRY_COMMIT, 512);
+    } else {
+        CHECK(model.log_len == 3);
+        check_write(&model, 0, ZZ_REG_USER2, 640);
+        check_write(&model, 1, ZZ_REG_USER1, ZZ_CARD_FEATURE_VIDEOCAP_GEOMETRY);
+        check_write(&model, 2, ZZ_REG_SET_FEATURE, 512);
+    }
+
+    /* Reset auto / Revert restore through the same path. */
+    model.log_len = 0;
+    model.resolved_width = 720;
+    model.resolved_height = 576;
+    CHECK(zz_vcap_geometry_apply(&io, 0, 0, 1) == ZZ_VCAP_OK);
+    CHECK(model.writes == 2);
+    CHECK(model.locks == 2 && model.unlocks == 2 && !model.locked);
+    CHECK(model.unlocked_writes == 0);
+    if (registers) {
+        CHECK(model.log_len == 2);
+        check_write(&model, 0, ZZ_REG_VCAP_GEOMETRY_WIDTH, 0);
+        check_write(&model, 1, ZZ_REG_VCAP_GEOMETRY_COMMIT, 0);
+    } else {
+        CHECK(model.log_len == 3);
+        check_write(&model, 0, ZZ_REG_USER2, 0);
+        check_write(&model, 1, ZZ_REG_USER1, ZZ_CARD_FEATURE_VIDEOCAP_GEOMETRY);
+        check_write(&model, 2, ZZ_REG_SET_FEATURE, 0);
+    }
+
+    /* Callers without lock hooks still issue the same request. */
+    model.log_len = 0;
+    io.lock = 0;
+    io.unlock = 0;
+    CHECK(zz_vcap_geometry_apply(&io, 656, 400, 0) == ZZ_VCAP_OK);
+    CHECK(model.writes == 3);
+    CHECK(model.log_len == (registers ? 2U : 3U));
+    CHECK(model.unlocked_writes == model.log_len);
+}
+
+/* A register ABI the client does not know keeps it on the 2.9.0 sequence. */
+static void test_unknown_register_abi(void)
+{
+    struct geometry_model model;
+    struct zz_vcap_io io;
+
+    model_init(&model);
+    model.regs_abi = (uint16_t)(ZZ_CFG_VCAP_GEOMETRY_REGS_ABI + 1U);
+    model.value[ZZ_CFG_KEY_VCAP_GEOMETRY_REGS] = model.regs_abi;
+    model.resolved_width = 640;
+    model.resolved_height = 512;
+    io = model_io(&model);
+    CHECK(zz_vcap_geometry_apply(&io, 640, 512, 0) == ZZ_VCAP_OK);
+    CHECK(model.log_len == 3);
+    check_write(&model, 0, ZZ_REG_USER2, 640);
+    check_write(&model, 2, ZZ_REG_SET_FEATURE, 512);
+}
+
+/* The firmware decode the client relies on: a staged width serves one commit,
+ * a bare commit is rejected without a new request. */
+static void test_bare_commit_rejected(void)
+{
+    struct geometry_model model;
+
+    model_init(&model);
+    model.regs_abi = ZZ_CFG_VCAP_GEOMETRY_REGS_ABI;
+    model_write16(&model, ZZ_REG_VCAP_GEOMETRY_WIDTH, 640);
+    model_write16(&model, ZZ_REG_VCAP_GEOMETRY_COMMIT, 512);
+    CHECK(model.writes == 1);
+    model_write16(&model, ZZ_REG_VCAP_GEOMETRY_COMMIT, 400);
+    CHECK(model.writes == 1);
+    CHECK(model.value[ZZ_CFG_KEY_VCAP_GEOMETRY_STATUS] &
+        ZZ_VCAP_GEOMETRY_STATUS_REJECTED);
+    CHECK(model.value[ZZ_CFG_KEY_VCAP_GEOMETRY_REQUEST_HEIGHT] == 512);
+}
+
 int main(void)
 {
-    test_query_abi_and_actual_readback();
-    test_requested_pair_fastpath_and_resolved_apply();
-    test_pending_rejection_and_restore();
-    test_timeout_cancellation_and_sequences();
-    test_request_bounds();
+    static const uint16_t generations[] = {
+        ZZ_CFG_VCAP_GEOMETRY_REGS_ABI, /* dedicated registers */
+        0                              /* 2.9.0: feature sequence only */
+    };
+    unsigned i;
+
+    for (i = 0; i < sizeof(generations) / sizeof(generations[0]); ++i) {
+        firmware_regs_abi = generations[i];
+        test_query_abi_and_actual_readback();
+        test_requested_pair_fastpath_and_resolved_apply();
+        test_pending_rejection_and_restore();
+        test_timeout_cancellation_and_sequences();
+        test_request_bounds();
+        test_write_sequence();
+    }
+    test_unknown_register_abi();
+    test_bare_commit_rejected();
     if (failures) {
         printf("%u of %u checks failed\n", failures, checks);
         return 1;

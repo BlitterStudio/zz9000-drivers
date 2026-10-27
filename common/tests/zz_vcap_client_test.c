@@ -98,6 +98,8 @@ static struct zz_vcap_io mock_io(struct mock *mock)
     io.delay = mock_delay;
     io.control_ctx = mock;
     io.keep_running = mock_keep_running;
+    io.lock = 0;
+    io.unlock = 0;
     return io;
 }
 
