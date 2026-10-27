@@ -12,10 +12,10 @@
  *
  * Support is detected through the ZZ9000.CFG query interface: key 35
  * returns the runtime applied gamma, 0 when the firmware or the loaded
- * bitstream has no gamma LUT. Applying a value selects the
- * CARD_FEATURE_GAMMA toggle and writes the hundredths through
- * REG_ZZ_SET_FEATURE, the same register path the RTG driver uses for
- * its feature toggles.
+ * bitstream has no gamma LUT. Applying a value writes the hundredths to
+ * the dedicated write-only ZZ_REG_GAMMA register and reads key 35 back.
+ * It deliberately avoids the USER1 feature-toggle path, whose selector
+ * the RTG driver caches for its blits.
  *
  * The live setting is not persisted: to keep it, write
  * gamma = x.xx to ZZ9000.CFG, or set it on ZZTop's Display page and Save.
@@ -78,8 +78,7 @@ int main(int argc, char *argv[])
     }
 
     if (argc == 2) {
-        zz9000_write_reg16(board_addr, ZZ_REG_USER1, ZZ_CARD_FEATURE_GAMMA);
-        zz9000_write_reg16(board_addr, ZZ_REG_SET_FEATURE, (UWORD)hundredths);
+        zz9000_write_reg16(board_addr, ZZ_REG_GAMMA, (UWORD)hundredths);
 
         applied = zzcfg_query(board_addr, ZZ_CFG_KEY_GAMMA, NULL);
         if (!applied) {

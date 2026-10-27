@@ -178,12 +178,7 @@ UWORD board_gamma(void)
 
 void board_set_gamma(UWORD hundredths)
 {
-	/* USER1 is the feature selector the RTG driver's blits also use:
-	 * keep another task from slipping a blit between the two writes. */
-	Forbid();
-	board_write16(ZZ_REG_USER1, ZZ_CARD_FEATURE_GAMMA);
-	board_write16(ZZ_REG_SET_FEATURE, hundredths);
-	Permit();
+	board_write16(ZZ_REG_GAMMA, hundredths);
 }
 
 ULONG board_register_probe(UWORD reads)

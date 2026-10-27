@@ -81,8 +81,8 @@ void board_set_scanline_parity(UWORD parity);
 /* Output gamma LUT (live, firmware issue #130). board_gamma reads config
  * key 35: the applied gamma in hundredths, 0 when the firmware or the
  * loaded bitstream has no LUT (or before firmware 2.3). board_set_gamma
- * sends CARD_FEATURE_GAMMA like the ZZGamma CLI; call it only when
- * board_gamma() is nonzero. */
+ * writes the dedicated ZZ_REG_GAMMA register like the ZZGamma CLI; call
+ * it only when board_gamma() is nonzero. */
 UWORD board_gamma(void);
 void board_set_gamma(UWORD hundredths);
 
