@@ -19,8 +19,8 @@
 
 #include <exec/types.h>
 
-#define ZZTOP_RELEASE "3.0"
-#define ZZTOP_DATE    "13.10.2026"
+#define ZZTOP_RELEASE "3.1"
+#define ZZTOP_DATE    "28.10.2026"
 
 /* Pending-change summary across every model, for the status bar, the
  * Save/Revert buttons and the Quit decision. */

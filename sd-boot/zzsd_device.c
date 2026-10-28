@@ -34,10 +34,10 @@ struct ExecBase* SysBase;
 #define XSTR(s) STR(s)
 
 #define DEVICE_NAME "zzsd.device"
-#define DEVICE_DATE "(12 Apr 2026)"
+#define DEVICE_DATE "(28 Oct 2026)"
 #define DEVICE_ID_STRING "zzsd.device " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
 #define DEVICE_VERSION 43
-#define DEVICE_REVISION 20
+#define DEVICE_REVISION 21
 #define DEVICE_PRIORITY 0
 
 #define SD_HEADS         1

@@ -33,9 +33,9 @@ struct GfxBase *GfxBase;
 struct IntuitionBase *IntuitionBase;
 struct Device *TimerBase;
 
-#define ZZ_CAPTURE_VERSION "0.9"
+#define ZZ_CAPTURE_VERSION "0.10"
 static const char version[] __attribute__((used)) =
-    "$VER: ZZCapture " ZZ_CAPTURE_VERSION " (23.09.2026)\r\n";
+    "$VER: ZZCapture " ZZ_CAPTURE_VERSION " (28.10.2026)\r\n";
 
 #define PHASE_WAIT_TICKS 250U
 #define FRAME_WAIT_TICKS 100U
