@@ -58,7 +58,12 @@ the drivers installer with the same `vX.Y.Z` tag.
    Commit and push the `SDK_REF` change. Wait for the drivers CI run to pass
    before tagging the drivers repository. The `sdk` and `amissl` CI jobs build
    from this pin, and the installer job checks out the same commit to generate
-   its AmiGuide manuals.
+   its AmiGuide manuals. The `amissl` job keys its cache on the firmware paths
+   the build reads (`sdk/integration/amissl`, `sdk/amiga/provider`,
+   `sdk/host`, `sdk/include`, `sdk/tools`) and on `amissl/Dockerfile` and
+   `amissl/build.sh`. When none of them changed since the last release, both
+   the master run and the tag run reuse the libraries instead of spending most
+   of an hour rebuilding them.
 
    `sdk/build.sh` and `amissl/build.sh` select an SDK tree in this order:
    `ZZ9000_SDK`, a sibling `../zz9000-firmware/sdk` checkout, then a clone at
