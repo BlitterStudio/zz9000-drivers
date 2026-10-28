@@ -76,7 +76,30 @@ static UWORD *new_patch(ULONG board_addr)
     patch[3] = PATCH_RTS;
     patch[4] = PATCH_MAGIC0;
     patch[5] = PATCH_MAGIC1;
+    /* The 68040/060 copyback data cache may still hold the new code; push it
+     * to memory and drop stale instruction-cache lines before anyone jumps
+     * into it. */
+    CacheClearU();
     return patch;
+}
+
+/* Send a line through the installed exec vector, so the UART shows that the
+ * whole path (vector, patch, register) works before anything else uses it. */
+static void raw_put_char(UBYTE c)
+{
+    register UBYTE d0 __asm("d0") = c;
+    register struct ExecBase *a6 __asm("a6") = SysBase;
+
+    __asm volatile("jsr -516(%%a6)"
+                   :
+                   : "r"(d0), "r"(a6)
+                   : "d1", "a0", "a1", "cc", "memory");
+}
+
+static void raw_put_string(const char *text)
+{
+    while (*text)
+        raw_put_char((UBYTE)*text++);
 }
 
 static int turn_off(void)
@@ -110,6 +133,8 @@ static int turn_on(ULONG board_addr)
     original = (APTR)SetFunction((struct Library *)SysBase, RAWPUTCHAR_LVO,
                                  (ExecVector)patch);
     patch_set_original(patch, original);
+    CacheClearU();
+    raw_put_string("\r\n[ZZDebugOut] RawPutChar now goes to the ZZ9000 UART\r\n");
     printf("ZZDebugOut enabled (RawPutChar -> ZZ9000 UART)\n");
     return RETURN_OK;
 }
