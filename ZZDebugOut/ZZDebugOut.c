@@ -28,6 +28,8 @@
 #define PATCH_MAGIC0 0x5a5aU
 #define PATCH_MAGIC1 0x444fU
 
+typedef ULONG (*ExecVector)(VOID);
+
 static const char version[] __attribute__((used)) =
     "$VER: ZZDebugOut 1.0 (28.10.2026)\r\n";
 
@@ -85,7 +87,8 @@ static int turn_off(void)
         printf("ZZDebugOut is not installed\n");
         return RETURN_WARN;
     }
-    (void)SetFunction(SysBase, RAWPUTCHAR_LVO, patch_original(patch));
+    (void)SetFunction((struct Library *)SysBase, RAWPUTCHAR_LVO,
+                      (ExecVector)patch_original(patch));
     printf("ZZDebugOut disabled\n");
     return RETURN_OK;
 }
@@ -104,7 +107,8 @@ static int turn_on(ULONG board_addr)
         printf("ERROR: cannot allocate resident patch\n");
         return RETURN_ERROR;
     }
-    original = SetFunction(SysBase, RAWPUTCHAR_LVO, (APTR)patch);
+    original = (APTR)SetFunction((struct Library *)SysBase, RAWPUTCHAR_LVO,
+                                 (ExecVector)patch);
     patch_set_original(patch, original);
     printf("ZZDebugOut enabled (RawPutChar -> ZZ9000 UART)\n");
     return RETURN_OK;
