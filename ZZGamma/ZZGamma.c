@@ -37,6 +37,9 @@
 #include "zzcfg_query.h"
 #include "zz9000_gamma.h"
 
+static const char version[] __attribute__((used)) =
+    "$VER: ZZGamma 1.0 (28.10.2026)\r\n";
+
 static void print_gamma(UWORD hundredths)
 {
     printf("Gamma %u.%02u%s\n", (unsigned)(hundredths / 100),
