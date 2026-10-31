@@ -320,7 +320,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        with:
+          repository: BlitterStudio/zz9000-firmware
+          ref: fix/app-load
+          path: zz9000-firmware
       - name: Build ZZRun
+        env:
+          ZZ9000_FIRMWARE: ${{ github.workspace }}/zz9000-firmware
+          ZZ9000_SDK: ${{ github.workspace }}/zz9000-firmware/sdk
         run: make ZZRun
       - uses: actions/upload-artifact@v7
         with:
