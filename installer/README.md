@@ -66,12 +66,14 @@ installed.
 
 ### Firmware bundles
 
-The installer does not write firmware to the card. Use `ZZTop` or
-`ZZFwUpdate` after installation with an unpacked matching firmware release.
-They install the release's `ZZ9K/*.ZZM` modules before `BOOT.bin` and leave
-the card's `ZZ9000.CFG` unchanged. On firmware that lacks the `ZZ9K/` updater
-capability, install `BOOT.bin`, reboot, then run the same release install
-again to add the optional modules.
+The installer does not write firmware to the card. A tagged driver bundle
+contains its matching `ZZ9K/MINIGL.ZZM` and `ZZ9K/MINIGL.KIT.json`; keep that
+pair together when preparing the firmware SD-card `ZZ9K/` directory. Use
+`ZZTop` or `ZZFwUpdate` after installation with an unpacked matching firmware
+release. They install the release's `ZZ9K/*.ZZM` modules before `BOOT.bin` and
+leave the card's `ZZ9000.CFG` unchanged. On firmware that lacks the `ZZ9K/`
+updater capability, install `BOOT.bin`, reboot, then run the same release
+install again to add the optional modules.
 
 ## Configuration, upgrades, and troubleshooting
 

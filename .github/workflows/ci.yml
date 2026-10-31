@@ -455,6 +455,18 @@ jobs:
         run: |
           git clone --quiet https://github.com/BlitterStudio/zz9000-firmware.git fw-src
           git -C fw-src checkout --quiet "$(cat sdk/SDK_REF)"
+      - name: Download matching MiniGL kit
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.MINIGL_RELEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir minigl-kit
+          gh release download "$GITHUB_REF_NAME" \
+            --repo BlitterStudio/amiberry-minigl-library \
+            --dir minigl-kit \
+            --pattern 'MINIGL.ZZM' \
+            --pattern 'MINIGL.KIT.json'
       - name: Assemble installer bundle
         id: bundle
         # The installer drawer's binary slots are .gitignored / unpopulated
@@ -475,6 +487,11 @@ jobs:
           # the (source ...) paths in installer/ZZ9000Installer/Install ZZ9000.
           INST="installer/ZZ9000Installer"
           install -Dm644 artifacts/ZZ9000.card/ZZ9000.card            "$INST/Libs/Picasso96/ZZ9000.card"
+          rm -rf "$INST/ZZ9K"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            ZZ9K_FIRMWARE_DIR="$PWD/fw-src" \
+              sh tools/stage-minigl-kit.sh minigl-kit "$INST"
+          fi
           install -Dm644 artifacts/mhizz9000.library/mhizz9000.library "$INST/Libs/MHI/mhizz9000.library"
           install -Dm644 artifacts/zzusbhw.device/zzusbhw.device       "$INST/Devs/USBHardware/zzusbhw.device"
           install -Dm644 artifacts/ZZ9000Net.device/ZZ9000Net.device   "$INST/Devs/Networks/ZZ9000Net.device"

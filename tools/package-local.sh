@@ -43,6 +43,13 @@ make_guide() {
 }
 
 rm -rf "$staging" "$archive"
+rm -rf "$inst/ZZ9K"
+if [ -n "${ZZ9K_MINIGL_KIT:-}" ]; then
+    firmware_dir=${ZZ9K_FIRMWARE_DIR:-$(dirname "$sdk_src")}
+    ZZ9K_FIRMWARE_DIR=$firmware_dir \
+        sh tools/stage-minigl-kit.sh "$ZZ9K_MINIGL_KIT" "$inst"
+fi
+
 
 install -Dm644 rtg/ZZ9000.card                  "$inst/Libs/Picasso96/ZZ9000.card"
 install -Dm644 mhi/mhizz9000.library            "$inst/Libs/MHI/mhizz9000.library"

@@ -516,6 +516,16 @@ class RepoToolingTests(unittest.TestCase):
         ):
             self.assertIn(artifact, script)
 
+    def test_minigl_kit_is_staged_for_tagged_installer_releases(self):
+        package = self.read("tools/package-local.sh")
+        ci = self.read(".github/workflows/ci.yml")
+        stager = self.read("tools/stage-minigl-kit.sh")
+        self.assertIn("ZZ9K_MINIGL_KIT", package)
+        self.assertIn("tools/stage-minigl-kit.sh minigl-kit", ci)
+        for artifact in ("MINIGL.ZZM", "MINIGL.KIT.json",
+                         "check_minigl_kit.py"):
+            self.assertIn(artifact, stager)
+
     def test_shell_scripts_parse(self):
         scripts = (
             "tools/amiga-docker.sh",
@@ -523,6 +533,7 @@ class RepoToolingTests(unittest.TestCase):
             "tools/package-local.sh",
             "tools/check-release.sh",
             "tools/check-quality.sh",
+            "tools/stage-minigl-kit.sh",
             "tools/stage-zz9k-headers.sh",
             "rtg/build.sh",
             "net/build.sh",
