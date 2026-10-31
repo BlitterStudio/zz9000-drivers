@@ -634,6 +634,20 @@
          (source "Tools/ZZNetReady")
          (dest "C:"))
 
+      (copyfiles
+         (prompt "Install ZZRun into C:")
+         (help "Launches one trusted ARM ELF through zz9k.library on the Zorro III app runtime. It restores the public screen when the app exits or faults. See Docs/ZZRun.guide for ROOT, Workbench ToolTypes, and file access.")
+         (source "Tools/ZZRun")
+         (infos)
+         (dest "C:"))
+
+      (makedir #docs-dest (infos))
+      (copyfiles
+         (prompt "ZZRun.guide (trusted app launcher)")
+         (source "Docs/ZZRun.guide")
+         (infos)
+         (dest #docs-dest))
+
       ; The command-line tool manual follows the tools it documents.
       (copyfiles
          (prompt "tools.guide (command-line tools)")

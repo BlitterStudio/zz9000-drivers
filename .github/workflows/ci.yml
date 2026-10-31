@@ -314,6 +314,19 @@ jobs:
           path: ZZCapture/ZZCapture
           if-no-files-found: error
 
+
+  zzrun:
+    name: ZZRun
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build ZZRun
+        run: make ZZRun
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ZZRun
+          path: ZZRun/ZZRun
+          if-no-files-found: error
   mhi:
     name: mhi — mhizz9000.library
     runs-on: ubuntu-latest
@@ -439,7 +452,7 @@ jobs:
 
   release:
     name: Package installer
-    needs: [host-checks, rtg, zztop, zzscanlines, zzgamma, zzfwupdate, usb-poseidon, sd-boot, net, ZZNetStats, ZZDiag, ZZNetReady, zzcapture, mhi, ahi, sdk, amissl]
+    needs: [host-checks, rtg, zztop, zzscanlines, zzgamma, zzfwupdate, usb-poseidon, sd-boot, net, ZZNetStats, ZZDiag, ZZNetReady, zzcapture, zzrun, mhi, ahi, sdk, amissl]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -488,12 +501,13 @@ jobs:
           install -Dm755 artifacts/ZZDiag/ZZDiag                       "$INST/Tools/ZZDiag"
           install -Dm755 artifacts/ZZNetReady/ZZNetReady               "$INST/Tools/ZZNetReady"
           install -Dm755 artifacts/ZZCapture/ZZCapture                 "$INST/Tools/ZZCapture"
+          install -Dm755 artifacts/ZZRun/ZZRun                         "$INST/Tools/ZZRun"
           # Amiga-side manuals ship as AmiGuide databases generated from
           # the canonical Markdown sources — raw .md has no Amiga reader.
           # Sibling names must cover the full drawer doc set so
           # cross-document links resolve inside the drawer.
           MD2GUIDE="fw-src/sdk/scripts/md2guide.py"
-          SIBLINGS="--sibling ahi.guide --sibling usb-poseidon.guide --sibling ZZCapture.guide --sibling sdk.guide --sibling amissl.guide --sibling ZZPlay.guide --sibling ZZTop.guide --sibling tools.guide"
+          SIBLINGS="--sibling ahi.guide --sibling usb-poseidon.guide --sibling ZZCapture.guide --sibling ZZRun.guide --sibling sdk.guide --sibling amissl.guide --sibling ZZPlay.guide --sibling ZZTop.guide --sibling tools.guide"
           make_guide() {
             # shellcheck disable=SC2086
             python3 "$MD2GUIDE" --name "$2" $SIBLINGS "$1" "$INST/Docs/$2.guide"
@@ -501,6 +515,7 @@ jobs:
           make_guide ahi/README.md ahi
           make_guide usb-poseidon/README.md usb-poseidon
           make_guide ZZCapture/README.md ZZCapture
+          make_guide ZZRun/README.md ZZRun
           make_guide ZZTop/README.md ZZTop
           make_guide docs/cli-tools.md tools
           # Diagnostic-only MHI build; staged under Docs, never installed

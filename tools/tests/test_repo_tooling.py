@@ -28,6 +28,7 @@ GENERATED_ARTIFACT_PATHS = (
     "net/ZZNetStats/ZZNetStats",
     "ZZDiag/ZZDiag",
     "ZZCapture/ZZCapture",
+    "ZZRun/ZZRun",
     "ahi/axtest/axtest",
     "ahi/duplextest/ZZAXDuplexTest",
 )
@@ -49,6 +50,7 @@ class RepoToolingTests(unittest.TestCase):
             "ZZNetStats:",
             "ZZDiag:",
             "ZZCapture:",
+            "ZZRun:",
         ):
             self.assertIn(target, text)
 
@@ -64,6 +66,7 @@ class RepoToolingTests(unittest.TestCase):
             "net/ZZNetStats/ZZNetStats.c",
             "ZZDiag/ZZDiag.c",
             "ZZCapture/ZZCapture.c",
+            "ZZRun/ZZRun.c",
         ):
             self.assertIn('#include "zz9000_hw.h"', self.read(relpath))
 
@@ -450,6 +453,7 @@ class RepoToolingTests(unittest.TestCase):
             "sd-boot/build.sh",
             "ZZDiag/build.sh",
             "ZZCapture/build.sh",
+            "ZZRun/build.sh",
         )
         for relpath in scripts:
             path = ROOT / relpath
@@ -469,6 +473,9 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("zzcapture:", ci)
         self.assertIn("make ZZCapture", ci)
         self.assertIn("ZZCapture/ZZCapture", ci)
+        self.assertIn("zzrun:", ci)
+        self.assertIn("make ZZRun", ci)
+        self.assertIn("ZZRun/ZZRun", ci)
 
     def test_ci_checks_matching_firmware_branch_with_master_fallback(self):
         ci = self.read(".github/workflows/ci.yml")
@@ -509,6 +516,7 @@ class RepoToolingTests(unittest.TestCase):
             "ZZNetStats",
             "ZZDiag",
             "ZZCapture",
+            "ZZRun",
             "zz9k.library",
             "mpega.library",
             "zz9k-picture.datatype",
@@ -530,6 +538,7 @@ class RepoToolingTests(unittest.TestCase):
             "sd-boot/build.sh",
             "ZZDiag/build.sh",
             "ZZCapture/build.sh",
+            "ZZRun/build.sh",
             "ahi/duplextest/build.sh",
             "sdk/build.sh",
             "amissl/build.sh",
@@ -614,6 +623,7 @@ class RepoToolingTests(unittest.TestCase):
             "ZZNetStats",
             "ZZDiag",
             "ZZCapture",
+            "ZZRun",
             "zz9k-info",
             "zz9k-services",
             "zz9k-view",
@@ -659,6 +669,18 @@ class RepoToolingTests(unittest.TestCase):
 
         self.assertIn('(source "Tools/ZZCapture")', installer)
         self.assertIn("Docs/ZZCapture.guide", installer)
+
+    def test_zzrun_is_packaged_with_its_manual(self):
+        ci = self.read(".github/workflows/ci.yml")
+        package = self.read("tools/package-local.sh")
+        installer = self.read("installer/ZZ9000Installer/Install ZZ9000")
+
+        for source in (ci, package):
+            self.assertIn("Tools/ZZRun", source)
+            self.assertIn("make_guide ZZRun/README.md ZZRun", source)
+
+        self.assertIn('(source "Tools/ZZRun")', installer)
+        self.assertIn("Docs/ZZRun.guide", installer)
 
     def test_audio_stack_uses_shared_ax_header(self):
         header = self.read("include/zz9000_ax.h")

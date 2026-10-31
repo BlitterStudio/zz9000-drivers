@@ -6,9 +6,9 @@
 # ZZ9000 command-line tools
 
 The standard installer places `ZZFwUpdate`, `ZZNetStats`, `ZZDiag`,
-`ZZNetReady`, `ZZScanlines`, and `ZZGamma` in `C:`. They update files on
-the card, inspect the network and board, gate network startup, and set
-scanlines and output gamma.
+`ZZNetReady`, `ZZScanlines`, `ZZGamma`, and `ZZRun` in `C:`. They update
+files on the card, inspect the network and board, gate network startup, set
+scanlines and output gamma, and start trusted ARM apps.
 `ZZCapture` is an optional diagnostic with its own `ZZCapture.guide`.
 The SDK tools, when installed, are documented in `sdk.guide`.
 
@@ -20,6 +20,7 @@ The SDK tools, when installed, are documented in `sdk.guide`.
 | `ZZNetReady` | Returns an AmigaDOS status for a boot script that waits for Ethernet negotiation. |
 | `ZZScanlines` | Changes the active scandoubler scanline mode and parity. |
 | `ZZGamma` | Sets the output gamma filter live, or prints the current gamma. |
+| `ZZRun` | Loads one trusted ARM ELF through `zz9k.library`; requires the Zorro III app-runtime firmware. |
 
 ## ZZFwUpdate: firmware updates
 

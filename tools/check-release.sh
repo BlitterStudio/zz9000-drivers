@@ -38,6 +38,7 @@ check_file ahi/README.md
 check_file usb-poseidon/README.md
 check_file docs/usb-qualification-matrix.md
 check_file ZZCapture/README.md
+check_file ZZRun/README.md
 check_file sdk/README.md
 check_file sdk/SDK_REF
 check_file amissl/README.md
@@ -58,6 +59,7 @@ if [ "$quick" -eq 0 ]; then
     check_exec ZZDiag/ZZDiag
     check_exec ZZNetReady/ZZNetReady
     check_exec ZZCapture/ZZCapture
+    check_exec ZZRun/ZZRun
 
     # SDK runtime payloads (sdk/build.sh).
     check_file sdk/out/Libs/zz9k.library
@@ -115,6 +117,7 @@ tracked_artifacts=$(
         net/ZZNetStats/ZZNetStats \
         ZZDiag/ZZDiag \
         ZZCapture/ZZCapture \
+        ZZRun/ZZRun \
         ahi/axtest/axtest \
         ahi/duplextest/ZZAXDuplexTest
     do

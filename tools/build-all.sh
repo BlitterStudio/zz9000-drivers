@@ -34,6 +34,7 @@ ahi/driver/build.sh
 "$amiga_docker" ZZDiag ./build.sh
 "$amiga_docker" ZZNetReady ./build.sh
 "$amiga_docker" ZZCapture ./build.sh
+"$amiga_docker" ZZRun ./build.sh
 
 # Runs its own Docker invocation (the SDK's build scripts wrap the same
 # image) — called directly, not through amiga-docker.sh.
