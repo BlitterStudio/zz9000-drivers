@@ -1482,13 +1482,7 @@ static int open_display(uint32_t w, uint32_t h, uint32_t format, ULONG forced_mo
     bound_fmt = format;
     life_put(ZZAPP_LIFE_CARD_FRONT_OFF, front);
     life_put(ZZAPP_LIFE_CARD_BACK_OFF, back);
-    memset(payload, 0, sizeof(payload));
-    zzapp_put_be32(payload + ZZAPP_BIND_WIDTH, w);
-    zzapp_put_be32(payload + ZZAPP_BIND_HEIGHT, h);
-    zzapp_put_be32(payload + ZZAPP_BIND_PITCH, pitch);
-    zzapp_put_be32(payload + ZZAPP_BIND_FORMAT, format);
-    zzapp_put_be32(payload + ZZAPP_BIND_CARD_FRONT, front);
-    zzapp_put_be32(payload + ZZAPP_BIND_CARD_BACK, back);
+    zzapp_build_display_bind_request(payload, w, h, pitch, format, front, back);
     status = mailbox(ZZAPP_OP_DISPLAY_BIND, payload, ZZAPP_BIND_REQ_BYTES, &reply);
     if (status != ZZ9K_STATUS_OK) {
         printf("ZZRun: display bind failed (%s)\n", status_name(status));
@@ -1570,10 +1564,7 @@ static int load_elf(BPTR fh, LONG size)
             return 0;
         }
         win_cache(ZZAPP_STAGING_OFF, (uint32_t)n);
-        memset(payload, 0, sizeof(payload));
-        zzapp_put_be32(payload + ZZAPP_CHUNK_FILE_OFF, (uint32_t)offset);
-        zzapp_put_be32(payload + ZZAPP_CHUNK_LENGTH, (uint32_t)n);
-        zzapp_put_be32(payload + ZZAPP_CHUNK_STAGING, ZZAPP_STAGING_OFF);
+        zzapp_build_chunk_request(payload, (uint32_t)offset, (uint32_t)n);
         status = mailbox(ZZAPP_OP_LOAD_CHUNK, payload, ZZAPP_CHUNK_REQ_BYTES, &reply);
         if (status != ZZ9K_STATUS_OK) {
             printf("ZZRun: chunk at %ld failed (%s)\n", (long)offset, status_name(status));
@@ -2016,8 +2007,7 @@ int main(int argc, char **argv)
     }
     Close(fh);
     fh = 0;
-    memset(payload, 0, sizeof(payload));
-    zzapp_put_be32(payload + ZZAPP_START_ARGC, (uint32_t)app_argc);
+    zzapp_build_start_request(payload, (uint32_t)app_argc);
     status = mailbox(ZZAPP_OP_START, payload, ZZAPP_START_REQ_BYTES, &reply);
     if (status != ZZ9K_STATUS_OK) {
         printf("ZZRun: start failed (%s)\n", status_name(status));
