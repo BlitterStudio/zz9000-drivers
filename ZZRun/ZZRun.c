@@ -68,7 +68,7 @@ static const char version[] __attribute__((used)) =
 #define ZZ_FMT_BGRA8888  2u
 
 #define ZZRUN_MIN_STACK     16384UL
-#define ZZRUN_IMAGE_LIMIT   ((16u * 1024u * 1024u) + (256u * 1024u))
+#define ZZRUN_IMAGE_LIMIT   ZZAPP_IMAGE_MAX_BYTES
 #define ZZRUN_GRACE_MS      500u
 #define ZZRUN_POLL_US       20000UL
 #define ZZRUN_VRAM_ARM      0x00200000UL
