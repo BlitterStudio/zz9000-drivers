@@ -84,7 +84,7 @@ ZZCapture:
 	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) ZZCapture ./build.sh
 
 ZZRun:
-	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) ZZRun ./build.sh
+	AMIGA_IMAGE="$(AMIGA_IMAGE)" ZZRun/build.sh
 
 ZZDiag:
 	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) ZZDiag ./build.sh
