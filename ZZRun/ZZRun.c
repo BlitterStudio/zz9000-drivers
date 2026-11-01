@@ -112,13 +112,14 @@ static struct Window *input_win;
 static struct Window *close_win;
 static struct ScreenBuffer *buf_front;
 static struct ScreenBuffer *buf_back;
-static struct BitMap *back_bm;
+static int joy_port0;
 static ULONG card_front;
 static ULONG card_back;
 static ULONG bound_w, bound_h, bound_pitch, bound_fmt;
 static uint16_t mouse_buttons;
 static ULONG joy_last[2];
 static int joy_valid[2];
+static int joy_touched[2];
 static struct MsgPort *timer_port;
 static struct timerequest *timer_io;
 static int timer_pending;
@@ -338,7 +339,7 @@ static void usage(void)
 {
     puts("ZZRun <app.elf> [args]\n"
          "Run Stack 32768 in this Shell first.\n"
-         "Workbench ToolTypes: APP, ROOT, ABS, MODE, ARGS.\n"
+         "Workbench ToolTypes: APP, ROOT, ABS, MODE, ARGS, JOYPORT0.\n"
          "ROOT defaults to the current directory, or the icon directory.");
 }
 
@@ -599,6 +600,9 @@ static int read_tooltypes(struct DiskObject *icon, char *app_out, size_t app_n,
     value = tool_value(icon, "MODE");
     if (value && value[0] && mode && parse_mode(value, mode))
         *have_mode = 1;
+    value = tool_value(icon, "JOYPORT0");
+    if (value && (value[0] == 0 || tool_true(value)))
+        joy_port0 = 1;
     value = tool_value(icon, "ARGS");
     return !value || add_args_split(value);
 }
@@ -1487,13 +1491,17 @@ static void drain_window(struct Window *win)
 static void poll_joysticks(void)
 {
     ULONG port;
-    if (!LowLevelBase)
+
+    if (!LowLevelBase || !input_win ||
+        !(input_win->Flags & WFLG_WINDOWACTIVE))
         return;
-    for (port = 0; port < 2; port++) {
+    for (port = joy_port0 ? 0 : 1; port < 2; port++) {
         ULONG raw = ReadJoyPort(port);
         ULONG type = raw & JP_TYPE_MASK;
         int16_t dx = 0, dy = 0;
         uint16_t buttons = 0;
+
+        joy_touched[port] = 1;
         if (type != JP_TYPE_JOYSTK && type != JP_TYPE_GAMECTLR)
             continue;
         if (joy_valid[port] && raw == joy_last[port])
@@ -1508,6 +1516,20 @@ static void poll_joysticks(void)
         if (raw & JPF_BUTTON_BLUE) buttons |= 2u;
         if (raw & JPF_BUTTON_YELLOW) buttons |= 4u;
         push_event(ZZAPP_EV_JOY, (uint16_t)port, dx, dy, buttons);
+    }
+}
+
+static void release_joysticks(void)
+{
+    ULONG port;
+
+    if (!LowLevelBase)
+        return;
+    for (port = 0; port < 2; port++) {
+        if (joy_touched[port]) {
+            (void)SetJoyPortAttrs(port, SJA_Reinitialize, TRUE, TAG_DONE);
+            joy_touched[port] = 0;
+        }
     }
 }
 
@@ -1597,10 +1619,7 @@ static void close_display(void)
         p96CloseScreen(screen);
         screen = NULL;
     }
-    if (back_bm) {
-        p96FreeBitMap(back_bm);
-        back_bm = NULL;
-    }
+    /* AllocScreenBuffer owns both double-buffer bitmaps. */
     have_two = 0;
     showing = 0;
     if (pub_name[0]) {
@@ -1665,20 +1684,38 @@ static int open_display(uint32_t w, uint32_t h, uint32_t format, ULONG forced_mo
         return 0;
     }
     if (!bitmap_arm(screen->RastPort.BitMap, &front, &pitch)) {
+        puts("ZZRun: display unavailable (front bitmap address)");
         close_display();
         return 0;
     }
-    back_bm = p96AllocBitMap(w, h, depth, BMF_DISPLAYABLE | BMF_CLEAR,
-                             screen->RastPort.BitMap, (RGBFTYPE)rgb);
-    if (back_bm && bitmap_arm(back_bm, &back, &pitch)) {
-        buf_front = AllocScreenBuffer(screen, NULL, SB_SCREEN_BITMAP);
-        buf_back = AllocScreenBuffer(screen, back_bm, 0);
-        flip_safe_port = CreateMsgPort();
-        if (buf_front && buf_back && flip_safe_port &&
-            buf_front->sb_DBufInfo && buf_back->sb_DBufInfo) {
-            buf_front->sb_DBufInfo->dbi_SafeMessage.mn_ReplyPort = flip_safe_port;
-            buf_back->sb_DBufInfo->dbi_SafeMessage.mn_ReplyPort = flip_safe_port;
-            have_two = 1;
+    buf_front = AllocScreenBuffer(screen, NULL, SB_SCREEN_BITMAP);
+    if (!buf_front) {
+        puts("ZZRun: double buffering unavailable (front screen buffer)");
+    } else {
+        buf_back = AllocScreenBuffer(screen, NULL, 0);
+        if (!buf_back) {
+            puts("ZZRun: double buffering unavailable (back screen buffer)");
+        } else {
+            ULONG back_pitch = 0;
+
+            if (!bitmap_arm(buf_back->sb_BitMap, &back, &back_pitch)) {
+                puts("ZZRun: double buffering unavailable (back bitmap address)");
+            } else if (back_pitch != pitch) {
+                puts("ZZRun: double buffering unavailable (back bitmap pitch)");
+            } else {
+                flip_safe_port = CreateMsgPort();
+                if (!flip_safe_port) {
+                    puts("ZZRun: double buffering unavailable (safe message port)");
+                } else if (!buf_front->sb_DBufInfo || !buf_back->sb_DBufInfo) {
+                    puts("ZZRun: double buffering unavailable (screen buffer info)");
+                } else {
+                    buf_front->sb_DBufInfo->dbi_SafeMessage.mn_ReplyPort =
+                        flip_safe_port;
+                    buf_back->sb_DBufInfo->dbi_SafeMessage.mn_ReplyPort =
+                        flip_safe_port;
+                    have_two = 1;
+                }
+            }
         }
     }
     if (!have_two) {
@@ -1692,10 +1729,6 @@ static int open_display(uint32_t w, uint32_t h, uint32_t format, ULONG forced_mo
             FreeScreenBuffer(screen, buf_front);
         buf_back = NULL;
         buf_front = NULL;
-        if (back_bm) {
-            p96FreeBitMap(back_bm);
-            back_bm = NULL;
-        }
         back = 0;
     }
     input_win = OpenWindowTags(NULL,
@@ -2083,6 +2116,7 @@ static void cleanup(void)
         DeleteMsgPort(timer_port);
         timer_port = NULL;
     }
+    release_joysticks();
     if (LowLevelBase) {
         CloseLibrary(LowLevelBase);
         LowLevelBase = NULL;
