@@ -34,7 +34,7 @@ returns 10 for invalid launcher arguments.
 | `ABS=1` | Permit app paths containing an Amiga volume or assign colon. The root check does not apply to those paths. |
 | `MODE` | Optional Picasso96 DisplayID, in decimal, `$` hexadecimal, or `0x` hexadecimal. The app still chooses width, height, and RGB format. |
 | `ARGS` | Optional space-separated arguments. Quoting is not parsed. |
-| `JOYPORT0=1` | Also read joystick port 0. Disabled by default so the mouse port is untouched. |
+| `JOYPORT0=1` | Also read joystick port 0. Disabled by default; a mouse in port 0 then also reports as joystick movement. |
 
 Dragging an ELF project onto the ZZRun icon takes precedence over `APP`.
 
@@ -74,11 +74,11 @@ All mailbox payload and rings fields are big-endian. ZZRun stages the firmware
 ZZRun forwards IDCMP raw keys without converting them to ASCII. A key-up has
 `ZZ_EV_KEY_UP`; its raw key code has the Amiga up bit removed. Key qualifiers
 stay in `buttons`. Mouse movement carries deltas, and mouse buttons use bits
-0, 1, and 2 for left, right, and middle. `lowlevel.library` is optional;
-when present, joystick events use the same three button bits and `dx`/`dy` in
-`-1, 0, 1`. ZZRun reads joystick port 1 only while its display window is
-active; `JOYPORT0=1` also enables port 0. Every port it reads is reinitialized
-before exit.
+0, 1, and 2 for left, right, and middle. Joystick events report one fire
+button in bit 0 and `dx`/`dy` in `-1, 0, 1`. ZZRun reads joystick port 1 only
+while its display window is active; `JOYPORT0=1` also enables port 0. It only
+reads `JOYxDAT` and the CIA-A fire bits and never drives the port pins, so the
+mouse and joystick ports are left exactly as it found them.
 
 The launcher owns the input producer side. It drops a new event rather than
 blocking when all 256 slots are full, and increments `input_drops`. Firmware

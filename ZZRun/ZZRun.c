@@ -18,7 +18,6 @@
 #include <workbench/startup.h>
 #include <workbench/workbench.h>
 #include <libraries/Picasso96.h>
-#include <libraries/lowlevel.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
 #include <proto/intuition.h>
@@ -26,7 +25,6 @@
 #include <proto/timer.h>
 #include <proto/icon.h>
 #include <proto/Picasso96.h>
-#include <proto/lowlevel.h>
 #include <proto/zz9k.h>
 #include "zz9k/request.h"
 #include "zzapp_proto.h"
@@ -119,7 +117,6 @@ static ULONG bound_w, bound_h, bound_pitch, bound_fmt;
 static uint16_t mouse_buttons;
 static ULONG joy_last[2];
 static int joy_valid[2];
-static int joy_touched[2];
 static struct MsgPort *timer_port;
 static struct timerequest *timer_io;
 static int timer_pending;
@@ -1488,48 +1485,38 @@ static void drain_window(struct Window *win)
     }
 }
 
+/*
+ * Read-only joystick sampling: JOYxDAT and the CIA-A fire bits.  ZZRun used
+ * lowlevel.library's ReadJoyPort(), whose controller auto-sensing drives the
+ * port pins and left the left mouse button repeating and releasing on its
+ * own after ZZRun had exited.  Reading these registers changes no state.
+ * One fire button per port; a mouse in a polled port reads as movement.
+ */
+#define ZZRUN_JOY0DAT ((volatile UWORD *)0xDFF00AUL)
+#define ZZRUN_JOY1DAT ((volatile UWORD *)0xDFF00CUL)
+#define ZZRUN_CIAA_PRA ((volatile UBYTE *)0xBFE001UL)
+
 static void poll_joysticks(void)
 {
     ULONG port;
 
-    if (!LowLevelBase || !input_win ||
-        !(input_win->Flags & WFLG_WINDOWACTIVE))
+    if (!input_win || !(input_win->Flags & WFLG_WINDOWACTIVE))
         return;
     for (port = joy_port0 ? 0 : 1; port < 2; port++) {
-        ULONG raw = ReadJoyPort(port);
-        ULONG type = raw & JP_TYPE_MASK;
+        UWORD dat = port ? *ZZRUN_JOY1DAT : *ZZRUN_JOY0DAT;
+        int fire = (*ZZRUN_CIAA_PRA & (port ? 0x80u : 0x40u)) == 0;
+        ULONG state = ((ULONG)(dat & 0x0303u) << 1) | (ULONG)fire;
         int16_t dx = 0, dy = 0;
-        uint16_t buttons = 0;
 
-        joy_touched[port] = 1;
-        if (type != JP_TYPE_JOYSTK && type != JP_TYPE_GAMECTLR)
+        if (joy_valid[port] && state == joy_last[port])
             continue;
-        if (joy_valid[port] && raw == joy_last[port])
-            continue;
-        joy_last[port] = raw;
+        joy_last[port] = state;
         joy_valid[port] = 1;
-        if (raw & JPF_JOY_LEFT) dx = -1;
-        else if (raw & JPF_JOY_RIGHT) dx = 1;
-        if (raw & JPF_JOY_UP) dy = -1;
-        else if (raw & JPF_JOY_DOWN) dy = 1;
-        if (raw & JPF_BUTTON_RED) buttons |= 1u;
-        if (raw & JPF_BUTTON_BLUE) buttons |= 2u;
-        if (raw & JPF_BUTTON_YELLOW) buttons |= 4u;
-        push_event(ZZAPP_EV_JOY, (uint16_t)port, dx, dy, buttons);
-    }
-}
-
-static void release_joysticks(void)
-{
-    ULONG port;
-
-    if (!LowLevelBase)
-        return;
-    for (port = 0; port < 2; port++) {
-        if (joy_touched[port]) {
-            (void)SetJoyPortAttrs(port, SJA_Reinitialize, TRUE, TAG_DONE);
-            joy_touched[port] = 0;
-        }
+        if (dat & 0x0200u) dx = -1;
+        else if (dat & 0x0002u) dx = 1;
+        if (((dat >> 9) ^ (dat >> 8)) & 1u) dy = -1;
+        else if (((dat >> 1) ^ dat) & 1u) dy = 1;
+        push_event(ZZAPP_EV_JOY, (uint16_t)port, dx, dy, fire ? 1u : 0u);
     }
 }
 
@@ -2116,11 +2103,6 @@ static void cleanup(void)
         DeleteMsgPort(timer_port);
         timer_port = NULL;
     }
-    release_joysticks();
-    if (LowLevelBase) {
-        CloseLibrary(LowLevelBase);
-        LowLevelBase = NULL;
-    }
     if (P96Base) {
         CloseLibrary(P96Base);
         P96Base = NULL;
@@ -2292,7 +2274,6 @@ int main(int argc, char **argv)
         return 20;
     }
     P96Base = OpenLibrary((CONST_STRPTR)"Picasso96API.library", 2);
-    LowLevelBase = OpenLibrary((CONST_STRPTR)"lowlevel.library", 0);
     timer_port = CreateMsgPort();
     if (timer_port)
         timer_io = (struct timerequest *)CreateIORequest(
