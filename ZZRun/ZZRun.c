@@ -71,6 +71,7 @@ static const char version[] __attribute__((used)) =
 #define ZZRUN_IMAGE_LIMIT   ZZAPP_IMAGE_MAX_BYTES
 #define ZZRUN_GRACE_MS      500u
 #define ZZRUN_POLL_US       20000UL
+#define ZZRUN_LONG_OP_MS    120000UL
 #define ZZRUN_VRAM_ARM      0x00200000UL
 #define ZZRUN_VRAM_END      0x033F0000UL
 #define ZZRUN_HEAP_END      0x08200000UL
@@ -78,6 +79,19 @@ static const char version[] __attribute__((used)) =
 #define ZZRUN_UNIX_DELTA    252460800UL
 #define ZZRUN_READ_CHUNK    8192u
 
+#define MMU_MAPP_CACHEINHIBIT 0x00000040UL
+#define MMU_MAPP_COPYBACK     0x00002000UL
+#define MMU_MAPP_IMPRECISE    0x00200000UL
+#define MMU_MAPP_NONSERIALIZED 0x20000000UL
+#define MMU_CACHE_MASK (MMU_MAPP_CACHEINHIBIT | MMU_MAPP_COPYBACK | \
+                        MMU_MAPP_IMPRECISE | MMU_MAPP_NONSERIALIZED)
+
+struct mmu_context;
+
+struct mmu_window_page {
+    uint32_t address;
+    uint32_t properties;
+};
 static struct ZZ9000Board board;
 static uint8_t *window;
 static uint32_t window_bytes;
@@ -88,7 +102,6 @@ static uint32_t stop_ms;
 static uint32_t flip_acked;
 static int have_two;
 static int showing;
-static ULONG pub_name_len;
 static char pub_name[128];
 static char elf_path[256];
 static char arg_store[ZZAPP_ARGV_MAX][ZZAPP_ARGV_STR_MAX];
@@ -104,13 +117,19 @@ static ULONG card_front;
 static ULONG card_back;
 static ULONG bound_w, bound_h, bound_pitch, bound_fmt;
 static uint16_t mouse_buttons;
-static int mouse_valid;
-static WORD mouse_x, mouse_y;
 static ULONG joy_last[2];
 static int joy_valid[2];
 static struct MsgPort *timer_port;
 static struct timerequest *timer_io;
 static int timer_pending;
+static struct MsgPort *flip_safe_port;
+static uint32_t flip_pending;
+static struct Library *MMUBase;
+static struct mmu_context *mmu_context;
+static struct mmu_window_page *mmu_window_pages;
+static uint32_t mmu_window_page_count;
+static uint32_t mmu_window_page_bytes;
+static uint32_t owned_generation;
 
 struct file_slot {
     BPTR fh;
@@ -138,6 +157,144 @@ static int stack_ok(void)
         (uintptr_t)task->tc_SPUpper - (uintptr_t)task->tc_SPLower < ZZRUN_MIN_STACK)
         return 0;
     return 1;
+}
+
+static struct mmu_context *mmu_default_context(void)
+{
+    register struct mmu_context *d0 __asm("d0");
+    register struct Library *a6 __asm("a6") = MMUBase;
+    __asm volatile("jsr -150(a6)"
+                   : "=r"(d0)
+                   : "r"(a6)
+                   : "cc", "memory", "d1", "a0", "a1");
+    return d0;
+}
+
+static uint32_t mmu_page_size(struct mmu_context *context)
+{
+    register uint32_t d0 __asm("d0");
+    register struct mmu_context *a0 __asm("a0") = context;
+    register struct Library *a6 __asm("a6") = MMUBase;
+    __asm volatile("jsr -48(a6)"
+                   : "=r"(d0), "+r"(a0)
+                   : "r"(a6)
+                   : "cc", "memory", "d1", "a1");
+    return d0;
+}
+
+static uint32_t mmu_properties(struct mmu_context *context, uint32_t address)
+{
+    register uint32_t d0 __asm("d0");
+    register struct mmu_context *a0 __asm("a0") = context;
+    register void *a1 __asm("a1") = (void *)(uintptr_t)address;
+    register void *a2 __asm("a2") = NULL;
+    register struct Library *a6 __asm("a6") = MMUBase;
+    __asm volatile("jsr -90(a6)"
+                   : "=r"(d0), "+r"(a0), "+r"(a1), "+r"(a2)
+                   : "r"(a6)
+                   : "cc", "memory", "d1");
+    return d0;
+}
+
+static int mmu_set_properties(struct mmu_context *context, uint32_t flags,
+                              uint32_t mask, uint32_t address, uint32_t size)
+{
+    register uint32_t d0 __asm("d0") = size;
+    register uint32_t d1 __asm("d1") = flags;
+    register uint32_t d2 __asm("d2") = mask;
+    register struct mmu_context *a0 __asm("a0") = context;
+    register void *a1 __asm("a1") = (void *)(uintptr_t)address;
+    register void *a2 __asm("a2") = NULL;
+    register struct Library *a6 __asm("a6") = MMUBase;
+    __asm volatile("jsr -84(a6)"
+                   : "+r"(d0), "+r"(d1), "+r"(d2), "+r"(a0), "+r"(a1), "+r"(a2)
+                   : "r"(a6)
+                   : "cc", "memory");
+    return d0 != 0;
+}
+
+static void window_cache_restore(void)
+{
+    uint32_t i;
+
+    if (MMUBase && mmu_context && mmu_window_pages) {
+        for (i = 0; i < mmu_window_page_count; i++) {
+            (void)mmu_set_properties(mmu_context,
+                                     mmu_window_pages[i].properties & MMU_CACHE_MASK,
+                                     MMU_CACHE_MASK, mmu_window_pages[i].address,
+                                     mmu_window_page_bytes);
+        }
+    }
+    if (mmu_window_pages) {
+        FreeMem(mmu_window_pages,
+                (ULONG)mmu_window_page_count * sizeof(*mmu_window_pages));
+        mmu_window_pages = NULL;
+    }
+    mmu_window_page_count = 0;
+    mmu_window_page_bytes = 0;
+    mmu_context = NULL;
+    if (MMUBase) {
+        CloseLibrary(MMUBase);
+        MMUBase = NULL;
+    }
+}
+
+static void window_cache_disable(void)
+{
+    uint32_t page_bytes;
+    uint32_t first;
+    uint32_t last;
+    uint32_t count;
+    uint32_t i;
+
+    MMUBase = OpenLibrary((CONST_STRPTR)"mmu.library", 41);
+    if (!MMUBase) {
+        puts("ZZRun: mmu.library unavailable; shared window remains cacheable.");
+        return;
+    }
+    mmu_context = mmu_default_context();
+    page_bytes = mmu_context ? mmu_page_size(mmu_context) : 0;
+    if (page_bytes == 0 || (page_bytes & (page_bytes - 1u)) != 0u) {
+        puts("ZZRun: mmu.library has no usable page size.");
+        window_cache_restore();
+        return;
+    }
+    first = (uint32_t)(uintptr_t)window & ~(page_bytes - 1u);
+    if (window_bytes > UINT32_MAX - (uint32_t)(uintptr_t)window ||
+        (uint32_t)(uintptr_t)window + window_bytes > UINT32_MAX - (page_bytes - 1u)) {
+        puts("ZZRun: shared window range overflows.");
+        window_cache_restore();
+        return;
+    }
+    last = ((uint32_t)(uintptr_t)window + window_bytes + page_bytes - 1u) &
+           ~(page_bytes - 1u);
+    count = (last - first) / page_bytes;
+    if (count == 0 || count > UINT32_MAX / sizeof(*mmu_window_pages)) {
+        puts("ZZRun: shared window page count is invalid.");
+        window_cache_restore();
+        return;
+    }
+    mmu_window_pages = AllocMem((ULONG)count * sizeof(*mmu_window_pages),
+                                MEMF_PUBLIC | MEMF_CLEAR);
+    if (!mmu_window_pages) {
+        puts("ZZRun: cannot save MMU window properties.");
+        window_cache_restore();
+        return;
+    }
+    mmu_window_page_count = count;
+    mmu_window_page_bytes = page_bytes;
+    for (i = 0; i < count; i++) {
+        uint32_t address = first + i * page_bytes;
+
+        mmu_window_pages[i].address = address;
+        mmu_window_pages[i].properties = mmu_properties(mmu_context, address);
+        if (!mmu_set_properties(mmu_context, MMU_MAPP_CACHEINHIBIT,
+                                MMU_CACHE_MASK, address, page_bytes)) {
+            puts("ZZRun: cannot make the shared window non-cacheable.");
+            window_cache_restore();
+            return;
+        }
+    }
 }
 
 static void win_cache(uint32_t off, uint32_t len)
@@ -260,9 +417,80 @@ static int mailbox(uint16_t opcode, const uint8_t *payload, uint16_t len,
     return status;
 }
 
+static int mailbox_long(uint16_t opcode, const uint8_t *payload, uint16_t len,
+                        ZZ9KMailboxEntry *reply, int *submitted)
+{
+    ZZ9KRequest request;
+    ZZ9KAsyncRequest async;
+    uint32_t started;
+    int status;
+
+    if (submitted)
+        *submitted = 0;
+    if (!reply)
+        return ZZ9K_STATUS_BAD_REQUEST;
+    zz9k_request_init(&request, opcode);
+    request.entry.payload_len = len;
+    if (len && payload)
+        memcpy(request.entry.payload.inline_data, payload, len);
+    memset(&async, 0, sizeof(async));
+    status = ZZ9KCallAsync(&async, &request, NULL, NULL);
+    if (status != ZZ9K_STATUS_QUEUED)
+        return status;
+    if (submitted)
+        *submitted = 1;
+    started = now_ms();
+    while (!async.completed) {
+        uint32_t completed = 0;
+
+        status = ZZ9KPoll(1, &completed);
+        if (status != ZZ9K_STATUS_OK)
+            break;
+        if (async.completed)
+            break;
+        if (now_ms() - started >= ZZRUN_LONG_OP_MS) {
+            (void)ZZ9KCancelAsync(&async);
+            return ZZ9K_STATUS_TIMEOUT;
+        }
+        Delay(1);
+    }
+    if (!async.completed)
+        return status;
+    *reply = async.reply;
+    return async.status;
+}
+
 static int op_empty(uint16_t opcode, ZZ9KMailboxEntry *reply)
 {
     return mailbox(opcode, NULL, 0, reply);
+}
+
+static int owns_current_generation(void)
+{
+    return window && owned_generation != 0 &&
+           life_get(ZZAPP_LIFE_GENERATION_OFF) == owned_generation;
+}
+
+static void claim_loading_generation(uint32_t previous_generation)
+{
+    uint32_t generation;
+    uint32_t state;
+
+    if (!window)
+        return;
+    generation = life_get(ZZAPP_LIFE_GENERATION_OFF);
+    state = life_get(ZZAPP_LIFE_STATE_OFF);
+    if (generation != 0 && generation != previous_generation &&
+        state != ZZAPP_ST_IDLE)
+        owned_generation = generation;
+}
+
+static void stop_owned(void)
+{
+    ZZ9KMailboxEntry reply;
+
+    if (owns_current_generation())
+        (void)op_empty(ZZAPP_OP_STOP, &reply);
 }
 
 
@@ -631,6 +859,32 @@ static int lock_target(BPTR dir, const char *leaf, BPTR *out, int *err)
     return 1;
 }
 
+static int final_path_under_root(BPTR dir, const char *leaf, int create,
+                                 int *err)
+{
+    BPTR old;
+    BPTR locked;
+
+    old = CurrentDir(dir);
+    locked = Lock((STRPTR)leaf, ACCESS_READ);
+    CurrentDir(old);
+    if (!locked) {
+        if (create && IoErr() == ERROR_OBJECT_NOT_FOUND)
+            return 1;
+        *err = zz_from_io();
+        if (*err == ZZ_OK)
+            *err = ZZ_ENOENT;
+        return 0;
+    }
+    if (!under_root(locked)) {
+        UnLock(locked);
+        *err = ZZ_EACCES;
+        return 0;
+    }
+    UnLock(locked);
+    return 1;
+}
+
 static int path_from_wire(const struct zzapp_file_wire *req, char *out, int *err)
 {
     uint32_t off = req->path_off;
@@ -640,6 +894,7 @@ static int path_from_wire(const struct zzapp_file_wire *req, char *out, int *err
         *err = ZZ_EINVAL;
         return 0;
     }
+    win_cache(ZZAPP_PATH_OFF, ZZAPP_PATH_BYTES);
     src = window + off;
     for (i = 0; i < ZZAPP_PATH_MAX && off + i < ZZAPP_PATH_OFF + ZZAPP_PATH_BYTES; i++) {
         out[i] = (char)src[i];
@@ -798,6 +1053,10 @@ static void serve_open(const struct zzapp_file_wire *req)
             err = ZZ_EIO;
             goto done;
         }
+        if (!final_path_under_root(dir, leaf,
+                                   (req->flags & ZZAPP_FILE_CREATE) != 0,
+                                   &err))
+            goto done;
         old = CurrentDir(dir);
         fh = Open((STRPTR)leaf, mode);
         CurrentDir(old);
@@ -1173,18 +1432,17 @@ static void push_event(uint16_t type, uint16_t code, int16_t dx, int16_t dy,
 
 static void request_stop(void)
 {
-    ZZ9KMailboxEntry reply;
     if (stop_asked)
         return;
     stop_asked = 1;
     stop_ms = now_ms();
-    if (window)
+    if (owns_current_generation())
         life_put(ZZAPP_LIFE_STOP_OFF, 1);
     if (!stop_event_sent) {
         push_event(ZZAPP_EV_STOP, 0, 0, 0, 0);
         stop_event_sent = 1;
     }
-    op_empty(ZZAPP_OP_STOP, &reply);
+    stop_owned();
 }
 
 static void drain_window(struct Window *win)
@@ -1217,14 +1475,9 @@ static void drain_window(struct Window *win)
             push_event(ZZAPP_EV_MOUSE, id, 0, 0, mouse_buttons);
         }
         if (class & IDCMP_MOUSEMOVE) {
-            int16_t dx = 0, dy = 0;
-            if (mouse_valid) {
-                dx = (int16_t)(mx - mouse_x);
-                dy = (int16_t)(my - mouse_y);
-            }
-            mouse_x = mx;
-            mouse_y = my;
-            mouse_valid = 1;
+            int16_t dx = (int16_t)mx;
+            int16_t dy = (int16_t)my;
+
             if (dx || dy)
                 push_event(ZZAPP_EV_MOUSE, 0, dx, dy, mouse_buttons);
         }
@@ -1271,8 +1524,6 @@ static void print_log(void)
         uint32_t avail = head - tail;
         uint16_t len;
         uint32_t step, i;
-        char text[256];
-        uint32_t copy;
         if (avail < 2)
             break;
         win_cache(ZZAPP_LOG_OFF + ZZAPP_LOG_HDR, usable);
@@ -1283,13 +1534,11 @@ static void print_log(void)
             tail = head;
             break;
         }
-        copy = len < sizeof(text) - 1 ? len : (uint32_t)sizeof(text) - 1;
-        for (i = 0; i < copy; i++)
-            text[i] = (char)window[ZZAPP_LOG_OFF + ZZAPP_LOG_HDR +
-                                   ((tail + 2 + i) % usable)];
-        text[copy] = 0;
-        fputs(text, stdout);
-        if (copy == 0 || text[copy - 1] != '\n')
+        for (i = 0; i < len; i++)
+            fputc((unsigned char)window[ZZAPP_LOG_OFF + ZZAPP_LOG_HDR +
+                                        ((tail + 2 + i) % usable)], stdout);
+        if (len == 0 || window[ZZAPP_LOG_OFF + ZZAPP_LOG_HDR +
+                               ((tail + 1 + len) % usable)] != '\n')
             fputc('\n', stdout);
         tail += step;
     }
@@ -1324,16 +1573,8 @@ static int bitmap_arm(struct BitMap *bm, ULONG *arm, ULONG *pitch)
 
 static void close_display(void)
 {
-    if (buf_back && screen)
-        FreeScreenBuffer(screen, buf_back);
-    if (buf_front && screen)
-        FreeScreenBuffer(screen, buf_front);
-    buf_back = NULL;
-    buf_front = NULL;
-    if (back_bm) {
-        p96FreeBitMap(back_bm);
-        back_bm = NULL;
-    }
+    if (buf_front && screen && showing)
+        (void)ChangeScreenBuffer(screen, buf_front);
     if (close_win) {
         CloseWindow(close_win);
         close_win = NULL;
@@ -1342,9 +1583,23 @@ static void close_display(void)
         CloseWindow(input_win);
         input_win = NULL;
     }
+    if (buf_back && screen)
+        FreeScreenBuffer(screen, buf_back);
+    if (buf_front && screen)
+        FreeScreenBuffer(screen, buf_front);
+    if (flip_safe_port) {
+        DeleteMsgPort(flip_safe_port);
+        flip_safe_port = NULL;
+    }
+    buf_back = NULL;
+    buf_front = NULL;
     if (screen) {
         p96CloseScreen(screen);
         screen = NULL;
+    }
+    if (back_bm) {
+        p96FreeBitMap(back_bm);
+        back_bm = NULL;
     }
     have_two = 0;
     showing = 0;
@@ -1377,7 +1632,6 @@ static int open_display(uint32_t w, uint32_t h, uint32_t format, ULONG forced_mo
     uint8_t payload[ZZAPP_BIND_REQ_BYTES];
     ZZ9KMailboxEntry reply;
     int status;
-    struct Screen *pub;
 
     if (w == 0 || h == 0 || w > ZZRUN_SCREEN_MAX || h > ZZRUN_SCREEN_MAX)
         return 0;
@@ -1385,17 +1639,8 @@ static int open_display(uint32_t w, uint32_t h, uint32_t format, ULONG forced_mo
         return 0;
     if (!P96Base || !IntuitionBase || !GfxBase)
         return 0;
-    pub = LockPubScreen(NULL);
-    if (pub) {
-        if (pub->DefaultTitle && !pub_name[0]) {
-            pub_name_len = (ULONG)strlen((char *)pub->DefaultTitle);
-            if (pub_name_len >= sizeof(pub_name))
-                pub_name_len = sizeof(pub_name) - 1;
-            memcpy(pub_name, pub->DefaultTitle, pub_name_len);
-            pub_name[pub_name_len] = 0;
-        }
-        UnlockPubScreen(NULL, pub);
-    }
+    if (!pub_name[0])
+        GetDefaultPubScreen((STRPTR)pub_name);
     depth = format == ZZ_FMT_BGRA8888 ? 32 : 16;
     rgb = format == ZZ_FMT_BGRA8888 ? RGBFB_B8G8R8A8 : RGBFB_R5G6B5;
     mode = mode_for(w, h, format, forced_mode);
@@ -1428,10 +1673,19 @@ static int open_display(uint32_t w, uint32_t h, uint32_t format, ULONG forced_mo
     if (back_bm && bitmap_arm(back_bm, &back, &pitch)) {
         buf_front = AllocScreenBuffer(screen, NULL, SB_SCREEN_BITMAP);
         buf_back = AllocScreenBuffer(screen, back_bm, 0);
-        if (buf_front && buf_back)
+        flip_safe_port = CreateMsgPort();
+        if (buf_front && buf_back && flip_safe_port &&
+            buf_front->sb_DBufInfo && buf_back->sb_DBufInfo) {
+            buf_front->sb_DBufInfo->dbi_SafeMessage.mn_ReplyPort = flip_safe_port;
+            buf_back->sb_DBufInfo->dbi_SafeMessage.mn_ReplyPort = flip_safe_port;
             have_two = 1;
+        }
     }
     if (!have_two) {
+        if (flip_safe_port) {
+            DeleteMsgPort(flip_safe_port);
+            flip_safe_port = NULL;
+        }
         if (buf_back && screen)
             FreeScreenBuffer(screen, buf_back);
         if (buf_front && screen)
@@ -1455,8 +1709,8 @@ static int open_display(uint32_t w, uint32_t h, uint32_t format, ULONG forced_mo
         WA_ReportMouse, TRUE,
         WA_Activate, TRUE,
         WA_NoCareRefresh, TRUE,
-        WA_IDCMP, IDCMP_RAWKEY | IDCMP_MOUSEMOVE | IDCMP_MOUSEBUTTONS |
-                  IDCMP_CLOSEWINDOW,
+        WA_IDCMP, IDCMP_RAWKEY | IDCMP_MOUSEMOVE | IDCMP_DELTAMOVE |
+                  IDCMP_MOUSEBUTTONS | IDCMP_CLOSEWINDOW,
         TAG_DONE);
     close_win = OpenWindowTags(NULL,
         WA_CustomScreen, (ULONG)screen,
@@ -1495,21 +1749,37 @@ static int open_display(uint32_t w, uint32_t h, uint32_t format, ULONG forced_mo
         return 0;
     }
     showing = 0;
+    flip_pending = 0;
     return 1;
 }
 
 static void ack_flip(void)
 {
     uint32_t gen, flags;
+
     if (!window || !screen)
         return;
+    if (flip_pending != 0) {
+        if (!flip_safe_port || !GetMsg(flip_safe_port))
+            return;
+        life_put(ZZAPP_LIFE_FLIP_ACK_OFF, flip_pending);
+        flip_acked = flip_pending;
+        flip_pending = 0;
+        return;
+    }
     gen = life_get(ZZAPP_LIFE_FLIP_GEN_OFF);
     if (gen == flip_acked)
         return;
     flags = life_get(ZZAPP_LIFE_FLAGS_OFF);
     if (have_two && buf_front && buf_back) {
-        showing ^= 1;
-        ChangeScreenBuffer(screen, showing ? buf_back : buf_front);
+        int next_showing = !showing;
+
+        if (!ChangeScreenBuffer(screen,
+                                next_showing ? buf_back : buf_front))
+            return;
+        showing = next_showing;
+        flip_pending = gen;
+        return;
     }
     if (flags & ZZAPP_F_VSYNC)
         WaitTOF();
@@ -1541,26 +1811,44 @@ static int load_elf(BPTR fh, LONG size)
 {
     uint8_t payload[ZZAPP_CHUNK_REQ_BYTES];
     ZZ9KMailboxEntry reply;
+    uint32_t prior_generation = life_get(ZZAPP_LIFE_GENERATION_OFF);
     LONG offset = 0;
-    int status = op_empty(ZZAPP_OP_LOAD_BEGIN, &reply);
+    int submitted;
+    int status;
+
+    status = mailbox_long(ZZAPP_OP_LOAD_BEGIN, NULL, 0, &reply, &submitted);
     if (status != ZZ9K_STATUS_OK) {
+        if (submitted)
+            claim_loading_generation(prior_generation);
         printf("ZZRun: load begin failed (%s)\n", status_name(status));
+        stop_owned();
+        return 0;
+    }
+    claim_loading_generation(prior_generation);
+    if (!owns_current_generation()) {
+        puts("ZZRun: load begin did not claim this launcher generation");
+        return 0;
+    }
+    if (!fill_argv()) {
+        tell("Arguments do not fit in the argv area.");
+        stop_owned();
         return 0;
     }
     while (offset < size) {
         LONG chunk = size - offset;
         LONG n;
+
         if (chunk > (LONG)ZZAPP_CHUNK_MAX)
             chunk = (LONG)ZZAPP_CHUNK_MAX;
         if (ctrl_c_set()) {
             puts("ZZRun: stopped during load");
-            op_empty(ZZAPP_OP_STOP, &reply);
+            stop_owned();
             return 0;
         }
         n = Read(fh, window + ZZAPP_STAGING_OFF, chunk);
         if (n != chunk) {
             puts("ZZRun: short read while loading the ELF");
-            op_empty(ZZAPP_OP_STOP, &reply);
+            stop_owned();
             return 0;
         }
         win_cache(ZZAPP_STAGING_OFF, (uint32_t)n);
@@ -1568,15 +1856,15 @@ static int load_elf(BPTR fh, LONG size)
         status = mailbox(ZZAPP_OP_LOAD_CHUNK, payload, ZZAPP_CHUNK_REQ_BYTES, &reply);
         if (status != ZZ9K_STATUS_OK) {
             printf("ZZRun: chunk at %ld failed (%s)\n", (long)offset, status_name(status));
-            op_empty(ZZAPP_OP_STOP, &reply);
+            stop_owned();
             return 0;
         }
         offset += n;
     }
-    status = op_empty(ZZAPP_OP_LOAD_END, &reply);
+    status = mailbox_long(ZZAPP_OP_LOAD_END, NULL, 0, &reply, NULL);
     if (status != ZZ9K_STATUS_OK) {
         printf("ZZRun: ELF rejected (%s)\n", status_name(status));
-        op_empty(ZZAPP_OP_STOP, &reply);
+        stop_owned();
         return 0;
     }
     return 1;
@@ -1641,6 +1929,7 @@ static int run_loop(ULONG forced_mode)
 {
     int entered = 1;
     int saw_fault = 0;
+    int display_failed = 0;
     uint32_t last_gen = 0;
     uint32_t fault = ZZAPP_FAULT_NONE;
     int32_t exit_code = 0;
@@ -1682,6 +1971,7 @@ static int run_loop(ULONG forced_mode)
                               life_get(ZZAPP_LIFE_FORMAT_OFF),
                               forced_mode)) {
                 puts("ZZRun: cannot open the requested screen");
+                display_failed = 1;
                 request_stop();
             }
         }
@@ -1722,7 +2012,7 @@ static int run_loop(ULONG forced_mode)
         else
             printf("ZZRun: exit %ld (%s)\n", (long)exit_code,
                    state_name(zzapp_get_be32(p + ZZAPP_STATUS_STATE)));
-        return exit_from_app(exit_code, fault, stop_asked);
+        return display_failed ? 20 : exit_from_app(exit_code, fault, stop_asked);
     }
     if (window) {
         fault = life_get(ZZAPP_LIFE_FAULT_OFF);
@@ -1736,7 +2026,7 @@ static int run_loop(ULONG forced_mode)
                          life_get(ZZAPP_LIFE_FSR_OFF),
                          life_get(ZZAPP_LIFE_CPSR_OFF),
                          life_get(ZZAPP_LIFE_GENERATION_OFF));
-        return exit_from_app(exit_code, fault, stop_asked);
+        return display_failed ? 20 : exit_from_app(exit_code, fault, stop_asked);
     }
     return 20;
 }
@@ -1768,11 +2058,11 @@ static int open_root(const char *root_text)
 static void cleanup(void)
 {
     int i;
-    ZZ9KMailboxEntry reply;
     timer_reap();
-    if (window && !stop_asked &&
+    if (!stop_asked && owns_current_generation() &&
         life_get(ZZAPP_LIFE_STATE_OFF) != ZZAPP_ST_IDLE)
-        op_empty(ZZAPP_OP_STOP, &reply);
+        stop_owned();
+    window_cache_restore();
     for (i = 0; i < ZZAPP_FD_COUNT; i++) {
         close_fd_index(i);
         close_list_index(i);
@@ -1935,6 +2225,11 @@ int main(int argc, char **argv)
         cleanup();
         return 20;
     }
+    if (state != ZZAPP_ST_IDLE) {
+        puts("ZZRun: app runtime is already owned by another launcher.");
+        cleanup();
+        return 20;
+    }
     status = op_empty(ZZAPP_OP_ALLOC_WINDOW, &reply);
     if (status != ZZ9K_STATUS_OK || reply.payload_len < ZZAPP_ALLOC_REPLY_BYTES) {
         printf("ZZRun: window allocation failed (%s)\n", status_name(status));
@@ -1948,7 +2243,6 @@ int main(int argc, char **argv)
         host_offset > board.board_size ||
         win_size > board.board_size - host_offset) {
         puts("ZZRun: rings window is outside the board");
-        op_empty(ZZAPP_OP_STOP, &reply);
         cleanup();
         return 20;
     }
@@ -1956,10 +2250,10 @@ int main(int argc, char **argv)
     window = (uint8_t *)(board.address + host_offset);
     window_bytes = win_size;
     win_cache(0, 256);
+    window_cache_disable();
     if (life_get(ZZAPP_LIFE_MAGIC_OFF) != ZZAPP_LIFE_MAGIC ||
         life_get(ZZAPP_LIFE_VERSION_OFF) != ZZAPP_LIFE_VERSION) {
         puts("ZZRun: rings window magic does not match");
-        op_empty(ZZAPP_OP_STOP, &reply);
         cleanup();
         return 20;
     }
@@ -1976,16 +2270,9 @@ int main(int argc, char **argv)
         return 20;
     }
     TimerBase = timer_io->tr_node.io_Device;
-    if (!fill_argv()) {
-        tell("Arguments do not fit in the argv area.");
-        op_empty(ZZAPP_OP_STOP, &reply);
-        cleanup();
-        return 10;
-    }
     fh = Open((STRPTR)elf_path, MODE_OLDFILE);
     if (!fh) {
         printf("ZZRun: cannot open %s\n", elf_path);
-        op_empty(ZZAPP_OP_STOP, &reply);
         cleanup();
         return 20;
     }
@@ -1995,7 +2282,6 @@ int main(int argc, char **argv)
         printf("ZZRun: %s is empty or larger than the 16 MiB image limit\n",
                elf_path);
         Close(fh);
-        op_empty(ZZAPP_OP_STOP, &reply);
         cleanup();
         return 20;
     }
@@ -2008,10 +2294,11 @@ int main(int argc, char **argv)
     Close(fh);
     fh = 0;
     zzapp_build_start_request(payload, (uint32_t)app_argc);
-    status = mailbox(ZZAPP_OP_START, payload, ZZAPP_START_REQ_BYTES, &reply);
+    status = mailbox_long(ZZAPP_OP_START, payload, ZZAPP_START_REQ_BYTES,
+                          &reply, NULL);
     if (status != ZZ9K_STATUS_OK) {
         printf("ZZRun: start failed (%s)\n", status_name(status));
-        op_empty(ZZAPP_OP_STOP, &reply);
+        stop_owned();
         cleanup();
         return 20;
     }
