@@ -99,6 +99,11 @@ static int stop_event_sent;
 static uint32_t stop_ms;
 static uint32_t flip_acked;
 static int have_two;
+/* Double buffering by panning one bitmap of twice the height, used when
+ * AllocScreenBuffer refuses the screen: the firmware draws the hidden half
+ * and a flip moves RyOffset, instead of the firmware copying every frame
+ * into the one visible bitmap (slow, and it tears). */
+static int have_pan;
 static int showing;
 static char pub_name[128];
 static char elf_path[256];
@@ -1608,6 +1613,7 @@ static void close_display(void)
     }
     /* AllocScreenBuffer owns both double-buffer bitmaps. */
     have_two = 0;
+    have_pan = 0;
     showing = 0;
     if (pub_name[0]) {
         struct Screen *pub = LockPubScreen((CONST_STRPTR)pub_name);
@@ -1632,6 +1638,28 @@ static ULONG mode_for(uint32_t w, uint32_t h, uint32_t format, ULONG forced)
         TAG_DONE);
 }
 
+static struct Screen *open_p96_screen(ULONG mode, uint32_t w, uint32_t h,
+                                      ULONG depth, ULONG rgb)
+{
+    struct Screen *s = p96OpenScreenTags(
+        P96SA_DisplayID, mode,
+        P96SA_Width, w,
+        P96SA_Height, h,
+        P96SA_Depth, depth,
+        P96SA_RGBFormat, rgb,
+        P96SA_Quiet, TRUE,
+        P96SA_ShowTitle, FALSE,
+        P96SA_AutoScroll, FALSE,
+        P96SA_Title, (ULONG)"ZZRun",
+        TAG_DONE);
+
+    if (s && (ULONG)p96GetBitMapAttr(s->RastPort.BitMap, P96BMA_RGBFORMAT) != rgb) {
+        p96CloseScreen(s);
+        s = NULL;
+    }
+    return s;
+}
+
 static int open_display(uint32_t w, uint32_t h, uint32_t format, ULONG forced_mode)
 {
     ULONG mode, depth, rgb, pitch = 0, front = 0, back = 0;
@@ -1653,23 +1681,9 @@ static int open_display(uint32_t w, uint32_t h, uint32_t format, ULONG forced_mo
     if (mode == (ULONG)INVALID_ID)
         return 0;
     heartbeat();
-    screen = p96OpenScreenTags(
-        P96SA_DisplayID, mode,
-        P96SA_Width, w,
-        P96SA_Height, h,
-        P96SA_Depth, depth,
-        P96SA_RGBFormat, rgb,
-        P96SA_Quiet, TRUE,
-        P96SA_ShowTitle, FALSE,
-        P96SA_AutoScroll, FALSE,
-        P96SA_Title, (ULONG)"ZZRun",
-        TAG_DONE);
+    screen = open_p96_screen(mode, w, h, depth, rgb);
     if (!screen)
         return 0;
-    if ((ULONG)p96GetBitMapAttr(screen->RastPort.BitMap, P96BMA_RGBFORMAT) != rgb) {
-        close_display();
-        return 0;
-    }
     if (!bitmap_arm(screen->RastPort.BitMap, &front, &pitch)) {
         puts("ZZRun: display unavailable (front bitmap address)");
         close_display();
@@ -1706,6 +1720,9 @@ static int open_display(uint32_t w, uint32_t h, uint32_t format, ULONG forced_mo
         }
     }
     if (!have_two) {
+        struct Screen *tall = NULL;
+        ULONG tall_front = 0, tall_pitch = 0;
+
         if (flip_safe_port) {
             DeleteMsgPort(flip_safe_port);
             flip_safe_port = NULL;
@@ -1717,6 +1734,22 @@ static int open_display(uint32_t w, uint32_t h, uint32_t format, ULONG forced_mo
         buf_back = NULL;
         buf_front = NULL;
         back = 0;
+        if (h <= ZZRUN_SCREEN_MAX / 2u)
+            tall = open_p96_screen(mode, w, h * 2u, depth, rgb);
+        if (tall && tall->Height >= (WORD)(h * 2u) &&
+            bitmap_arm(tall->RastPort.BitMap, &tall_front, &tall_pitch)) {
+            p96CloseScreen(screen);
+            screen = tall;
+            front = tall_front;
+            pitch = tall_pitch;
+            back = front + pitch * h;
+            have_pan = 1;
+            puts("ZZRun: double buffering by panning");
+        } else {
+            if (tall)
+                p96CloseScreen(tall);
+            puts("ZZRun: single buffer; the firmware copies each frame");
+        }
     }
     input_win = OpenWindowTags(NULL,
         WA_CustomScreen, (ULONG)screen,
@@ -1799,6 +1832,20 @@ static void ack_flip(void)
             return;
         showing = next_showing;
         flip_pending = gen;
+        return;
+    }
+    if (have_pan) {
+        int next_showing = !showing;
+
+        /* Show the half the firmware just finished.  The scroll takes
+         * effect at the next vertical blank; only then may the firmware
+         * draw into the half that was on screen, so always wait. */
+        screen->ViewPort.RasInfo->RyOffset = next_showing ? (WORD)bound_h : 0;
+        ScrollVPort(&screen->ViewPort);
+        WaitTOF();
+        showing = next_showing;
+        life_put(ZZAPP_LIFE_FLIP_ACK_OFF, gen);
+        flip_acked = gen;
         return;
     }
     if (flags & ZZAPP_F_VSYNC)

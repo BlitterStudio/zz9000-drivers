@@ -89,9 +89,12 @@ When firmware sets the display-unbound flag, ZZRun opens the requested P96
 screen. RGB565 is the first path; BGRA8888 is accepted when P96 returns that
 format. ZZRun binds the bitmap's actual pitch and card addresses with
 `APP_DISPLAY_BIND`. Firmware clears the flag only after a successful bind.
-With two displayable P96 bitmaps, each completed flip changes screen buffer;
-with one, ZZRun only waits for vertical sync when requested and acknowledges
-the generation.
+With two displayable P96 bitmaps (`AllocScreenBuffer`), each completed flip
+changes screen buffer. If P96 refuses screen buffers, ZZRun opens the screen
+with a bitmap twice the requested height and flips by panning between the two
+halves (`RyOffset`, `ScrollVPort`, then `WaitTOF`); the close gadget is only
+visible while the top half is shown. Only if that also fails does it bind one
+bitmap, which the firmware copies each frame into.
 
 ### Files and ROOT
 
