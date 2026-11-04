@@ -1885,15 +1885,48 @@ static void ack_flip(void)
         return;
     }
     if (have_pan) {
-        int next_showing = (showing + 1) % pan_count;
+        if (flags & ZZAPP_F_SCANOUT_ACK) {
+            uint32_t address = life_get(ZZAPP_LIFE_FLIP_ADDRESS_OFF);
+            uint32_t page_bytes;
+            uint32_t page;
 
-        screen->ViewPort.RasInfo->RyOffset = (WORD)(next_showing * bound_h);
-        ScrollVPort(&screen->ViewPort);
-        WaitTOF();
-        showing = next_showing;
-        life_put(ZZAPP_LIFE_FLIP_ACK_OFF, gen);
-        flip_acked = gen;
-        return;
+            if (bound_h == 0 || bound_pitch > 0xffffffffUL / bound_h) {
+                puts("ZZRun: invalid panning geometry");
+                request_stop();
+                return;
+            }
+            page_bytes = bound_pitch * bound_h;
+            if (page_bytes == 0 || address < card_front ||
+                (address - card_front) % page_bytes != 0) {
+                puts("ZZRun: invalid scanout flip address");
+                request_stop();
+                return;
+            }
+            page = (address - card_front) / page_bytes;
+            if (page >= (uint32_t)pan_count) {
+                puts("ZZRun: scanout flip address is outside the screen");
+                request_stop();
+                return;
+            }
+            screen->ViewPort.RasInfo->RyOffset = (WORD)(page * bound_h);
+            ScrollVPort(&screen->ViewPort);
+            showing = (int)page;
+            /* The firmware acknowledges after its own next vblank has
+             * latched this address, which keeps the old front unavailable
+             * until scanout has stopped reading it. */
+            life_put(ZZAPP_LIFE_FLIP_SUBMIT_OFF, gen);
+            return;
+        } else {
+            int next_showing = (showing + 1) % pan_count;
+
+            screen->ViewPort.RasInfo->RyOffset = (WORD)(next_showing * bound_h);
+            ScrollVPort(&screen->ViewPort);
+            WaitTOF();
+            showing = next_showing;
+            life_put(ZZAPP_LIFE_FLIP_ACK_OFF, gen);
+            flip_acked = gen;
+            return;
+        }
     }
     if (flags & ZZAPP_F_VSYNC)
         WaitTOF();
@@ -2404,7 +2437,8 @@ int main(int argc, char **argv)
      * flags word and LOAD_END replaces it with the ELF note's flags.  The
      * app is not running yet, so this read-modify-write cannot race. */
     life_put(ZZAPP_LIFE_FLAGS_OFF,
-             life_get(ZZAPP_LIFE_FLAGS_OFF) | ZZAPP_F_LAUNCHER_CLUT8);
+             life_get(ZZAPP_LIFE_FLAGS_OFF) | ZZAPP_F_LAUNCHER_CLUT8 |
+             ZZAPP_F_LAUNCHER_SCANOUT_ACK);
     zzapp_build_start_request(payload, (uint32_t)app_argc);
     status = mailbox_long(ZZAPP_OP_START, payload, ZZAPP_START_REQ_BYTES,
                           &reply, NULL);
