@@ -320,10 +320,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      # ZZRun builds against zzapp_proto.h from this firmware commit; it
+      # must carry every lifecycle field and flag ZZRun uses (CLUT8,
+      # spare buffer, scanout ack, mailbox: kit30-fpga).
       - uses: actions/checkout@v6
         with:
           repository: BlitterStudio/zz9000-firmware
-          ref: 13b75a5b4699fffe7e575758a842d081117c50da
+          ref: 6979a10da4b9ffa2e984f45a8eba86c69cb162cd
           path: zz9000-firmware
       - name: Build ZZRun
         env:
