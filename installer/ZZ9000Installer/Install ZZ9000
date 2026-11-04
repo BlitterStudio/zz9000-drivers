@@ -12,19 +12,30 @@
 ; --------------------------------------------------------------------
 ; Picasso96 RTG driver (ZZ9000.card)
 ; --------------------------------------------------------------------
+;
+; Optional: other RTG systems (e.g. PrismRTG) ship their own ZZ9000
+; driver, so a missing Picasso96 skips this section instead of aborting.
 
+(set #rtgver   (getversion "Libs:Picasso96/rtg.library"))
+(set #rtgmajor (/ #rtgver 65536))
+(set #rtgminor (- #rtgver (* #rtgmajor 65536)))
+
+(set #monexists   (and (exists "Devs:Monitors/Altais.info")  (exists "Devs:Monitors/Altais")))
+(set #zzmonexists (and (exists "Devs:Monitors/ZZ9000.info")  (exists "Devs:Monitors/ZZ9000")))
+
+(if (>= #rtgmajor 40)
+    (set #installp96
+       (askbool
+          (prompt "Install the ZZ9000 Picasso96 RTG driver and settings?\n\nFound Picasso96 rtg.library " #rtgmajor "." #rtgminor ".")
+          (help "Installs ZZ9000.card, configures the Devs:Monitors/ZZ9000 monitor file and installs the ZZ9000 Picasso96Settings.\n\nAnswer No if you use another RTG system, such as PrismRTG, that comes with its own ZZ9000 driver. The rest of the installation is not affected.")
+          (default 1)))
+    (
+       (set #installp96 0)
+       (message "Picasso96 was not found (Libs:Picasso96/rtg.library version 40 or newer). The ZZ9000 Picasso96 driver and settings will be skipped; the rest of the installation continues.\n\nOther RTG systems, such as PrismRTG, come with their own ZZ9000 driver.\n\nTo use Picasso96, choose Abort, install Picasso96 with *Altais* as the graphics card, then run this installer again."
+          (help "You can use either the old shareware Picasso96 on Aminet, or the new P96 by Individual Computers (recommended). To purchase it, register at https://icomp.de/shop-icomp/en/register.html and log in to their shop. P96 then appears as a product."))))
+
+(if #installp96
 (
-
-      (set #rtgver   (getversion "Libs:Picasso96/rtg.library"))
-      (set #rtgmajor (/ #rtgver 65536))
-      (set #rtgminor (- #rtgver (* #rtgmajor 65536)))
-
-      (set #monexists   (and (exists "Devs:Monitors/Altais.info")  (exists "Devs:Monitors/Altais")))
-      (set #zzmonexists (and (exists "Devs:Monitors/ZZ9000.info")  (exists "Devs:Monitors/ZZ9000")))
-
-      (if (or (not (or #monexists #zzmonexists)) (< #rtgmajor 40))
-          (abort "Please install Picasso96 first and select *Altais* as the graphics card.\n\nYou can use either the old shareware Picasso96 on Aminet, or the new P96 by Individual Computers (recommended). To purchase it, register at https://icomp.de/shop-icomp/en/register.html and log in to their shop. P96 then appears as a product.")
-      )
 
       (set #newver   (getversion "Libs/Picasso96/ZZ9000.card"))
       (set #newmajor (/ #newver 65536))
@@ -54,31 +65,39 @@
 
       (complete 10)
 
-      (if (not #zzmonexists)
-          (copyfiles
-             (prompt "Create Monitor file for ZZ9000")
-             (help "Creates Devs:Monitors/ZZ9000 from the Altais monitor file - needed to expose the ZZ9000 screenmodes.")
-             (source "Devs:Monitors/Altais")
-             (infos)
-             (dest "Devs:Monitors")
-             (newname "ZZ9000")))
+      ; The installer ships no monitor binary: Devs:Monitors/ZZ9000 is made
+      ; from the Altais monitor that the Picasso96 installer creates. Without
+      ; either file the card and settings are still installed, and a re-run
+      ; after adding the Altais monitor completes the setup.
+      (if (or #monexists #zzmonexists)
+         (
+            (if (not #zzmonexists)
+                (copyfiles
+                   (prompt "Create Monitor file for ZZ9000")
+                   (help "Creates Devs:Monitors/ZZ9000 from the Altais monitor file - needed to expose the ZZ9000 screenmodes.")
+                   (source "Devs:Monitors/Altais")
+                   (infos)
+                   (dest "Devs:Monitors")
+                   (newname "ZZ9000")))
 
-      (if #monexists
-          (delete "Devs:Monitors/Altais"
-             (prompt "Delete the Altais monitor file (it has been renamed to ZZ9000).")
-             (help "The installer renamed Altais to ZZ9000; the original file is no longer needed.")
-             (confirm)
-             (infos)))
+            (if #monexists
+                (delete "Devs:Monitors/Altais"
+                   (prompt "Delete the Altais monitor file (it has been renamed to ZZ9000).")
+                   (help "The installer renamed Altais to ZZ9000; the original file is no longer needed.")
+                   (confirm)
+                   (infos)))
 
-      (complete 20)
+            (complete 20)
 
-      (tooltype
-         (prompt "Configure the ZZ9000 Monitor file for ZZ9000.card")
-         (help "Registers ZZ9000.card as the P96 card driver in the monitor file.")
-         (dest "Devs:Monitors/ZZ9000")
-         (settooltype "BOARDTYPE"       "ZZ9000")
-         (settooltype "FAKENATIVEMODES" "No")
-         (settooltype "DISPLAYCHAIN"    "Yes"))
+            (tooltype
+               (prompt "Configure the ZZ9000 Monitor file for ZZ9000.card")
+               (help "Registers ZZ9000.card as the P96 card driver in the monitor file.")
+               (dest "Devs:Monitors/ZZ9000")
+               (settooltype "BOARDTYPE"       "ZZ9000")
+               (settooltype "FAKENATIVEMODES" "No")
+               (settooltype "DISPLAYCHAIN"    "Yes"))
+         )
+         (message "No ZZ9000 monitor file yet\n\nDevs:Monitors has no Altais or ZZ9000 monitor file, so Picasso96 will not load ZZ9000.card yet. The installer continues with the Picasso96 settings and the other drivers.\n\nTo finish the Picasso96 setup, run the Picasso96 installer and select *Altais* as the graphics card, then run this installer again. It turns the Altais monitor into the ZZ9000 monitor and configures it."))
 
       (complete 30)
 
@@ -133,7 +152,7 @@
          (help "Records that this installer placed the current Picasso96Settings, so later runs skip the migration notice and backups.")
          (append "ZZ9000")
          (dest "ENVARC:ZZ9000.P96Settings"))
-)
+))
 
 
 (complete 50)
@@ -278,29 +297,40 @@
              (set #oldminor (- #oldver (* #oldmajor 65536)))
 
              (if (askbool (prompt "Replace existing ZZ9000Net.device?\n\nInstalled version: " #oldmajor "." #oldminor "\nNew version: " #newmajor "." #newminor "\n\nProceed with overwrite?")
-                          (help "The SANA-II driver that Roadshow / Miami DX talks to."))
+                          (help "The SANA-II Ethernet driver. Any SANA-II TCP/IP stack can use it."))
                  (copyfiles
                     (prompt "Install ZZ9000Net.device into Devs:Networks/")
-                    (help "The SANA-II driver that Roadshow / Miami DX talks to.")
+                    (help "The SANA-II Ethernet driver. Any SANA-II TCP/IP stack can use it.")
                     (source "Devs/Networks/ZZ9000Net.device")
                     (infos)
                     (dest "Devs:Networks")))
           )
           (copyfiles
              (prompt "Install ZZ9000Net.device (version " #newmajor "." #newminor ") into Devs:Networks/")
-             (help "The SANA-II driver that Roadshow / Miami DX talks to.")
+             (help "The SANA-II Ethernet driver. Any SANA-II TCP/IP stack can use it.")
              (source "Devs/Networks/ZZ9000Net.device")
              (infos)
              (dest "Devs:Networks")))
 
-      ; The example Roadshow NetInterface (DHCP defaults) comes along with
-      ; the driver; edit Devs:NetInterfaces/ZZ9000Net to customise.
-      (copyfiles
-         (prompt "Install example NetInterface into Devs:NetInterfaces/")
-         (help "A Roadshow NetInterface template defaulting to DHCP; edit it to customise.")
-         (source "Devs/NetInterfaces/ZZ9000Net")
-         (infos)
-         (dest "Devs:NetInterfaces"))
+      ; The NetInterface template only applies to Roadshow; other stacks
+      ; configure the device in their own way. Roadshow creates
+      ; Devs:NetInterfaces, so its presence sets the default answer.
+      (set #roadshowfound (exists "Devs:NetInterfaces"))
+      (set #rstemplate-note
+         (if (exists "Devs:NetInterfaces/ZZ9000Net")
+             "\n\nDevs:NetInterfaces/ZZ9000Net already exists and will be replaced."
+             ""))
+
+      (if (askbool
+             (prompt "Install the Roadshow NetInterface template for ZZ9000Net.device?" #rstemplate-note)
+             (help "Installs Devs:NetInterfaces/ZZ9000Net, a Roadshow NetInterface that uses DHCP. Edit it to change the settings.\n\nAnswer No if you use a different TCP/IP stack. Configure ZZ9000Net.device, unit 0, in that stack instead.")
+             (default #roadshowfound))
+          (copyfiles
+             (prompt "Install Roadshow NetInterface template into Devs:NetInterfaces/")
+             (help "A Roadshow NetInterface template defaulting to DHCP; edit it to customise.")
+             (source "Devs/NetInterfaces/ZZ9000Net")
+             (infos)
+             (dest "Devs:NetInterfaces")))
    )
 
 (complete 75)

@@ -91,9 +91,11 @@ MAC address, including a `mac` value from `ZZ9000.CFG`; `ENV:ZZ9K_MAC`
 overrides that address. `ENV:ZZ9K_INT2`, or `int2 = on` in `ZZ9000.CFG`,
 selects INT2 instead of the default INT6.
 
-The installer also copies a DHCP Roadshow NetInterface template to
-`Devs:NetInterfaces/ZZ9000Net`. Edit that template if the network requires
-different settings.
+When `Devs:NetInterfaces` exists, the installer offers a DHCP Roadshow
+NetInterface template, `Devs:NetInterfaces/ZZ9000Net`, and installs it by
+default. Edit that template if the network requires different settings. With
+another TCP/IP stack, skip the template and configure `ZZ9000Net.device`,
+unit 0, in that stack.
 
 ### ZZNetStats
 
