@@ -35,11 +35,11 @@ shared-memory layout before SDK services are exposed.
 3. Open `ZZ9000Installer/Install ZZ9000`.
 4. Reboot after installing or replacing drivers.
 
-The installer places the drivers, tools, icons, Picasso96 settings, and optional
-Roadshow template. It also stages the SDK runtime and selects the matching
-AmiSSL build for the detected CPU when an AmiSSL 5.27 installation is present.
-Its AmiGuide manuals install beside ZZTop and ZZPlay or into the documentation
-drawer selected during installation.
+The installer places the drivers, tools, icons, optional Picasso96 settings,
+and optional Roadshow template. It also stages the SDK runtime and selects
+the matching AmiSSL build for the detected CPU when an AmiSSL 5.27
+installation is present. Its AmiGuide manuals install beside ZZTop and ZZPlay
+or into the documentation drawer selected during installation.
 
 ZZTop and ZZPlay install in `SYS:Utilities/ZZ9000/`. Expert installation can
 add that drawer to the command path by updating its `;BEGIN ZZ9000` block in
@@ -60,7 +60,11 @@ these drivers with an older firmware release.
 
 ## Picasso96 graphics
 
-Install Picasso96 before running the installer. It configures
+Install Picasso96 before running the installer if you want to use it. The
+Picasso96 part is optional: when Picasso96 is not found, or you answer No,
+the installer skips it and installs everything else. Other RTG systems, such
+as PrismRTG, come with their own ZZ9000 driver. For Picasso96, the installer
+configures
 `Devs:Monitors/ZZ9000` with `BOARDTYPE=ZZ9000`, `FAKENATIVEMODES=No`, and
 `DISPLAYCHAIN=Yes`. Keep `DISPLAYCHAIN` enabled so the ZZ9000 can switch the
 native Amiga signal through its flicker fixer.
@@ -126,12 +130,12 @@ precedence over the card file. Remove `ZZ9K_INT2`, `ZZ9K_MAC`,
 
 ## Networking and diagnostics
 
-`ZZ9000Net.device` is a SANA-II Ethernet driver and works with SANA-II-capable
-stacks such as Roadshow, Miami DX, and AmiTCP. It programs the firmware
-multicast hash filter for joined groups. `ZZNetReady` reports whether the card
-is present and Ethernet has negotiated; `ZZNetStats` reports SANA-II counters
-and firmware receive-backlog and drop registers. `ZZDiag` reports board,
-firmware, VideoCap, USB, SD, audio, and Ethernet diagnostics.
+`ZZ9000Net.device` is a SANA-II Ethernet driver and works with any SANA-II
+TCP/IP stack, including Roadshow, Miami DX, and AmiTCP. It programs the
+firmware multicast hash filter for joined groups. `ZZNetReady` reports whether
+the card is present and Ethernet has negotiated; `ZZNetStats` reports SANA-II
+counters and firmware receive-backlog and drop registers. `ZZDiag` reports
+board, firmware, VideoCap, USB, SD, audio, and Ethernet diagnostics.
 
 `ZZFwUpdate` installs a `BOOT.bin` and, when it has a sibling `ZZ9K/` drawer,
 the release's optional `*.ZZM` modules. It sends modules first and `BOOT.bin`

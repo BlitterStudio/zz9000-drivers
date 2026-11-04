@@ -15,9 +15,12 @@ choices described below.
 
 1. Unpack the release LHA on the Amiga and open `ZZ9000Installer`.
 2. Double-click `Install ZZ9000`.
-3. For RTG support, install Picasso96 first and select either the `Altais` or
-   `ZZ9000` monitor. The script stops when `Libs:Picasso96/rtg.library` is
-   older than version 40 or neither monitor file is present.
+3. For Picasso96 RTG support, install Picasso96 first and select either the
+   `Altais` or `ZZ9000` monitor. When `Libs:Picasso96/rtg.library` is version
+   40 or newer, the script asks whether to install the Picasso96 driver and
+   settings. Without `rtg.library` it skips that part and installs the rest.
+   Answer No, or let it skip, when another RTG system, such as PrismRTG,
+   supplies its own ZZ9000 driver.
 4. Choose the Zorro II-safe profile unless the machine has a Zorro III
    ZZ9000. The Zorro III profile enables the 1920x1080x32 screen mode.
 5. Answer the optional USB, SDK, AmiSSL, ZZCapture, and command-path prompts
@@ -32,10 +35,10 @@ manuals always go in the program drawer.
 
 | Component | Source in `ZZ9000Installer/` | Destination and behaviour |
 | --- | --- | --- |
-| Picasso96 driver | `Libs/Picasso96/ZZ9000.card` | Offers to install or replace `Libs:Picasso96/ZZ9000.card`. |
-| Monitor and P96 settings | Existing `Devs:Monitors/Altais`; `Devs/Picasso96Settings` or `Devs/Picasso96Settings-Z3` | Creates `Devs:Monitors/ZZ9000` from `Altais` when needed, removes the old `Altais` file after confirmation, sets `BOARDTYPE=ZZ9000`, `FAKENATIVEMODES=No`, and `DISPLAYCHAIN=Yes`, then installs the selected profile as `Devs:Picasso96Settings`. |
+| Picasso96 driver | `Libs/Picasso96/ZZ9000.card` | Optional; offered only when `rtg.library` 40 or newer is present. Offers to install or replace `Libs:Picasso96/ZZ9000.card`. |
+| Monitor and P96 settings | Existing `Devs:Monitors/Altais`; `Devs/Picasso96Settings` or `Devs/Picasso96Settings-Z3` | Installed with the Picasso96 driver. Creates `Devs:Monitors/ZZ9000` from `Altais` when needed, removes the old `Altais` file after confirmation, sets `BOARDTYPE=ZZ9000`, `FAKENATIVEMODES=No`, and `DISPLAYCHAIN=Yes`, then installs the selected profile as `Devs:Picasso96Settings`. With neither monitor file present, it installs the card and settings and asks you to add the `Altais` monitor through the Picasso96 installer, then run this script again. |
 | Poseidon USB | `Devs/USBHardware/zzusbhw.device` | Optional. Installs to `Devs:USBHardware/`; if that drawer is absent, offers to create it. |
-| Network | `Devs/Networks/ZZ9000Net.device`; `Devs/NetInterfaces/ZZ9000Net` | Saves the entered MAC address in `ENVARC:ZZ9K_MAC`, installs the SANA-II driver in `Devs:Networks/`, and installs the DHCP Roadshow template in `Devs:NetInterfaces/`. |
+| Network | `Devs/Networks/ZZ9000Net.device`; `Devs/NetInterfaces/ZZ9000Net` | Saves the entered MAC address in `ENVARC:ZZ9K_MAC` and installs the SANA-II driver in `Devs:Networks/`. Then offers the DHCP Roadshow template for `Devs:NetInterfaces/`, defaulting to Yes when that drawer exists. Skip it with another TCP/IP stack. |
 | AHI and MHI audio | `Devs/AHI/zz9000ax.audio`; `Devs/AudioModes/ZZ9000AX`; `Libs/MHI/mhizz9000.library` | Installs the AHI subdriver in `Devs:AHI/`, its AudioMode in `Devs:AudioModes/`, and the MHI library in `LIBS:MHI/`. |
 | SDK runtime | `Libs/zz9k.library`; `Libs/mpega.library`; `Classes/DataTypes/zz9k-picture.datatype`; `Classes/DataTypes/zz9k-sound.datatype`; `Storage/DataTypes/`; `Tools/zz9k-#?`; `Tools/ZZPlay#?` | Offered only when `zz9k.library` is in the release drawer. Installs `zz9k.library` and optional `mpega.library` in `LIBS:`, the picture and sound datatype classes in `SYS:Classes/DataTypes/`, the JPEG, PNG, WebP, MP3, FLAC, and Ogg Vorbis descriptors in inactive `SYS:Storage/DataTypes/`, the `zz9k-*` commands in `C:`, and `ZZPlay` in the program drawer. |
 | Accelerated AmiSSL | `Libs/AmiSSL/68020-40/amissl_v362.library`; `Libs/AmiSSL/68060/amissl_v362.library` | Offered only when a staged build and `LIBS:AmiSSL/amissl_v362.library` already exist. Backs up the installed library once, then installs the chosen CPU build in `LIBS:AmiSSL/`. |
