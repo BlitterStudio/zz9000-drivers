@@ -2365,8 +2365,6 @@ int main(int argc, char **argv)
         cleanup();
         return 20;
     }
-    life_put(ZZAPP_LIFE_FLAGS_OFF,
-             life_get(ZZAPP_LIFE_FLAGS_OFF) | ZZAPP_F_LAUNCHER_CLUT8);
     P96Base = OpenLibrary((CONST_STRPTR)"Picasso96API.library", 2);
     timer_port = CreateMsgPort();
     if (timer_port)
@@ -2402,6 +2400,11 @@ int main(int argc, char **argv)
     }
     Close(fh);
     fh = 0;
+    /* Launcher capabilities go in after the load: LOAD_BEGIN clears the
+     * flags word and LOAD_END replaces it with the ELF note's flags.  The
+     * app is not running yet, so this read-modify-write cannot race. */
+    life_put(ZZAPP_LIFE_FLAGS_OFF,
+             life_get(ZZAPP_LIFE_FLAGS_OFF) | ZZAPP_F_LAUNCHER_CLUT8);
     zzapp_build_start_request(payload, (uint32_t)app_argc);
     status = mailbox_long(ZZAPP_OP_START, payload, ZZAPP_START_REQ_BYTES,
                           &reply, NULL);
