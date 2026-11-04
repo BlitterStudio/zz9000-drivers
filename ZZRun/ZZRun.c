@@ -77,6 +77,9 @@ static const char version[] __attribute__((used)) =
 #define ZZRUN_VRAM_ARM      0x00200000UL
 #define ZZRUN_VRAM_END      0x033F0000UL
 #define ZZRUN_HEAP_END      0x08200000UL
+/* A card-vblank flip acknowledgement normally arrives within one refresh;
+ * after this long ZZRun stops waiting for it and uses WaitTOF. */
+#define ZZRUN_SCANOUT_ACK_MS 100UL
 #define ZZRUN_SCREEN_MAX    4096u
 #define ZZRUN_UNIX_DELTA    252460800UL
 #define ZZRUN_READ_CHUNK    8192u
@@ -130,6 +133,9 @@ static struct timerequest *timer_io;
 static int timer_pending;
 static struct MsgPort *flip_safe_port;
 static uint32_t flip_pending;
+static uint32_t scanout_submitted;
+static uint32_t scanout_submit_ms;
+static int scanout_fallback;
 static uint32_t palette_generation;
 static struct Library *MMUBase;
 static struct mmu_context *mmu_context;
@@ -1852,6 +1858,8 @@ static int open_display(uint32_t w, uint32_t h, uint32_t format, ULONG forced_mo
     }
     showing = 0;
     flip_pending = 0;
+    scanout_submitted = 0;
+    scanout_fallback = 0;
     palette_generation = 0;
     return 1;
 }
@@ -1869,6 +1877,27 @@ static void ack_flip(void)
         flip_acked = flip_pending;
         flip_pending = 0;
         return;
+    }
+    if (scanout_submitted != 0) {
+        /* Submitted by address: the firmware acknowledges at the card's
+         * vblank.  If it never does (the latched scanout address did not
+         * match), fall back to the Amiga vblank for the rest of the run
+         * instead of leaving the app waiting. */
+        if (life_get(ZZAPP_LIFE_FLIP_ACK_OFF) == scanout_submitted) {
+            flip_acked = scanout_submitted;
+            scanout_submitted = 0;
+        } else if ((uint32_t)(now_ms() - scanout_submit_ms) <
+                   ZZRUN_SCANOUT_ACK_MS) {
+            return;
+        } else {
+            if (!scanout_fallback)
+                puts("ZZRun: no card vblank acknowledgement; using WaitTOF");
+            scanout_fallback = 1;
+            WaitTOF();
+            life_put(ZZAPP_LIFE_FLIP_ACK_OFF, scanout_submitted);
+            flip_acked = scanout_submitted;
+            scanout_submitted = 0;
+        }
     }
     gen = life_get(ZZAPP_LIFE_FLIP_GEN_OFF);
     if (gen == flip_acked)
@@ -1914,7 +1943,15 @@ static void ack_flip(void)
             /* The firmware acknowledges after its own next vblank has
              * latched this address, which keeps the old front unavailable
              * until scanout has stopped reading it. */
+            if (scanout_fallback) {
+                WaitTOF();
+                life_put(ZZAPP_LIFE_FLIP_ACK_OFF, gen);
+                flip_acked = gen;
+                return;
+            }
             life_put(ZZAPP_LIFE_FLIP_SUBMIT_OFF, gen);
+            scanout_submitted = gen;
+            scanout_submit_ms = now_ms();
             return;
         } else {
             int next_showing = (showing + 1) % pan_count;
