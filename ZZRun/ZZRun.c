@@ -64,6 +64,8 @@ static const char version[] __attribute__((used)) =
 
 #define ZZ_FMT_RGB565    1u
 #define ZZ_FMT_BGRA8888  2u
+#define ZZ_LAYOUT_RGB565_BE 1u
+#define ZZ_LAYOUT_BGRA8888  5u
 
 #define ZZRUN_MIN_STACK     16384UL
 #define ZZRUN_IMAGE_LIMIT   ZZAPP_IMAGE_MAX_BYTES
@@ -112,7 +114,6 @@ static int app_argc;
 static BPTR root_lock;
 static struct Screen *screen;
 static struct Window *input_win;
-static struct Window *close_win;
 static struct ScreenBuffer *buf_front;
 static struct ScreenBuffer *buf_back;
 static int joy_port0;
@@ -1589,10 +1590,6 @@ static void close_display(void)
 {
     if (buf_front && screen && showing)
         (void)ChangeScreenBuffer(screen, buf_front);
-    if (close_win) {
-        CloseWindow(close_win);
-        close_win = NULL;
-    }
     if (input_win) {
         CloseWindow(input_win);
         input_win = NULL;
@@ -1765,19 +1762,7 @@ static int open_display(uint32_t w, uint32_t h, uint32_t format, ULONG forced_mo
         WA_IDCMP, IDCMP_RAWKEY | IDCMP_MOUSEMOVE | IDCMP_DELTAMOVE |
                   IDCMP_MOUSEBUTTONS | IDCMP_CLOSEWINDOW,
         TAG_DONE);
-    close_win = OpenWindowTags(NULL,
-        WA_CustomScreen, (ULONG)screen,
-        WA_Left, 0, WA_Top, 0,
-        WA_Width, 80,
-        WA_Height, screen->BarHeight + 4 > 14 ? screen->BarHeight + 4 : 14,
-        WA_CloseGadget, TRUE,
-        WA_DragBar, TRUE,
-        WA_DepthGadget, FALSE,
-        WA_Title, (ULONG)"ZZRun",
-        WA_Activate, FALSE,
-        WA_IDCMP, IDCMP_CLOSEWINDOW,
-        TAG_DONE);
-    if (!input_win || !close_win) {
+    if (!input_win) {
         close_display();
         return 0;
     }
@@ -1789,7 +1774,10 @@ static int open_display(uint32_t w, uint32_t h, uint32_t format, ULONG forced_mo
     bound_fmt = format;
     life_put(ZZAPP_LIFE_CARD_FRONT_OFF, front);
     life_put(ZZAPP_LIFE_CARD_BACK_OFF, back);
-    zzapp_build_display_bind_request(payload, w, h, pitch, format, front, back);
+    zzapp_build_display_bind_request_layout(payload, w, h, pitch, format, front,
+                                            back, format == ZZ_FMT_BGRA8888 ?
+                                            ZZ_LAYOUT_BGRA8888 :
+                                            ZZ_LAYOUT_RGB565_BE);
     status = mailbox(ZZAPP_OP_DISPLAY_BIND, payload, ZZAPP_BIND_REQ_BYTES, &reply);
     if (status != ZZ9K_STATUS_OK) {
         printf("ZZRun: display bind failed (%s)\n", status_name(status));
@@ -2012,8 +2000,6 @@ static int run_loop(ULONG forced_mode)
             mask |= 1UL << timer_port->mp_SigBit;
         if (input_win && input_win->UserPort)
             mask |= 1UL << input_win->UserPort->mp_SigBit;
-        if (close_win && close_win->UserPort)
-            mask |= 1UL << close_win->UserPort->mp_SigBit;
         signals = Wait(mask);
         if (signals & (1UL << timer_port->mp_SigBit))
             timer_reap();
@@ -2023,7 +2009,6 @@ static int run_loop(ULONG forced_mode)
             request_stop();
         }
         drain_window(input_win);
-        drain_window(close_win);
         poll_joysticks();
         serve_files();
         print_log();
