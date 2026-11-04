@@ -103,11 +103,11 @@ static int stop_event_sent;
 static uint32_t stop_ms;
 static uint32_t flip_acked;
 static int have_two;
-/* Double buffering by panning one bitmap of twice the height, used when
- * AllocScreenBuffer refuses the screen: the firmware draws the hidden half
- * and a flip moves RyOffset, instead of the firmware copying every frame
- * into the one visible bitmap (slow, and it tears). */
+/* Panning fallback uses a triple-height bitmap when P96 permits it.  The
+ * spare third page lets the app start the next frame while the last pan is
+ * pending; a two-page bitmap remains a compatible fallback. */
 static int have_pan;
+static int pan_count;
 static int showing;
 static char pub_name[128];
 static char elf_path[256];
@@ -1638,6 +1638,7 @@ static void close_display(void)
     /* AllocScreenBuffer owns both double-buffer bitmaps. */
     have_two = 0;
     have_pan = 0;
+    pan_count = 0;
     showing = 0;
     if (pub_name[0]) {
         struct Screen *pub = LockPubScreen((CONST_STRPTR)pub_name);
@@ -1688,8 +1689,8 @@ static struct Screen *open_p96_screen(ULONG mode, uint32_t w, uint32_t h,
 
 static int open_display(uint32_t w, uint32_t h, uint32_t format, ULONG forced_mode)
 {
-    ULONG mode, depth, rgb, pitch = 0, front = 0, back = 0;
-    uint8_t payload[ZZAPP_BIND_REQ_BYTES];
+    ULONG mode, depth, rgb, pitch = 0, front = 0, back = 0, spare = 0;
+    uint8_t payload[ZZAPP_BIND_EXT_REQ_BYTES];
     ZZ9KMailboxEntry reply;
     int status;
 
@@ -1760,21 +1761,40 @@ static int open_display(uint32_t w, uint32_t h, uint32_t format, ULONG forced_mo
         buf_back = NULL;
         buf_front = NULL;
         back = 0;
-        if (h <= ZZRUN_SCREEN_MAX / 2u)
-            tall = open_p96_screen(mode, w, h * 2u, depth, rgb);
-        if (tall && tall->Height >= (WORD)(h * 2u) &&
+        if (h <= ZZRUN_SCREEN_MAX / 3u)
+            tall = open_p96_screen(mode, w, h * 3u, depth, rgb);
+        if (tall && tall->Height >= (WORD)(h * 3u) &&
             bitmap_arm(tall->RastPort.BitMap, &tall_front, &tall_pitch)) {
             p96CloseScreen(screen);
             screen = tall;
             front = tall_front;
             pitch = tall_pitch;
             back = front + pitch * h;
+            spare = back + pitch * h;
             have_pan = 1;
-            puts("ZZRun: double buffering by panning");
+            pan_count = 3;
+            puts("ZZRun: triple buffering by panning");
         } else {
             if (tall)
                 p96CloseScreen(tall);
-            puts("ZZRun: single buffer; the firmware copies each frame");
+            tall = NULL;
+            if (h <= ZZRUN_SCREEN_MAX / 2u)
+                tall = open_p96_screen(mode, w, h * 2u, depth, rgb);
+            if (tall && tall->Height >= (WORD)(h * 2u) &&
+                bitmap_arm(tall->RastPort.BitMap, &tall_front, &tall_pitch)) {
+                p96CloseScreen(screen);
+                screen = tall;
+                front = tall_front;
+                pitch = tall_pitch;
+                back = front + pitch * h;
+                have_pan = 1;
+                pan_count = 2;
+                puts("ZZRun: double buffering by panning");
+            } else {
+                if (tall)
+                    p96CloseScreen(tall);
+                puts("ZZRun: single buffer; the firmware copies each frame");
+            }
         }
     }
     input_win = OpenWindowTags(NULL,
@@ -1803,12 +1823,14 @@ static int open_display(uint32_t w, uint32_t h, uint32_t format, ULONG forced_mo
     bound_fmt = format;
     life_put(ZZAPP_LIFE_CARD_FRONT_OFF, front);
     life_put(ZZAPP_LIFE_CARD_BACK_OFF, back);
-    zzapp_build_display_bind_request_layout(payload, w, h, pitch, format, front,
+    life_put(ZZAPP_LIFE_CARD_SPARE_OFF, spare);
+    zzapp_build_display_bind_request_triple(payload, w, h, pitch, format, front,
                                             back, format == ZZ_FMT_BGRA8888 ?
                                             ZZ_LAYOUT_BGRA8888 :
                                             (format == ZZ_FMT_CLUT8 ? ZZ_LAYOUT_CLUT8 :
-                                             ZZ_LAYOUT_RGB565_BE));
-    status = mailbox(ZZAPP_OP_DISPLAY_BIND, payload, ZZAPP_BIND_REQ_BYTES, &reply);
+                                             ZZ_LAYOUT_RGB565_BE), spare);
+    status = mailbox(ZZAPP_OP_DISPLAY_BIND, payload, spare ?
+                     ZZAPP_BIND_EXT_REQ_BYTES : ZZAPP_BIND_REQ_BYTES, &reply);
     if (status != ZZ9K_STATUS_OK) {
         printf("ZZRun: display bind failed (%s)\n", status_name(status));
         close_display();
@@ -1854,12 +1876,9 @@ static void ack_flip(void)
         return;
     }
     if (have_pan) {
-        int next_showing = !showing;
+        int next_showing = (showing + 1) % pan_count;
 
-        /* Show the half the firmware just finished.  The scroll takes
-         * effect at the next vertical blank; only then may the firmware
-         * draw into the half that was on screen, so always wait. */
-        screen->ViewPort.RasInfo->RyOffset = next_showing ? (WORD)bound_h : 0;
+        screen->ViewPort.RasInfo->RyOffset = (WORD)(next_showing * bound_h);
         ScrollVPort(&screen->ViewPort);
         WaitTOF();
         showing = next_showing;
