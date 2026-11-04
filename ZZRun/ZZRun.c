@@ -1604,11 +1604,18 @@ static void load_palette(void)
     if (count == 0 || first >= 256 || count > 256 - first)
         return;
     win_cache(ZZAPP_PALETTE_OFF + first * 4u, count * 4u);
+    /* LoadRGB32: (count << 16) | first, then R, G, B per colour, each
+     * left-justified in 32 bits, then a 0 terminator. */
     colors[0] = (count << 16) | first;
-    for (i = 0; i < count; i++)
-        colors[i + 1] = zzapp_get_be32(window + ZZAPP_PALETTE_OFF +
-                                        (first + i) * 4u) << 8;
-    colors[count + 1] = 0;
+    for (i = 0; i < count; i++) {
+        uint32_t rgb = zzapp_get_be32(window + ZZAPP_PALETTE_OFF +
+                                      (first + i) * 4u);
+
+        colors[1 + i * 3u] = ((rgb >> 16) & 0xffu) * 0x01010101u;
+        colors[2 + i * 3u] = ((rgb >> 8) & 0xffu) * 0x01010101u;
+        colors[3 + i * 3u] = (rgb & 0xffu) * 0x01010101u;
+    }
+    colors[1 + count * 3u] = 0;
     LoadRGB32(&screen->ViewPort, colors);
     palette_generation = generation;
 }
@@ -1694,6 +1701,8 @@ static int open_display(uint32_t w, uint32_t h, uint32_t format, ULONG forced_mo
     ZZ9KMailboxEntry reply;
     int status;
 
+    if (w == 0 || h == 0 || w > ZZRUN_SCREEN_MAX || h > ZZRUN_SCREEN_MAX)
+        return 0;
     if (format != ZZ_FMT_RGB565 && format != ZZ_FMT_BGRA8888 &&
         format != ZZ_FMT_CLUT8)
         return 0;
