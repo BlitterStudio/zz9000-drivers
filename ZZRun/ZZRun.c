@@ -1913,6 +1913,11 @@ static void ack_flip(void)
         flip_pending = gen;
         return;
     }
+    /* In negotiated mailbox mode core 0 owns every per-frame VDMA choice.
+     * Keep P96's initial app page as the visibility guard; do not mirror
+     * RyOffset or race the card with a 68k pan. */
+    if (have_pan && (flags & ZZAPP_F_MAILBOX))
+        return;
     if (have_pan) {
         if (flags & ZZAPP_F_SCANOUT_ACK) {
             uint32_t address = life_get(ZZAPP_LIFE_FLIP_ADDRESS_OFF);
@@ -2475,7 +2480,7 @@ int main(int argc, char **argv)
      * app is not running yet, so this read-modify-write cannot race. */
     life_put(ZZAPP_LIFE_FLAGS_OFF,
              life_get(ZZAPP_LIFE_FLAGS_OFF) | ZZAPP_F_LAUNCHER_CLUT8 |
-             ZZAPP_F_LAUNCHER_SCANOUT_ACK);
+             ZZAPP_F_LAUNCHER_SCANOUT_ACK | ZZAPP_F_LAUNCHER_MAILBOX);
     zzapp_build_start_request(payload, (uint32_t)app_argc);
     status = mailbox_long(ZZAPP_OP_START, payload, ZZAPP_START_REQ_BYTES,
                           &reply, NULL);
