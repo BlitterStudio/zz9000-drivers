@@ -64,8 +64,10 @@ static const char version[] __attribute__((used)) =
 
 #define ZZ_FMT_RGB565    1u
 #define ZZ_FMT_BGRA8888  2u
+#define ZZ_FMT_CLUT8     3u
 #define ZZ_LAYOUT_RGB565_BE 1u
 #define ZZ_LAYOUT_BGRA8888  5u
+#define ZZ_LAYOUT_CLUT8     7u
 
 #define ZZRUN_MIN_STACK     16384UL
 #define ZZRUN_IMAGE_LIMIT   ZZAPP_IMAGE_MAX_BYTES
@@ -128,6 +130,7 @@ static struct timerequest *timer_io;
 static int timer_pending;
 static struct MsgPort *flip_safe_port;
 static uint32_t flip_pending;
+static uint32_t palette_generation;
 static struct Library *MMUBase;
 static struct mmu_context *mmu_context;
 static struct mmu_window_page *mmu_window_pages;
@@ -1586,6 +1589,30 @@ static int bitmap_arm(struct BitMap *bm, ULONG *arm, ULONG *pitch)
     return 1;
 }
 
+static void load_palette(void)
+{
+    ULONG colors[770];
+    uint32_t generation, first, count, i;
+
+    if (!screen || bound_fmt != ZZ_FMT_CLUT8)
+        return;
+    generation = life_get(ZZAPP_LIFE_PALETTE_GEN_OFF);
+    if (generation == palette_generation)
+        return;
+    first = life_get(ZZAPP_LIFE_PALETTE_FIRST_OFF);
+    count = life_get(ZZAPP_LIFE_PALETTE_COUNT_OFF);
+    if (count == 0 || first >= 256 || count > 256 - first)
+        return;
+    win_cache(ZZAPP_PALETTE_OFF + first * 4u, count * 4u);
+    colors[0] = (count << 16) | first;
+    for (i = 0; i < count; i++)
+        colors[i + 1] = zzapp_get_be32(window + ZZAPP_PALETTE_OFF +
+                                        (first + i) * 4u) << 8;
+    colors[count + 1] = 0;
+    LoadRGB32(&screen->ViewPort, colors);
+    palette_generation = generation;
+}
+
 static void close_display(void)
 {
     if (buf_front && screen && showing)
@@ -1623,8 +1650,10 @@ static void close_display(void)
 
 static ULONG mode_for(uint32_t w, uint32_t h, uint32_t format, ULONG forced)
 {
-    ULONG depth = format == ZZ_FMT_BGRA8888 ? 32 : 16;
-    ULONG formats = format == ZZ_FMT_BGRA8888 ? RGBFF_B8G8R8A8 : RGBFF_R5G6B5;
+    ULONG depth = format == ZZ_FMT_BGRA8888 ? 32 :
+                  (format == ZZ_FMT_CLUT8 ? 8 : 16);
+    ULONG formats = format == ZZ_FMT_BGRA8888 ? RGBFF_B8G8R8A8 :
+                    (format == ZZ_FMT_CLUT8 ? RGBFF_CLUT : RGBFF_R5G6B5);
     if (forced)
         return forced;
     return p96BestModeIDTags(
@@ -1664,16 +1693,16 @@ static int open_display(uint32_t w, uint32_t h, uint32_t format, ULONG forced_mo
     ZZ9KMailboxEntry reply;
     int status;
 
-    if (w == 0 || h == 0 || w > ZZRUN_SCREEN_MAX || h > ZZRUN_SCREEN_MAX)
-        return 0;
-    if (format != ZZ_FMT_RGB565 && format != ZZ_FMT_BGRA8888)
+    if (format != ZZ_FMT_RGB565 && format != ZZ_FMT_BGRA8888 &&
+        format != ZZ_FMT_CLUT8)
         return 0;
     if (!P96Base || !IntuitionBase || !GfxBase)
         return 0;
     if (!pub_name[0])
         GetDefaultPubScreen((STRPTR)pub_name);
-    depth = format == ZZ_FMT_BGRA8888 ? 32 : 16;
-    rgb = format == ZZ_FMT_BGRA8888 ? RGBFB_B8G8R8A8 : RGBFB_R5G6B5;
+    depth = format == ZZ_FMT_BGRA8888 ? 32 : (format == ZZ_FMT_CLUT8 ? 8 : 16);
+    rgb = format == ZZ_FMT_BGRA8888 ? RGBFB_B8G8R8A8 :
+          (format == ZZ_FMT_CLUT8 ? RGBFB_CLUT : RGBFB_R5G6B5);
     mode = mode_for(w, h, format, forced_mode);
     if (mode == (ULONG)INVALID_ID)
         return 0;
@@ -1777,7 +1806,8 @@ static int open_display(uint32_t w, uint32_t h, uint32_t format, ULONG forced_mo
     zzapp_build_display_bind_request_layout(payload, w, h, pitch, format, front,
                                             back, format == ZZ_FMT_BGRA8888 ?
                                             ZZ_LAYOUT_BGRA8888 :
-                                            ZZ_LAYOUT_RGB565_BE);
+                                            (format == ZZ_FMT_CLUT8 ? ZZ_LAYOUT_CLUT8 :
+                                             ZZ_LAYOUT_RGB565_BE));
     status = mailbox(ZZAPP_OP_DISPLAY_BIND, payload, ZZAPP_BIND_REQ_BYTES, &reply);
     if (status != ZZ9K_STATUS_OK) {
         printf("ZZRun: display bind failed (%s)\n", status_name(status));
@@ -1791,6 +1821,7 @@ static int open_display(uint32_t w, uint32_t h, uint32_t format, ULONG forced_mo
     }
     showing = 0;
     flip_pending = 0;
+    palette_generation = 0;
     return 1;
 }
 
@@ -2012,6 +2043,7 @@ static int run_loop(ULONG forced_mode)
         poll_joysticks();
         serve_files();
         print_log();
+        load_palette();
         if (!window)
             break;
         state = life_get(ZZAPP_LIFE_STATE_OFF);
@@ -2305,6 +2337,8 @@ int main(int argc, char **argv)
         cleanup();
         return 20;
     }
+    life_put(ZZAPP_LIFE_FLAGS_OFF,
+             life_get(ZZAPP_LIFE_FLAGS_OFF) | ZZAPP_F_LAUNCHER_CLUT8);
     P96Base = OpenLibrary((CONST_STRPTR)"Picasso96API.library", 2);
     timer_port = CreateMsgPort();
     if (timer_port)
