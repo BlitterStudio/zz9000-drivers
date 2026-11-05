@@ -59,12 +59,14 @@ another shared-memory convention.
    packed area must fit `ZZAPP_ARGV_BYTES`.
 5. While the app runs, every poll writes `heartbeat_ms`, drains firmware log
    records, forwards input, services one file request, binds a requested P96
-   screen, and acknowledges completed flips. `APP_STATUS` is called when the
-   app ends or faults.
-6. Ctrl-C or the close gadget writes the lifecycle `stop` word, enqueues one
-   `ZZ_EV_STOP`, and posts `APP_STOP`. ZZRun remains alive for the 500 ms
-   grace period so firmware can publish its final state. It closes the custom
-   screen and returns the public screen even after a fault.
+   screen, loads changed CLUT8 palette entries, and acknowledges completed
+   flips. `APP_STATUS` is called when the app ends or faults.
+6. Ctrl-C requests a stop: ZZRun writes the lifecycle `stop` word, enqueues one
+   `ZZ_EV_STOP`, and posts `APP_STOP`. The app display has one borderless input
+   window, not a close gadget; its raw keys are forwarded to the app, including
+   the app's own quit controls. ZZRun remains alive for the 500 ms grace period
+   so firmware can publish its final state. It closes the custom screen and
+   returns the public screen even after a fault.
 
 All mailbox payload and rings fields are big-endian. ZZRun stages the firmware
 `zzapp_proto.h` header at build time; that header is the layout authority.
@@ -86,15 +88,19 @@ owns the log producer side. ZZRun consumes its padded log records and prints
 them on stdout.
 
 When firmware sets the display-unbound flag, ZZRun opens the requested P96
-screen. RGB565 is the first path; BGRA8888 is accepted when P96 returns that
-format. ZZRun binds the bitmap's actual pitch and card addresses with
-`APP_DISPLAY_BIND`. Firmware clears the flag only after a successful bind.
+screen. RGB565 is the first path; CLUT8 is supported and ZZRun loads changed
+palette entries from the lifecycle window; BGRA8888 is accepted when P96
+returns that format. ZZRun binds the bitmap's actual pitch and card addresses
+with `APP_DISPLAY_BIND`. Firmware clears the flag only after a successful bind.
 With two displayable P96 bitmaps (`AllocScreenBuffer`), each completed flip
-changes screen buffer. If P96 refuses screen buffers, ZZRun opens the screen
-with a bitmap twice the requested height and flips by panning between the two
-halves (`RyOffset`, `ScrollVPort`, then `WaitTOF`); the close gadget is only
-visible while the top half is shown. Only if that also fails does it bind one
-bitmap, which the firmware copies each frame into.
+changes screen buffer. If P96 refuses screen buffers, ZZRun first opens a
+bitmap three times the requested height and pans between its pages. If that
+fails, it retries with a double-height bitmap. For address-based scanout flips,
+firmware acknowledges after card vblank; if that acknowledgement has not
+arrived within 100 ms, ZZRun uses `WaitTOF` for the rest of the run. In mailbox
+mode, firmware chooses the scanout frame and ZZRun does not pan. Only if both
+panning layouts fail does it bind one bitmap, which the firmware copies each
+frame into.
 
 ### Files and ROOT
 
@@ -120,10 +126,10 @@ Amiga `DateStamp`, or zero when the time is absent.
 
 A data abort, prefetch abort, undefined instruction, watchdog, or
 watchdog-plus-restart prints the captured pc, sp, lr, far, fsr, cpsr, exit
-code, and generation, then returns 20. A forced stop caused by Ctrl-C or the
-close gadget returns the app's normal exit code when it has one. Every exit
-path closes opened files and directory handles, restores the public screen,
-and releases its Amiga-side resources.
+code, and generation, then returns 20. A forced stop caused by Ctrl-C returns
+the app's normal exit code when it has one. Every exit path closes opened files
+and directory handles, restores the public screen, and releases its Amiga-side
+resources.
 
 ## Building
 
