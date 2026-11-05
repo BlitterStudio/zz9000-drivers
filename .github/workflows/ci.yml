@@ -321,12 +321,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       # ZZRun builds against zzapp_proto.h from this firmware commit; it
-      # must carry every lifecycle field and flag ZZRun uses (CLUT8,
-      # spare buffer, scanout ack, mailbox: kit30-fpga).
+      # must carry every lifecycle field, flag and window region ZZRun uses
+      # (API 0.2 console, AHI and message rings: runtime/api-0.2).
       - uses: actions/checkout@v6
         with:
           repository: BlitterStudio/zz9000-firmware
-          ref: 6979a10da4b9ffa2e984f45a8eba86c69cb162cd
+          ref: e8554ca4debeb0bb97a5e1601604699979d69a50
           path: zz9000-firmware
       - name: Build ZZRun
         env:
