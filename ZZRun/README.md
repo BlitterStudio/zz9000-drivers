@@ -100,8 +100,9 @@ default; only when the app first uses console I/O does firmware set its console
 flag, causing ZZRun to open a closable `CON:` window. If opening that requested
 console fails, ZZRun stops the app instead of silently losing output.
 
-The default audio route is the card fabric. Set `AUDIO=AHI` in the app icon to
-request the AHI route; it is advertised to firmware before the app starts.
+The default audio route is the card fabric. Set `AUDIO=AHI` in the app icon or
+pass `AUDIO=AHI` before app arguments in a Shell command to request the AHI
+route; it is advertised to firmware before the app starts.
 The shared PCM ring is interleaved S16LE and carries its requested rate and
 channel count. ZZRun accepts the route only when AHI grants the exact requested
 stereo rate; it converts the ring's S16LE samples into AHI's S16BE bounce

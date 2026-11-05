@@ -367,7 +367,7 @@ static int ctrl_c_set(void)
 
 static void usage(void)
 {
-    puts("ZZRun <app.elf> [args]\n"
+    puts("ZZRun <app.elf> [AUDIO=AHI] [args]\n"
          "Run Stack 32768 in this Shell first.\n"
          "Workbench ToolTypes: APP, ROOT, ABS, MODE, ARGS, JOYPORT0, AUDIO.\n"
          "ROOT defaults to the current directory, or the icon directory.");
@@ -640,11 +640,10 @@ static int read_tooltypes(struct DiskObject *icon, char *app_out, size_t app_n,
     return !value || add_args_split(value);
 }
 
-static int tool_is_ahi(const char *value)
-{
     return value && (tolower((unsigned char)value[0]) == 'a') &&
-           (tolower((unsigned char)value[1]) == 'h') &&
-           (tolower((unsigned char)value[2]) == 'i') && value[3] == '\0';
+           value[1] && (tolower((unsigned char)value[1]) == 'h') &&
+           value[2] && (tolower((unsigned char)value[2]) == 'i') &&
+           value[3] == '\0';
 }
 
 static int load_program_icon(char *app_out, size_t app_n, char *root_out,
@@ -2720,6 +2719,15 @@ int main(int argc, char **argv)
         }
         memcpy(elf_path, argv[1], strlen(argv[1]) + 1);
         for (i = 2; i < argc; i++) {
+            if (strncmp(argv[i], "AUDIO=", 6) == 0) {
+                if (!tool_is_ahi(argv[i] + 6)) {
+                    tell("AUDIO must be AHI.");
+                    cleanup();
+                    return 10;
+                }
+                audio_ahi = 1;
+                continue;
+            }
             if (!add_arg(argv[i])) {
                 cleanup();
                 return 10;
