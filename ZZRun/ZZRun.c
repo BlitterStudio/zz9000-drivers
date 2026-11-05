@@ -640,6 +640,8 @@ static int read_tooltypes(struct DiskObject *icon, char *app_out, size_t app_n,
     return !value || add_args_split(value);
 }
 
+static int tool_is_ahi(const char *value)
+{
     return value && (tolower((unsigned char)value[0]) == 'a') &&
            value[1] && (tolower((unsigned char)value[1]) == 'h') &&
            value[2] && (tolower((unsigned char)value[2]) == 'i') &&
