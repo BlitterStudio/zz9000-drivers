@@ -93,6 +93,8 @@ static const char version[] __attribute__((used)) =
 #define MMU_MAPP_NONSERIALIZED 0x20000000UL
 #define MMU_CACHE_MASK (MMU_MAPP_CACHEINHIBIT | MMU_MAPP_COPYBACK | \
                         MMU_MAPP_IMPRECISE | MMU_MAPP_NONSERIALIZED)
+#define ZZRUN_AHI_BUFFER_COUNT 2u
+#define ZZRUN_AHI_BUFFER_BYTES 8192u
 
 struct mmu_context;
 
@@ -150,15 +152,13 @@ static BPTR console_handle;
 static int console_failed;
 static int audio_ahi;
 static struct MsgPort *ahi_port;
-static struct AHIRequest *ahi_request;
-static struct AHIAudioCtrl *ahi_control;
-static int ahi_device_open;
-static int ahi_sound_loaded;
+static struct AHIRequest *ahi_request[ZZRUN_AHI_BUFFER_COUNT];
+static int ahi_device_open = -1;
 static uint32_t ahi_rate;
 static uint32_t ahi_channels;
-static uint32_t ahi_pending_bytes;
-static uint8_t *ahi_buffer;
-static uint32_t ahi_until_ms;
+static uint32_t ahi_pending_bytes[ZZRUN_AHI_BUFFER_COUNT];
+static uint8_t *ahi_buffer[ZZRUN_AHI_BUFFER_COUNT];
+static uint8_t ahi_pending[ZZRUN_AHI_BUFFER_COUNT];
 static uint32_t ahi_underruns;
 
 struct file_slot {
@@ -1688,6 +1688,20 @@ static void console_drain_output(void)
     zzapp_put_be32(hdr + 4, tail);
     win_cache(ZZAPP_CONSOLE_OUT_OFF + 4, 4);
 }
+static int console_output_pending(void)
+{
+    uint8_t *hdr;
+    uint32_t head, tail;
+
+    if (!window || !(life_get(ZZAPP_LIFE_FLAGS_OFF) & ZZAPP_F_CONSOLE))
+        return 0;
+    hdr = window + ZZAPP_CONSOLE_OUT_OFF;
+    win_cache(ZZAPP_CONSOLE_OUT_OFF, ZZAPP_CONSOLE_HDR);
+    head = zzapp_get_be32(hdr);
+    tail = zzapp_get_be32(hdr + 4);
+    return head - tail <= ZZAPP_CONSOLE_OUT_CAP && head != tail;
+}
+
 
 static void console_fill_input(void)
 {
@@ -1705,7 +1719,7 @@ static void console_fill_input(void)
     tail = zzapp_get_be32(hdr + 4);
     if (head - tail > ZZAPP_CONSOLE_IN_CAP)
         return;
-    if (!WaitForChar(console_input(), 0))
+    if (IsInteractive(console_input()) && !WaitForChar(console_input(), 0))
         return;
     free_bytes = ZZAPP_CONSOLE_IN_CAP - (head - tail);
     if (free_bytes == 0)
@@ -1729,138 +1743,165 @@ static void console_fill_input(void)
     win_cache(ZZAPP_CONSOLE_IN_OFF, 4);
 }
 
-static ULONG ahi_find_stereo_mode(void)
-{
-    ULONG id = AHI_INVALID_ID;
-
-    while ((id = AHI_NextAudioID(id)) != AHI_INVALID_ID) {
-        LONG stereo = FALSE;
-        LONG bits = 0;
-        struct TagItem tags[] = {
-            { AHIDB_Stereo, (ULONG)&stereo },
-            { AHIDB_Bits, (ULONG)&bits },
-            { TAG_DONE, 0 }
-        };
-
-        if (AHI_GetAudioAttrsA(id, NULL, tags) && stereo && bits == 16)
-            return id;
-    }
-    return AHI_INVALID_ID;
-}
-
 static void ahi_close(void)
 {
-    if (ahi_control) {
-        struct TagItem stop_tags[] = {
-            { AHIC_Play, FALSE },
-            { TAG_DONE, 0 }
-        };
+    unsigned i;
 
-        AHI_ControlAudioA(ahi_control, stop_tags);
-        if (ahi_sound_loaded)
-            AHI_UnloadSound(0, ahi_control);
-        AHI_FreeAudio(ahi_control);
-        ahi_control = NULL;
+    for (i = 0u; i < ZZRUN_AHI_BUFFER_COUNT; i++) {
+        if (ahi_request[i] && ahi_pending[i]) {
+            if (!CheckIO((struct IORequest *)ahi_request[i]))
+                AbortIO((struct IORequest *)ahi_request[i]);
+            WaitIO((struct IORequest *)ahi_request[i]);
+        }
+        ahi_pending[i] = 0u;
+        ahi_pending_bytes[i] = 0u;
     }
-    ahi_sound_loaded = 0;
-    if (ahi_buffer) {
-        FreeVec(ahi_buffer);
-        ahi_buffer = NULL;
+    if (ahi_port) {
+        while (GetMsg(ahi_port))
+            ;
     }
-    if (!ahi_device_open && ahi_request)
-        CloseDevice((struct IORequest *)ahi_request);
+    if (ahi_device_open == 0 && ahi_request[0])
+        CloseDevice((struct IORequest *)ahi_request[0]);
     ahi_device_open = -1;
-    if (ahi_request) {
-        DeleteIORequest((struct IORequest *)ahi_request);
-        ahi_request = NULL;
+    if (ahi_request[1]) {
+        FreeVec(ahi_request[1]);
+        ahi_request[1] = NULL;
+    }
+    if (ahi_request[0]) {
+        DeleteIORequest((struct IORequest *)ahi_request[0]);
+        ahi_request[0] = NULL;
+    }
+    for (i = 0u; i < ZZRUN_AHI_BUFFER_COUNT; i++) {
+        if (ahi_buffer[i]) {
+            FreeVec(ahi_buffer[i]);
+            ahi_buffer[i] = NULL;
+        }
     }
     if (ahi_port) {
         DeleteMsgPort(ahi_port);
         ahi_port = NULL;
     }
     AHIBase = NULL;
-    ahi_rate = 0;
-    ahi_channels = 0;
-    ahi_pending_bytes = 0;
+    ahi_rate = 0u;
+    ahi_channels = 0u;
 }
 
 static int ahi_open(uint32_t rate, uint32_t channels)
 {
-    ULONG mode;
-    ULONG actual_rate = 0;
-    struct AHISampleInfo sample;
-    struct TagItem alloc_tags[] = {
-        { AHIA_AudioID, 0 },
-        { AHIA_MixFreq, 0 },
-        { AHIA_Channels, 1 },
-        { AHIA_Sounds, 1 },
-        { TAG_DONE, 0 }
-    };
-    struct TagItem start_tags[] = {
-        { AHIC_Play, TRUE },
-        { AHIC_MixFreq_Query, (ULONG)&actual_rate },
-        { TAG_DONE, 0 }
-    };
+    unsigned i;
 
     if (channels != 2u || rate == 0u)
         return 0;
     ahi_port = CreateMsgPort();
     if (!ahi_port)
         return 0;
-    ahi_request = (struct AHIRequest *)CreateIORequest(ahi_port,
-                                                        sizeof(*ahi_request));
-    if (!ahi_request)
+    ahi_request[0] = (struct AHIRequest *)CreateIORequest(
+        ahi_port, sizeof(*ahi_request[0]));
+    if (!ahi_request[0])
         goto failed;
-    ahi_request->ahir_Version = 4;
+    ahi_request[0]->ahir_Version = 4;
     ahi_device_open = OpenDevice((CONST_STRPTR)AHINAME, AHI_NO_UNIT,
-                                 (struct IORequest *)ahi_request, 0);
+                                 (struct IORequest *)ahi_request[0], 0);
     if (ahi_device_open)
         goto failed;
-    AHIBase = (struct Library *)ahi_request->ahir_Std.io_Device;
-    mode = ahi_find_stereo_mode();
-    if (mode == AHI_INVALID_ID)
+    AHIBase = (struct Library *)ahi_request[0]->ahir_Std.io_Device;
+    ahi_request[1] = AllocVec(sizeof(*ahi_request[1]), MEMF_PUBLIC);
+    if (!ahi_request[1])
         goto failed;
-    alloc_tags[0].ti_Data = mode;
-    alloc_tags[1].ti_Data = rate;
-    ahi_control = AHI_AllocAudioA(alloc_tags);
-    if (!ahi_control)
-        goto failed;
-    ahi_buffer = AllocVec(ZZAPP_AUDIO_CAP, MEMF_PUBLIC | MEMF_CLEAR);
-    if (!ahi_buffer)
-        goto failed;
-    memset(&sample, 0, sizeof(sample));
-    sample.ahisi_Type = AHIST_S16S;
-    sample.ahisi_Address = ahi_buffer;
-    sample.ahisi_Length = ZZAPP_AUDIO_CAP / 4u;
-    if (AHI_LoadSound(0, AHIST_DYNAMICSAMPLE, &sample, ahi_control) != AHIE_OK)
-        goto failed;
-    ahi_sound_loaded = 1;
-    if (AHI_ControlAudioA(ahi_control, start_tags) != AHIE_OK ||
-        actual_rate != rate)
-        goto failed;
-    AHI_SetVol(0, 0x10000L, 0x8000L, ahi_control,
-               AHISF_IMM | AHISF_NODELAY);
+    CopyMem(ahi_request[0], ahi_request[1], sizeof(*ahi_request[1]));
+    for (i = 0u; i < ZZRUN_AHI_BUFFER_COUNT; i++) {
+        ahi_buffer[i] = AllocVec(ZZRUN_AHI_BUFFER_BYTES,
+                                 MEMF_PUBLIC | MEMF_CLEAR);
+        if (!ahi_buffer[i])
+            goto failed;
+    }
     ahi_rate = rate;
     ahi_channels = channels;
-    ahi_underruns = 0;
+    ahi_underruns = 0u;
     return 1;
 failed:
     ahi_close();
     return 0;
 }
 
+static int ahi_free_slot(void)
+{
+    unsigned i;
+
+    for (i = 0u; i < ZZRUN_AHI_BUFFER_COUNT; i++) {
+        if (!ahi_pending[i])
+            return (int)i;
+    }
+    return -1;
+}
+
+static int ahi_reap(uint32_t *tail)
+{
+    struct Message *message;
+    unsigned i;
+    int completed = 0;
+
+    while ((message = GetMsg(ahi_port)) != NULL) {
+        for (i = 0u; i < ZZRUN_AHI_BUFFER_COUNT; i++) {
+            if (ahi_request[i] &&
+                message == &ahi_request[i]->ahir_Std.io_Message) {
+                if (ahi_pending[i]) {
+                    *tail += ahi_pending_bytes[i];
+                    ahi_pending_bytes[i] = 0u;
+                    ahi_pending[i] = 0u;
+                    completed = 1;
+                }
+                break;
+            }
+        }
+    }
+    return completed;
+}
+
+static void ahi_submit(unsigned slot, uint32_t bytes)
+{
+    struct AHIRequest *request = ahi_request[slot];
+    struct AHIRequest *link = NULL;
+    unsigned i;
+
+    for (i = 0u; i < ZZRUN_AHI_BUFFER_COUNT; i++) {
+        if (ahi_pending[i]) {
+            link = ahi_request[i];
+            break;
+        }
+    }
+    request->ahir_Std.io_Command = CMD_WRITE;
+    request->ahir_Std.io_Length = bytes;
+    request->ahir_Std.io_Data = ahi_buffer[slot];
+    if (!link)
+        request->ahir_Std.io_Offset = 0;
+    request->ahir_Type = AHIST_S16S;
+    request->ahir_Frequency = ahi_rate;
+    request->ahir_Volume = 0x10000L;
+    request->ahir_Position = 0x8000L;
+    request->ahir_Link = link;
+    ahi_pending_bytes[slot] = bytes;
+    ahi_pending[slot] = 1u;
+    SendIO((struct IORequest *)request);
+}
+
 static void service_ahi_audio(void)
 {
     uint8_t *hdr;
-    uint32_t head, tail, available, contiguous, bytes, frames, now, at, i;
-    int completed = 0;
-    if (!window || !(life_get(ZZAPP_LIFE_FLAGS_OFF) & ZZAPP_F_LAUNCHER_AUDIO_AHI))
+    uint32_t head, tail, available, contiguous, bytes, frames, at, i;
+    int completed;
+    int slot;
+
+    if (!window)
         return;
     hdr = window + ZZAPP_AUDIO_OFF;
     win_cache(ZZAPP_AUDIO_OFF, ZZAPP_AUDIO_HDR);
-    if (zzapp_get_be32(hdr + ZZAPP_AUDIO_ROUTE_OFF) != ZZAPP_AUDIO_ROUTE_AHI)
+    if (!(life_get(ZZAPP_LIFE_FLAGS_OFF) & ZZAPP_F_LAUNCHER_AUDIO_AHI) ||
+        zzapp_get_be32(hdr + ZZAPP_AUDIO_ROUTE_OFF) != ZZAPP_AUDIO_ROUTE_AHI) {
+        ahi_close();
         return;
-    if (!ahi_control &&
+    }
+    if (!ahi_request[0] &&
         !ahi_open(zzapp_get_be32(hdr + ZZAPP_AUDIO_RATE_OFF),
                   zzapp_get_be32(hdr + ZZAPP_AUDIO_CHANNELS_OFF))) {
         request_stop();
@@ -1870,15 +1911,10 @@ static void service_ahi_audio(void)
     tail = zzapp_get_be32(hdr + ZZAPP_AUDIO_TAIL_OFF);
     if (head - tail > ZZAPP_AUDIO_CAP)
         return;
-    now = now_ms();
-    if (ahi_pending_bytes) {
-        if ((int32_t)(now - ahi_until_ms) < 0)
-            return;
-        tail += ahi_pending_bytes;
-        ahi_pending_bytes = 0;
+    completed = ahi_reap(&tail);
+    if (completed) {
         zzapp_put_be32(hdr + ZZAPP_AUDIO_TAIL_OFF, tail);
         win_cache(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_TAIL_OFF, 4);
-        completed = 1;
     }
     available = head - tail;
     contiguous = ZZAPP_AUDIO_CAP - (tail % ZZAPP_AUDIO_CAP);
@@ -1888,6 +1924,8 @@ static void service_ahi_audio(void)
         return;
     if (bytes > frames * ahi_channels * 2u)
         bytes = frames * ahi_channels * 2u;
+    if (bytes > ZZRUN_AHI_BUFFER_BYTES)
+        bytes = ZZRUN_AHI_BUFFER_BYTES;
     bytes -= bytes % (ahi_channels * 2u);
     if (bytes == 0u) {
         if (completed) {
@@ -1898,19 +1936,18 @@ static void service_ahi_audio(void)
         }
         return;
     }
+    slot = ahi_free_slot();
+    if (slot < 0)
+        return;
     at = tail % ZZAPP_AUDIO_CAP;
     win_cache(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_HDR + at, bytes);
-    for (i = 0; i < bytes; i += 2u) {
-        ahi_buffer[i] = window[ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_HDR + at + i + 1u];
-        ahi_buffer[i + 1u] = window[ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_HDR + at + i];
+    for (i = 0u; i < bytes; i += 2u) {
+        ahi_buffer[slot][i] =
+            window[ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_HDR + at + i + 1u];
+        ahi_buffer[slot][i + 1u] =
+            window[ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_HDR + at + i];
     }
-    AHI_SetSound(0, 0, 0, bytes / (ahi_channels * 2u), ahi_control,
-                 AHISF_IMM | AHISF_NODELAY);
-    AHI_SetFreq(0, ahi_rate, ahi_control, AHISF_IMM | AHISF_NODELAY);
-    ahi_pending_bytes = bytes;
-    ahi_until_ms = now + (bytes / (ahi_channels * 2u)) * 1000u / ahi_rate;
-    if (ahi_until_ms == now)
-        ahi_until_ms++;
+    ahi_submit((unsigned)slot, bytes);
 }
 
 static void service_console(void)
@@ -2515,15 +2552,20 @@ static int run_loop(ULONG forced_mode)
         ack_flip();
         if (state == ZZAPP_ST_FAULTED || fault == ZZAPP_FAULT_WATCHDOG_RESTART) {
             saw_fault = 1;
-            break;
+            if (!console_output_pending())
+                break;
+            timer_arm();
+            continue;
         }
         if (entered && (state == ZZAPP_ST_IDLE ||
                         (state == ZZAPP_ST_STOPPING && stop_asked &&
                          now_ms() - stop_ms >= ZZRUN_GRACE_MS))) {
-            if (!stop_asked || now_ms() - stop_ms >= ZZRUN_GRACE_MS)
+            if ((!stop_asked || now_ms() - stop_ms >= ZZRUN_GRACE_MS) &&
+                !console_output_pending())
                 break;
         }
-        if (stop_asked && now_ms() - stop_ms >= ZZRUN_GRACE_MS + ZZRUN_GRACE_MS)
+        if (stop_asked && now_ms() - stop_ms >= ZZRUN_GRACE_MS + ZZRUN_GRACE_MS &&
+            !console_output_pending())
             break;
         if (life_get(ZZAPP_LIFE_GENERATION_OFF) != last_gen &&
             state != ZZAPP_ST_RUNNING && state != ZZAPP_ST_STARTING &&
@@ -2804,9 +2846,6 @@ int main(int argc, char **argv)
         cleanup();
         return 20;
     }
-    if (audio_ahi)
-        life_put(ZZAPP_LIFE_FLAGS_OFF,
-                 life_get(ZZAPP_LIFE_FLAGS_OFF) | ZZAPP_F_LAUNCHER_AUDIO_AHI);
     P96Base = OpenLibrary((CONST_STRPTR)"Picasso96API.library", 2);
     timer_port = CreateMsgPort();
     if (timer_port)
@@ -2847,7 +2886,8 @@ int main(int argc, char **argv)
      * app is not running yet, so this read-modify-write cannot race. */
     life_put(ZZAPP_LIFE_FLAGS_OFF,
              life_get(ZZAPP_LIFE_FLAGS_OFF) | ZZAPP_F_LAUNCHER_CLUT8 |
-             ZZAPP_F_LAUNCHER_SCANOUT_ACK | ZZAPP_F_LAUNCHER_MAILBOX);
+             ZZAPP_F_LAUNCHER_SCANOUT_ACK | ZZAPP_F_LAUNCHER_MAILBOX |
+             (audio_ahi ? ZZAPP_F_LAUNCHER_AUDIO_AHI : 0u));
     zzapp_build_start_request(payload, (uint32_t)app_argc);
     status = mailbox_long(ZZAPP_OP_START, payload, ZZAPP_START_REQ_BYTES,
                           &reply, NULL);

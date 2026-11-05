@@ -37,12 +37,15 @@ fi
 
 if [ -n "$sdk_src" ] && [ -d "$sdk_src/include/zz9k" ]; then
   rm -rf "$stage_dir"
-  mkdir -p "$stage_dir/zz9k" "$stage_dir/proto" "$stage_dir/clib"
+  mkdir -p "$stage_dir/zz9k" "$stage_dir/proto" "$stage_dir/clib" \
+           "$stage_dir/inline" "$stage_dir/pragmas"
   cp -r "$sdk_src/include/zz9k/." "$stage_dir/zz9k/"
   cp -r "$sdk_src/host/include/zz9k/." "$stage_dir/zz9k/"
   cp -r "$sdk_src/amiga/include/zz9k/." "$stage_dir/zz9k/"
   cp "$sdk_src/amiga/include/proto/zz9k.h" "$stage_dir/proto/"
   cp "$sdk_src/amiga/include/clib/zz9k_protos.h" "$stage_dir/clib/"
+  cp "$sdk_src/amiga/include/inline/zz9k.h" "$stage_dir/inline/"
+  cp "$sdk_src/amiga/include/pragmas/zz9k_pragmas.h" "$stage_dir/pragmas/"
 fi
 
 if [ ! -d "$stage_dir/zz9k" ]; then

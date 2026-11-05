@@ -326,7 +326,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: BlitterStudio/zz9000-firmware
-          ref: e8554ca4debeb0bb97a5e1601604699979d69a50
+          ref: 1582b26ee480472c75d35a042f185ac922dce5f4
           path: zz9000-firmware
       - name: Build ZZRun
         env:
