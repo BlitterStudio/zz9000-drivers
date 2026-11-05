@@ -9,8 +9,8 @@ time; firmware rejects a second load while one is active.
 
 ## Starting an app
 
-Give the ELF first. Remaining Shell tokens become the app's `argv`; `argv[0]`
-is not added by ZZRun.
+Give the ELF first. The app's `argv[0]` is the ELF's file name and the
+remaining Shell tokens follow it, as C programs expect (up to 15 arguments).
 
 ```text
 Stack 32768

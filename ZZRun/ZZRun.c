@@ -565,7 +565,7 @@ static int add_arg(const char *text)
     n = strlen(text);
     if (n == 0)
         return 1;
-    if (n > 127 || app_argc >= (int)ZZAPP_ARGV_MAX) {
+    if (n > 127 || app_argc >= (int)ZZAPP_ARGV_MAX - 1) {
         tell("Too many arguments, or an argument is longer than 127 bytes.");
         return 0;
     }
@@ -2361,18 +2361,29 @@ static void ack_flip(void)
     flip_acked = gen;
 }
 
+/* argv[0] is the app's file name, as C programs expect; the Shell or ARGS
+ * tokens follow it. */
 static int fill_argv(void)
 {
     uint8_t *base = window + ZZAPP_ARGV_OFF;
     uint32_t at = ZZAPP_ARGV_STR_OFF;
+    const char *name = (const char *)FilePart((STRPTR)elf_path);
+    uint32_t n;
     int i;
     memset(base, 0, ZZAPP_ARGV_BYTES);
-    zzapp_put_be32(base + ZZAPP_ARGV_ARGC_OFF, (uint32_t)app_argc);
+    zzapp_put_be32(base + ZZAPP_ARGV_ARGC_OFF, (uint32_t)app_argc + 1u);
+    n = (uint32_t)strlen(name);
+    if (n > 127u)
+        n = 127u;
+    zzapp_put_be32(base + ZZAPP_ARGV_OFFS_OFF, ZZAPP_ARGV_OFF + at);
+    memcpy(base + at, name, n);
+    base[at + n] = 0;
+    at += n + 1u;
     for (i = 0; i < app_argc; i++) {
-        uint32_t n = (uint32_t)strlen(arg_store[i]);
+        n = (uint32_t)strlen(arg_store[i]);
         if (n > 127 || at + n + 1u > ZZAPP_ARGV_BYTES)
             return 0;
-        zzapp_put_be32(base + ZZAPP_ARGV_OFFS_OFF + (uint32_t)i * 4u,
+        zzapp_put_be32(base + ZZAPP_ARGV_OFFS_OFF + (uint32_t)(i + 1) * 4u,
                        ZZAPP_ARGV_OFF + at);
         memcpy(base + at, arg_store[i], n + 1u);
         at += n + 1u;
@@ -2888,7 +2899,7 @@ int main(int argc, char **argv)
              life_get(ZZAPP_LIFE_FLAGS_OFF) | ZZAPP_F_LAUNCHER_CLUT8 |
              ZZAPP_F_LAUNCHER_SCANOUT_ACK | ZZAPP_F_LAUNCHER_MAILBOX |
              (audio_ahi ? ZZAPP_F_LAUNCHER_AUDIO_AHI : 0u));
-    zzapp_build_start_request(payload, (uint32_t)app_argc);
+    zzapp_build_start_request(payload, (uint32_t)app_argc + 1u);
     status = mailbox_long(ZZAPP_OP_START, payload, ZZAPP_START_REQ_BYTES,
                           &reply, NULL);
     if (status != ZZ9K_STATUS_OK) {
