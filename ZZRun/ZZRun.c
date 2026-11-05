@@ -29,6 +29,8 @@
 #include "zz9k/request.h"
 #include "zzapp_proto.h"
 #include "zz9000_hw.h"
+#include <devices/ahi.h>
+#include <proto/ahi.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,6 +43,7 @@ struct Library *IconBase;
 struct Device *TimerBase;
 struct Library *P96Base;
 struct Library *ZZ9KBase;
+struct Library *AHIBase;
 
 extern struct WBStartup *_WBenchMsg;
 
@@ -143,6 +146,20 @@ static struct mmu_window_page *mmu_window_pages;
 static uint32_t mmu_window_page_count;
 static uint32_t mmu_window_page_bytes;
 static uint32_t owned_generation;
+static BPTR console_handle;
+static int console_failed;
+static int audio_ahi;
+static struct MsgPort *ahi_port;
+static struct AHIRequest *ahi_request;
+static struct AHIAudioCtrl *ahi_control;
+static int ahi_device_open;
+static int ahi_sound_loaded;
+static uint32_t ahi_rate;
+static uint32_t ahi_channels;
+static uint32_t ahi_pending_bytes;
+static uint8_t *ahi_buffer;
+static uint32_t ahi_until_ms;
+static uint32_t ahi_underruns;
 
 struct file_slot {
     BPTR fh;
@@ -162,6 +179,7 @@ static uint32_t file_reply_seq;
 static uint32_t file_generation;
 
 static void cleanup(void);
+static int tool_is_ahi(const char *value);
 
 static int stack_ok(void)
 {
@@ -351,7 +369,7 @@ static void usage(void)
 {
     puts("ZZRun <app.elf> [args]\n"
          "Run Stack 32768 in this Shell first.\n"
-         "Workbench ToolTypes: APP, ROOT, ABS, MODE, ARGS, JOYPORT0.\n"
+         "Workbench ToolTypes: APP, ROOT, ABS, MODE, ARGS, JOYPORT0, AUDIO.\n"
          "ROOT defaults to the current directory, or the icon directory.");
 }
 
@@ -615,8 +633,18 @@ static int read_tooltypes(struct DiskObject *icon, char *app_out, size_t app_n,
     value = tool_value(icon, "JOYPORT0");
     if (value && (value[0] == 0 || tool_true(value)))
         joy_port0 = 1;
+    value = tool_value(icon, "AUDIO");
+    if (tool_is_ahi(value))
+        audio_ahi = 1;
     value = tool_value(icon, "ARGS");
     return !value || add_args_split(value);
+}
+
+static int tool_is_ahi(const char *value)
+{
+    return value && (tolower((unsigned char)value[0]) == 'a') &&
+           (tolower((unsigned char)value[1]) == 'h') &&
+           (tolower((unsigned char)value[2]) == 'i') && value[3] == '\0';
 }
 
 static int load_program_icon(char *app_out, size_t app_n, char *root_out,
@@ -1461,6 +1489,18 @@ static void request_stop(void)
     stop_owned();
 }
 
+static uint16_t break_signal_for_rawkey(uint16_t code, uint16_t qualifiers)
+{
+    if (!(qualifiers & IEQUALIFIER_CONTROL))
+        return 0;
+    switch (code) {
+    case 0x22u: return ZZAPP_BREAK_CTRL_D;
+    case 0x12u: return ZZAPP_BREAK_CTRL_E;
+    case 0x23u: return ZZAPP_BREAK_CTRL_F;
+    default: return 0;
+    }
+}
+
 static void drain_window(struct Window *win)
 {
     struct IntuiMessage *im;
@@ -1476,9 +1516,15 @@ static void drain_window(struct Window *win)
         if (class & IDCMP_CLOSEWINDOW)
             request_stop();
         if (class & IDCMP_RAWKEY) {
+            uint16_t raw = (uint16_t)(code & 0x7f);
             uint16_t type = (code & IECODE_UP_PREFIX) ? ZZAPP_EV_KEY_UP
                                                      : ZZAPP_EV_KEY_DOWN;
-            push_event(type, (uint16_t)(code & 0x7f), 0, 0, qual);
+            uint16_t signal = type == ZZAPP_EV_KEY_DOWN ?
+                break_signal_for_rawkey(raw, qual) : 0;
+
+            push_event(type, raw, 0, 0, qual);
+            if (signal)
+                push_event(ZZAPP_EV_BREAK, signal, 0, 0, qual);
         }
         if (class & IDCMP_MOUSEBUTTONS) {
             uint16_t id = 0;
@@ -1569,6 +1615,307 @@ static void print_log(void)
     fflush(stdout);
     zzapp_put_be32(window + ZZAPP_LOG_OFF + 4, tail);
     win_cache(ZZAPP_LOG_OFF + 4, 4);
+}
+
+
+static BPTR console_output(void)
+{
+    return console_handle ? console_handle : Output();
+}
+
+static BPTR console_input(void)
+{
+    return console_handle ? console_handle : Input();
+}
+
+static int console_open_if_needed(void)
+{
+    if (!_WBenchMsg || console_handle)
+        return 1;
+    console_handle = Open((CONST_STRPTR)"CON:0/0/640/160/ZZRun/CLOSE/WAIT",
+                          MODE_OLDFILE);
+    if (!console_handle) {
+        if (!console_failed) {
+            tell("ZZRun: cannot open the requested Workbench console.");
+            console_failed = 1;
+        }
+        return 0;
+    }
+    return 1;
+}
+
+static void console_drain_output(void)
+{
+    uint8_t *hdr;
+    uint32_t head, tail, available, at, chunk;
+    LONG written;
+
+    if (!window || !(life_get(ZZAPP_LIFE_FLAGS_OFF) & ZZAPP_F_CONSOLE))
+        return;
+    if (!console_open_if_needed()) {
+        request_stop();
+        return;
+    }
+    hdr = window + ZZAPP_CONSOLE_OUT_OFF;
+    win_cache(ZZAPP_CONSOLE_OUT_OFF, ZZAPP_CONSOLE_HDR);
+    head = zzapp_get_be32(hdr);
+    tail = zzapp_get_be32(hdr + 4);
+    available = head - tail;
+    if (available > ZZAPP_CONSOLE_OUT_CAP) {
+        zzapp_put_be32(hdr + 4, head);
+        win_cache(ZZAPP_CONSOLE_OUT_OFF + 4, 4);
+        return;
+    }
+    while (available) {
+        at = tail % ZZAPP_CONSOLE_OUT_CAP;
+        chunk = ZZAPP_CONSOLE_OUT_CAP - at;
+        if (chunk > available)
+            chunk = available;
+        if (chunk > 1024u)
+            chunk = 1024u;
+        win_cache(ZZAPP_CONSOLE_OUT_OFF + ZZAPP_CONSOLE_HDR + at, chunk);
+        written = Write(console_output(),
+                        window + ZZAPP_CONSOLE_OUT_OFF + ZZAPP_CONSOLE_HDR + at,
+                        (LONG)chunk);
+        if (written <= 0)
+            break;
+        tail += (uint32_t)written;
+        available -= (uint32_t)written;
+        if ((uint32_t)written != chunk)
+            break;
+    }
+    zzapp_put_be32(hdr + 4, tail);
+    win_cache(ZZAPP_CONSOLE_OUT_OFF + 4, 4);
+}
+
+static void console_fill_input(void)
+{
+    uint8_t *hdr;
+    uint32_t head, tail, free_bytes, at, chunk;
+    LONG got;
+
+    if (!window || !(life_get(ZZAPP_LIFE_FLAGS_OFF) & ZZAPP_F_CONSOLE))
+        return;
+    if (!console_open_if_needed())
+        return;
+    hdr = window + ZZAPP_CONSOLE_IN_OFF;
+    win_cache(ZZAPP_CONSOLE_IN_OFF, ZZAPP_CONSOLE_HDR);
+    head = zzapp_get_be32(hdr);
+    tail = zzapp_get_be32(hdr + 4);
+    if (head - tail > ZZAPP_CONSOLE_IN_CAP)
+        return;
+    if (!WaitForChar(console_input(), 0))
+        return;
+    free_bytes = ZZAPP_CONSOLE_IN_CAP - (head - tail);
+    if (free_bytes == 0)
+        return;
+    at = head % ZZAPP_CONSOLE_IN_CAP;
+    chunk = ZZAPP_CONSOLE_IN_CAP - at;
+    if (chunk > free_bytes)
+        chunk = free_bytes;
+    if (chunk > 256u)
+        chunk = 256u;
+    got = Read(console_input(),
+               window + ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_HDR + at,
+               (LONG)chunk);
+    if (got <= 0) {
+        zzapp_put_be32(hdr + ZZAPP_CONSOLE_EOF_OFF, 1u);
+        win_cache(ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_EOF_OFF, 4);
+        return;
+    }
+    win_cache(ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_HDR + at, (uint32_t)got);
+    zzapp_put_be32(hdr, head + (uint32_t)got);
+    win_cache(ZZAPP_CONSOLE_IN_OFF, 4);
+}
+
+static ULONG ahi_find_stereo_mode(void)
+{
+    ULONG id = AHI_INVALID_ID;
+
+    while ((id = AHI_NextAudioID(id)) != AHI_INVALID_ID) {
+        LONG stereo = FALSE;
+        LONG bits = 0;
+        struct TagItem tags[] = {
+            { AHIDB_Stereo, (ULONG)&stereo },
+            { AHIDB_Bits, (ULONG)&bits },
+            { TAG_DONE, 0 }
+        };
+
+        if (AHI_GetAudioAttrsA(id, NULL, tags) && stereo && bits == 16)
+            return id;
+    }
+    return AHI_INVALID_ID;
+}
+
+static void ahi_close(void)
+{
+    if (ahi_control) {
+        struct TagItem stop_tags[] = {
+            { AHIC_Play, FALSE },
+            { TAG_DONE, 0 }
+        };
+
+        AHI_ControlAudioA(ahi_control, stop_tags);
+        if (ahi_sound_loaded)
+            AHI_UnloadSound(0, ahi_control);
+        AHI_FreeAudio(ahi_control);
+        ahi_control = NULL;
+    }
+    ahi_sound_loaded = 0;
+    if (ahi_buffer) {
+        FreeVec(ahi_buffer);
+        ahi_buffer = NULL;
+    }
+    if (!ahi_device_open && ahi_request)
+        CloseDevice((struct IORequest *)ahi_request);
+    ahi_device_open = -1;
+    if (ahi_request) {
+        DeleteIORequest((struct IORequest *)ahi_request);
+        ahi_request = NULL;
+    }
+    if (ahi_port) {
+        DeleteMsgPort(ahi_port);
+        ahi_port = NULL;
+    }
+    AHIBase = NULL;
+    ahi_rate = 0;
+    ahi_channels = 0;
+    ahi_pending_bytes = 0;
+}
+
+static int ahi_open(uint32_t rate, uint32_t channels)
+{
+    ULONG mode;
+    ULONG actual_rate = 0;
+    struct AHISampleInfo sample;
+    struct TagItem alloc_tags[] = {
+        { AHIA_AudioID, 0 },
+        { AHIA_MixFreq, 0 },
+        { AHIA_Channels, 1 },
+        { AHIA_Sounds, 1 },
+        { TAG_DONE, 0 }
+    };
+    struct TagItem start_tags[] = {
+        { AHIC_Play, TRUE },
+        { AHIC_MixFreq_Query, (ULONG)&actual_rate },
+        { TAG_DONE, 0 }
+    };
+
+    if (channels != 2u || rate == 0u)
+        return 0;
+    ahi_port = CreateMsgPort();
+    if (!ahi_port)
+        return 0;
+    ahi_request = (struct AHIRequest *)CreateIORequest(ahi_port,
+                                                        sizeof(*ahi_request));
+    if (!ahi_request)
+        goto failed;
+    ahi_request->ahir_Version = 4;
+    ahi_device_open = OpenDevice((CONST_STRPTR)AHINAME, AHI_NO_UNIT,
+                                 (struct IORequest *)ahi_request, 0);
+    if (ahi_device_open)
+        goto failed;
+    AHIBase = (struct Library *)ahi_request->ahir_Std.io_Device;
+    mode = ahi_find_stereo_mode();
+    if (mode == AHI_INVALID_ID)
+        goto failed;
+    alloc_tags[0].ti_Data = mode;
+    alloc_tags[1].ti_Data = rate;
+    ahi_control = AHI_AllocAudioA(alloc_tags);
+    if (!ahi_control)
+        goto failed;
+    ahi_buffer = AllocVec(ZZAPP_AUDIO_CAP, MEMF_PUBLIC | MEMF_CLEAR);
+    if (!ahi_buffer)
+        goto failed;
+    memset(&sample, 0, sizeof(sample));
+    sample.ahisi_Type = AHIST_S16S;
+    sample.ahisi_Address = ahi_buffer;
+    sample.ahisi_Length = ZZAPP_AUDIO_CAP / 4u;
+    if (AHI_LoadSound(0, AHIST_DYNAMICSAMPLE, &sample, ahi_control) != AHIE_OK)
+        goto failed;
+    ahi_sound_loaded = 1;
+    if (AHI_ControlAudioA(ahi_control, start_tags) != AHIE_OK ||
+        actual_rate != rate)
+        goto failed;
+    AHI_SetVol(0, 0x10000L, 0x8000L, ahi_control,
+               AHISF_IMM | AHISF_NODELAY);
+    ahi_rate = rate;
+    ahi_channels = channels;
+    ahi_underruns = 0;
+    return 1;
+failed:
+    ahi_close();
+    return 0;
+}
+
+static void service_ahi_audio(void)
+{
+    uint8_t *hdr;
+    uint32_t head, tail, available, contiguous, bytes, frames, now, at, i;
+    int completed = 0;
+    if (!window || !(life_get(ZZAPP_LIFE_FLAGS_OFF) & ZZAPP_F_LAUNCHER_AUDIO_AHI))
+        return;
+    hdr = window + ZZAPP_AUDIO_OFF;
+    win_cache(ZZAPP_AUDIO_OFF, ZZAPP_AUDIO_HDR);
+    if (zzapp_get_be32(hdr + ZZAPP_AUDIO_ROUTE_OFF) != ZZAPP_AUDIO_ROUTE_AHI)
+        return;
+    if (!ahi_control &&
+        !ahi_open(zzapp_get_be32(hdr + ZZAPP_AUDIO_RATE_OFF),
+                  zzapp_get_be32(hdr + ZZAPP_AUDIO_CHANNELS_OFF))) {
+        request_stop();
+        return;
+    }
+    head = zzapp_get_be32(hdr + ZZAPP_AUDIO_HEAD_OFF);
+    tail = zzapp_get_be32(hdr + ZZAPP_AUDIO_TAIL_OFF);
+    if (head - tail > ZZAPP_AUDIO_CAP)
+        return;
+    now = now_ms();
+    if (ahi_pending_bytes) {
+        if ((int32_t)(now - ahi_until_ms) < 0)
+            return;
+        tail += ahi_pending_bytes;
+        ahi_pending_bytes = 0;
+        zzapp_put_be32(hdr + ZZAPP_AUDIO_TAIL_OFF, tail);
+        win_cache(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_TAIL_OFF, 4);
+        completed = 1;
+    }
+    available = head - tail;
+    contiguous = ZZAPP_AUDIO_CAP - (tail % ZZAPP_AUDIO_CAP);
+    bytes = available < contiguous ? available : contiguous;
+    frames = ahi_rate / 50u;
+    if (frames == 0u)
+        return;
+    if (bytes > frames * ahi_channels * 2u)
+        bytes = frames * ahi_channels * 2u;
+    bytes -= bytes % (ahi_channels * 2u);
+    if (bytes == 0u) {
+        if (completed) {
+            ahi_underruns++;
+            zzapp_put_be32(hdr + ZZAPP_AUDIO_UNDERRUNS_OFF, ahi_underruns);
+            life_put(ZZAPP_LIFE_AUDIO_UNDERRUNS_OFF, ahi_underruns);
+            win_cache(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_UNDERRUNS_OFF, 4);
+        }
+        return;
+    }
+    at = tail % ZZAPP_AUDIO_CAP;
+    win_cache(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_HDR + at, bytes);
+    for (i = 0; i < bytes; i += 2u) {
+        ahi_buffer[i] = window[ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_HDR + at + i + 1u];
+        ahi_buffer[i + 1u] = window[ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_HDR + at + i];
+    }
+    AHI_SetSound(0, 0, 0, bytes / (ahi_channels * 2u), ahi_control,
+                 AHISF_IMM | AHISF_NODELAY);
+    AHI_SetFreq(0, ahi_rate, ahi_control, AHISF_IMM | AHISF_NODELAY);
+    ahi_pending_bytes = bytes;
+    ahi_until_ms = now + (bytes / (ahi_channels * 2u)) * 1000u / ahi_rate;
+    if (ahi_until_ms == now)
+        ahi_until_ms++;
+}
+
+static void service_console(void)
+{
+    console_drain_output();
+    console_fill_input();
 }
 
 static int bitmap_arm(struct BitMap *bm, ULONG *arm, ULONG *pitch)
@@ -2145,6 +2492,8 @@ static int run_loop(ULONG forced_mode)
         drain_window(input_win);
         poll_joysticks();
         serve_files();
+        service_console();
+        service_ahi_audio();
         print_log();
         load_palette();
         if (!window)
@@ -2249,7 +2598,12 @@ static void cleanup(void)
     if (!stop_asked && owns_current_generation() &&
         life_get(ZZAPP_LIFE_STATE_OFF) != ZZAPP_ST_IDLE)
         stop_owned();
+    ahi_close();
     window_cache_restore();
+    if (console_handle) {
+        Close(console_handle);
+        console_handle = 0;
+    }
     for (i = 0; i < ZZAPP_FD_COUNT; i++) {
         close_fd_index(i);
         close_list_index(i);
@@ -2440,6 +2794,9 @@ int main(int argc, char **argv)
         cleanup();
         return 20;
     }
+    if (audio_ahi)
+        life_put(ZZAPP_LIFE_FLAGS_OFF,
+                 life_get(ZZAPP_LIFE_FLAGS_OFF) | ZZAPP_F_LAUNCHER_AUDIO_AHI);
     P96Base = OpenLibrary((CONST_STRPTR)"Picasso96API.library", 2);
     timer_port = CreateMsgPort();
     if (timer_port)

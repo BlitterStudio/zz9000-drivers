@@ -34,7 +34,7 @@ returns 10 for invalid launcher arguments.
 | `ABS=1` | Permit app paths containing an Amiga volume or assign colon. The root check does not apply to those paths. |
 | `MODE` | Optional Picasso96 DisplayID, in decimal, `$` hexadecimal, or `0x` hexadecimal. The app still chooses width, height, and RGB format. |
 | `ARGS` | Optional space-separated arguments. Quoting is not parsed. |
-| `JOYPORT0=1` | Also read joystick port 0. Disabled by default; a mouse in port 0 then also reports as joystick movement. |
+| `AUDIO=AHI` | Route app PCM to AHI. The default remains the card audio fabric. |
 
 Dragging an ELF project onto the ZZRun icon takes precedence over `APP`.
 
@@ -48,7 +48,7 @@ another shared-memory convention.
    ZZRun stops before allocating a window.
 2. `APP_ALLOC_WINDOW` returns an ARM address, size, and `host_offset`. ZZRun
    maps the rings at `board_base + host_offset`; it does not assume a board
-   offset. The returned block is the fixed 384 KiB `ZZAPP_WINDOW_BYTES`
+   offset. The returned block is the fixed 592 KiB `ZZAPP_WINDOW_BYTES`
    layout in `zzapp_proto.h`.
 3. `APP_LOAD_BEGIN` reserves the app arena. ZZRun streams the ELF through
    `ZZAPP_STAGING_OFF` in chunks no larger than `ZZAPP_STAGING_BYTES`, posting
@@ -58,14 +58,17 @@ another shared-memory convention.
    calls `APP_START`. Strings are capped at 127 bytes plus NUL; the complete
    packed area must fit `ZZAPP_ARGV_BYTES`.
 5. While the app runs, every poll writes `heartbeat_ms`, drains firmware log
-   records, forwards input, services one file request, binds a requested P96
-   screen, loads changed CLUT8 palette entries, and acknowledges completed
-   flips. `APP_STATUS` is called when the app ends or faults.
+   records and app console output, fills app console input when data is ready,
+   forwards input, services one file request, binds a requested P96 screen,
+   loads changed CLUT8 palette entries, and acknowledges completed flips.
+   `APP_STATUS` is called when the app ends or faults.
 6. Ctrl-C requests a stop: ZZRun writes the lifecycle `stop` word, enqueues one
-   `ZZ_EV_STOP`, and posts `APP_STOP`. The app display has one borderless input
-   window, not a close gadget; its raw keys are forwarded to the app, including
-   the app's own quit controls. ZZRun remains alive for the 500 ms grace period
-   so firmware can publish its final state. It closes the custom screen and
+   `ZZ_EV_STOP`, and posts `APP_STOP`. Ctrl-D, Ctrl-E, and Ctrl-F on the app
+   display remain normal raw-key events and additionally enqueue `ZZ_EV_BREAK`
+   with codes 4, 5, and 6. The app display has one borderless input window, not
+   a close gadget; its raw keys are forwarded to the app, including the app's
+   own quit controls. ZZRun remains alive for the 500 ms grace period so
+   firmware can publish its final state. It closes the custom screen and
    returns the public screen even after a fault.
 
 All mailbox payload and rings fields are big-endian. ZZRun stages the firmware
@@ -86,6 +89,24 @@ The launcher owns the input producer side. It drops a new event rather than
 blocking when all 256 slots are full, and increments `input_drops`. Firmware
 owns the log producer side. ZZRun consumes its padded log records and prints
 them on stdout.
+
+### Console and audio routes
+
+App `stdout` and `stderr` use the dedicated non-lossy console-output ring, not
+the diagnostic `zz_log` ring. A Shell launch writes those bytes through
+`Output()` and takes app stdin from `Input()`. EOF from that handle is published
+to the app after all input bytes. A Workbench launch opens no console by
+default; only when the app first uses console I/O does firmware set its console
+flag, causing ZZRun to open a closable `CON:` window. If opening that requested
+console fails, ZZRun stops the app instead of silently losing output.
+
+The default audio route is the card fabric. Set `AUDIO=AHI` in the app icon to
+request the AHI route; it is advertised to firmware before the app starts.
+The shared PCM ring is interleaved S16LE and carries its requested rate and
+channel count. ZZRun accepts the route only when AHI grants the exact requested
+stereo rate; it converts the ring's S16LE samples into AHI's S16BE bounce
+buffer without resampling or downmixing. AHI underruns are reported in the
+audio ring/lifecycle counters.
 
 When firmware sets the display-unbound flag, ZZRun opens the requested P96
 screen. RGB565 is the first path; CLUT8 is supported and ZZRun loads changed
