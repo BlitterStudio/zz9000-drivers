@@ -34,10 +34,11 @@ if [ -z "$engine" ]; then
     fi
 fi
 
-# Expand PATH inside the container, not on the host.
+# The GCC 6.5 image installs its cross tools under /opt/m68k-amigaos; retain
+# the older location for local images that still use it.
 # shellcheck disable=SC2016
 exec "$engine" run --rm \
     -v "$repo_root":/src \
     -w "/src/$workdir" \
     "$image" \
-    sh -lc 'export PATH=/opt/amiga/bin:$PATH; exec "$@"' sh "$@"
+    sh -lc 'export PATH=/opt/m68k-amigaos/bin:/opt/amiga/bin:$PATH; exec "$@"' sh "$@"
