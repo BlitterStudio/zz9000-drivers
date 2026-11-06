@@ -29,9 +29,6 @@
 #include "zz9k/request.h"
 #include "zzapp_proto.h"
 #include "zzrun_policy.h"
-#ifndef ZZAPP_AUDIO_EPOCH_OFF
-#define ZZAPP_AUDIO_EPOCH_OFF 28u
-#endif
 #include "zz9000_hw.h"
 #include <devices/ahi.h>
 #include <proto/ahi.h>
@@ -100,13 +97,8 @@ _Static_assert(ZZRUN_FAULT_WATCHDOG_RESTART == ZZAPP_FAULT_WATCHDOG_RESTART,
                "watchdog restart");
 _Static_assert(ZZRUN_POLICY_GRACE_MS == ZZRUN_GRACE_MS, "grace");
 _Static_assert(ZZAPP_AUDIO_EPOCH_OFF == 28u, "audio epoch offset");
-#if defined(ZZAPP_AUDIO_FLAGS_OFF)
-_Static_assert(ZZAPP_AUDIO_FLAGS_OFF == ZZAPP_AUDIO_EPOCH_OFF, "epoch word");
-#endif
-#ifdef ZZAPP_STOP_REQ_BYTES
 _Static_assert(ZZAPP_STOP_REQ_BYTES == ZZRUN_STOP_REQ_BYTES, "stop bytes");
 _Static_assert(ZZAPP_STOP_GENERATION == 0u, "stop generation offset");
-#endif
 
 #define MMU_MAPP_CACHEINHIBIT 0x00000040UL
 #define MMU_MAPP_COPYBACK     0x00002000UL
@@ -2109,6 +2101,10 @@ static void service_ahi_audio(void)
         return;
     }
     epoch = zzapp_get_be32(hdr + ZZAPP_AUDIO_EPOCH_OFF);
+    /* Firmware writes the epoch last on open. Zero means the rest of the
+     * header may still belong to the previous stream. */
+    if (epoch == 0u)
+        return;
     rate = zzapp_get_be32(hdr + ZZAPP_AUDIO_RATE_OFF);
     channels = zzapp_get_be32(hdr + ZZAPP_AUDIO_CHANNELS_OFF);
     if (zzrun_audio_epoch_replaced(ahi_stream_epoch_valid, ahi_stream_epoch,
