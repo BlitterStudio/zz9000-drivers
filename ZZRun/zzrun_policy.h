@@ -170,4 +170,13 @@ static inline uint32_t zzrun_load_generation_to_claim(
     return observed;
 }
 
+/* Firmware abandons a timed-out file request by changing its sequence.
+ * A late host reply may write the captured request only while that sequence
+ * is still live; otherwise its fields would corrupt the newer request. */
+static inline int zzrun_file_reply_is_current(uint32_t request_seq,
+                                              uint32_t live_seq)
+{
+    return request_seq == live_seq;
+}
+
 #endif /* ZZRUN_POLICY_H */

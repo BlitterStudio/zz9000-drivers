@@ -956,6 +956,10 @@ static void file_reply(uint32_t request_seq, int32_t fd, int32_t err,
     if (life_get(ZZAPP_LIFE_GENERATION_OFF) != file_generation)
         return;
     win_cache(ZZAPP_FILE_OFF, ZZAPP_FILE_BYTES);
+    if (!zzrun_file_reply_is_current(
+            request_seq,
+            zzapp_get_be32(slot + offsetof(struct zzapp_file_wire, seq))))
+        return;
     zzapp_put_be32(slot + offsetof(struct zzapp_file_wire, seq), request_seq + 1u);
     win_cache(ZZAPP_FILE_OFF, 4);
     zzapp_put_be32(slot + offsetof(struct zzapp_file_wire, fd), (uint32_t)fd);

@@ -153,6 +153,13 @@ static void test_busy_load_begin_claims_nothing(void)
     assert(zzrun_load_generation_to_claim(0, 0, 7u, 8u, 0, 0, 0u) == 0u);
 }
 
+static void test_late_file_reply_does_not_match_new_request(void)
+{
+    assert(zzrun_file_reply_is_current(8u, 8u));
+    assert(!zzrun_file_reply_is_current(8u, 9u));
+    assert(!zzrun_file_reply_is_current(8u, 10u));
+}
+
 int main(void)
 {
     test_output_failure_does_not_block_exit();
@@ -165,6 +172,7 @@ int main(void)
     test_finish_prompt_is_not_stdout();
     test_ahi_open_failure_exits_20();
     test_busy_load_begin_claims_nothing();
+    test_late_file_reply_does_not_match_new_request();
     puts("zzrun_policy_test: ok");
     return 0;
 }
