@@ -1707,6 +1707,137 @@ static int console_output_pending(void)
 }
 
 
+/*
+ * Interactive input runs the console in raw mode with ZZRun doing the line
+ * editing. In cooked mode WaitForChar() never reports a Ctrl-\ typed on an
+ * empty line, so the app never saw EOF, and a blocking Read() would stop
+ * ZZRun serving the app.
+ */
+static int console_raw;
+static int console_csi;
+static int console_eof_pending;
+static uint32_t console_line_len;
+static int console_line_ready;
+static char console_line[256];
+
+static void console_restore_mode(void)
+{
+    if (console_raw) {
+        SetMode(console_input(), 0);
+        console_raw = 0;
+    }
+}
+
+static void console_echo(const char *text, LONG n)
+{
+    (void)Write(console_input(), (APTR)text, n);
+}
+
+static void console_edit(UBYTE c)
+{
+    if (console_csi) {
+        if (c >= 0x40u && c <= 0x7eu)
+            console_csi = 0;
+        return;
+    }
+    if (c == 0x9bu || c == 0x1bu) {
+        console_csi = 1;
+        return;
+    }
+    if (c == '\r' || c == '\n') {
+        console_line[console_line_len++] = '\n';
+        console_echo("\n", 1);
+        console_line_ready = 1;
+        return;
+    }
+    if (c == 0x1cu) {
+        console_line_ready = console_line_len != 0;
+        console_eof_pending = 1;
+        return;
+    }
+    if (c == 0x08u || c == 0x7fu) {
+        if (console_line_len) {
+            console_line_len--;
+            console_echo("\b \b", 3);
+        }
+        return;
+    }
+    if (c < 0x20u || (c >= 0x80u && c < 0xa0u))
+        return;
+    if (console_line_len < sizeof(console_line) - 1u) {
+        console_line[console_line_len++] = (char)c;
+        console_echo((const char *)&c, 1);
+    }
+}
+
+/* Copies bytes into the stdin ring; returns how many fitted. */
+static uint32_t console_push(uint8_t *hdr, const uint8_t *data, uint32_t n)
+{
+    uint32_t head = zzapp_get_be32(hdr);
+    uint32_t tail = zzapp_get_be32(hdr + 4);
+    uint32_t free_bytes = ZZAPP_CONSOLE_IN_CAP - (head - tail);
+    uint32_t done = 0;
+
+    if (head - tail > ZZAPP_CONSOLE_IN_CAP)
+        return 0;
+    while (done < n && free_bytes) {
+        uint32_t at = head % ZZAPP_CONSOLE_IN_CAP;
+        uint32_t chunk = ZZAPP_CONSOLE_IN_CAP - at;
+        if (chunk > free_bytes)
+            chunk = free_bytes;
+        if (chunk > n - done)
+            chunk = n - done;
+        memcpy(window + ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_HDR + at,
+               data + done, chunk);
+        win_cache(ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_HDR + at, chunk);
+        head += chunk;
+        done += chunk;
+        free_bytes -= chunk;
+    }
+    zzapp_put_be32(hdr, head);
+    win_cache(ZZAPP_CONSOLE_IN_OFF, 4);
+    return done;
+}
+
+static void console_set_eof(uint8_t *hdr)
+{
+    zzapp_put_be32(hdr + ZZAPP_CONSOLE_EOF_OFF, 1u);
+    win_cache(ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_EOF_OFF, 4);
+}
+
+static void console_fill_interactive(uint8_t *hdr)
+{
+    UBYTE raw[32];
+    LONG got, i;
+
+    if (!console_raw) {
+        if (!SetMode(console_input(), 1))
+            return;
+        console_raw = 1;
+    }
+    while (!console_line_ready && !console_eof_pending &&
+           WaitForChar(console_input(), 0)) {
+        got = Read(console_input(), raw, (LONG)sizeof(raw));
+        if (got <= 0) {
+            console_eof_pending = 1;
+            break;
+        }
+        for (i = 0; i < got && !console_line_ready && !console_eof_pending; i++)
+            console_edit(raw[i]);
+    }
+    if (console_line_ready) {
+        uint32_t sent = console_push(hdr, (const uint8_t *)console_line,
+                                     console_line_len);
+        memmove(console_line, console_line + sent, console_line_len - sent);
+        console_line_len -= sent;
+        if (console_line_len)
+            return;
+        console_line_ready = 0;
+    }
+    if (console_eof_pending)
+        console_set_eof(hdr);
+}
+
 static void console_fill_input(void)
 {
     uint8_t *hdr;
@@ -1719,11 +1850,15 @@ static void console_fill_input(void)
         return;
     hdr = window + ZZAPP_CONSOLE_IN_OFF;
     win_cache(ZZAPP_CONSOLE_IN_OFF, ZZAPP_CONSOLE_HDR);
+    if (zzapp_get_be32(hdr + ZZAPP_CONSOLE_EOF_OFF))
+        return;
+    if (IsInteractive(console_input())) {
+        console_fill_interactive(hdr);
+        return;
+    }
     head = zzapp_get_be32(hdr);
     tail = zzapp_get_be32(hdr + 4);
     if (head - tail > ZZAPP_CONSOLE_IN_CAP)
-        return;
-    if (IsInteractive(console_input()) && !WaitForChar(console_input(), 0))
         return;
     free_bytes = ZZAPP_CONSOLE_IN_CAP - (head - tail);
     if (free_bytes == 0)
@@ -1738,8 +1873,7 @@ static void console_fill_input(void)
                window + ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_HDR + at,
                (LONG)chunk);
     if (got <= 0) {
-        zzapp_put_be32(hdr + ZZAPP_CONSOLE_EOF_OFF, 1u);
-        win_cache(ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_EOF_OFF, 4);
+        console_set_eof(hdr);
         return;
     }
     win_cache(ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_HDR + at, (uint32_t)got);
@@ -2677,6 +2811,7 @@ static void cleanup(void)
         stop_owned();
     ahi_close();
     window_cache_restore();
+    console_restore_mode();
     if (console_handle) {
         Close(console_handle);
         console_handle = 0;
