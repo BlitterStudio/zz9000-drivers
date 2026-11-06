@@ -95,10 +95,16 @@ them on stdout.
 App `stdout` and `stderr` use the dedicated non-lossy console-output ring, not
 the diagnostic `zz_log` ring. A Shell launch writes those bytes through
 `Output()` and takes app stdin from `Input()`. EOF from that handle is published
-to the app after all input bytes. A Workbench launch opens no console by
-default; only when the app first uses console I/O does firmware set its console
-flag, causing ZZRun to open a closable `CON:` window. If opening that requested
-console fails, ZZRun stops the app instead of silently losing output.
+to the app after all input bytes. A redirected input (`<file`) ends the app's
+stdin at the end of the file. From the keyboard, the app gets whatever ends a
+`Type *` in the same console; on OS 3.2.3 with the standard or CCON handler
+Ctrl-\ does not, so stop such an app with Ctrl-C. If the app is waiting for
+keyboard input when it stops, ZZRun prints `press Return to finish.`: the
+console cannot cancel the line read it has open. A Workbench launch opens no
+console by default; only when the app first uses console I/O does firmware set
+its console flag, causing ZZRun to open a closable `CON:` window. If opening
+that requested console fails, ZZRun stops the app instead of silently losing
+output.
 
 The default audio route is the card fabric. Set `AUDIO=AHI` in the app icon or
 pass `AUDIO=AHI` before app arguments in a Shell command to request the AHI

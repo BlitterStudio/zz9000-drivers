@@ -1754,32 +1754,14 @@ static int console_read_start(BPTR fh)
     return 1;
 }
 
-/* Console-handler packets that put characters into its input as if typed
- * (FORCE) or at the end of its input buffer (QUEUE). The NDK 3.x headers do
- * not define them. */
-#ifndef ACTION_FORCE
-#define ACTION_FORCE 2001
-#endif
-#ifndef ACTION_QUEUE
-#define ACTION_QUEUE 2003
-#endif
-
-/* A pending read must come back before its port and buffer are freed. A
- * Return put into the console's input completes it; a handler that knows
- * neither packet needs the user to press Return. */
+/* A pending read must come back before its port and buffer are freed. The
+ * 3.2 console handler has no way to cancel it (it ignored ACTION_FORCE and
+ * ACTION_QUEUE on the A4000), so the user finishes it with Return. This
+ * only happens when the app stops while it is waiting for input. */
 static void console_read_finish(void)
 {
     if (con_pending) {
-        struct FileHandle *handle = (struct FileHandle *)BADDR(con_fh);
-        int waited;
-
-        if (!DoPkt(handle->fh_Type, ACTION_FORCE, handle->fh_Arg1,
-                   (LONG)"\n", 1, 0, 0))
-            (void)DoPkt(handle->fh_Type, ACTION_QUEUE, handle->fh_Arg1,
-                        (LONG)"\n", 1, 0, 0);
-        for (waited = 0; waited < 50 && !GetMsg(con_port); waited++)
-            Delay(1);
-        if (waited == 50) {
+        if (!GetMsg(con_port)) {
             puts("ZZRun: press Return to finish.");
             fflush(stdout);
             WaitPort(con_port);
