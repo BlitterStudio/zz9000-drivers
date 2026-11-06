@@ -23,8 +23,8 @@ ZZRun icon. For Quake, set `ROOT` to the directory containing `id1/`.
 
 On normal app exit, ZZRun returns the app exit code. It returns 20 after an
 app fault, an unavailable runtime, display failure, a console that cannot be
-opened or written, or another launcher error. It returns 10 for invalid
-launcher arguments.
+opened or written, an AHI route that cannot be opened, or another launcher
+error. It returns 10 for invalid launcher arguments.
 
 ## Workbench ToolTypes
 
@@ -112,7 +112,9 @@ the same asynchronous read, so an open writer cannot stall heartbeat, display,
 or audio. A regular file completes immediately. If a non-interactive read is
 still pending at exit, ZZRun writes `waiting for pending input to finish.` to
 the user console (not stdout, and not the pipe) and waits, because a pipe read
-cannot be cancelled. A Workbench launch opens no console by default; only when
+cannot be cancelled. The custom screen is closed before either of those waits,
+so the prompt is not hidden behind the app display. A Workbench launch opens
+no console by default; only when
 the app first uses console I/O does firmware set its console flag, causing
 ZZRun to open a closable `CON:` window. If opening that requested console
 fails, or if writing app output fails, ZZRun stops the app, does not wait for
@@ -126,7 +128,8 @@ channel count. Each successful firmware audio open publishes a stream epoch in
 the audio header. If that epoch changes, ZZRun aborts and reaps its previous
 AHI requests without retiring their bytes onto the new stream, then accepts
 the new head, tail, and rate. ZZRun accepts the route only when AHI grants the
-exact requested stereo rate; it converts the ring's S16LE samples into AHI's
+exact requested stereo rate; if AHI cannot be opened, ZZRun stops the app and
+returns 20. It converts the ring's S16LE samples into AHI's
 S16BE bounce buffer without resampling or downmixing. AHI underruns are
 reported in the audio ring/lifecycle counters.
 

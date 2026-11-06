@@ -140,4 +140,15 @@ static inline int zzrun_finish_prompt(int pending, int interactive_read)
     return ZZRUN_FINISH_WAIT_ON_USER_CONSOLE;
 }
 
+/* README returns 20 for a launcher error even when the app exits 0.
+ * An AHI open failure on the AUDIO=AHI route is a launcher error, as are
+ * a display failure and a console that cannot be opened or written. */
+static inline int zzrun_process_exit(int app_exit, int display_failed,
+                                     int console_failed, int ahi_open_failed)
+{
+    if (display_failed || console_failed || ahi_open_failed)
+        return 20;
+    return app_exit;
+}
+
 #endif /* ZZRUN_POLICY_H */

@@ -1,6 +1,7 @@
 import os
 import pathlib
 import re
+import struct
 import shutil
 import subprocess
 import tempfile
@@ -32,6 +33,110 @@ GENERATED_ARTIFACT_PATHS = (
     "ahi/axtest/axtest",
     "ahi/duplextest/ZZAXDuplexTest",
 )
+
+
+def _be32(data, offset):
+    return int.from_bytes(data[offset:offset + 4], "big")
+
+
+def _skip_counted_string(data, offset):
+    if offset + 4 > len(data):
+        raise ValueError("truncated string length at %d" % offset)
+    length = _be32(data, offset)
+    end = offset + 4 + length
+    if length == 0 or end > len(data) or data[end - 1] != 0:
+        raise ValueError("bad counted string at %d length %d" % (offset, length))
+    return end
+
+
+def _skip_image(data, offset):
+    if offset + 20 > len(data):
+        raise ValueError("truncated image at %d" % offset)
+    width, height, depth = struct.unpack_from(">hhh", data, offset + 4)
+    image_data = _be32(data, offset + 10)
+    if width <= 0 or height <= 0 or not 1 <= depth <= 8:
+        raise ValueError("bad image geometry at %d" % offset)
+    offset += 20
+    if image_data:
+        row_bytes = ((width + 15) // 16) * 2
+        nbytes = row_bytes * height * depth
+        if offset + nbytes > len(data):
+            raise ValueError("truncated image planes at %d" % offset)
+        offset += nbytes
+    return offset
+
+
+def read_classic_tooltypes(data, allow_trailing=False):
+    """Read ToolTypes the way icon.library reads a classic DiskObject.
+
+    Pointer fields are presence markers. Bodies follow the 78-byte header
+    in order: DrawerData, render Image, select Image, DefaultTool,
+    ToolTypes, ToolWindow. ToolTypes are a longword of (count + 1) * 4,
+    then length-prefixed NUL-terminated strings.
+    """
+    if len(data) < 78 or data[0:2] != b"\xe3\x10" or data[2:4] != b"\x00\x01":
+        raise ValueError("not a classic DiskObject")
+    render = _be32(data, 22)
+    select = _be32(data, 26)
+    default_tool = _be32(data, 50)
+    tooltypes = _be32(data, 54)
+    drawer = _be32(data, 66)
+    tool_window = _be32(data, 70)
+    if tooltypes == 0:
+        raise ValueError("icon has no tooltypes")
+    offset = 78
+    if drawer:
+        if offset + 56 > len(data):
+            raise ValueError("truncated DrawerData")
+        offset += 56
+    if render:
+        offset = _skip_image(data, offset)
+    if select:
+        offset = _skip_image(data, offset)
+    if default_tool:
+        offset = _skip_counted_string(data, offset)
+    if offset + 4 > len(data):
+        raise ValueError("truncated tooltype table")
+    header = _be32(data, offset)
+    if header < 8 or header % 4 != 0 or header > 4096:
+        raise ValueError("tooltype table size %d is not a classic count" % header)
+    count = header // 4 - 1
+    offset += 4
+    strings = []
+    for _ in range(count):
+        if offset + 4 > len(data):
+            raise ValueError("truncated tooltype")
+        length = _be32(data, offset)
+        end = offset + 4 + length
+        if length < 2 or end > len(data) or data[end - 1] != 0:
+            raise ValueError("tooltype is not a length-prefixed string")
+        strings.append(data[offset + 4:end - 1].decode("latin-1"))
+        offset = end
+    if tool_window:
+        offset = _skip_counted_string(data, offset)
+    if not allow_trailing and offset != len(data):
+        raise ValueError(
+            "trailing %d bytes after classic bodies" % (len(data) - offset)
+        )
+    return strings
+
+
+def old_offset_tooltypes(prefix, strings):
+    """The previous generator: a longword offset table plus raw C strings."""
+    encoded = [(text + "\0").encode("ascii") for text in strings]
+    table_bytes = (len(encoded) + 1) * 4
+    cursor = len(prefix) + table_bytes
+    pointers = []
+    blob = b""
+    for raw in encoded:
+        pointers.append(cursor)
+        blob += raw
+        cursor += len(raw)
+    table = b"".join(struct.pack(">I", off) for off in pointers)
+    table += struct.pack(">I", 0)
+    data = bytearray(prefix + table + blob)
+    data[54:58] = struct.pack(">I", len(prefix))
+    return bytes(data)
 
 
 class RepoToolingTests(unittest.TestCase):
@@ -1309,6 +1414,136 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("available = ZZ_AX_AUDIO_RX_RESIDENT_PERIODS", body)
         self.assertIn("newest_period + ZZ_AX_AUDIO_PERIODS", body)
         self.assertIn("period * ZZ_AX_BYTES_PER_PERIOD", body)
+
+    def test_build_all_runs_zzrun_on_the_host(self):
+        """ZZRun/build.sh stages firmware headers before re-execing in Docker.
+        amiga-docker.sh mounts only this repo and does not forward
+        ZZ9000_FIRMWARE or ZZ9000_SDK, so build-all must invoke that script
+        on the host. A Docker-first invocation never writes the host marker.
+        """
+        import stat
+
+        stub = "#!/bin/sh\nexit 0\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            tools = root / "tools"
+            tools.mkdir()
+            (tools / "build-all.sh").write_bytes(
+                (ROOT / "tools" / "build-all.sh").read_bytes()
+            )
+            (tools / "amiga-docker.sh").write_text(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> docker-invocations\nexit 0\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            (tools / "check-release.sh").write_text(
+                stub, encoding="utf-8", newline="\n"
+            )
+            (root / "ZZRun").mkdir()
+            (root / "ZZRun" / "build.sh").write_text(
+                "#!/bin/sh\nset -eu\n"
+                "printf 'host firmware=%s sdk=%s\\n' "
+                "\"${ZZ9000_FIRMWARE:-}\" \"${ZZ9000_SDK:-}\" "
+                "> zzrun-host-marker\n"
+                "test -n \"${ZZ9000_FIRMWARE:-}\"\n"
+                "test -n \"${ZZ9000_SDK:-}\"\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            for rel in (
+                "ZZTop/build-gcc.sh",
+                "mhi/build.sh",
+                "ahi/driver/build.sh",
+                "sdk/build.sh",
+            ):
+                path = root / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(stub, encoding="utf-8", newline="\n")
+            (root / "rtg" / "tests").mkdir(parents=True)
+            (root / "rtg" / "tests" / "Makefile").write_text(
+                "test:\n\t@echo ok\n", encoding="utf-8", newline="\n"
+            )
+            bindir = root / "bin"
+            bindir.mkdir()
+            (bindir / "make").write_text(stub, encoding="utf-8", newline="\n")
+            for path in root.rglob("*"):
+                if path.is_file():
+                    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+
+            env = os.environ.copy()
+            env["ZZ9000_FIRMWARE"] = "firmware-tree"
+            env["ZZ9000_SDK"] = "sdk-tree"
+            env["PATH"] = str(bindir) + os.pathsep + env.get("PATH", "")
+            result = subprocess.run(
+                ["sh", str(tools / "build-all.sh")],
+                cwd=root,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=False,
+                timeout=60,
+            )
+            docker_log = ""
+            docker_path = root / "docker-invocations"
+            if docker_path.is_file():
+                docker_log = docker_path.read_text(encoding="utf-8")
+            marker = root / "zzrun-host-marker"
+            self.assertTrue(
+                marker.is_file(),
+                "ZZRun/build.sh was not run on the host\n%s\ndocker:\n%s"
+                % (result.stdout, docker_log),
+            )
+            text = marker.read_text(encoding="utf-8")
+            self.assertIn("firmware=firmware-tree", text)
+            self.assertIn("sdk=sdk-tree", text)
+            self.assertEqual(0, result.returncode, result.stdout)
+            for line in docker_log.splitlines():
+                self.assertFalse(
+                    line.startswith("ZZRun"),
+                    "build-all invoked ZZRun inside amiga-docker.sh: %s" % line,
+                )
+
+    def test_zzrun_icon_tooltypes_use_classic_format(self):
+        """icon.library writes ToolTypes as a size longword plus
+        length-prefixed strings. The old offset table is not that format.
+        """
+        import importlib.util
+
+        expected = ["APP=", "ROOT=", "ABS=0", "MODE=", "ARGS="]
+        installer = (
+            ROOT / "installer" / "ZZ9000Installer" / "Install ZZ9000.info"
+        ).read_bytes()
+        self.assertEqual(
+            ["APPNAME=ZZ9000", "MINUSER=AVERAGE"],
+            read_classic_tooltypes(installer, allow_trailing=True),
+        )
+
+        spec = importlib.util.spec_from_file_location(
+            "make_zzrun_icon", ROOT / "tools" / "make-zzrun-icon.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        generated = module.build()
+        self.assertEqual(expected, read_classic_tooltypes(generated))
+        self.assertEqual(32768, struct.unpack_from(">I", generated, 74)[0])
+        for rel in (
+            "ZZRun/ZZRun.info",
+            "installer/ZZ9000Installer/Tools/ZZRun.info",
+        ):
+            committed = (ROOT / rel).read_bytes()
+            self.assertEqual(generated, committed, rel)
+            self.assertEqual(expected, read_classic_tooltypes(committed))
+
+        planes = ((32 + 15) // 16) * 2 * 32 * 2
+        prefix_len = 78 + 20 + planes + 20 + planes
+        self.assertEqual(
+            (len(expected) + 1) * 4,
+            struct.unpack_from(">I", generated, prefix_len)[0],
+        )
+        old = old_offset_tooltypes(generated[:prefix_len], expected)
+        with self.assertRaises(ValueError):
+            read_classic_tooltypes(old)
 
 
 if __name__ == "__main__":

@@ -133,6 +133,15 @@ static void test_finish_prompt_is_not_stdout(void)
     assert(zzrun_finish_prompt(1, 0) == ZZRUN_FINISH_WAIT_ON_USER_CONSOLE);
 }
 
+static void test_ahi_open_failure_exits_20(void)
+{
+    assert(zzrun_process_exit(0, 0, 0, 1) == 20);
+    assert(zzrun_process_exit(0, 0, 0, 0) == 0);
+    assert(zzrun_process_exit(7, 0, 0, 1) == 20);
+    assert(zzrun_process_exit(0, 1, 0, 0) == 20);
+    assert(zzrun_process_exit(0, 0, 1, 0) == 20);
+}
+
 int main(void)
 {
     test_output_failure_does_not_block_exit();
@@ -143,6 +152,7 @@ int main(void)
     test_audio_epoch_discards_before_accept();
     test_stop_payload_carries_generation();
     test_finish_prompt_is_not_stdout();
+    test_ahi_open_failure_exits_20();
     puts("zzrun_policy_test: ok");
     return 0;
 }

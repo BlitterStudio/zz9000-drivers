@@ -170,6 +170,7 @@ static uint32_t ahi_underruns;
 static uint32_t ahi_stream_epoch;
 static int ahi_stream_epoch_valid;
 static int console_output_failed;
+static int audio_open_failed;
 
 struct file_slot {
     BPTR fh;
@@ -2118,7 +2119,11 @@ static void service_ahi_audio(void)
         ahi_underruns = 0u;
         ahi_stream_epoch_valid = 0;
     }
+    if (audio_open_failed)
+        return;
     if (!ahi_request[0] && !ahi_open(rate, channels)) {
+        puts("ZZRun: cannot open AHI for AUDIO=AHI.");
+        audio_open_failed = 1;
         request_stop();
         return;
     }
@@ -2839,8 +2844,9 @@ static int run_loop(ULONG forced_mode)
         else
             printf("ZZRun: exit %ld (%s)\n", (long)exit_code,
                    state_name(zzapp_get_be32(p + ZZAPP_STATUS_STATE)));
-        return (display_failed || console_output_failed) ? 20 :
-               exit_from_app(exit_code, fault, stop_asked);
+        return zzrun_process_exit(exit_from_app(exit_code, fault, stop_asked),
+                                  display_failed, console_output_failed,
+                                  audio_open_failed);
     }
     if (window) {
         fault = life_get(ZZAPP_LIFE_FAULT_OFF);
@@ -2854,8 +2860,9 @@ static int run_loop(ULONG forced_mode)
                          life_get(ZZAPP_LIFE_FSR_OFF),
                          life_get(ZZAPP_LIFE_CPSR_OFF),
                          life_get(ZZAPP_LIFE_GENERATION_OFF));
-        return (display_failed || console_output_failed) ? 20 :
-               exit_from_app(exit_code, fault, stop_asked);
+        return zzrun_process_exit(exit_from_app(exit_code, fault, stop_asked),
+                                  display_failed, console_output_failed,
+                                  audio_open_failed);
     }
     return 20;
 }
@@ -2893,6 +2900,9 @@ static void cleanup(void)
         stop_owned();
     ahi_close();
     window_cache_release();
+    /* A pending console read cannot be cancelled. Close the app screen
+     * before that wait so the prompt is not hidden behind it. */
+    close_display();
     console_read_finish();
     if (console_handle) {
         Close(console_handle);
@@ -2902,7 +2912,6 @@ static void cleanup(void)
         close_fd_index(i);
         close_list_index(i);
     }
-    close_display();
     if (root_lock) {
         UnLock(root_lock);
         root_lock = 0;

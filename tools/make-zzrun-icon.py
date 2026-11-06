@@ -3,10 +3,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Generate the Workbench icon for ZZRun.
 
-Pointers in the file are offsets from the start, which is what
-icon.library adds the load address to. Tooltypes are the v0 set from
-the app-runtime contract, plus APP and ARGS so a tool icon can name
-the ELF and its arguments.
+icon.library stores DiskObject pointers as presence markers (1 or 0), then
+appends bodies in order: DrawerData, render Image, select Image,
+do_DefaultTool, do_ToolTypes, do_ToolWindow. ToolTypes are a longword of
+(count + 1) * 4 followed by length-prefixed NUL-terminated strings, which
+is what PutDiskObject writes and what Install ZZ9000.info uses. An offset
+table of raw C strings is not a ToolType array.
 
 Usage: python3 tools/make-zzrun-icon.py [--check]
 """
@@ -87,19 +89,21 @@ def to_planes(pix):
     return bytes(out)
 
 
-def image_struct(data_off):
+def image_struct():
+    # ImageData is a presence marker. Planes follow this 20-byte struct.
     return struct.pack(
         ">hhhhhIBBI",
         0, 0, WIDTH, HEIGHT, DEPTH,
-        data_off,
+        1,
         (1 << DEPTH) - 1,
         0,
         0,
     )
 
 
-def gadget(render_off, select_off):
+def gadget():
     # 2-byte Amiga alignment: no pad between ga_GadgetType and ga_GadgetRender.
+    # Render pointers are presence markers, not file offsets.
     return struct.pack(
         ">IhhhhHHHIIIIIhI",
         0,
@@ -108,8 +112,8 @@ def gadget(render_off, select_off):
         GFLG_GADGIMAGE,
         GACT_RELVERIFY,
         GTYP_BOOLGADGET,
-        render_off,
-        select_off,
+        1,
+        1,
         0,
         0,
         0,
@@ -118,12 +122,12 @@ def gadget(render_off, select_off):
     )
 
 
-def disk_object(render_off, select_off, tools_off):
+def disk_object():
     body = struct.pack(">HH", 0xE310, 1)
-    body += gadget(render_off, select_off)
+    body += gadget()
     body += struct.pack(">BB", WB_TOOL, 0)
     body += struct.pack(">I", 0)          # do_DefaultTool
-    body += struct.pack(">I", tools_off)
+    body += struct.pack(">I", 1)          # do_ToolTypes present
     body += struct.pack(">II", NO_ICON_POSITION, NO_ICON_POSITION)
     body += struct.pack(">I", 0)          # do_DrawerData
     body += struct.pack(">I", 0)          # do_ToolWindow
@@ -133,38 +137,33 @@ def disk_object(render_off, select_off, tools_off):
     return body
 
 
+def string_body(text):
+    raw = text.encode("ascii") + b"\0"
+    return struct.pack(">I", len(raw)) + raw
+
+
+def tooltypes_body(entries):
+    # The longword is the in-memory pointer-table size, including the NULL
+    # terminator. Each string then carries its own length, including NUL.
+    out = struct.pack(">I", (len(entries) + 1) * 4)
+    for entry in entries:
+        out += string_body(entry)
+    return out
+
+
 def build():
     normal = to_planes(draw(False))
     selected = to_planes(draw(True))
-    image_len = 20
-    # DiskObject, two images, two plane blobs, then the tooltype table.
-    normal_image = 78
-    normal_planes = normal_image + image_len
-    select_image = normal_planes + len(normal)
-    select_planes = select_image + image_len
-    tools_off = select_planes + len(selected)
-    strings = [(text + "\0").encode("ascii") for text in TOOLTYPES]
-    table_bytes = (len(strings) + 1) * 4
-    string_at = tools_off + table_bytes
-    pointers = []
-    blob = b""
-    cursor = string_at
-    for raw in strings:
-        pointers.append(cursor)
-        blob += raw
-        cursor += len(raw)
-    table = b"".join(struct.pack(">I", off) for off in pointers)
-    table += struct.pack(">I", 0)
-
-    out = disk_object(normal_image, select_image, tools_off)
-    out += image_struct(normal_planes)
-    out += normal
-    out += image_struct(select_planes)
-    out += selected
-    out += table
-    out += blob
-    if out[tools_off:tools_off + 4] != struct.pack(">I", string_at):
-        raise SystemExit("tooltype table was not written at its offset")
+    tools = tooltypes_body(TOOLTYPES)
+    out = disk_object()
+    out += image_struct() + normal
+    out += image_struct() + selected
+    out += tools
+    if struct.unpack_from(">I", out, 54)[0] != 1:
+        raise SystemExit("do_ToolTypes is not a presence marker")
+    tools_at = 78 + 20 + len(normal) + 20 + len(selected)
+    if struct.unpack_from(">I", out, tools_at)[0] != (len(TOOLTYPES) + 1) * 4:
+        raise SystemExit("tooltype table size was not written")
     return out
 
 
