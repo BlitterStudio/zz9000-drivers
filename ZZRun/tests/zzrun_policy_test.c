@@ -71,6 +71,23 @@ static void test_clean_exit_still_drains(void)
     assert(zzrun_run_should_exit(&watchdog) == 1);
 }
 
+static void test_generation_change_ends_even_if_new_app_is_live(void)
+{
+    struct zzrun_exit_in running =
+        exit_in(ZZRUN_ST_RUNNING, 0u, 0u, 0, 0, 1, 0);
+    struct zzrun_exit_in starting =
+        exit_in(ZZRUN_ST_STARTING, 0u, 0u, 0, 0, 0, 0);
+    struct zzrun_exit_in loading =
+        exit_in(ZZRUN_ST_LOADING, 0u, 0u, 0, 0, 0, 0);
+
+    running.generation = 8u;
+    starting.generation = 8u;
+    loading.generation = 8u;
+    assert(zzrun_run_should_exit(&running) == 1);
+    assert(zzrun_run_should_exit(&starting) == 1);
+    assert(zzrun_run_should_exit(&loading) == 1);
+}
+
 static void test_keyboard_read_gated_on_running(void)
 {
     assert(zzrun_keyboard_read_allowed(ZZRUN_ST_RUNNING, 1, 0, 4u, 4u, 1u, 0,
@@ -165,6 +182,7 @@ int main(void)
     test_output_failure_does_not_block_exit();
     test_ctrl_c_ends_even_if_output_remains();
     test_clean_exit_still_drains();
+    test_generation_change_ends_even_if_new_app_is_live();
     test_keyboard_read_gated_on_running();
     test_noninteractive_read_is_not_want_gated();
     test_audio_epoch_discards_before_accept();

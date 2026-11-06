@@ -2749,6 +2749,7 @@ static int run_loop(ULONG forced_mode)
     int entered = 1;
     int saw_fault = 0;
     int display_failed = 0;
+    int ownership_lost = 0;
     uint32_t last_gen = 0;
     uint32_t fault = ZZAPP_FAULT_NONE;
     int32_t exit_code = 0;
@@ -2770,6 +2771,13 @@ static int run_loop(ULONG forced_mode)
         signals = Wait(mask);
         if (signals & (1UL << timer_port->mp_SigBit))
             timer_reap();
+        /* Everything below services shared app state. Stop before the
+         * new generation's files, console, display, audio, or input can
+         * be touched. */
+        if (!owns_current_generation()) {
+            ownership_lost = 1;
+            break;
+        }
         heartbeat();
         if ((signals & SIGBREAKF_CTRL_C) || ctrl_c_set()) {
             SetSignal(0, SIGBREAKF_CTRL_C);
@@ -2791,6 +2799,12 @@ static int run_loop(ULONG forced_mode)
         service_ahi_audio();
         print_log();
         load_palette();
+        /* A new launcher may have acquired the window while one of the
+         * services above was returning. Do not read its status or flip. */
+        if (!owns_current_generation()) {
+            ownership_lost = 1;
+            break;
+        }
         if (!window)
             break;
         state = life_get(ZZAPP_LIFE_STATE_OFF);
@@ -2831,6 +2845,11 @@ static int run_loop(ULONG forced_mode)
         timer_arm();
     }
     timer_reap();
+    if (ownership_lost) {
+        /* cleanup() must only release local resources after ownership loss. */
+        window = NULL;
+        return 20;
+    }
     if (op_empty(ZZAPP_OP_STATUS, &reply) == ZZ9K_STATUS_OK &&
         reply.payload_len >= ZZAPP_STATUS_REPLY_BYTES) {
         uint8_t *p = reply.payload.inline_data;

@@ -52,10 +52,13 @@ static inline int zzrun_output_blocks_exit(int output_pending, int output_failed
 static inline int zzrun_run_should_exit(const struct zzrun_exit_in *in)
 {
     int blocked;
-    int live;
 
     if (!in)
         return 0;
+    /* The generation is the ownership token. A different value belongs to
+     * another launcher even when its app is already live. */
+    if (in->generation != in->last_generation)
+        return 1;
     blocked = zzrun_output_blocks_exit(in->output_pending, in->output_failed);
     /* Ctrl-C ends the process once both grace periods have elapsed, even
      * when console output is still queued. The faulted path must not skip
@@ -75,10 +78,6 @@ static inline int zzrun_run_should_exit(const struct zzrun_exit_in *in)
         return 1;
     if (in->stop_asked && in->elapsed_ms >= ZZRUN_POLICY_GRACE_MS * 2u &&
         !blocked)
-        return 1;
-    live = in->state == ZZRUN_ST_RUNNING || in->state == ZZRUN_ST_STARTING ||
-           in->state == ZZRUN_ST_LOADING;
-    if (in->generation != in->last_generation && !live)
         return 1;
     return 0;
 }
