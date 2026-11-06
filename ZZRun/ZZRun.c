@@ -188,6 +188,7 @@ static struct file_slot files[ZZAPP_FD_COUNT];
 static struct list_slot lists[ZZAPP_FD_COUNT];
 static uint32_t file_reply_seq;
 static uint32_t file_generation;
+static uint8_t file_io_buffer[ZZRUN_READ_CHUNK];
 
 static void cleanup(void);
 static int tool_is_ahi(const char *value);
@@ -541,9 +542,8 @@ static int add_arg(const char *text)
     if (!text)
         return 1;
     n = strlen(text);
-    if (n == 0)
-        return 1;
-    if (n > 127 || app_argc >= (int)ZZAPP_ARGV_MAX - 1) {
+    if (!zzrun_arg_length_allowed((uint32_t)n) ||
+        app_argc >= (int)ZZAPP_ARGV_MAX - 1) {
         tell("Too many arguments, or an argument is longer than 127 bytes.");
         return 0;
     }
@@ -947,19 +947,44 @@ static int open_mode(int32_t flags, LONG *mode, int *err)
     return 1;
 }
 
+static int file_request_is_current(uint32_t request_seq)
+{
+    uint32_t live_generation;
+    uint32_t live_seq;
+
+    if (!window)
+        return 0;
+    live_generation = life_get(ZZAPP_LIFE_GENERATION_OFF);
+    if (live_generation != file_generation)
+        return 0;
+    win_cache(ZZAPP_FILE_OFF, 4);
+    live_seq = zzapp_get_be32(window + ZZAPP_FILE_OFF);
+    return zzrun_file_request_is_current(
+        request_seq, file_generation, live_seq,
+        life_get(ZZAPP_LIFE_GENERATION_OFF));
+}
+
+static int file_copy_data_if_current(uint32_t request_seq, uint32_t at,
+                                     const uint8_t *data, uint32_t len)
+{
+    if (!file_request_is_current(request_seq))
+        return 0;
+    memcpy(window + ZZAPP_DATA_OFF + at, data, len);
+    win_cache(ZZAPP_DATA_OFF + at, len);
+    return 1;
+}
+
 static void file_reply(uint32_t request_seq, int32_t fd, int32_t err,
                        uint32_t out_n, uint32_t mode, uint64_t out_pos,
                        uint32_t mtime)
 {
-    uint8_t *slot = window + ZZAPP_FILE_OFF;
+    uint8_t *slot;
     uint32_t done = request_seq + 2u;
-    if (life_get(ZZAPP_LIFE_GENERATION_OFF) != file_generation)
-        return;
+
     win_cache(ZZAPP_FILE_OFF, ZZAPP_FILE_BYTES);
-    if (!zzrun_file_reply_is_current(
-            request_seq,
-            zzapp_get_be32(slot + offsetof(struct zzapp_file_wire, seq))))
+    if (!file_request_is_current(request_seq))
         return;
+    slot = window + ZZAPP_FILE_OFF;
     zzapp_put_be32(slot + offsetof(struct zzapp_file_wire, seq), request_seq + 1u);
     win_cache(ZZAPP_FILE_OFF, 4);
     zzapp_put_be32(slot + offsetof(struct zzapp_file_wire, fd), (uint32_t)fd);
@@ -1141,22 +1166,27 @@ static void serve_read(const struct zzapp_file_wire *req)
     while (left) {
         uint32_t chunk = left > ZZRUN_READ_CHUNK ? ZZRUN_READ_CHUNK : left;
         LONG n;
+
+        if (!file_request_is_current(req->seq))
+            return;
         heartbeat();
         if (ctrl_c_set())
             break;
-        n = Read(files[index].fh, window + ZZAPP_DATA_OFF + done, (LONG)chunk);
+        n = Read(files[index].fh, file_io_buffer, (LONG)chunk);
         if (n < 0) {
             err = zz_from_io();
             break;
         }
         if (n == 0)
             break;
+        if (!file_copy_data_if_current(req->seq, done, file_io_buffer,
+                                       (uint32_t)n))
+            return;
         done += (uint32_t)n;
         left -= (uint32_t)n;
         if ((uint32_t)n < chunk)
             break;
     }
-    win_cache(ZZAPP_DATA_OFF, done);
     file_reply(req->seq, req->fd, err, done, 0, 0, 0);
 }
 
@@ -1173,13 +1203,19 @@ static void serve_write(const struct zzapp_file_wire *req)
         file_reply(req->seq, req->fd, ZZ_EINVAL, 0, 0, 0, 0);
         return;
     }
-    win_cache(ZZAPP_DATA_OFF, req->length);
     left = req->length;
     while (left) {
         uint32_t chunk = left > ZZRUN_READ_CHUNK ? ZZRUN_READ_CHUNK : left;
         LONG n;
+
+        if (!file_request_is_current(req->seq))
+            return;
+        win_cache(ZZAPP_DATA_OFF + done, chunk);
+        if (!file_request_is_current(req->seq))
+            return;
+        memcpy(file_io_buffer, window + ZZAPP_DATA_OFF + done, chunk);
         heartbeat();
-        n = Write(files[index].fh, window + ZZAPP_DATA_OFF + done, (LONG)chunk);
+        n = Write(files[index].fh, file_io_buffer, (LONG)chunk);
         if (n < 0) {
             err = zz_from_io();
             break;
@@ -1188,6 +1224,8 @@ static void serve_write(const struct zzapp_file_wire *req)
             err = ZZ_ENOSPC;
             break;
         }
+        if (!file_request_is_current(req->seq))
+            return;
         done += (uint32_t)n;
         left -= (uint32_t)n;
         if ((uint32_t)n < chunk)
@@ -1370,6 +1408,8 @@ static void serve_list_next(const struct zzapp_file_wire *req)
         file_reply(req->seq, req->fd, ZZ_EBADF, 0, 0, 0, 0);
         return;
     }
+    if (!file_request_is_current(req->seq))
+        return;
     heartbeat();
     if (!ExNext(lists[index].lock, lists[index].fib)) {
         err = zz_from_io();
@@ -1379,9 +1419,11 @@ static void serve_list_next(const struct zzapp_file_wire *req)
     len = strlen((const char *)lists[index].fib->fib_FileName);
     if (len > ZZAPP_PATH_MAX)
         len = ZZAPP_PATH_MAX;
-    memcpy(window + ZZAPP_DATA_OFF, lists[index].fib->fib_FileName, len);
-    window[ZZAPP_DATA_OFF + len] = 0;
-    win_cache(ZZAPP_DATA_OFF, (uint32_t)len + 1u);
+    memcpy(file_io_buffer, lists[index].fib->fib_FileName, len);
+    file_io_buffer[len] = 0;
+    if (!file_copy_data_if_current(req->seq, 0, file_io_buffer,
+                                   (uint32_t)len + 1u))
+        return;
     n = (uint32_t)len;
     mode = lists[index].fib->fib_DirEntryType > 0 ? ZZAPP_MODE_DIR : ZZAPP_MODE_FILE;
     file_reply(req->seq, req->fd, err, n, mode,

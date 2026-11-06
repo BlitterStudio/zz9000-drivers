@@ -169,13 +169,21 @@ static inline uint32_t zzrun_load_generation_to_claim(
     return observed;
 }
 
-/* Firmware abandons a timed-out file request by changing its sequence.
- * A late host reply may write the captured request only while that sequence
- * is still live; otherwise its fields would corrupt the newer request. */
-static inline int zzrun_file_reply_is_current(uint32_t request_seq,
-                                              uint32_t live_seq)
+/* A request captured by the launcher remains usable only while both the
+ * request sequence and the owning app generation still match the window. */
+static inline int zzrun_file_request_is_current(uint32_t request_seq,
+                                                uint32_t request_generation,
+                                                uint32_t live_seq,
+                                                uint32_t live_generation)
 {
-    return request_seq == live_seq;
+    return request_seq == live_seq && request_generation == live_generation;
+}
+
+/* argv accepts an empty NUL-terminated string; only oversized strings are
+ * invalid. */
+static inline int zzrun_arg_length_allowed(uint32_t length)
+{
+    return length <= 127u;
 }
 
 #endif /* ZZRUN_POLICY_H */
