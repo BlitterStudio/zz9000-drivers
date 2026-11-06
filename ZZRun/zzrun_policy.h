@@ -22,6 +22,39 @@
 #define ZZRUN_ST_FAULTED 6u
 #define ZZRUN_FAULT_WATCHDOG_RESTART 6u
 
+/* Launcher diagnostics share the asynchronous app-output writer. Keep space
+ * for status/error text when a stalled destination has filled diagnostics. */
+#define ZZRUN_LAUNCHER_OUTPUT_BYTES 8192u
+#define ZZRUN_LAUNCHER_STATUS_RESERVE_BYTES 2048u
+
+#define ZZRUN_OUTPUT_NONE 0
+#define ZZRUN_OUTPUT_LAUNCHER 1
+#define ZZRUN_OUTPUT_APP 2
+
+static inline int zzrun_launcher_output_accept(uint32_t used, uint32_t bytes,
+                                               int diagnostic)
+{
+    uint32_t limit = diagnostic ? ZZRUN_LAUNCHER_OUTPUT_BYTES -
+                                  ZZRUN_LAUNCHER_STATUS_RESERVE_BYTES :
+                                  ZZRUN_LAUNCHER_OUTPUT_BYTES;
+
+    return used <= limit && bytes <= limit - used;
+}
+
+/* A launcher message already staged before a drain precedes app bytes that
+ * have not yet been submitted to the shared asynchronous writer. */
+static inline int zzrun_output_next_source(uint32_t launcher_bytes,
+                                           uint32_t app_bytes)
+{
+    if (launcher_bytes)
+        return ZZRUN_OUTPUT_LAUNCHER;
+    return app_bytes ? ZZRUN_OUTPUT_APP : ZZRUN_OUTPUT_NONE;
+}
+
+#if ZZRUN_LAUNCHER_STATUS_RESERVE_BYTES >= ZZRUN_LAUNCHER_OUTPUT_BYTES
+#error "launcher status reserve must leave diagnostic space"
+#endif
+
 #define ZZRUN_STOP_REQ_BYTES 4u
 
 /* console_read_finish: never stdout. */

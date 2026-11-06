@@ -37,6 +37,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdarg.h>
+
 
 struct GfxBase *GfxBase;
 struct IntuitionBase *IntuitionBase;
@@ -172,6 +174,9 @@ static uint32_t ahi_stream_epoch;
 static int ahi_stream_epoch_valid;
 static int console_output_failed;
 static int audio_open_failed;
+static int launcher_output_active;
+static uint32_t launcher_log_dropped;
+
 
 struct file_slot {
     BPTR fh;
@@ -193,6 +198,8 @@ static uint8_t file_io_buffer[ZZRUN_READ_CHUNK];
 
 static void cleanup(void);
 static int tool_is_ahi(const char *value);
+static void launcher_status(const char *msg);
+
 
 static int stack_ok(void)
 {
@@ -350,7 +357,10 @@ static void usage(void)
 
 static void tell(const char *msg)
 {
-    puts(msg);
+    if (launcher_output_active)
+        launcher_status(msg);
+    else
+        puts(msg);
     if (_WBenchMsg && IntuitionBase) {
         struct EasyStruct es;
         memset(&es, 0, sizeof(es));
@@ -1619,6 +1629,81 @@ static void poll_joysticks(void)
     }
 }
 
+static uint8_t launcher_output[ZZRUN_LAUNCHER_OUTPUT_BYTES];
+static uint32_t launcher_output_head;
+static uint32_t launcher_output_tail;
+static uint32_t launcher_output_used;
+
+static int launcher_output_reserve(uint32_t bytes, int diagnostic)
+{
+    if (zzrun_launcher_output_accept(launcher_output_used, bytes, diagnostic))
+        return 1;
+    if (diagnostic)
+        launcher_log_dropped++;
+    return 0;
+}
+
+static void launcher_output_put(uint8_t value)
+{
+    launcher_output[launcher_output_head] = value;
+    launcher_output_head = (launcher_output_head + 1u) %
+                           ZZRUN_LAUNCHER_OUTPUT_BYTES;
+    launcher_output_used++;
+}
+
+static void launcher_output_append(const uint8_t *data, uint32_t bytes,
+                                   int diagnostic)
+{
+    uint32_t i;
+
+    if (!launcher_output_reserve(bytes, diagnostic))
+        return;
+    for (i = 0; i < bytes; i++)
+        launcher_output_put(data[i]);
+}
+
+static void launcher_status(const char *msg)
+{
+    uint32_t bytes = (uint32_t)strlen(msg);
+    uint32_t i;
+
+    if (!launcher_output_reserve(bytes + 1u, 0))
+        return;
+    for (i = 0; i < bytes; i++)
+        launcher_output_put((uint8_t)msg[i]);
+    launcher_output_put('\n');
+}
+
+static void launcher_statusf(const char *format, ...)
+{
+    char msg[256];
+    va_list ap;
+    int len;
+
+    va_start(ap, format);
+    len = vsnprintf(msg, sizeof(msg), format, ap);
+    va_end(ap);
+    if (len > 0)
+        launcher_output_append((const uint8_t *)msg,
+                               (uint32_t)(len < (int)sizeof(msg) ? len :
+                                          (int)sizeof(msg) - 1),
+                               0);
+}
+
+static uint32_t launcher_output_contiguous(void)
+{
+    uint32_t bytes = ZZRUN_LAUNCHER_OUTPUT_BYTES - launcher_output_tail;
+
+    return launcher_output_used < bytes ? launcher_output_used : bytes;
+}
+
+static void launcher_output_consume(uint32_t bytes)
+{
+    launcher_output_tail = (launcher_output_tail + bytes) %
+                           ZZRUN_LAUNCHER_OUTPUT_BYTES;
+    launcher_output_used -= bytes;
+}
+
 static void print_log(void)
 {
     uint32_t head, tail, usable, guard = 0;
@@ -1632,6 +1717,7 @@ static void print_log(void)
         uint32_t avail = head - tail;
         uint16_t len;
         uint32_t step, i;
+        int newline;
         if (avail < 2)
             break;
         win_cache(ZZAPP_LOG_OFF + ZZAPP_LOG_HDR, usable);
@@ -1642,15 +1728,17 @@ static void print_log(void)
             tail = head;
             break;
         }
-        for (i = 0; i < len; i++)
-            fputc((unsigned char)window[ZZAPP_LOG_OFF + ZZAPP_LOG_HDR +
-                                        ((tail + 2 + i) % usable)], stdout);
-        if (len == 0 || window[ZZAPP_LOG_OFF + ZZAPP_LOG_HDR +
-                               ((tail + 1 + len) % usable)] != '\n')
-            fputc('\n', stdout);
+        newline = len == 0 || window[ZZAPP_LOG_OFF + ZZAPP_LOG_HDR +
+                                     ((tail + 1 + len) % usable)] != '\n';
+        if (launcher_output_reserve((uint32_t)len + (uint32_t)newline, 1)) {
+            for (i = 0; i < len; i++)
+                launcher_output_put(window[ZZAPP_LOG_OFF + ZZAPP_LOG_HDR +
+                                          ((tail + 2 + i) % usable)]);
+            if (newline)
+                launcher_output_put('\n');
+        }
         tail += step;
     }
-    fflush(stdout);
     zzapp_put_be32(window + ZZAPP_LOG_OFF + 4, tail);
     win_cache(ZZAPP_LOG_OFF + 4, 4);
 }
@@ -1699,10 +1787,13 @@ static int con_write_pending;
 static int con_write_interactive;
 static uint32_t con_write_tail;
 static uint32_t con_write_bytes;
+static int con_write_source;
+
 
 static void console_reap_packets(void);
 static int console_write_start(BPTR fh, const uint8_t *data, uint32_t tail,
-                               uint32_t bytes);
+                               uint32_t bytes, int source);
+
 
 static void console_output_error(void)
 {
@@ -1714,33 +1805,42 @@ static void console_output_error(void)
 
 static void console_drain_output(void)
 {
-    uint8_t *hdr;
-    uint32_t head, tail, available, at, chunk;
+    uint8_t *hdr = NULL;
+    uint32_t head = 0, tail = 0, available = 0, at, chunk;
+    int source;
 
     console_reap_packets();
     if (console_output_failed || con_write_pending)
         return;
-    if (!window || !(life_get(ZZAPP_LIFE_FLAGS_OFF) & ZZAPP_F_CONSOLE))
+    if (window && (life_get(ZZAPP_LIFE_FLAGS_OFF) & ZZAPP_F_CONSOLE)) {
+        hdr = window + ZZAPP_CONSOLE_OUT_OFF;
+        win_cache(ZZAPP_CONSOLE_OUT_OFF, ZZAPP_CONSOLE_HDR);
+        head = zzapp_get_be32(hdr);
+        tail = zzapp_get_be32(hdr + 4);
+        available = head - tail;
+        if (available > ZZAPP_CONSOLE_OUT_CAP) {
+            zzapp_put_be32(hdr + 4, head);
+            win_cache(ZZAPP_CONSOLE_OUT_OFF + 4, 4);
+            available = 0;
+        }
+    }
+    source = zzrun_output_next_source(launcher_output_used, available);
+    if (source == ZZRUN_OUTPUT_NONE)
         return;
-    if (!console_open_if_needed()) {
+    if (hdr && !console_open_if_needed()) {
         console_output_error();
         return;
     }
-    hdr = window + ZZAPP_CONSOLE_OUT_OFF;
-    win_cache(ZZAPP_CONSOLE_OUT_OFF, ZZAPP_CONSOLE_HDR);
-    head = zzapp_get_be32(hdr);
-    tail = zzapp_get_be32(hdr + 4);
-    available = head - tail;
-    if (available > ZZAPP_CONSOLE_OUT_CAP) {
-        zzapp_put_be32(hdr + 4, head);
-        win_cache(ZZAPP_CONSOLE_OUT_OFF + 4, 4);
+    if (source == ZZRUN_OUTPUT_LAUNCHER) {
+        chunk = launcher_output_contiguous();
+        if (chunk > ZZRUN_CONSOLE_WRITE_BYTES)
+            chunk = ZZRUN_CONSOLE_WRITE_BYTES;
+        if (!console_write_start(console_output(),
+                                 launcher_output + launcher_output_tail,
+                                 0, chunk, source))
+            console_output_error();
         return;
     }
-    if (!available)
-        return;
-    /* ZZRun's own messages go through buffered stdio; flush them first so
-     * they appear before the app's output, not after it. */
-    fflush(stdout);
     at = tail % ZZAPP_CONSOLE_OUT_CAP;
     chunk = ZZAPP_CONSOLE_OUT_CAP - at;
     if (chunk > available)
@@ -1751,7 +1851,7 @@ static void console_drain_output(void)
     if (!console_write_start(console_output(),
                              window + ZZAPP_CONSOLE_OUT_OFF +
                                  ZZAPP_CONSOLE_HDR + at,
-                             tail, chunk))
+                             tail, chunk, source))
         console_output_error();
 }
 
@@ -1760,7 +1860,7 @@ static int console_output_pending(void)
     uint8_t *hdr;
     uint32_t head, tail;
 
-    if (con_write_pending)
+    if (con_write_pending || launcher_output_used)
         return 1;
     if (!window || !(life_get(ZZAPP_LIFE_FLAGS_OFF) & ZZAPP_F_CONSOLE))
         return 0;
@@ -1846,7 +1946,7 @@ static void console_user_note(const char *msg)
 }
 
 static int console_write_start(BPTR fh, const uint8_t *data, uint32_t tail,
-                               uint32_t bytes)
+                               uint32_t bytes, int source)
 {
     struct FileHandle *handle = (struct FileHandle *)BADDR(fh);
 
@@ -1874,6 +1974,7 @@ static int console_write_start(BPTR fh, const uint8_t *data, uint32_t tail,
     con_write_packet->sp_Pkt.dp_Arg3 = (LONG)bytes;
     con_write_tail = tail;
     con_write_bytes = bytes;
+    con_write_source = source;
     con_write_interactive = IsInteractive(fh);
     con_write_pending = 1;
     PutMsg(handle->fh_Type, &con_write_packet->sp_Msg);
@@ -1887,7 +1988,10 @@ static void console_write_complete(void)
         con_write_bytes, (int32_t)written);
 
     con_write_pending = 0;
-    if (advanced && window && owns_current_generation()) {
+    if (con_write_source == ZZRUN_OUTPUT_LAUNCHER) {
+        if (advanced)
+            launcher_output_consume(advanced);
+    } else if (advanced && window && owns_current_generation()) {
         uint8_t *hdr = window + ZZAPP_CONSOLE_OUT_OFF;
 
         win_cache(ZZAPP_CONSOLE_OUT_OFF, ZZAPP_CONSOLE_HDR);
@@ -1946,16 +2050,20 @@ static int console_keyboard_demand(uint8_t *hdr)
                                        head, tail, want, 0, 0);
 }
 
-/* Pending console packets must return before their port and storage are
- * freed. Neither pipes nor the console handler can cancel them. */
+/* Pending console packets and queued launcher messages must finish before
+ * their port and storage are released. Neither pipes nor the console handler
+ * can cancel a pending write. */
 static void console_read_finish(void)
 {
     int input_noted = 0;
     int output_noted = 0;
 
-    while (con_pending || con_write_pending) {
+    while (con_pending || con_write_pending ||
+           (!console_output_failed && launcher_output_used)) {
         console_reap_packets();
-        if (!con_pending && !con_write_pending)
+        console_drain_output();
+        if (!con_pending && !con_write_pending &&
+            (console_output_failed || !launcher_output_used))
             break;
         if (con_pending && !input_noted) {
             int kind = zzrun_finish_prompt(1, con_interactive);
@@ -1992,6 +2100,7 @@ static void console_read_finish(void)
     con_write_interactive = 0;
     con_write_tail = 0;
     con_write_bytes = 0;
+    con_write_source = ZZRUN_OUTPUT_NONE;
     con_buffer = NULL;
     con_packet = NULL;
     con_port = NULL;
@@ -2285,7 +2394,7 @@ static void service_ahi_audio(void)
     if (audio_open_failed)
         return;
     if (!ahi_request[0] && !ahi_open(rate, channels)) {
-        puts("ZZRun: cannot open AHI for AUDIO=AHI.");
+        launcher_status("ZZRun: cannot open AHI for AUDIO=AHI.");
         audio_open_failed = 1;
         request_stop();
         return;
@@ -2531,30 +2640,30 @@ static int open_display(uint32_t w, uint32_t h, uint32_t format, ULONG forced_mo
     if (!screen)
         return 0;
     if (!bitmap_arm(screen->RastPort.BitMap, &front, &pitch)) {
-        puts("ZZRun: display unavailable (front bitmap address)");
+        launcher_status("ZZRun: display unavailable (front bitmap address)");
         close_display();
         return 0;
     }
     buf_front = AllocScreenBuffer(screen, NULL, SB_SCREEN_BITMAP);
     if (!buf_front) {
-        puts("ZZRun: double buffering unavailable (front screen buffer)");
+        launcher_status("ZZRun: double buffering unavailable (front screen buffer)");
     } else {
         buf_back = AllocScreenBuffer(screen, NULL, 0);
         if (!buf_back) {
-            puts("ZZRun: double buffering unavailable (back screen buffer)");
+            launcher_status("ZZRun: double buffering unavailable (back screen buffer)");
         } else {
             ULONG back_pitch = 0;
 
             if (!bitmap_arm(buf_back->sb_BitMap, &back, &back_pitch)) {
-                puts("ZZRun: double buffering unavailable (back bitmap address)");
+                launcher_status("ZZRun: double buffering unavailable (back bitmap address)");
             } else if (back_pitch != pitch) {
-                puts("ZZRun: double buffering unavailable (back bitmap pitch)");
+                launcher_status("ZZRun: double buffering unavailable (back bitmap pitch)");
             } else {
                 flip_safe_port = CreateMsgPort();
                 if (!flip_safe_port) {
-                    puts("ZZRun: double buffering unavailable (safe message port)");
+                    launcher_status("ZZRun: double buffering unavailable (safe message port)");
                 } else if (!buf_front->sb_DBufInfo || !buf_back->sb_DBufInfo) {
-                    puts("ZZRun: double buffering unavailable (screen buffer info)");
+                    launcher_status("ZZRun: double buffering unavailable (screen buffer info)");
                 } else {
                     buf_front->sb_DBufInfo->dbi_SafeMessage.mn_ReplyPort =
                         flip_safe_port;
@@ -2592,7 +2701,7 @@ static int open_display(uint32_t w, uint32_t h, uint32_t format, ULONG forced_mo
             spare = back + pitch * h;
             have_pan = 1;
             pan_count = 3;
-            puts("ZZRun: triple buffering by panning");
+            launcher_status("ZZRun: triple buffering by panning");
         } else {
             if (tall)
                 p96CloseScreen(tall);
@@ -2608,11 +2717,11 @@ static int open_display(uint32_t w, uint32_t h, uint32_t format, ULONG forced_mo
                 back = front + pitch * h;
                 have_pan = 1;
                 pan_count = 2;
-                puts("ZZRun: double buffering by panning");
+                launcher_status("ZZRun: double buffering by panning");
             } else {
                 if (tall)
                     p96CloseScreen(tall);
-                puts("ZZRun: single buffer; the firmware copies each frame");
+                launcher_status("ZZRun: single buffer; the firmware copies each frame");
             }
         }
     }
@@ -2651,12 +2760,12 @@ static int open_display(uint32_t w, uint32_t h, uint32_t format, ULONG forced_mo
     status = mailbox(ZZAPP_OP_DISPLAY_BIND, payload, spare ?
                      ZZAPP_BIND_EXT_REQ_BYTES : ZZAPP_BIND_REQ_BYTES, &reply);
     if (status != ZZ9K_STATUS_OK) {
-        printf("ZZRun: display bind failed (%s)\n", status_name(status));
+        launcher_statusf("ZZRun: display bind failed (%s)\n", status_name(status));
         close_display();
         return 0;
     }
     if (life_get(ZZAPP_LIFE_FLAGS_OFF) & ZZAPP_F_DISPLAY_UNBOUND) {
-        puts("ZZRun: display request stayed set after bind");
+        launcher_status("ZZRun: display request stayed set after bind");
         close_display();
         return 0;
     }
@@ -2697,7 +2806,7 @@ static void ack_flip(void)
             return;
         } else {
             if (!scanout_fallback)
-                puts("ZZRun: no card vblank acknowledgement; using WaitTOF");
+                launcher_status("ZZRun: no card vblank acknowledgement; using WaitTOF");
             scanout_fallback = 1;
             WaitTOF();
             life_put(ZZAPP_LIFE_FLIP_ACK_OFF, scanout_submitted);
@@ -2732,20 +2841,20 @@ static void ack_flip(void)
             uint32_t page;
 
             if (bound_h == 0 || bound_pitch > 0xffffffffUL / bound_h) {
-                puts("ZZRun: invalid panning geometry");
+                launcher_status("ZZRun: invalid panning geometry");
                 request_stop();
                 return;
             }
             page_bytes = bound_pitch * bound_h;
             if (page_bytes == 0 || address < card_front ||
                 (address - card_front) % page_bytes != 0) {
-                puts("ZZRun: invalid scanout flip address");
+                launcher_status("ZZRun: invalid scanout flip address");
                 request_stop();
                 return;
             }
             page = (address - card_front) / page_bytes;
             if (page >= (uint32_t)pan_count) {
-                puts("ZZRun: scanout flip address is outside the screen");
+                launcher_status("ZZRun: scanout flip address is outside the screen");
                 request_stop();
                 return;
             }
@@ -2880,19 +2989,28 @@ static void report_fault(uint32_t code, int32_t exit_code, uint32_t pc,
                          uint32_t cpsr, uint32_t generation)
 {
     char line[160];
-    printf("ZZRun: %s\n", fault_name(code));
-    printf("  pc=%08lx sp=%08lx lr=%08lx\n",
-           (unsigned long)pc, (unsigned long)sp, (unsigned long)lr);
-    printf("  far=%08lx fsr=%08lx cpsr=%08lx\n",
-           (unsigned long)far, (unsigned long)fsr, (unsigned long)cpsr);
-    printf("  exit=%ld generation=%lu\n", (long)exit_code,
-           (unsigned long)generation);
+
+    launcher_statusf("ZZRun: %s\n", fault_name(code));
+    launcher_statusf("  pc=%08lx sp=%08lx lr=%08lx\n",
+                     (unsigned long)pc, (unsigned long)sp, (unsigned long)lr);
+    launcher_statusf("  far=%08lx fsr=%08lx cpsr=%08lx\n",
+                     (unsigned long)far, (unsigned long)fsr,
+                     (unsigned long)cpsr);
+    launcher_statusf("  exit=%ld generation=%lu\n", (long)exit_code,
+                     (unsigned long)generation);
     if (_WBenchMsg && IntuitionBase) {
+        struct EasyStruct es;
+
         snprintf(line, sizeof(line),
                  "%s\\npc=%08lx far=%08lx\\nexit=%ld",
                  fault_name(code), (unsigned long)pc, (unsigned long)far,
                  (long)exit_code);
-        tell(line);
+        es.es_StructSize = sizeof(es);
+        es.es_Flags = 0;
+        es.es_Title = (UBYTE *)"ZZRun";
+        es.es_TextFormat = (UBYTE *)line;
+        es.es_GadgetFormat = (UBYTE *)"OK";
+        EasyRequestArgs(NULL, &es, NULL, NULL);
     }
 }
 
@@ -3001,7 +3119,7 @@ static int run_loop(ULONG forced_mode)
                               life_get(ZZAPP_LIFE_HEIGHT_OFF),
                               life_get(ZZAPP_LIFE_FORMAT_OFF),
                               forced_mode)) {
-                puts("ZZRun: cannot open the requested screen");
+                launcher_status("ZZRun: cannot open the requested screen");
                 display_failed = 1;
                 request_stop();
             }
@@ -3034,7 +3152,7 @@ static int run_loop(ULONG forced_mode)
     if (ownership_lost) {
         /* cleanup() must only release local resources after ownership loss. */
         window = NULL;
-        puts("ZZRun: another launcher started an app; this app's exit status is lost.");
+        launcher_status("ZZRun: another launcher started an app; this app's exit status is lost.");
         return 20;
     }
     if (op_empty(ZZAPP_OP_STATUS, &reply) == ZZ9K_STATUS_OK &&
@@ -3052,8 +3170,8 @@ static int run_loop(ULONG forced_mode)
                          zzapp_get_be32(p + ZZAPP_STATUS_CPSR),
                          zzapp_get_be32(p + ZZAPP_STATUS_GENERATION));
         else
-            printf("ZZRun: exit %ld (%s)\n", (long)exit_code,
-                   state_name(zzapp_get_be32(p + ZZAPP_STATUS_STATE)));
+            launcher_statusf("ZZRun: exit %ld (%s)\n", (long)exit_code,
+                             state_name(zzapp_get_be32(p + ZZAPP_STATUS_STATE)));
         return zzrun_process_exit(exit_from_app(exit_code, fault, stop_asked),
                                   display_failed, console_output_failed,
                                   audio_open_failed);
@@ -3158,6 +3276,12 @@ static void cleanup(void)
         GfxBase = NULL;
     }
     window = NULL;
+    if (launcher_output_active) {
+        launcher_output_active = 0;
+        if (launcher_log_dropped)
+            printf("ZZRun: dropped %lu diagnostic log records.\n",
+                   (unsigned long)launcher_log_dropped);
+    }
 }
 
 int main(int argc, char **argv)
@@ -3367,6 +3491,8 @@ int main(int argc, char **argv)
         cleanup();
         return 20;
     }
+    fflush(stdout);
+    launcher_output_active = 1;
     rc = run_loop(have_mode ? forced_mode : 0);
     cleanup();
     return rc;

@@ -229,6 +229,25 @@ static void test_screen_buffer_safe_messages_are_all_reaped(void)
     assert(pending == 0u);
 }
 
+static void test_launcher_output_reserves_status_room(void)
+{
+    uint32_t diagnostic_limit = ZZRUN_LAUNCHER_OUTPUT_BYTES -
+                                ZZRUN_LAUNCHER_STATUS_RESERVE_BYTES;
+
+    assert(zzrun_launcher_output_accept(diagnostic_limit - 1u, 1u, 1));
+    assert(!zzrun_launcher_output_accept(diagnostic_limit, 1u, 1));
+    assert(zzrun_launcher_output_accept(diagnostic_limit, 1u, 0));
+    assert(!zzrun_launcher_output_accept(ZZRUN_LAUNCHER_OUTPUT_BYTES, 1u, 0));
+}
+
+static void test_launcher_output_orders_queued_messages_before_app_output(void)
+{
+    assert(zzrun_output_next_source(0u, 0u) == ZZRUN_OUTPUT_NONE);
+    assert(zzrun_output_next_source(12u, 0u) == ZZRUN_OUTPUT_LAUNCHER);
+    assert(zzrun_output_next_source(0u, 12u) == ZZRUN_OUTPUT_APP);
+    assert(zzrun_output_next_source(12u, 12u) == ZZRUN_OUTPUT_LAUNCHER);
+}
+
 int main(void)
 {
     test_output_failure_does_not_block_exit();
@@ -248,6 +267,8 @@ int main(void)
     test_terminal_output_drains_before_exit();
     test_raw_ctrl_c_requests_stop();
     test_screen_buffer_safe_messages_are_all_reaped();
+    test_launcher_output_reserves_status_room();
+    test_launcher_output_orders_queued_messages_before_app_output();
     puts("zzrun_policy_test: ok");
     return 0;
 }

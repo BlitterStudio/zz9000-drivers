@@ -92,8 +92,12 @@ mouse and joystick ports are left exactly as it found them.
 
 The launcher owns the input producer side. It drops a new event rather than
 blocking when all 256 slots are full, and increments `input_drops`. Firmware
-owns the log producer side. ZZRun consumes its padded log records and prints
-them on stdout.
+owns the log producer side. ZZRun stages log records and its own runtime
+status through the same asynchronous writer as app console output. If a
+stalled destination fills the bounded staging queue, ZZRun drops diagnostic
+log records but reserves space for launcher status and errors; after pending
+writes finish during cleanup it reports the number of dropped records. ZZRun
+does not write to stderr while the app is running.
 
 ### Console and audio routes
 
