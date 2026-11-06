@@ -1667,6 +1667,10 @@ static void console_drain_output(void)
         win_cache(ZZAPP_CONSOLE_OUT_OFF + 4, 4);
         return;
     }
+    /* ZZRun's own messages go through buffered stdio; flush them first so
+     * they appear before the app's output, not after it. */
+    if (available)
+        fflush(stdout);
     while (available) {
         at = tail % ZZAPP_CONSOLE_OUT_CAP;
         chunk = ZZAPP_CONSOLE_OUT_CAP - at;
@@ -1800,7 +1804,9 @@ static int ahi_open(uint32_t rate, uint32_t channels)
     if (!ahi_request[0])
         goto failed;
     ahi_request[0]->ahir_Version = 4;
-    ahi_device_open = OpenDevice((CONST_STRPTR)AHINAME, AHI_NO_UNIT,
+    /* CMD_WRITE needs a real unit; AHI_NO_UNIT only opens the library
+     * interface and has no unit to queue the request on. */
+    ahi_device_open = OpenDevice((CONST_STRPTR)AHINAME, AHI_DEFAULT_UNIT,
                                  (struct IORequest *)ahi_request[0], 0);
     if (ahi_device_open)
         goto failed;
@@ -1888,7 +1894,7 @@ static void ahi_submit(unsigned slot, uint32_t bytes)
 static void service_ahi_audio(void)
 {
     uint8_t *hdr;
-    uint32_t head, tail, available, contiguous, bytes, frames, at, i;
+    uint32_t head, tail, staged, available, contiguous, bytes, frames, at, i;
     int completed;
     int slot;
 
@@ -1916,8 +1922,15 @@ static void service_ahi_audio(void)
         zzapp_put_be32(hdr + ZZAPP_AUDIO_TAIL_OFF, tail);
         win_cache(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_TAIL_OFF, 4);
     }
-    available = head - tail;
-    contiguous = ZZAPP_AUDIO_CAP - (tail % ZZAPP_AUDIO_CAP);
+    /* Bytes already handed to AHI stay in the ring until their request
+     * returns, so the next buffer starts after them, not at the tail. */
+    staged = tail;
+    for (i = 0u; i < ZZRUN_AHI_BUFFER_COUNT; i++)
+        staged += ahi_pending_bytes[i];
+    if (head - staged > ZZAPP_AUDIO_CAP)
+        return;
+    available = head - staged;
+    contiguous = ZZAPP_AUDIO_CAP - (staged % ZZAPP_AUDIO_CAP);
     bytes = available < contiguous ? available : contiguous;
     frames = ahi_rate / 50u;
     if (frames == 0u)
@@ -1928,7 +1941,8 @@ static void service_ahi_audio(void)
         bytes = ZZRUN_AHI_BUFFER_BYTES;
     bytes -= bytes % (ahi_channels * 2u);
     if (bytes == 0u) {
-        if (completed) {
+        /* An underrun: a buffer just finished and AHI has nothing queued. */
+        if (completed && staged == tail) {
             ahi_underruns++;
             zzapp_put_be32(hdr + ZZAPP_AUDIO_UNDERRUNS_OFF, ahi_underruns);
             life_put(ZZAPP_LIFE_AUDIO_UNDERRUNS_OFF, ahi_underruns);
@@ -1939,7 +1953,7 @@ static void service_ahi_audio(void)
     slot = ahi_free_slot();
     if (slot < 0)
         return;
-    at = tail % ZZAPP_AUDIO_CAP;
+    at = staged % ZZAPP_AUDIO_CAP;
     win_cache(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_HDR + at, bytes);
     for (i = 0u; i < bytes; i += 2u) {
         ahi_buffer[slot][i] =
@@ -2523,7 +2537,8 @@ static int run_loop(ULONG forced_mode)
         last_gen = life_get(ZZAPP_LIFE_GENERATION_OFF);
     timer_arm();
     for (;;) {
-        ULONG mask = SIGBREAKF_CTRL_C;
+        ULONG mask = SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_D | SIGBREAKF_CTRL_E |
+                     SIGBREAKF_CTRL_F;
         ULONG signals;
         uint32_t state, flags;
         if (timer_port)
@@ -2538,6 +2553,14 @@ static int run_loop(ULONG forced_mode)
             SetSignal(0, SIGBREAKF_CTRL_C);
             request_stop();
         }
+        /* A Shell delivers Ctrl-D/E/F as task signals, not as keys in the
+         * app's display window, so map them here as well. */
+        if (signals & SIGBREAKF_CTRL_D)
+            push_event(ZZAPP_EV_BREAK, ZZAPP_BREAK_CTRL_D, 0, 0, 0);
+        if (signals & SIGBREAKF_CTRL_E)
+            push_event(ZZAPP_EV_BREAK, ZZAPP_BREAK_CTRL_E, 0, 0, 0);
+        if (signals & SIGBREAKF_CTRL_F)
+            push_event(ZZAPP_EV_BREAK, ZZAPP_BREAK_CTRL_F, 0, 0, 0);
         drain_window(input_win);
         poll_joysticks();
         serve_files();
