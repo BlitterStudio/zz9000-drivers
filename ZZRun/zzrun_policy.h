@@ -186,12 +186,13 @@ static inline int zzrun_arg_length_allowed(uint32_t length)
     return length <= 127u;
 }
 
-/* Amiga raw key C is 0x20. The key still goes to the app; this decides only
- * whether ZZRun also requests its documented stop. */
+/* Amiga raw key C is 0x33 (0x31 Z, 0x32 X, 0x33 C; 0x20 is A). The key still
+ * goes to the app; this decides only whether ZZRun also requests its
+ * documented stop. */
 static inline int zzrun_rawkey_requests_stop(uint16_t code, uint16_t qualifiers,
                                              uint16_t control_qualifier)
 {
-    return (qualifiers & control_qualifier) != 0 && code == 0x20u;
+    return (qualifiers & control_qualifier) != 0 && code == 0x33u;
 }
 
 

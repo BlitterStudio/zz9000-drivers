@@ -211,9 +211,10 @@ static void test_terminal_output_drains_before_exit(void)
 
 static void test_raw_ctrl_c_requests_stop(void)
 {
-    assert(zzrun_rawkey_requests_stop(0x20u, 0x0008u, 0x0008u));
-    assert(!zzrun_rawkey_requests_stop(0x22u, 0x0008u, 0x0008u));
-    assert(!zzrun_rawkey_requests_stop(0x20u, 0u, 0x0008u));
+    assert(zzrun_rawkey_requests_stop(0x33u, 0x0008u, 0x0008u));
+    assert(!zzrun_rawkey_requests_stop(0x20u, 0x0008u, 0x0008u)); /* Ctrl-A */
+    assert(!zzrun_rawkey_requests_stop(0x22u, 0x0008u, 0x0008u)); /* Ctrl-D */
+    assert(!zzrun_rawkey_requests_stop(0x33u, 0u, 0x0008u));
 }
 
 int main(void)
