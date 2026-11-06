@@ -148,6 +148,7 @@ static struct timerequest *timer_io;
 static int timer_pending;
 static struct MsgPort *flip_safe_port;
 static uint32_t flip_pending;
+static uint32_t flip_safe_pending;
 static uint32_t scanout_submitted;
 static uint32_t scanout_submit_ms;
 static int scanout_fallback;
@@ -2403,10 +2404,35 @@ static void load_palette(void)
     palette_generation = generation;
 }
 
+/* Only SafeMessage has a reply port: DisplayMessage is not used. Every
+ * successful ChangeScreenBuffer contributes one reply before teardown. */
+static void flip_reap_safe_messages(void)
+{
+    while (flip_safe_port && GetMsg(flip_safe_port))
+        flip_safe_pending = zzrun_screen_safe_completed(flip_safe_pending);
+}
+
+static void flip_wait_safe_messages(void)
+{
+    while (flip_safe_pending != 0) {
+        WaitPort(flip_safe_port);
+        flip_reap_safe_messages();
+    }
+}
+
 static void close_display(void)
 {
-    if (buf_front && screen && showing)
-        (void)ChangeScreenBuffer(screen, buf_front);
+    if (have_two && buf_front && buf_back && screen && flip_safe_port) {
+        /* A prior app flip may still own either buffer. */
+        flip_wait_safe_messages();
+        flip_pending = 0;
+        if (showing && ChangeScreenBuffer(screen, buf_front)) {
+            flip_safe_pending = zzrun_screen_safe_started(flip_safe_pending);
+            showing = 0;
+            /* The restoring change has its own SafeMessage. */
+            flip_wait_safe_messages();
+        }
+    }
     if (input_win) {
         CloseWindow(input_win);
         input_win = NULL;
@@ -2419,6 +2445,7 @@ static void close_display(void)
         DeleteMsgPort(flip_safe_port);
         flip_safe_port = NULL;
     }
+    flip_safe_pending = 0;
     buf_back = NULL;
     buf_front = NULL;
     if (screen) {
@@ -2635,6 +2662,7 @@ static int open_display(uint32_t w, uint32_t h, uint32_t format, ULONG forced_mo
     }
     showing = 0;
     flip_pending = 0;
+    flip_safe_pending = 0;
     scanout_submitted = 0;
     scanout_fallback = 0;
     palette_generation = 0;
@@ -2650,6 +2678,7 @@ static void ack_flip(void)
     if (flip_pending != 0) {
         if (!flip_safe_port || !GetMsg(flip_safe_port))
             return;
+        flip_safe_pending = zzrun_screen_safe_completed(flip_safe_pending);
         life_put(ZZAPP_LIFE_FLIP_ACK_OFF, flip_pending);
         flip_acked = flip_pending;
         flip_pending = 0;
@@ -2688,6 +2717,7 @@ static void ack_flip(void)
             return;
         showing = next_showing;
         flip_pending = gen;
+        flip_safe_pending = zzrun_screen_safe_started(flip_safe_pending);
         return;
     }
     /* In negotiated mailbox mode core 0 owns every per-frame VDMA choice.

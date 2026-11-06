@@ -212,4 +212,16 @@ static inline int zzrun_console_write_failed(uint32_t requested,
     return written <= 0 || (uint32_t)written != requested;
 }
 
+/* Each successful ChangeScreenBuffer has one SafeMessage before the old
+ * buffer and its reply port may be released. */
+static inline uint32_t zzrun_screen_safe_started(uint32_t pending)
+{
+    return pending + 1u;
+}
+
+static inline uint32_t zzrun_screen_safe_completed(uint32_t pending)
+{
+    return pending ? pending - 1u : 0u;
+}
+
 #endif /* ZZRUN_POLICY_H */

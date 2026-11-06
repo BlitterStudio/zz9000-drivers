@@ -217,6 +217,18 @@ static void test_raw_ctrl_c_requests_stop(void)
     assert(!zzrun_rawkey_requests_stop(0x33u, 0u, 0x0008u));
 }
 
+static void test_screen_buffer_safe_messages_are_all_reaped(void)
+{
+    uint32_t pending = 0;
+
+    pending = zzrun_screen_safe_started(pending);
+    pending = zzrun_screen_safe_started(pending);
+    pending = zzrun_screen_safe_completed(pending);
+    assert(pending == 1u);
+    pending = zzrun_screen_safe_completed(pending);
+    assert(pending == 0u);
+}
+
 int main(void)
 {
     test_output_failure_does_not_block_exit();
@@ -235,6 +247,7 @@ int main(void)
     test_async_console_write_advances_only_on_completion();
     test_terminal_output_drains_before_exit();
     test_raw_ctrl_c_requests_stop();
+    test_screen_buffer_safe_messages_are_all_reaped();
     puts("zzrun_policy_test: ok");
     return 0;
 }
