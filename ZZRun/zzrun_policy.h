@@ -186,16 +186,14 @@ static inline int zzrun_arg_length_allowed(uint32_t length)
     return length <= 127u;
 }
 
-/* Terminal app states leave the run loop even with a write in flight; the
- * cleanup path waits for that packet without starving service work first. */
-static inline int zzrun_console_output_blocks_run_exit(uint32_t state,
-                                                        int pending,
-                                                        int failed)
+/* Amiga raw key C is 0x20. The key still goes to the app; this decides only
+ * whether ZZRun also requests its documented stop. */
+static inline int zzrun_rawkey_requests_stop(uint16_t code, uint16_t qualifiers,
+                                             uint16_t control_qualifier)
 {
-    if (state == ZZRUN_ST_IDLE || state == ZZRUN_ST_FAULTED)
-        return 0;
-    return pending && !failed;
+    return (qualifiers & control_qualifier) != 0 && code == 0x20u;
 }
+
 
 /* A DOS write may advance the consumer tail only by the completed byte
  * count. A short completion is an output failure after that partial advance. */

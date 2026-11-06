@@ -195,12 +195,25 @@ static void test_async_console_write_advances_only_on_completion(void)
     assert(zzrun_console_write_failed(64u, 0));
 }
 
-static void test_terminal_output_waits_in_cleanup(void)
+static void test_terminal_output_drains_before_exit(void)
 {
-    assert(zzrun_console_output_blocks_run_exit(ZZRUN_ST_RUNNING, 1, 0));
-    assert(!zzrun_console_output_blocks_run_exit(ZZRUN_ST_IDLE, 1, 0));
-    assert(!zzrun_console_output_blocks_run_exit(ZZRUN_ST_FAULTED, 1, 0));
-    assert(!zzrun_console_output_blocks_run_exit(ZZRUN_ST_RUNNING, 1, 1));
+    struct zzrun_exit_in idle =
+        exit_in(ZZRUN_ST_IDLE, 0u, 0u, 0, 0, 1, 0);
+    struct zzrun_exit_in faulted =
+        exit_in(ZZRUN_ST_FAULTED, 0u, 0u, 0, 0, 1, 0);
+    struct zzrun_exit_in failed =
+        exit_in(ZZRUN_ST_IDLE, 0u, 0u, 0, 0, 1, 1);
+
+    assert(zzrun_run_should_exit(&idle) == 0);
+    assert(zzrun_run_should_exit(&faulted) == 0);
+    assert(zzrun_run_should_exit(&failed) == 1);
+}
+
+static void test_raw_ctrl_c_requests_stop(void)
+{
+    assert(zzrun_rawkey_requests_stop(0x20u, 0x0008u, 0x0008u));
+    assert(!zzrun_rawkey_requests_stop(0x22u, 0x0008u, 0x0008u));
+    assert(!zzrun_rawkey_requests_stop(0x20u, 0u, 0x0008u));
 }
 
 int main(void)
@@ -219,7 +232,8 @@ int main(void)
     test_stale_file_request_cannot_publish_or_claim();
     test_empty_argument_is_allowed();
     test_async_console_write_advances_only_on_completion();
-    test_terminal_output_waits_in_cleanup();
+    test_terminal_output_drains_before_exit();
+    test_raw_ctrl_c_requests_stop();
     puts("zzrun_policy_test: ok");
     return 0;
 }

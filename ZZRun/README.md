@@ -63,13 +63,14 @@ another shared-memory convention.
    forwards input, services one file request, binds a requested P96 screen,
    loads changed CLUT8 palette entries, and acknowledges completed flips.
    `APP_STATUS` is called when the app ends or faults.
-6. Ctrl-C requests a stop: ZZRun writes the lifecycle `stop` word, enqueues one
-   `ZZ_EV_STOP`, and posts `APP_STOP` carrying the generation it owns. Firmware
-   rejects a stop whose generation does not match, so a stale stop cannot abort
-   a newer load. Ctrl-D, Ctrl-E, and Ctrl-F on the app display remain normal
-   raw-key events and additionally enqueue `ZZ_EV_BREAK` with codes 4, 5, and
-   6. The app display has one borderless input window, not a close gadget; its
-   raw keys are forwarded to the app, including the app's own quit controls.
+6. Ctrl-C from the Shell or an app-display raw key requests a stop: ZZRun
+   writes the lifecycle `stop` word, enqueues one `ZZ_EV_STOP`, and posts
+   `APP_STOP` carrying the generation it owns. Firmware rejects a stop whose
+   generation does not match, so a stale stop cannot abort a newer load.
+   Ctrl-D, Ctrl-E, and Ctrl-F on the app display remain normal raw-key events
+   and additionally enqueue `ZZ_EV_BREAK` with codes 4, 5, and 6. The app
+   display has one borderless input window, not a close gadget; its raw keys
+   are forwarded to the app, including Ctrl-C and the app's own quit controls.
    ZZRun remains alive for the 500 ms grace period so firmware can publish its
    final state. Ctrl-C ends ZZRun after that grace, plus a second 500 ms,
    even if console output is still queued. It closes the custom screen and

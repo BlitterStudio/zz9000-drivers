@@ -1137,8 +1137,6 @@ done:
         Close(fh);
     if (dir)
         UnLock(dir);
-    if (err != ZZ_OK)
-        close_fd_index(index);
     file_reply(req->seq, req->fd, err, 0, mode_out, size, mtime);
 }
 
@@ -1556,6 +1554,11 @@ static void drain_window(struct Window *win)
             uint16_t signal = type == ZZAPP_EV_KEY_DOWN ?
                 break_signal_for_rawkey(raw, qual) : 0;
 
+            if (type == ZZAPP_EV_KEY_DOWN &&
+                zzrun_rawkey_requests_stop(raw, qual, IEQUALIFIER_CONTROL)) {
+                user_stop = 1;
+                request_stop();
+            }
             push_event(type, raw, 0, 0, qual);
             if (signal)
                 push_event(ZZAPP_EV_BREAK, signal, 0, 0, qual);
@@ -2990,8 +2993,7 @@ static int run_loop(ULONG forced_mode)
             leave.entered = entered;
             leave.stop_asked = stop_asked;
             leave.user_stop = user_stop;
-            leave.output_pending = zzrun_console_output_blocks_run_exit(
-                state, console_output_pending(), console_output_failed);
+            leave.output_pending = console_output_pending();
             leave.output_failed = console_output_failed;
             if (zzrun_run_should_exit(&leave))
                 break;
