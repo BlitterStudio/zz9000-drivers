@@ -1900,9 +1900,6 @@ static void console_fill_async(uint8_t *hdr, int keyboard)
         console_set_eof(hdr);
         return;
     }
-    /* A false result must not fall through to a blocking Read. */
-    if (!zzrun_input_uses_async(keyboard))
-        return;
     if (keyboard) {
         if (!console_keyboard_demand(hdr))
             return;

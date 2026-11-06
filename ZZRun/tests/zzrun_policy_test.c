@@ -93,10 +93,8 @@ static void test_keyboard_read_gated_on_running(void)
                                        0) == 0);
 }
 
-static void test_noninteractive_read_is_async_and_not_want_gated(void)
+static void test_noninteractive_read_is_not_want_gated(void)
 {
-    assert(zzrun_input_uses_async(0) == 1);
-    assert(zzrun_input_uses_async(1) == 1);
     assert(zzrun_async_read_allowed(ZZRUN_ST_RUNNING, 1, 0, 0u, 0u, 16u, 0, 0) ==
            1);
     assert(zzrun_async_read_allowed(ZZRUN_ST_RUNNING, 1, 0, 16u, 0u, 16u, 0,
@@ -141,7 +139,7 @@ int main(void)
     test_ctrl_c_ends_even_if_output_remains();
     test_clean_exit_still_drains();
     test_keyboard_read_gated_on_running();
-    test_noninteractive_read_is_async_and_not_want_gated();
+    test_noninteractive_read_is_not_want_gated();
     test_audio_epoch_discards_before_accept();
     test_stop_payload_carries_generation();
     test_finish_prompt_is_not_stdout();

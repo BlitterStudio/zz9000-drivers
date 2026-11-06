@@ -99,14 +99,6 @@ static inline int zzrun_keyboard_read_allowed(uint32_t state, int owns,
     return want == 1u;
 }
 
-/* Pipes and files use the same asynchronous read. A blocking Read is never
- * the non-interactive path. */
-static inline int zzrun_input_uses_async(int interactive)
-{
-    (void)interactive;
-    return 1;
-}
-
 static inline int zzrun_async_read_allowed(uint32_t state, int owns,
                                            int stop_asked, uint32_t head,
                                            uint32_t tail, uint32_t cap,
