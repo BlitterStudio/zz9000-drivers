@@ -2848,6 +2848,7 @@ static int run_loop(ULONG forced_mode)
     if (ownership_lost) {
         /* cleanup() must only release local resources after ownership loss. */
         window = NULL;
+        puts("ZZRun: another launcher started an app; this app's exit status is lost.");
         return 20;
     }
     if (op_empty(ZZAPP_OP_STATUS, &reply) == ZZ9K_STATUS_OK &&
