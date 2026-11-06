@@ -1708,66 +1708,97 @@ static int console_output_pending(void)
 
 
 /*
- * Interactive input runs the console in raw mode with ZZRun doing the line
- * editing. In cooked mode WaitForChar() never reports a Ctrl-\ typed on an
- * empty line, so the app never saw EOF, and a blocking Read() would stop
- * ZZRun serving the app.
+ * Interactive input stays in the console's normal line mode, so the Shell
+ * keeps its echo, line editing and Ctrl-C/D/E/F signals. ZZRun reads it with
+ * an asynchronous ACTION_READ on its own reply port, and only while the app
+ * is blocked reading stdin (ZZAPP_CONSOLE_WANT_OFF): a pending read returns
+ * a line on Return and 0 bytes on Ctrl-\, which WaitForChar() never reports.
+ * Synchronous DOS calls keep using pr_MsgPort, so their replies never meet
+ * this packet.
  */
-static int console_raw;
-static int console_csi;
-static int console_eof_pending;
-static uint32_t console_line_len;
-static int console_line_ready;
-static char console_line[256];
+#define ZZRUN_CONSOLE_READ_BYTES 256
 
-static void console_restore_mode(void)
+static struct MsgPort *con_port;
+static struct StandardPacket *con_packet;
+static UBYTE *con_buffer;
+static BPTR con_fh;
+static int con_pending;
+static uint32_t con_have;
+static uint32_t con_offset;
+static int con_eof;
+
+static int console_read_start(BPTR fh)
 {
-    if (console_raw) {
-        SetMode(console_input(), 0);
-        console_raw = 0;
+    struct FileHandle *handle = (struct FileHandle *)BADDR(fh);
+
+    if (!handle || !handle->fh_Type)
+        return 0;
+    if (!con_port) {
+        con_port = CreateMsgPort();
+        con_packet = AllocMem(sizeof(*con_packet), MEMF_PUBLIC | MEMF_CLEAR);
+        con_buffer = AllocMem(ZZRUN_CONSOLE_READ_BYTES, MEMF_PUBLIC);
+        if (!con_port || !con_packet || !con_buffer)
+            return 0;
     }
+    memset(con_packet, 0, sizeof(*con_packet));
+    con_packet->sp_Msg.mn_Node.ln_Name = (char *)&con_packet->sp_Pkt;
+    con_packet->sp_Pkt.dp_Link = &con_packet->sp_Msg;
+    con_packet->sp_Pkt.dp_Port = con_port;
+    con_packet->sp_Pkt.dp_Type = ACTION_READ;
+    con_packet->sp_Pkt.dp_Arg1 = handle->fh_Arg1;
+    con_packet->sp_Pkt.dp_Arg2 = (LONG)con_buffer;
+    con_packet->sp_Pkt.dp_Arg3 = ZZRUN_CONSOLE_READ_BYTES;
+    con_fh = fh;
+    con_pending = 1;
+    PutMsg(handle->fh_Type, &con_packet->sp_Msg);
+    return 1;
 }
 
-static void console_echo(const char *text, LONG n)
-{
-    (void)Write(console_input(), (APTR)text, n);
-}
+/* Console-handler packets that put characters into its input as if typed
+ * (FORCE) or at the end of its input buffer (QUEUE). The NDK 3.x headers do
+ * not define them. */
+#ifndef ACTION_FORCE
+#define ACTION_FORCE 2001
+#endif
+#ifndef ACTION_QUEUE
+#define ACTION_QUEUE 2003
+#endif
 
-static void console_edit(UBYTE c)
+/* A pending read must come back before its port and buffer are freed. A
+ * Return put into the console's input completes it; a handler that knows
+ * neither packet needs the user to press Return. */
+static void console_read_finish(void)
 {
-    if (console_csi) {
-        if (c >= 0x40u && c <= 0x7eu)
-            console_csi = 0;
-        return;
-    }
-    if (c == 0x9bu || c == 0x1bu) {
-        console_csi = 1;
-        return;
-    }
-    if (c == '\r' || c == '\n') {
-        console_line[console_line_len++] = '\n';
-        console_echo("\n", 1);
-        console_line_ready = 1;
-        return;
-    }
-    if (c == 0x1cu) {
-        console_line_ready = console_line_len != 0;
-        console_eof_pending = 1;
-        return;
-    }
-    if (c == 0x08u || c == 0x7fu) {
-        if (console_line_len) {
-            console_line_len--;
-            console_echo("\b \b", 3);
+    if (con_pending) {
+        struct FileHandle *handle = (struct FileHandle *)BADDR(con_fh);
+        int waited;
+
+        if (!DoPkt(handle->fh_Type, ACTION_FORCE, handle->fh_Arg1,
+                   (LONG)"\n", 1, 0, 0))
+            (void)DoPkt(handle->fh_Type, ACTION_QUEUE, handle->fh_Arg1,
+                        (LONG)"\n", 1, 0, 0);
+        for (waited = 0; waited < 50 && !GetMsg(con_port); waited++)
+            Delay(1);
+        if (waited == 50) {
+            puts("ZZRun: press Return to finish.");
+            fflush(stdout);
+            WaitPort(con_port);
+            GetMsg(con_port);
         }
-        return;
+        con_pending = 0;
     }
-    if (c < 0x20u || (c >= 0x80u && c < 0xa0u))
-        return;
-    if (console_line_len < sizeof(console_line) - 1u) {
-        console_line[console_line_len++] = (char)c;
-        console_echo((const char *)&c, 1);
-    }
+    if (con_buffer)
+        FreeMem(con_buffer, ZZRUN_CONSOLE_READ_BYTES);
+    if (con_packet)
+        FreeMem(con_packet, sizeof(*con_packet));
+    if (con_port)
+        DeleteMsgPort(con_port);
+    con_buffer = NULL;
+    con_packet = NULL;
+    con_port = NULL;
+    con_have = 0;
+    con_offset = 0;
+    con_eof = 0;
 }
 
 /* Copies bytes into the stdin ring; returns how many fitted. */
@@ -1807,34 +1838,34 @@ static void console_set_eof(uint8_t *hdr)
 
 static void console_fill_interactive(uint8_t *hdr)
 {
-    UBYTE raw[32];
-    LONG got, i;
+    if (con_pending) {
+        LONG got;
 
-    if (!console_raw) {
-        if (!SetMode(console_input(), 1))
+        if (!GetMsg(con_port))
             return;
-        console_raw = 1;
-    }
-    while (!console_line_ready && !console_eof_pending &&
-           WaitForChar(console_input(), 0)) {
-        got = Read(console_input(), raw, (LONG)sizeof(raw));
-        if (got <= 0) {
-            console_eof_pending = 1;
-            break;
+        con_pending = 0;
+        got = con_packet->sp_Pkt.dp_Res1;
+        if (got <= 0)
+            con_eof = 1;
+        else {
+            con_have = (uint32_t)got;
+            con_offset = 0;
         }
-        for (i = 0; i < got && !console_line_ready && !console_eof_pending; i++)
-            console_edit(raw[i]);
     }
-    if (console_line_ready) {
-        uint32_t sent = console_push(hdr, (const uint8_t *)console_line,
-                                     console_line_len);
-        memmove(console_line, console_line + sent, console_line_len - sent);
-        console_line_len -= sent;
-        if (console_line_len)
+    if (con_have) {
+        uint32_t sent = console_push(hdr, con_buffer + con_offset, con_have);
+        con_offset += sent;
+        con_have -= sent;
+        if (con_have)
             return;
-        console_line_ready = 0;
     }
-    if (console_eof_pending)
+    if (con_eof) {
+        console_set_eof(hdr);
+        return;
+    }
+    if (zzapp_get_be32(hdr + ZZAPP_CONSOLE_WANT_OFF) == 1u &&
+        zzapp_get_be32(hdr) == zzapp_get_be32(hdr + 4) &&
+        !console_read_start(console_input()))
         console_set_eof(hdr);
 }
 
@@ -2677,6 +2708,8 @@ static int run_loop(ULONG forced_mode)
         uint32_t state, flags;
         if (timer_port)
             mask |= 1UL << timer_port->mp_SigBit;
+        if (con_port)
+            mask |= 1UL << con_port->mp_SigBit;
         if (input_win && input_win->UserPort)
             mask |= 1UL << input_win->UserPort->mp_SigBit;
         signals = Wait(mask);
@@ -2811,7 +2844,7 @@ static void cleanup(void)
         stop_owned();
     ahi_close();
     window_cache_restore();
-    console_restore_mode();
+    console_read_finish();
     if (console_handle) {
         Close(console_handle);
         console_handle = 0;
