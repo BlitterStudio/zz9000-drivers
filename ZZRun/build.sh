@@ -40,6 +40,12 @@ stage_proto() {
 }
 
 if [ "$staged" -eq 0 ]; then
+    # An explicit firmware checkout also supplies the SDK headers, unless
+    # ZZ9000_SDK overrides them.
+    if [ -z "${ZZ9000_SDK:-}" ] && [ -n "${ZZ9000_FIRMWARE:-}" ]; then
+        ZZ9000_SDK=$ZZ9000_FIRMWARE/sdk
+        export ZZ9000_SDK
+    fi
     "$repo_root/tools/stage-zz9k-headers.sh" "$stage_dir" "$repo_root"
     stage_proto
 fi

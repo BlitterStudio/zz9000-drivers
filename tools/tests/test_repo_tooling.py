@@ -1654,6 +1654,33 @@ class RepoToolingTests(unittest.TestCase):
             self.assertIn("ZZRun.c", args)
             self.assertIn("-o ZZRun", args)
 
+    def test_zzrun_build_stages_sdk_from_explicit_firmware(self):
+        """ZZ9000_FIRMWARE alone must supply the SDK headers too; staging
+        must not fall back to cloning the firmware.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            base = pathlib.Path(tmp)
+            repo = self._zzrun_build_tree(base)
+            firmware = base / "elsewhere" / "fw"
+            self._fake_firmware_sdk(firmware)
+            proto = firmware / "ZZ9000_proto.sdk" / "ZZ9000OS" / "src" / "zzapp_proto.h"
+            proto.parent.mkdir(parents=True, exist_ok=True)
+            proto.write_text("/* explicit-proto */\n", encoding="utf-8")
+            self._write_exec(base / "bin" / "m68k-amigaos-gcc", "#!/bin/sh\nexit 0\n")
+            self._write_exec(
+                base / "bin" / "git",
+                "#!/bin/sh\necho \"unexpected git $*\" >&2\nexit 1\n",
+            )
+            env = os.environ.copy()
+            env["ZZ9000_FIRMWARE"] = str(firmware)
+            env.pop("ZZ9000_SDK", None)
+            env["PATH"] = str(base / "bin") + os.pathsep + env.get("PATH", "")
+            result = self._run_zzrun_build(repo, env)
+            self.assertEqual(0, result.returncode, result.stdout)
+            self.assertNotIn("unexpected git", result.stdout)
+            staged = repo / "ZZRun" / "zz9k-headers" / "zzapp_proto.h"
+            self.assertEqual("/* explicit-proto */\n", staged.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()
