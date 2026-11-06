@@ -186,4 +186,31 @@ static inline int zzrun_arg_length_allowed(uint32_t length)
     return length <= 127u;
 }
 
+/* Terminal app states leave the run loop even with a write in flight; the
+ * cleanup path waits for that packet without starving service work first. */
+static inline int zzrun_console_output_blocks_run_exit(uint32_t state,
+                                                        int pending,
+                                                        int failed)
+{
+    if (state == ZZRUN_ST_IDLE || state == ZZRUN_ST_FAULTED)
+        return 0;
+    return pending && !failed;
+}
+
+/* A DOS write may advance the consumer tail only by the completed byte
+ * count. A short completion is an output failure after that partial advance. */
+static inline uint32_t zzrun_console_write_advance(uint32_t requested,
+                                                    int32_t written)
+{
+    if (written <= 0 || (uint32_t)written > requested)
+        return 0;
+    return (uint32_t)written;
+}
+
+static inline int zzrun_console_write_failed(uint32_t requested,
+                                             int32_t written)
+{
+    return written <= 0 || (uint32_t)written != requested;
+}
+
 #endif /* ZZRUN_POLICY_H */

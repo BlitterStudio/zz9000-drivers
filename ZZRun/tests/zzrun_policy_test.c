@@ -170,7 +170,7 @@ static void test_busy_load_begin_claims_nothing(void)
     assert(zzrun_load_generation_to_claim(0, 0, 7u, 8u, 0, 0, 0u) == 0u);
 }
 
-static void test_stale_file_request_cannot_publish(void)
+static void test_stale_file_request_cannot_publish_or_claim(void)
 {
     assert(zzrun_file_request_is_current(8u, 3u, 8u, 3u));
     assert(!zzrun_file_request_is_current(8u, 3u, 9u, 3u));
@@ -182,6 +182,25 @@ static void test_empty_argument_is_allowed(void)
     assert(zzrun_arg_length_allowed(0u));
     assert(zzrun_arg_length_allowed(127u));
     assert(!zzrun_arg_length_allowed(128u));
+}
+
+static void test_async_console_write_advances_only_on_completion(void)
+{
+    assert(zzrun_console_write_advance(64u, 64) == 64u);
+    assert(zzrun_console_write_advance(64u, 17) == 17u);
+    assert(zzrun_console_write_advance(64u, 0) == 0u);
+    assert(zzrun_console_write_advance(64u, 65) == 0u);
+    assert(!zzrun_console_write_failed(64u, 64));
+    assert(zzrun_console_write_failed(64u, 17));
+    assert(zzrun_console_write_failed(64u, 0));
+}
+
+static void test_terminal_output_waits_in_cleanup(void)
+{
+    assert(zzrun_console_output_blocks_run_exit(ZZRUN_ST_RUNNING, 1, 0));
+    assert(!zzrun_console_output_blocks_run_exit(ZZRUN_ST_IDLE, 1, 0));
+    assert(!zzrun_console_output_blocks_run_exit(ZZRUN_ST_FAULTED, 1, 0));
+    assert(!zzrun_console_output_blocks_run_exit(ZZRUN_ST_RUNNING, 1, 1));
 }
 
 int main(void)
@@ -197,8 +216,10 @@ int main(void)
     test_finish_prompt_is_not_stdout();
     test_ahi_open_failure_exits_20();
     test_busy_load_begin_claims_nothing();
-    test_stale_file_request_cannot_publish();
+    test_stale_file_request_cannot_publish_or_claim();
     test_empty_argument_is_allowed();
+    test_async_console_write_advances_only_on_completion();
+    test_terminal_output_waits_in_cleanup();
     puts("zzrun_policy_test: ok");
     return 0;
 }

@@ -1119,15 +1119,19 @@ static void serve_open(const struct zzapp_file_wire *req)
             err = ZZ_ENOENT;
         goto done;
     }
-    files[index].fh = fh;
-    files[index].used = 1;
-    fh = 0;
-    if (ExamineFH(files[index].fh, &fib)) {
+    if (!file_request_is_current(req->seq))
+        goto done;
+    if (ExamineFH(fh, &fib)) {
         size = (uint32_t)fib.fib_Size;
         mtime = amiga_unix(&fib.fib_Date);
         if (fib.fib_DirEntryType > 0)
             mode_out = ZZAPP_MODE_DIR;
     }
+    if (!file_request_is_current(req->seq))
+        goto done;
+    files[index].fh = fh;
+    files[index].used = 1;
+    fh = 0;
 done:
     if (fh)
         Close(fh);
@@ -1334,7 +1338,7 @@ static void serve_list_open(const struct zzapp_file_wire *req)
     char leaf[108];
     BPTR dir = 0;
     BPTR locked = 0;
-    struct FileInfoBlock *fib;
+    struct FileInfoBlock *fib = NULL;
     int err = ZZ_OK;
     int index = slot_index(req->fd, &err);
 
@@ -1368,6 +1372,8 @@ static void serve_list_open(const struct zzapp_file_wire *req)
                 goto done;
         }
     }
+    if (!file_request_is_current(req->seq))
+        goto done;
     fib = AllocMem(sizeof(*fib), MEMF_PUBLIC | MEMF_CLEAR);
     if (!fib) {
         err = ZZ_ENOMEM;
@@ -1375,20 +1381,23 @@ static void serve_list_open(const struct zzapp_file_wire *req)
     }
     if (!Examine(locked, fib)) {
         err = zz_from_io();
-        FreeMem(fib, sizeof(*fib));
         goto done;
     }
     if (fib->fib_DirEntryType < 0) {
         err = ZZ_EIO;
-        FreeMem(fib, sizeof(*fib));
         goto done;
     }
+    if (!file_request_is_current(req->seq))
+        goto done;
     lists[index].lock = locked;
     lists[index].fib = fib;
     lists[index].used = 1;
     lists[index].primed = 1;
     locked = 0;
+    fib = NULL;
 done:
+    if (fib)
+        FreeMem(fib, sizeof(*fib));
     if (locked)
         UnLock(locked);
     if (dir)
@@ -1668,20 +1677,49 @@ static int console_open_if_needed(void)
     }
     return 1;
 }
+#define ZZRUN_CONSOLE_READ_BYTES 256
+#define ZZRUN_CONSOLE_WRITE_BYTES 1024
+
+static struct MsgPort *con_port;
+static struct StandardPacket *con_packet;
+static UBYTE *con_buffer;
+static BPTR con_fh;
+static int con_pending;
+static int con_interactive;
+static uint32_t con_have;
+static uint32_t con_offset;
+static int con_eof;
+static struct StandardPacket *con_write_packet;
+static UBYTE *con_write_buffer;
+static int con_write_pending;
+static int con_write_interactive;
+static uint32_t con_write_tail;
+static uint32_t con_write_bytes;
+
+static void console_reap_packets(void);
+static int console_write_start(BPTR fh, const uint8_t *data, uint32_t tail,
+                               uint32_t bytes);
+
+static void console_output_error(void)
+{
+    if (!console_output_failed)
+        tell("ZZRun: cannot write app console output.");
+    console_output_failed = 1;
+    request_stop();
+}
 
 static void console_drain_output(void)
 {
     uint8_t *hdr;
     uint32_t head, tail, available, at, chunk;
-    LONG written;
 
-    if (console_output_failed)
+    console_reap_packets();
+    if (console_output_failed || con_write_pending)
         return;
     if (!window || !(life_get(ZZAPP_LIFE_FLAGS_OFF) & ZZAPP_F_CONSOLE))
         return;
     if (!console_open_if_needed()) {
-        console_output_failed = 1;
-        request_stop();
+        console_output_error();
         return;
     }
     hdr = window + ZZAPP_CONSOLE_OUT_OFF;
@@ -1694,41 +1732,32 @@ static void console_drain_output(void)
         win_cache(ZZAPP_CONSOLE_OUT_OFF + 4, 4);
         return;
     }
+    if (!available)
+        return;
     /* ZZRun's own messages go through buffered stdio; flush them first so
      * they appear before the app's output, not after it. */
-    if (available)
-        fflush(stdout);
-    while (available) {
-        at = tail % ZZAPP_CONSOLE_OUT_CAP;
-        chunk = ZZAPP_CONSOLE_OUT_CAP - at;
-        if (chunk > available)
-            chunk = available;
-        if (chunk > 1024u)
-            chunk = 1024u;
-        win_cache(ZZAPP_CONSOLE_OUT_OFF + ZZAPP_CONSOLE_HDR + at, chunk);
-        written = Write(console_output(),
-                        window + ZZAPP_CONSOLE_OUT_OFF + ZZAPP_CONSOLE_HDR + at,
-                        (LONG)chunk);
-        if (written <= 0) {
-            if (!console_output_failed)
-                tell("ZZRun: cannot write app console output.");
-            console_output_failed = 1;
-            request_stop();
-            break;
-        }
-        tail += (uint32_t)written;
-        available -= (uint32_t)written;
-        if ((uint32_t)written != chunk)
-            break;
-    }
-    zzapp_put_be32(hdr + 4, tail);
-    win_cache(ZZAPP_CONSOLE_OUT_OFF + 4, 4);
+    fflush(stdout);
+    at = tail % ZZAPP_CONSOLE_OUT_CAP;
+    chunk = ZZAPP_CONSOLE_OUT_CAP - at;
+    if (chunk > available)
+        chunk = available;
+    if (chunk > ZZRUN_CONSOLE_WRITE_BYTES)
+        chunk = ZZRUN_CONSOLE_WRITE_BYTES;
+    win_cache(ZZAPP_CONSOLE_OUT_OFF + ZZAPP_CONSOLE_HDR + at, chunk);
+    if (!console_write_start(console_output(),
+                             window + ZZAPP_CONSOLE_OUT_OFF +
+                                 ZZAPP_CONSOLE_HDR + at,
+                             tail, chunk))
+        console_output_error();
 }
+
 static int console_output_pending(void)
 {
     uint8_t *hdr;
     uint32_t head, tail;
 
+    if (con_write_pending)
+        return 1;
     if (!window || !(life_get(ZZAPP_LIFE_FLAGS_OFF) & ZZAPP_F_CONSOLE))
         return 0;
     hdr = window + ZZAPP_CONSOLE_OUT_OFF;
@@ -1749,17 +1778,6 @@ static int console_output_pending(void)
  * WANT, sampled after the ring. Synchronous DOS calls keep using
  * pr_MsgPort, so their replies never meet this packet.
  */
-#define ZZRUN_CONSOLE_READ_BYTES 256
-
-static struct MsgPort *con_port;
-static struct StandardPacket *con_packet;
-static UBYTE *con_buffer;
-static BPTR con_fh;
-static int con_pending;
-static int con_interactive;
-static uint32_t con_have;
-static uint32_t con_offset;
-static int con_eof;
 
 static int console_read_start(BPTR fh)
 {
@@ -1767,13 +1785,14 @@ static int console_read_start(BPTR fh)
 
     if (!handle || !handle->fh_Type)
         return 0;
-    if (!con_port) {
+    if (!con_port)
         con_port = CreateMsgPort();
+    if (!con_packet)
         con_packet = AllocMem(sizeof(*con_packet), MEMF_PUBLIC | MEMF_CLEAR);
+    if (!con_buffer)
         con_buffer = AllocMem(ZZRUN_CONSOLE_READ_BYTES, MEMF_PUBLIC);
-        if (!con_port || !con_packet || !con_buffer)
-            return 0;
-    }
+    if (!con_port || !con_packet || !con_buffer)
+        return 0;
     memset(con_packet, 0, sizeof(*con_packet));
     con_packet->sp_Msg.mn_Node.ln_Name = (char *)&con_packet->sp_Pkt;
     con_packet->sp_Pkt.dp_Link = &con_packet->sp_Msg;
@@ -1822,6 +1841,92 @@ static void console_user_note(const char *msg)
     }
 }
 
+static int console_write_start(BPTR fh, const uint8_t *data, uint32_t tail,
+                               uint32_t bytes)
+{
+    struct FileHandle *handle = (struct FileHandle *)BADDR(fh);
+
+    if (!handle || !handle->fh_Type || !data || bytes == 0 ||
+        bytes > ZZRUN_CONSOLE_WRITE_BYTES)
+        return 0;
+    if (!con_port)
+        con_port = CreateMsgPort();
+    if (!con_write_packet)
+        con_write_packet = AllocMem(sizeof(*con_write_packet),
+                                    MEMF_PUBLIC | MEMF_CLEAR);
+    if (!con_write_buffer)
+        con_write_buffer = AllocMem(ZZRUN_CONSOLE_WRITE_BYTES, MEMF_PUBLIC);
+    if (!con_port || !con_write_packet || !con_write_buffer)
+        return 0;
+    memcpy(con_write_buffer, data, bytes);
+    memset(con_write_packet, 0, sizeof(*con_write_packet));
+    con_write_packet->sp_Msg.mn_Node.ln_Name =
+        (char *)&con_write_packet->sp_Pkt;
+    con_write_packet->sp_Pkt.dp_Link = &con_write_packet->sp_Msg;
+    con_write_packet->sp_Pkt.dp_Port = con_port;
+    con_write_packet->sp_Pkt.dp_Type = ACTION_WRITE;
+    con_write_packet->sp_Pkt.dp_Arg1 = handle->fh_Arg1;
+    con_write_packet->sp_Pkt.dp_Arg2 = (LONG)con_write_buffer;
+    con_write_packet->sp_Pkt.dp_Arg3 = (LONG)bytes;
+    con_write_tail = tail;
+    con_write_bytes = bytes;
+    con_write_interactive = IsInteractive(fh);
+    con_write_pending = 1;
+    PutMsg(handle->fh_Type, &con_write_packet->sp_Msg);
+    return 1;
+}
+
+static void console_write_complete(void)
+{
+    LONG written = con_write_packet->sp_Pkt.dp_Res1;
+    uint32_t advanced = zzrun_console_write_advance(
+        con_write_bytes, (int32_t)written);
+
+    con_write_pending = 0;
+    if (advanced && window && owns_current_generation()) {
+        uint8_t *hdr = window + ZZAPP_CONSOLE_OUT_OFF;
+
+        win_cache(ZZAPP_CONSOLE_OUT_OFF, ZZAPP_CONSOLE_HDR);
+        if (zzapp_get_be32(hdr + 4) == con_write_tail) {
+            zzapp_put_be32(hdr + 4, con_write_tail + advanced);
+            win_cache(ZZAPP_CONSOLE_OUT_OFF + 4, 4);
+        } else {
+            console_output_error();
+            return;
+        }
+    }
+    if (zzrun_console_write_failed(con_write_bytes, (int32_t)written))
+        console_output_error();
+}
+
+static void console_read_complete(void)
+{
+    LONG got = con_packet->sp_Pkt.dp_Res1;
+
+    con_pending = 0;
+    if (got <= 0)
+        con_eof = 1;
+    else {
+        con_have = (uint32_t)got;
+        con_offset = 0;
+    }
+}
+
+static void console_reap_packets(void)
+{
+    struct Message *msg;
+
+    if (!con_port)
+        return;
+    while ((msg = GetMsg(con_port)) != NULL) {
+        if (con_pending && con_packet && msg == &con_packet->sp_Msg)
+            console_read_complete();
+        else if (con_write_pending && con_write_packet &&
+                 msg == &con_write_packet->sp_Msg)
+            console_write_complete();
+    }
+}
+
 /* Head and tail are loaded before WANT. The barrier stops the compiler
  * from moving the WANT load ahead of that observation. */
 static int console_keyboard_demand(uint8_t *hdr)
@@ -1837,16 +1942,18 @@ static int console_keyboard_demand(uint8_t *hdr)
                                        head, tail, want, 0, 0);
 }
 
-/* A pending read must come back before its port and buffer are freed. The
- * 3.2 console handler and a pipe handler have no way to cancel it, so ZZRun
- * waits. A keyboard read asks for Return on the handle that owns the read,
- * never on redirected stdout. A pipe cannot be cancelled, so the wait
- * message goes to the user console, not to the pipe and not to stdout.
- * A regular file has already completed. */
+/* Pending console packets must return before their port and storage are
+ * freed. Neither pipes nor the console handler can cancel them. */
 static void console_read_finish(void)
 {
-    if (con_pending) {
-        if (!GetMsg(con_port)) {
+    int input_noted = 0;
+    int output_noted = 0;
+
+    while (con_pending || con_write_pending) {
+        console_reap_packets();
+        if (!con_pending && !con_write_pending)
+            break;
+        if (con_pending && !input_noted) {
             int kind = zzrun_finish_prompt(1, con_interactive);
 
             if (kind == ZZRUN_FINISH_RETURN_ON_READ_HANDLE)
@@ -1855,17 +1962,32 @@ static void console_read_finish(void)
             else
                 console_user_note(
                     "ZZRun: waiting for pending input to finish.\n");
-            WaitPort(con_port);
-            GetMsg(con_port);
+            input_noted = 1;
         }
-        con_pending = 0;
+        if (con_write_pending && !con_write_interactive && !output_noted) {
+            console_user_note(
+                "ZZRun: waiting for pending output to finish.\n");
+            output_noted = 1;
+        }
+        if (con_port)
+            WaitPort(con_port);
     }
+    if (con_write_buffer)
+        FreeMem(con_write_buffer, ZZRUN_CONSOLE_WRITE_BYTES);
+    if (con_write_packet)
+        FreeMem(con_write_packet, sizeof(*con_write_packet));
     if (con_buffer)
         FreeMem(con_buffer, ZZRUN_CONSOLE_READ_BYTES);
     if (con_packet)
         FreeMem(con_packet, sizeof(*con_packet));
     if (con_port)
         DeleteMsgPort(con_port);
+    con_write_buffer = NULL;
+    con_write_packet = NULL;
+    con_write_pending = 0;
+    con_write_interactive = 0;
+    con_write_tail = 0;
+    con_write_bytes = 0;
     con_buffer = NULL;
     con_packet = NULL;
     con_port = NULL;
@@ -1915,20 +2037,9 @@ static void console_fill_async(uint8_t *hdr, int keyboard)
 {
     uint32_t head, tail;
 
-    if (con_pending) {
-        LONG got;
-
-        if (!GetMsg(con_port))
-            return;
-        con_pending = 0;
-        got = con_packet->sp_Pkt.dp_Res1;
-        if (got <= 0)
-            con_eof = 1;
-        else {
-            con_have = (uint32_t)got;
-            con_offset = 0;
-        }
-    }
+    console_reap_packets();
+    if (con_pending)
+        return;
     if (con_have) {
         uint32_t sent = console_push(hdr, con_buffer + con_offset, con_have);
 
@@ -2879,7 +2990,8 @@ static int run_loop(ULONG forced_mode)
             leave.entered = entered;
             leave.stop_asked = stop_asked;
             leave.user_stop = user_stop;
-            leave.output_pending = console_output_pending();
+            leave.output_pending = zzrun_console_output_blocks_run_exit(
+                state, console_output_pending(), console_output_failed);
             leave.output_failed = console_output_failed;
             if (zzrun_run_should_exit(&leave))
                 break;
