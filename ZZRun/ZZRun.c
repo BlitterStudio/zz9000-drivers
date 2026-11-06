@@ -28,6 +28,10 @@
 #include <proto/zz9k.h>
 #include "zz9k/request.h"
 #include "zzapp_proto.h"
+#include "zzrun_policy.h"
+#ifndef ZZAPP_AUDIO_EPOCH_OFF
+#define ZZAPP_AUDIO_EPOCH_OFF 28u
+#endif
 #include "zz9000_hw.h"
 #include <devices/ahi.h>
 #include <proto/ahi.h>
@@ -49,7 +53,7 @@ extern struct WBStartup *_WBenchMsg;
 
 #define ZZRUN_VERSION "0.1"
 static const char version[] __attribute__((used)) =
-    "$VER: ZZRun " ZZRUN_VERSION " (31.10.2026)\r\n";
+    "$VER: ZZRun " ZZRUN_VERSION " (06.11.2026)\r\n";
 
 #define ZZ_OK          0
 #define ZZ_EIO        -1
@@ -86,6 +90,23 @@ static const char version[] __attribute__((used)) =
 #define ZZRUN_SCREEN_MAX    4096u
 #define ZZRUN_UNIX_DELTA    252460800UL
 #define ZZRUN_READ_CHUNK    8192u
+_Static_assert(ZZRUN_ST_IDLE == ZZAPP_ST_IDLE, "idle");
+_Static_assert(ZZRUN_ST_LOADING == ZZAPP_ST_LOADING, "loading");
+_Static_assert(ZZRUN_ST_STARTING == ZZAPP_ST_STARTING, "starting");
+_Static_assert(ZZRUN_ST_RUNNING == ZZAPP_ST_RUNNING, "running");
+_Static_assert(ZZRUN_ST_STOPPING == ZZAPP_ST_STOPPING, "stopping");
+_Static_assert(ZZRUN_ST_FAULTED == ZZAPP_ST_FAULTED, "faulted");
+_Static_assert(ZZRUN_FAULT_WATCHDOG_RESTART == ZZAPP_FAULT_WATCHDOG_RESTART,
+               "watchdog restart");
+_Static_assert(ZZRUN_POLICY_GRACE_MS == ZZRUN_GRACE_MS, "grace");
+_Static_assert(ZZAPP_AUDIO_EPOCH_OFF == 28u, "audio epoch offset");
+#if defined(ZZAPP_AUDIO_FLAGS_OFF)
+_Static_assert(ZZAPP_AUDIO_FLAGS_OFF == ZZAPP_AUDIO_EPOCH_OFF, "epoch word");
+#endif
+#ifdef ZZAPP_STOP_REQ_BYTES
+_Static_assert(ZZAPP_STOP_REQ_BYTES == ZZRUN_STOP_REQ_BYTES, "stop bytes");
+_Static_assert(ZZAPP_STOP_GENERATION == 0u, "stop generation offset");
+#endif
 
 #define MMU_MAPP_CACHEINHIBIT 0x00000040UL
 #define MMU_MAPP_COPYBACK     0x00002000UL
@@ -98,15 +119,12 @@ static const char version[] __attribute__((used)) =
 
 struct mmu_context;
 
-struct mmu_window_page {
-    uint32_t address;
-    uint32_t properties;
-};
 static struct ZZ9000Board board;
 static uint8_t *window;
 static uint32_t window_bytes;
 static int abs_paths;
 static int stop_asked;
+static int user_stop;
 static int stop_event_sent;
 static uint32_t stop_ms;
 static uint32_t flip_acked;
@@ -144,9 +162,6 @@ static int scanout_fallback;
 static uint32_t palette_generation;
 static struct Library *MMUBase;
 static struct mmu_context *mmu_context;
-static struct mmu_window_page *mmu_window_pages;
-static uint32_t mmu_window_page_count;
-static uint32_t mmu_window_page_bytes;
 static uint32_t owned_generation;
 static BPTR console_handle;
 static int console_failed;
@@ -160,6 +175,9 @@ static uint32_t ahi_pending_bytes[ZZRUN_AHI_BUFFER_COUNT];
 static uint8_t *ahi_buffer[ZZRUN_AHI_BUFFER_COUNT];
 static uint8_t ahi_pending[ZZRUN_AHI_BUFFER_COUNT];
 static uint32_t ahi_underruns;
+static uint32_t ahi_stream_epoch;
+static int ahi_stream_epoch_valid;
+static int console_output_failed;
 
 struct file_slot {
     BPTR fh;
@@ -213,20 +231,6 @@ static uint32_t mmu_page_size(struct mmu_context *context)
     return d0;
 }
 
-static uint32_t mmu_properties(struct mmu_context *context, uint32_t address)
-{
-    register uint32_t d0 __asm("d0");
-    register struct mmu_context *a0 __asm("a0") = context;
-    register void *a1 __asm("a1") = (void *)(uintptr_t)address;
-    register void *a2 __asm("a2") = NULL;
-    register struct Library *a6 __asm("a6") = MMUBase;
-    __asm volatile("jsr -90(a6)"
-                   : "=r"(d0), "+r"(a0), "+r"(a1), "+r"(a2)
-                   : "r"(a6)
-                   : "cc", "memory", "d1");
-    return d0;
-}
-
 static int mmu_set_properties(struct mmu_context *context, uint32_t flags,
                               uint32_t mask, uint32_t address, uint32_t size)
 {
@@ -244,25 +248,12 @@ static int mmu_set_properties(struct mmu_context *context, uint32_t flags,
     return d0 != 0;
 }
 
-static void window_cache_restore(void)
+/* The shared window stays cache-inhibited once any page is inhibited.
+ * Restoring the saved mode would make another client's live window
+ * copyback-cacheable again. There is no snapshot: a failed inhibit must
+ * not call SetProperties on pages it did not change. */
+static void window_cache_release(void)
 {
-    uint32_t i;
-
-    if (MMUBase && mmu_context && mmu_window_pages) {
-        for (i = 0; i < mmu_window_page_count; i++) {
-            (void)mmu_set_properties(mmu_context,
-                                     mmu_window_pages[i].properties & MMU_CACHE_MASK,
-                                     MMU_CACHE_MASK, mmu_window_pages[i].address,
-                                     mmu_window_page_bytes);
-        }
-    }
-    if (mmu_window_pages) {
-        FreeMem(mmu_window_pages,
-                (ULONG)mmu_window_page_count * sizeof(*mmu_window_pages));
-        mmu_window_pages = NULL;
-    }
-    mmu_window_page_count = 0;
-    mmu_window_page_bytes = 0;
     mmu_context = NULL;
     if (MMUBase) {
         CloseLibrary(MMUBase);
@@ -287,45 +278,34 @@ static void window_cache_disable(void)
     page_bytes = mmu_context ? mmu_page_size(mmu_context) : 0;
     if (page_bytes == 0 || (page_bytes & (page_bytes - 1u)) != 0u) {
         puts("ZZRun: mmu.library has no usable page size.");
-        window_cache_restore();
+        window_cache_release();
         return;
     }
     first = (uint32_t)(uintptr_t)window & ~(page_bytes - 1u);
     if (window_bytes > UINT32_MAX - (uint32_t)(uintptr_t)window ||
         (uint32_t)(uintptr_t)window + window_bytes > UINT32_MAX - (page_bytes - 1u)) {
         puts("ZZRun: shared window range overflows.");
-        window_cache_restore();
+        window_cache_release();
         return;
     }
     last = ((uint32_t)(uintptr_t)window + window_bytes + page_bytes - 1u) &
            ~(page_bytes - 1u);
     count = (last - first) / page_bytes;
-    if (count == 0 || count > UINT32_MAX / sizeof(*mmu_window_pages)) {
+    if (count == 0) {
         puts("ZZRun: shared window page count is invalid.");
-        window_cache_restore();
+        window_cache_release();
         return;
     }
-    mmu_window_pages = AllocMem((ULONG)count * sizeof(*mmu_window_pages),
-                                MEMF_PUBLIC | MEMF_CLEAR);
-    if (!mmu_window_pages) {
-        puts("ZZRun: cannot save MMU window properties.");
-        window_cache_restore();
-        return;
-    }
-    mmu_window_page_count = count;
-    mmu_window_page_bytes = page_bytes;
     for (i = 0; i < count; i++) {
         uint32_t address = first + i * page_bytes;
 
-        mmu_window_pages[i].address = address;
-        mmu_window_pages[i].properties = mmu_properties(mmu_context, address);
         if (!mmu_set_properties(mmu_context, MMU_MAPP_CACHEINHIBIT,
                                 MMU_CACHE_MASK, address, page_bytes)) {
             puts("ZZRun: cannot make the shared window non-cacheable.");
-            window_cache_restore();
-            return;
+            break;
         }
     }
+    window_cache_release();
 }
 
 static void win_cache(uint32_t off, uint32_t len)
@@ -519,9 +499,12 @@ static void claim_loading_generation(uint32_t previous_generation)
 static void stop_owned(void)
 {
     ZZ9KMailboxEntry reply;
+    uint8_t payload[ZZRUN_STOP_REQ_BYTES];
 
-    if (owns_current_generation())
-        (void)op_empty(ZZAPP_OP_STOP, &reply);
+    if (!owns_current_generation())
+        return;
+    zzrun_stop_payload(payload, owned_generation);
+    (void)mailbox(ZZAPP_OP_STOP, payload, ZZRUN_STOP_REQ_BYTES, &reply);
 }
 
 
@@ -1651,9 +1634,12 @@ static void console_drain_output(void)
     uint32_t head, tail, available, at, chunk;
     LONG written;
 
+    if (console_output_failed)
+        return;
     if (!window || !(life_get(ZZAPP_LIFE_FLAGS_OFF) & ZZAPP_F_CONSOLE))
         return;
     if (!console_open_if_needed()) {
+        console_output_failed = 1;
         request_stop();
         return;
     }
@@ -1682,8 +1668,13 @@ static void console_drain_output(void)
         written = Write(console_output(),
                         window + ZZAPP_CONSOLE_OUT_OFF + ZZAPP_CONSOLE_HDR + at,
                         (LONG)chunk);
-        if (written <= 0)
+        if (written <= 0) {
+            if (!console_output_failed)
+                tell("ZZRun: cannot write app console output.");
+            console_output_failed = 1;
+            request_stop();
             break;
+        }
         tail += (uint32_t)written;
         available -= (uint32_t)written;
         if ((uint32_t)written != chunk)
@@ -1708,13 +1699,14 @@ static int console_output_pending(void)
 
 
 /*
- * Interactive input stays in the console's normal line mode, so the Shell
- * keeps its echo, line editing and Ctrl-C/D/E/F signals. ZZRun reads it with
- * an asynchronous ACTION_READ on its own reply port, and only while the app
- * is blocked reading stdin (ZZAPP_CONSOLE_WANT_OFF): a pending read returns
- * a line on Return and 0 bytes on Ctrl-\, which WaitForChar() never reports.
- * Synchronous DOS calls keep using pr_MsgPort, so their replies never meet
- * this packet.
+ * Input stays asynchronous for every handle. A keyboard read uses the
+ * console's normal line mode, so the Shell keeps echo, line editing and
+ * Ctrl-C/D/E/F. A pipe or file uses the same ACTION_READ: a blocking Read
+ * would stop heartbeat, display and audio while the writer stays open.
+ * A pending read returns a line on Return and 0 bytes on Ctrl-\. It is
+ * started only while the owned app is RUNNING. Keyboard reads also require
+ * WANT, sampled after the ring. Synchronous DOS calls keep using
+ * pr_MsgPort, so their replies never meet this packet.
  */
 #define ZZRUN_CONSOLE_READ_BYTES 256
 
@@ -1723,6 +1715,7 @@ static struct StandardPacket *con_packet;
 static UBYTE *con_buffer;
 static BPTR con_fh;
 static int con_pending;
+static int con_interactive;
 static uint32_t con_have;
 static uint32_t con_offset;
 static int con_eof;
@@ -1754,16 +1747,73 @@ static int console_read_start(BPTR fh)
     return 1;
 }
 
+static void console_write_fh(BPTR fh, const char *msg)
+{
+    if (!fh || !msg || !msg[0])
+        return;
+    (void)Write(fh, (APTR)msg, (LONG)strlen(msg));
+}
+
+/* The user's console, never redirected stdout and never the pipe. */
+static void console_user_note(const char *msg)
+{
+    BPTR fh;
+
+    if (console_handle) {
+        console_write_fh(console_handle, msg);
+        return;
+    }
+    fh = Open((CONST_STRPTR)"CONSOLE:", MODE_OLDFILE);
+    if (fh) {
+        console_write_fh(fh, msg);
+        Close(fh);
+        return;
+    }
+    if (_WBenchMsg && IntuitionBase) {
+        struct EasyStruct es;
+
+        es.es_StructSize = sizeof(es);
+        es.es_Flags = 0;
+        es.es_Title = (UBYTE *)"ZZRun";
+        es.es_TextFormat = (UBYTE *)msg;
+        es.es_GadgetFormat = (UBYTE *)"OK";
+        EasyRequestArgs(NULL, &es, NULL, NULL);
+    }
+}
+
+/* Head and tail are loaded before WANT. The barrier stops the compiler
+ * from moving the WANT load ahead of that observation. */
+static int console_keyboard_demand(uint8_t *hdr)
+{
+    uint32_t head = zzapp_get_be32(hdr);
+    uint32_t tail = zzapp_get_be32(hdr + 4);
+    uint32_t want;
+
+    __asm__ volatile("" ::: "memory");
+    want = zzapp_get_be32(hdr + ZZAPP_CONSOLE_WANT_OFF);
+    return zzrun_keyboard_read_allowed(life_get(ZZAPP_LIFE_STATE_OFF),
+                                       owns_current_generation(), stop_asked,
+                                       head, tail, want, 0, 0);
+}
+
 /* A pending read must come back before its port and buffer are freed. The
- * 3.2 console handler has no way to cancel it (it ignored ACTION_FORCE and
- * ACTION_QUEUE on the A4000), so the user finishes it with Return. This
- * only happens when the app stops while it is waiting for input. */
+ * 3.2 console handler and a pipe handler have no way to cancel it, so ZZRun
+ * waits. A keyboard read asks for Return on the handle that owns the read,
+ * never on redirected stdout. A pipe cannot be cancelled, so the wait
+ * message goes to the user console, not to the pipe and not to stdout.
+ * A regular file has already completed. */
 static void console_read_finish(void)
 {
     if (con_pending) {
         if (!GetMsg(con_port)) {
-            puts("ZZRun: press Return to finish.");
-            fflush(stdout);
+            int kind = zzrun_finish_prompt(1, con_interactive);
+
+            if (kind == ZZRUN_FINISH_RETURN_ON_READ_HANDLE)
+                console_write_fh(con_fh ? con_fh : console_input(),
+                                 "ZZRun: press Return to finish.\n");
+            else
+                console_user_note(
+                    "ZZRun: waiting for pending input to finish.\n");
             WaitPort(con_port);
             GetMsg(con_port);
         }
@@ -1778,9 +1828,11 @@ static void console_read_finish(void)
     con_buffer = NULL;
     con_packet = NULL;
     con_port = NULL;
+    con_fh = 0;
     con_have = 0;
     con_offset = 0;
     con_eof = 0;
+    con_interactive = 0;
 }
 
 /* Copies bytes into the stdin ring; returns how many fitted. */
@@ -1818,8 +1870,10 @@ static void console_set_eof(uint8_t *hdr)
     win_cache(ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_EOF_OFF, 4);
 }
 
-static void console_fill_interactive(uint8_t *hdr)
+static void console_fill_async(uint8_t *hdr, int keyboard)
 {
+    uint32_t head, tail;
+
     if (con_pending) {
         LONG got;
 
@@ -1836,6 +1890,7 @@ static void console_fill_interactive(uint8_t *hdr)
     }
     if (con_have) {
         uint32_t sent = console_push(hdr, con_buffer + con_offset, con_have);
+
         con_offset += sent;
         con_have -= sent;
         if (con_have)
@@ -1845,17 +1900,33 @@ static void console_fill_interactive(uint8_t *hdr)
         console_set_eof(hdr);
         return;
     }
-    if (zzapp_get_be32(hdr + ZZAPP_CONSOLE_WANT_OFF) == 1u &&
-        zzapp_get_be32(hdr) == zzapp_get_be32(hdr + 4) &&
-        !console_read_start(console_input()))
+    /* A false result must not fall through to a blocking Read. */
+    if (!zzrun_input_uses_async(keyboard))
+        return;
+    if (keyboard) {
+        if (!console_keyboard_demand(hdr))
+            return;
+    } else {
+        head = zzapp_get_be32(hdr);
+        tail = zzapp_get_be32(hdr + 4);
+        if (!zzrun_async_read_allowed(life_get(ZZAPP_LIFE_STATE_OFF),
+                                      owns_current_generation(), stop_asked,
+                                      head, tail, ZZAPP_CONSOLE_IN_CAP, 0, 0))
+            return;
+    }
+    /* Forced unwind can leave WANT set after the app is no longer running. */
+    if (stop_asked || !owns_current_generation() ||
+        life_get(ZZAPP_LIFE_STATE_OFF) != ZZAPP_ST_RUNNING)
+        return;
+    if (!console_read_start(console_input()))
         console_set_eof(hdr);
+    else
+        con_interactive = keyboard;
 }
 
 static void console_fill_input(void)
 {
     uint8_t *hdr;
-    uint32_t head, tail, free_bytes, at, chunk;
-    LONG got;
 
     if (!window || !(life_get(ZZAPP_LIFE_FLAGS_OFF) & ZZAPP_F_CONSOLE))
         return;
@@ -1865,36 +1936,12 @@ static void console_fill_input(void)
     win_cache(ZZAPP_CONSOLE_IN_OFF, ZZAPP_CONSOLE_HDR);
     if (zzapp_get_be32(hdr + ZZAPP_CONSOLE_EOF_OFF))
         return;
-    if (IsInteractive(console_input())) {
-        console_fill_interactive(hdr);
-        return;
-    }
-    head = zzapp_get_be32(hdr);
-    tail = zzapp_get_be32(hdr + 4);
-    if (head - tail > ZZAPP_CONSOLE_IN_CAP)
-        return;
-    free_bytes = ZZAPP_CONSOLE_IN_CAP - (head - tail);
-    if (free_bytes == 0)
-        return;
-    at = head % ZZAPP_CONSOLE_IN_CAP;
-    chunk = ZZAPP_CONSOLE_IN_CAP - at;
-    if (chunk > free_bytes)
-        chunk = free_bytes;
-    if (chunk > 256u)
-        chunk = 256u;
-    got = Read(console_input(),
-               window + ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_HDR + at,
-               (LONG)chunk);
-    if (got <= 0) {
-        console_set_eof(hdr);
-        return;
-    }
-    win_cache(ZZAPP_CONSOLE_IN_OFF + ZZAPP_CONSOLE_HDR + at, (uint32_t)got);
-    zzapp_put_be32(hdr, head + (uint32_t)got);
-    win_cache(ZZAPP_CONSOLE_IN_OFF, 4);
+    console_fill_async(hdr, IsInteractive(console_input()));
 }
 
-static void ahi_close(void)
+/* Abort in-flight writes and drop their byte counts. Callers that are
+ * retiring a live stream use ahi_reap instead, which publishes the tail. */
+static void ahi_abort_pending(void)
 {
     unsigned i;
 
@@ -1911,6 +1958,13 @@ static void ahi_close(void)
         while (GetMsg(ahi_port))
             ;
     }
+}
+
+static void ahi_close(void)
+{
+    unsigned i;
+
+    ahi_abort_pending();
     if (ahi_device_open == 0 && ahi_request[0])
         CloseDevice((struct IORequest *)ahi_request[0]);
     ahi_device_open = -1;
@@ -1935,6 +1989,8 @@ static void ahi_close(void)
     AHIBase = NULL;
     ahi_rate = 0u;
     ahi_channels = 0u;
+    ahi_stream_epoch = 0u;
+    ahi_stream_epoch_valid = 0;
 }
 
 static int ahi_open(uint32_t rate, uint32_t channels)
@@ -2042,6 +2098,7 @@ static void service_ahi_audio(void)
 {
     uint8_t *hdr;
     uint32_t head, tail, staged, available, contiguous, bytes, frames, at, i;
+    uint32_t epoch, rate, channels;
     int completed;
     int slot;
 
@@ -2054,12 +2111,26 @@ static void service_ahi_audio(void)
         ahi_close();
         return;
     }
-    if (!ahi_request[0] &&
-        !ahi_open(zzapp_get_be32(hdr + ZZAPP_AUDIO_RATE_OFF),
-                  zzapp_get_be32(hdr + ZZAPP_AUDIO_CHANNELS_OFF))) {
+    epoch = zzapp_get_be32(hdr + ZZAPP_AUDIO_EPOCH_OFF);
+    rate = zzapp_get_be32(hdr + ZZAPP_AUDIO_RATE_OFF);
+    channels = zzapp_get_be32(hdr + ZZAPP_AUDIO_CHANNELS_OFF);
+    if (zzrun_audio_epoch_replaced(ahi_stream_epoch_valid, ahi_stream_epoch,
+                                   epoch)) {
+        /* A close and reopen can both land between polls. Old request
+         * completions must not be added to the new stream's tail. */
+        if (ahi_request[0] && (rate != ahi_rate || channels != ahi_channels))
+            ahi_close();
+        else
+            ahi_abort_pending();
+        ahi_underruns = 0u;
+        ahi_stream_epoch_valid = 0;
+    }
+    if (!ahi_request[0] && !ahi_open(rate, channels)) {
         request_stop();
         return;
     }
+    ahi_stream_epoch = epoch;
+    ahi_stream_epoch_valid = 1;
     head = zzapp_get_be32(hdr + ZZAPP_AUDIO_HEAD_OFF);
     tail = zzapp_get_be32(hdr + ZZAPP_AUDIO_TAIL_OFF);
     if (head - tail > ZZAPP_AUDIO_CAP)
@@ -2700,6 +2771,7 @@ static int run_loop(ULONG forced_mode)
         heartbeat();
         if ((signals & SIGBREAKF_CTRL_C) || ctrl_c_set()) {
             SetSignal(0, SIGBREAKF_CTRL_C);
+            user_stop = 1;
             request_stop();
         }
         /* A Shell delivers Ctrl-D/E/F as task signals, not as keys in the
@@ -2733,27 +2805,27 @@ static int run_loop(ULONG forced_mode)
             }
         }
         ack_flip();
-        if (state == ZZAPP_ST_FAULTED || fault == ZZAPP_FAULT_WATCHDOG_RESTART) {
-            saw_fault = 1;
-            if (!console_output_pending())
+        {
+            struct zzrun_exit_in leave;
+            uint32_t generation = life_get(ZZAPP_LIFE_GENERATION_OFF);
+
+            if (state == ZZAPP_ST_FAULTED ||
+                fault == ZZAPP_FAULT_WATCHDOG_RESTART)
+                saw_fault = 1;
+            memset(&leave, 0, sizeof(leave));
+            leave.state = state;
+            leave.fault = fault;
+            leave.elapsed_ms = stop_asked ? now_ms() - stop_ms : 0u;
+            leave.generation = generation;
+            leave.last_generation = last_gen;
+            leave.entered = entered;
+            leave.stop_asked = stop_asked;
+            leave.user_stop = user_stop;
+            leave.output_pending = console_output_pending();
+            leave.output_failed = console_output_failed;
+            if (zzrun_run_should_exit(&leave))
                 break;
-            timer_arm();
-            continue;
         }
-        if (entered && (state == ZZAPP_ST_IDLE ||
-                        (state == ZZAPP_ST_STOPPING && stop_asked &&
-                         now_ms() - stop_ms >= ZZRUN_GRACE_MS))) {
-            if ((!stop_asked || now_ms() - stop_ms >= ZZRUN_GRACE_MS) &&
-                !console_output_pending())
-                break;
-        }
-        if (stop_asked && now_ms() - stop_ms >= ZZRUN_GRACE_MS + ZZRUN_GRACE_MS &&
-            !console_output_pending())
-            break;
-        if (life_get(ZZAPP_LIFE_GENERATION_OFF) != last_gen &&
-            state != ZZAPP_ST_RUNNING && state != ZZAPP_ST_STARTING &&
-            state != ZZAPP_ST_LOADING)
-            break;
         timer_arm();
     }
     timer_reap();
@@ -2774,7 +2846,8 @@ static int run_loop(ULONG forced_mode)
         else
             printf("ZZRun: exit %ld (%s)\n", (long)exit_code,
                    state_name(zzapp_get_be32(p + ZZAPP_STATUS_STATE)));
-        return display_failed ? 20 : exit_from_app(exit_code, fault, stop_asked);
+        return (display_failed || console_output_failed) ? 20 :
+               exit_from_app(exit_code, fault, stop_asked);
     }
     if (window) {
         fault = life_get(ZZAPP_LIFE_FAULT_OFF);
@@ -2788,7 +2861,8 @@ static int run_loop(ULONG forced_mode)
                          life_get(ZZAPP_LIFE_FSR_OFF),
                          life_get(ZZAPP_LIFE_CPSR_OFF),
                          life_get(ZZAPP_LIFE_GENERATION_OFF));
-        return display_failed ? 20 : exit_from_app(exit_code, fault, stop_asked);
+        return (display_failed || console_output_failed) ? 20 :
+               exit_from_app(exit_code, fault, stop_asked);
     }
     return 20;
 }
@@ -2825,7 +2899,7 @@ static void cleanup(void)
         life_get(ZZAPP_LIFE_STATE_OFF) != ZZAPP_ST_IDLE)
         stop_owned();
     ahi_close();
-    window_cache_restore();
+    window_cache_release();
     console_read_finish();
     if (console_handle) {
         Close(console_handle);

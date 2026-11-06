@@ -76,6 +76,7 @@ jobs:
           ZZ9K_FIRMWARE_DIR: ${{ github.workspace }}/zz9000-firmware
         run: |
           make rtg-tests
+          make zzrun-tests
           make -C common/tests test
           make -C usb-poseidon/tests test
           make -C net/tests test

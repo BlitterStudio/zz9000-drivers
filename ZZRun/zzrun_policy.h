@@ -1,0 +1,151 @@
+/*
+ * Decisions ZZRun makes from launcher state. No AmigaOS types, so a host
+ * test can exercise them without DOS or Exec.
+ *
+ * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+#ifndef ZZRUN_POLICY_H
+#define ZZRUN_POLICY_H
+
+#include <stdint.h>
+
+#define ZZRUN_POLICY_GRACE_MS 500u
+
+/* Must match ZZAPP_ST_* / ZZAPP_FAULT_WATCHDOG_RESTART. ZZRun.c asserts it. */
+#define ZZRUN_ST_IDLE 0u
+#define ZZRUN_ST_LOADING 1u
+#define ZZRUN_ST_STARTING 2u
+#define ZZRUN_ST_RUNNING 3u
+#define ZZRUN_ST_PAUSED 4u
+#define ZZRUN_ST_STOPPING 5u
+#define ZZRUN_ST_FAULTED 6u
+#define ZZRUN_FAULT_WATCHDOG_RESTART 6u
+
+#define ZZRUN_STOP_REQ_BYTES 4u
+
+/* console_read_finish: never stdout. */
+#define ZZRUN_FINISH_NONE 0
+#define ZZRUN_FINISH_RETURN_ON_READ_HANDLE 1
+#define ZZRUN_FINISH_WAIT_ON_USER_CONSOLE 2
+
+struct zzrun_exit_in {
+    uint32_t state;
+    uint32_t fault;
+    uint32_t elapsed_ms;
+    uint32_t generation;
+    uint32_t last_generation;
+    int entered;
+    int stop_asked;
+    int user_stop;
+    int output_pending;
+    int output_failed;
+};
+
+/* A failed drain must not keep the launcher alive. Pending output still
+ * delays a clean exit so the app's text can be written. */
+static inline int zzrun_output_blocks_exit(int output_pending, int output_failed)
+{
+    return output_pending && !output_failed;
+}
+
+static inline int zzrun_run_should_exit(const struct zzrun_exit_in *in)
+{
+    int blocked;
+    int live;
+
+    if (!in)
+        return 0;
+    blocked = zzrun_output_blocks_exit(in->output_pending, in->output_failed);
+    /* Ctrl-C ends the process once both grace periods have elapsed, even
+     * when console output is still queued. The faulted path must not skip
+     * this: that was the hang. */
+    if (in->user_stop && in->elapsed_ms >= ZZRUN_POLICY_GRACE_MS * 2u)
+        return 1;
+    if ((in->state == ZZRUN_ST_FAULTED ||
+         in->fault == ZZRUN_FAULT_WATCHDOG_RESTART) &&
+        !blocked)
+        return 1;
+    if (in->entered &&
+        (in->state == ZZRUN_ST_IDLE ||
+         (in->state == ZZRUN_ST_STOPPING && in->stop_asked &&
+          in->elapsed_ms >= ZZRUN_POLICY_GRACE_MS)) &&
+        (!in->stop_asked || in->elapsed_ms >= ZZRUN_POLICY_GRACE_MS) &&
+        !blocked)
+        return 1;
+    if (in->stop_asked && in->elapsed_ms >= ZZRUN_POLICY_GRACE_MS * 2u &&
+        !blocked)
+        return 1;
+    live = in->state == ZZRUN_ST_RUNNING || in->state == ZZRUN_ST_STARTING ||
+           in->state == ZZRUN_ST_LOADING;
+    if (in->generation != in->last_generation && !live)
+        return 1;
+    return 0;
+}
+
+/* Ring head/tail are the caller's earlier samples. WANT is sampled after
+ * them; forced unwind leaves WANT set, so state and stop are required. */
+static inline int zzrun_keyboard_read_allowed(uint32_t state, int owns,
+                                              int stop_asked, uint32_t head,
+                                              uint32_t tail, uint32_t want,
+                                              int read_pending, int at_eof)
+{
+    if (read_pending || at_eof || stop_asked || !owns)
+        return 0;
+    if (state != ZZRUN_ST_RUNNING)
+        return 0;
+    if (head != tail)
+        return 0;
+    return want == 1u;
+}
+
+/* Pipes and files use the same asynchronous read. A blocking Read is never
+ * the non-interactive path. */
+static inline int zzrun_input_uses_async(int interactive)
+{
+    (void)interactive;
+    return 1;
+}
+
+static inline int zzrun_async_read_allowed(uint32_t state, int owns,
+                                           int stop_asked, uint32_t head,
+                                           uint32_t tail, uint32_t cap,
+                                           int read_pending, int at_eof)
+{
+    uint32_t used;
+
+    if (read_pending || at_eof || stop_asked || !owns)
+        return 0;
+    if (state != ZZRUN_ST_RUNNING)
+        return 0;
+    used = head - tail;
+    if (used > cap)
+        return 0;
+    return (cap - used) != 0u;
+}
+
+static inline int zzrun_audio_epoch_replaced(int have_epoch, uint32_t accepted,
+                                             uint32_t observed)
+{
+    return have_epoch && observed != accepted;
+}
+
+static inline void zzrun_stop_payload(uint8_t out[ZZRUN_STOP_REQ_BYTES],
+                                      uint32_t generation)
+{
+    out[0] = (uint8_t)(generation >> 24);
+    out[1] = (uint8_t)(generation >> 16);
+    out[2] = (uint8_t)(generation >> 8);
+    out[3] = (uint8_t)generation;
+}
+
+static inline int zzrun_finish_prompt(int pending, int interactive_read)
+{
+    if (!pending)
+        return ZZRUN_FINISH_NONE;
+    if (interactive_read)
+        return ZZRUN_FINISH_RETURN_ON_READ_HANDLE;
+    return ZZRUN_FINISH_WAIT_ON_USER_CONSOLE;
+}
+
+#endif /* ZZRUN_POLICY_H */

@@ -21,6 +21,7 @@ ahi/duplextest/ZZAXDuplexTest
 ahi/driver/ZZ9000AX
 ahi/driver/timer_pair_test
 rtg/tests/build/
+ZZRun/tests/build/
 sd-boot/zzsd-device.h
 sd-boot/boot-rom/boot.bin
 ZZDiag/ZZDiag

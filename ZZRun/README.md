@@ -22,8 +22,9 @@ current directory. A Workbench launch defaults to the directory holding the
 ZZRun icon. For Quake, set `ROOT` to the directory containing `id1/`.
 
 On normal app exit, ZZRun returns the app exit code. It returns 20 after an
-app fault, an unavailable runtime, display failure, or launcher error. It
-returns 10 for invalid launcher arguments.
+app fault, an unavailable runtime, display failure, a console that cannot be
+opened or written, or another launcher error. It returns 10 for invalid
+launcher arguments.
 
 ## Workbench ToolTypes
 
@@ -63,12 +64,15 @@ another shared-memory convention.
    loads changed CLUT8 palette entries, and acknowledges completed flips.
    `APP_STATUS` is called when the app ends or faults.
 6. Ctrl-C requests a stop: ZZRun writes the lifecycle `stop` word, enqueues one
-   `ZZ_EV_STOP`, and posts `APP_STOP`. Ctrl-D, Ctrl-E, and Ctrl-F on the app
-   display remain normal raw-key events and additionally enqueue `ZZ_EV_BREAK`
-   with codes 4, 5, and 6. The app display has one borderless input window, not
-   a close gadget; its raw keys are forwarded to the app, including the app's
-   own quit controls. ZZRun remains alive for the 500 ms grace period so
-   firmware can publish its final state. It closes the custom screen and
+   `ZZ_EV_STOP`, and posts `APP_STOP` carrying the generation it owns. Firmware
+   rejects a stop whose generation does not match, so a stale stop cannot abort
+   a newer load. Ctrl-D, Ctrl-E, and Ctrl-F on the app display remain normal
+   raw-key events and additionally enqueue `ZZ_EV_BREAK` with codes 4, 5, and
+   6. The app display has one borderless input window, not a close gadget; its
+   raw keys are forwarded to the app, including the app's own quit controls.
+   ZZRun remains alive for the 500 ms grace period so firmware can publish its
+   final state. Ctrl-C ends ZZRun after that grace, plus a second 500 ms,
+   even if console output is still queued. It closes the custom screen and
    returns the public screen even after a fault.
 
 All mailbox payload and rings fields are big-endian. ZZRun stages the firmware
@@ -95,25 +99,36 @@ them on stdout.
 App `stdout` and `stderr` use the dedicated non-lossy console-output ring, not
 the diagnostic `zz_log` ring. A Shell launch writes those bytes through
 `Output()` and takes app stdin from `Input()`. EOF from that handle is published
-to the app after all input bytes. A redirected input (`<file`) ends the app's
-stdin at the end of the file. From the keyboard, the app gets whatever ends a
-`Type *` in the same console; on OS 3.2.3 with the standard or CCON handler
-Ctrl-\ does not, so stop such an app with Ctrl-C. If the app is waiting for
-keyboard input when it stops, ZZRun prints `press Return to finish.`: the
-console cannot cancel the line read it has open. A Workbench launch opens no
-console by default; only when the app first uses console I/O does firmware set
-its console flag, causing ZZRun to open a closable `CON:` window. If opening
-that requested console fails, ZZRun stops the app instead of silently losing
-output.
+to the app after all input bytes. A redirected input (`<file` or a pipe) ends
+the app's stdin at the end of that stream. From the keyboard, the app gets
+whatever ends a `Type *` in the same console; on OS 3.2.3 with the standard or
+CCON handler Ctrl-\ does not, so stop such an app with Ctrl-C. ZZRun starts a
+keyboard read only while the app it owns is running and has asked for input.
+If the app is waiting for keyboard input when it stops, ZZRun writes
+`press Return to finish.` to the console that owns that read (the Workbench
+`CON:` window, or `Input()`), not to redirected stdout: the console cannot
+cancel the line read it has open. A pipe or other non-interactive input uses
+the same asynchronous read, so an open writer cannot stall heartbeat, display,
+or audio. A regular file completes immediately. If a non-interactive read is
+still pending at exit, ZZRun writes `waiting for pending input to finish.` to
+the user console (not stdout, and not the pipe) and waits, because a pipe read
+cannot be cancelled. A Workbench launch opens no console by default; only when
+the app first uses console I/O does firmware set its console flag, causing
+ZZRun to open a closable `CON:` window. If opening that requested console
+fails, or if writing app output fails, ZZRun stops the app, does not wait for
+the output ring to empty, and returns 20.
 
 The default audio route is the card fabric. Set `AUDIO=AHI` in the app icon or
 pass `AUDIO=AHI` before app arguments in a Shell command to request the AHI
 route; it is advertised to firmware before the app starts.
 The shared PCM ring is interleaved S16LE and carries its requested rate and
-channel count. ZZRun accepts the route only when AHI grants the exact requested
-stereo rate; it converts the ring's S16LE samples into AHI's S16BE bounce
-buffer without resampling or downmixing. AHI underruns are reported in the
-audio ring/lifecycle counters.
+channel count. Each successful firmware audio open publishes a stream epoch in
+the audio header. If that epoch changes, ZZRun aborts and reaps its previous
+AHI requests without retiring their bytes onto the new stream, then accepts
+the new head, tail, and rate. ZZRun accepts the route only when AHI grants the
+exact requested stereo rate; it converts the ring's S16LE samples into AHI's
+S16BE bounce buffer without resampling or downmixing. AHI underruns are
+reported in the audio ring/lifecycle counters.
 
 When firmware sets the display-unbound flag, ZZRun opens the requested P96
 screen. RGB565 is the first path; CLUT8 is supported and ZZRun loads changed
@@ -157,7 +172,8 @@ watchdog-plus-restart prints the captured pc, sp, lr, far, fsr, cpsr, exit
 code, and generation, then returns 20. A forced stop caused by Ctrl-C returns
 the app's normal exit code when it has one. Every exit path closes opened files
 and directory handles, restores the public screen, and releases its Amiga-side
-resources.
+resources. ZZRun inhibits caching on the shared window and does not restore
+the previous cache mode; the window stays cache-inhibited.
 
 ## Building
 
