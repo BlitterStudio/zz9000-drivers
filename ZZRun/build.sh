@@ -16,10 +16,22 @@ proto_rel=ZZ9000_proto.sdk/ZZ9000OS/src/zzapp_proto.h
 stage_dir=$script_dir/zz9k-headers
 
 stage_proto() {
-    firmware=${ZZ9000_FIRMWARE:-"$repo_root/../zz9000-app-runtime"}
-    src=$firmware/$proto_rel
+    # Same checkout tools/stage-zz9k-headers.sh just used: explicit
+    # ZZ9000_FIRMWARE, else ZZ9000_SDK's parent, else the sibling
+    # zz9000-firmware, else the clone that staging left in sdk/work.
+    firmware=${ZZ9000_FIRMWARE:-}
+    if [ -z "$firmware" ] && [ -n "${ZZ9000_SDK:-}" ]; then
+        firmware=$(CDPATH='' cd -- "$ZZ9000_SDK/.." && pwd)
+    fi
+    if [ -z "$firmware" ] && [ -d "$repo_root/../zz9000-firmware/sdk/include/zz9k" ]; then
+        firmware=$(CDPATH='' cd -- "$repo_root/../zz9000-firmware" && pwd)
+    fi
+    if [ -z "$firmware" ] && [ -d "$repo_root/sdk/work/zz9000-firmware/sdk/include/zz9k" ]; then
+        firmware=$(CDPATH='' cd -- "$repo_root/sdk/work/zz9000-firmware" && pwd)
+    fi
+    src=${firmware:+$firmware/$proto_rel}
 
-    if [ ! -s "$src" ]; then
+    if [ -z "$firmware" ] || [ ! -s "$src" ]; then
         echo "ERROR: stage zzapp_proto.h from feature/app-runtime with" >&2
         echo "       ZZ9000_FIRMWARE=/path/to/zz9000-firmware" >&2
         exit 1
@@ -41,6 +53,7 @@ if ! command -v m68k-amigaos-gcc >/dev/null 2>&1; then
     exec "$repo_root/tools/amiga-docker.sh" ZZRun ./build.sh --staged "$@"
 fi
 
+cd "$script_dir"
 m68k-amigaos-gcc ZZRun.c -m68030 -O2 -std=gnu11 -o ZZRun \
     -Wall -Wextra -Wno-unused-parameter \
     -I../include -Izz9k-headers \

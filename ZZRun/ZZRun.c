@@ -475,18 +475,20 @@ static int owns_current_generation(void)
            life_get(ZZAPP_LIFE_GENERATION_OFF) == owned_generation;
 }
 
-static void claim_loading_generation(uint32_t previous_generation)
+static void claim_load_begin(int status, int submitted, uint32_t prior)
 {
-    uint32_t generation;
-    uint32_t state;
+    uint32_t observed = 0;
+    int idle = 1;
 
-    if (!window)
-        return;
-    generation = life_get(ZZAPP_LIFE_GENERATION_OFF);
-    state = life_get(ZZAPP_LIFE_STATE_OFF);
-    if (generation != 0 && generation != previous_generation &&
-        state != ZZAPP_ST_IDLE)
-        owned_generation = generation;
+    if (window) {
+        observed = life_get(ZZAPP_LIFE_GENERATION_OFF);
+        idle = life_get(ZZAPP_LIFE_STATE_OFF) == ZZAPP_ST_IDLE;
+    }
+    /* run_deferred() leaves the LOAD_BEGIN reply length at 0, so the
+     * generation is not in the reply. A busy rejection must not adopt
+     * the generation the other launcher just published. */
+    owned_generation = zzrun_load_generation_to_claim(
+        submitted, status == ZZ9K_STATUS_BUSY, prior, observed, idle, 0, 0);
 }
 
 static void stop_owned(void)
@@ -2632,14 +2634,12 @@ static int load_elf(BPTR fh, LONG size)
     int status;
 
     status = mailbox_long(ZZAPP_OP_LOAD_BEGIN, NULL, 0, &reply, &submitted);
+    claim_load_begin(status, submitted, prior_generation);
     if (status != ZZ9K_STATUS_OK) {
-        if (submitted)
-            claim_loading_generation(prior_generation);
         printf("ZZRun: load begin failed (%s)\n", status_name(status));
         stop_owned();
         return 0;
     }
-    claim_loading_generation(prior_generation);
     if (!owns_current_generation()) {
         puts("ZZRun: load begin did not claim this launcher generation");
         return 0;

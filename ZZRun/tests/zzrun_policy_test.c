@@ -142,6 +142,17 @@ static void test_ahi_open_failure_exits_20(void)
     assert(zzrun_process_exit(0, 0, 1, 0) == 20);
 }
 
+static void test_busy_load_begin_claims_nothing(void)
+{
+    assert(zzrun_load_generation_to_claim(1, 1, 7u, 8u, 0, 0, 0u) == 0u);
+    assert(zzrun_load_generation_to_claim(1, 1, 7u, 8u, 0, 1, 8u) == 0u);
+    assert(zzrun_load_generation_to_claim(1, 0, 7u, 8u, 0, 0, 0u) == 8u);
+    assert(zzrun_load_generation_to_claim(1, 0, 7u, 9u, 0, 1, 8u) == 8u);
+    assert(zzrun_load_generation_to_claim(1, 0, 7u, 7u, 0, 0, 0u) == 0u);
+    assert(zzrun_load_generation_to_claim(1, 0, 7u, 8u, 1, 0, 0u) == 0u);
+    assert(zzrun_load_generation_to_claim(0, 0, 7u, 8u, 0, 0, 0u) == 0u);
+}
+
 int main(void)
 {
     test_output_failure_does_not_block_exit();
@@ -153,6 +164,7 @@ int main(void)
     test_stop_payload_carries_generation();
     test_finish_prompt_is_not_stdout();
     test_ahi_open_failure_exits_20();
+    test_busy_load_begin_claims_nothing();
     puts("zzrun_policy_test: ok");
     return 0;
 }

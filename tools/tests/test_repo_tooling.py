@@ -1545,6 +1545,115 @@ class RepoToolingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             read_classic_tooltypes(old)
 
+    def _write_exec(self, path, text):
+        import stat
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8", newline="\n")
+        path.chmod(path.stat().st_mode | stat.S_IEXEC)
+
+    def _fake_firmware_sdk(self, firmware):
+        for rel in (
+            "sdk/include/zz9k/zz9k.h",
+            "sdk/host/include/zz9k/zz9k.h",
+            "sdk/amiga/include/zz9k/zz9k.h",
+            "sdk/amiga/include/proto/zz9k.h",
+            "sdk/amiga/include/clib/zz9k_protos.h",
+            "sdk/amiga/include/inline/zz9k.h",
+            "sdk/amiga/include/pragmas/zz9k_pragmas.h",
+        ):
+            path = firmware / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("/* fixture */\n", encoding="utf-8")
+
+    def _zzrun_build_tree(self, base):
+        repo = base / "drivers"
+        (repo / "ZZRun").mkdir(parents=True)
+        (repo / "tools").mkdir()
+        shutil.copy(ROOT / "ZZRun" / "build.sh", repo / "ZZRun" / "build.sh")
+        shutil.copy(
+            ROOT / "tools" / "stage-zz9k-headers.sh",
+            repo / "tools" / "stage-zz9k-headers.sh",
+        )
+        for path in (repo / "ZZRun" / "build.sh",
+                     repo / "tools" / "stage-zz9k-headers.sh"):
+            path.chmod(path.stat().st_mode | 0o755)
+        return repo
+
+    def _run_zzrun_build(self, repo, env):
+        return subprocess.run(
+            ["sh", str(repo / "ZZRun" / "build.sh")],
+            cwd=repo,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            timeout=60,
+        )
+
+    def test_zzrun_build_stages_proto_from_firmware_sibling(self):
+        """Unset ZZ9000_FIRMWARE must use the sibling checkout that
+        stage-zz9k-headers.sh already accepts, not zz9000-app-runtime.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            base = pathlib.Path(tmp)
+            repo = self._zzrun_build_tree(base)
+            sibling = base / "zz9000-firmware"
+            self._fake_firmware_sdk(sibling)
+            proto = sibling / "ZZ9000_proto.sdk" / "ZZ9000OS" / "src" / "zzapp_proto.h"
+            proto.parent.mkdir(parents=True, exist_ok=True)
+            proto.write_text("/* sibling-proto */\n", encoding="utf-8")
+            self._write_exec(
+                base / "bin" / "m68k-amigaos-gcc",
+                "#!/bin/sh\nexit 0\n",
+            )
+            env = os.environ.copy()
+            env.pop("ZZ9000_FIRMWARE", None)
+            env.pop("ZZ9000_SDK", None)
+            env["PATH"] = str(base / "bin") + os.pathsep + env.get("PATH", "")
+            result = self._run_zzrun_build(repo, env)
+            staged = repo / "ZZRun" / "zz9k-headers" / "zzapp_proto.h"
+            self.assertEqual(0, result.returncode, result.stdout)
+            self.assertEqual(
+                "/* sibling-proto */\n",
+                staged.read_text(encoding="utf-8"),
+            )
+
+    def test_zzrun_build_compiles_from_its_directory(self):
+        """A host m68k-amigaos-gcc must see the same directory the Docker
+        wrapper uses. make ZZRun invokes the script from the repo root.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            base = pathlib.Path(tmp)
+            repo = self._zzrun_build_tree(base)
+            firmware = base / "firmware"
+            self._fake_firmware_sdk(firmware)
+            proto = firmware / "ZZ9000_proto.sdk" / "ZZ9000OS" / "src" / "zzapp_proto.h"
+            proto.parent.mkdir(parents=True, exist_ok=True)
+            proto.write_text("/* explicit-proto */\n", encoding="utf-8")
+            self._write_exec(
+                base / "bin" / "m68k-amigaos-gcc",
+                "#!/bin/sh\nprintf '%s\\n' \"$PWD\" > \"$ZZRUN_GCC_CWD\"\n"
+                "printf '%s\\n' \"$*\" > \"$ZZRUN_GCC_ARGS\"\nexit 0\n",
+            )
+            env = os.environ.copy()
+            env["ZZ9000_FIRMWARE"] = str(firmware)
+            env["ZZ9000_SDK"] = str(firmware / "sdk")
+            env["ZZRUN_GCC_CWD"] = str(base / "cwd")
+            env["ZZRUN_GCC_ARGS"] = str(base / "args")
+            env["PATH"] = str(base / "bin") + os.pathsep + env.get("PATH", "")
+            result = self._run_zzrun_build(repo, env)
+            self.assertEqual(0, result.returncode, result.stdout)
+            cwd = (base / "cwd").read_text(encoding="utf-8").strip()
+            args = (base / "args").read_text(encoding="utf-8")
+            self.assertTrue(
+                cwd.replace("\\", "/").rstrip("/").endswith("/ZZRun"),
+                cwd,
+            )
+            self.assertIn("ZZRun.c", args)
+            self.assertIn("-o ZZRun", args)
+
 
 if __name__ == "__main__":
     unittest.main()

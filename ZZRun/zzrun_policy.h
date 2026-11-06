@@ -151,4 +151,23 @@ static inline int zzrun_process_exit(int app_exit, int display_failed,
     return app_exit;
 }
 
+/* A queued APP_LOAD_BEGIN that comes back busy did not publish a
+ * generation: the shared word may already belong to the launcher that won
+ * the race. Claim nothing then. Other submitted outcomes retain the
+ * existing cleanup behaviour. A reply generation, when firmware includes
+ * one, is the value this request published; otherwise adopt the observed
+ * non-idle generation that replaced the one sampled before the request. */
+static inline uint32_t zzrun_load_generation_to_claim(
+    int submitted, int begin_busy, uint32_t prior, uint32_t observed,
+    int observed_idle, int reply_has_generation, uint32_t reply_generation)
+{
+    if (!submitted || begin_busy)
+        return 0;
+    if (reply_has_generation)
+        return reply_generation;
+    if (observed_idle || observed == 0u || observed == prior)
+        return 0;
+    return observed;
+}
+
 #endif /* ZZRUN_POLICY_H */
