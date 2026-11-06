@@ -323,11 +323,12 @@ jobs:
       - uses: actions/checkout@v6
       # ZZRun builds against zzapp_proto.h from this firmware commit; it
       # must carry every lifecycle field, flag and window region ZZRun uses
-      # (API 0.2 console, AHI and message rings: runtime/api-0.2).
+      # (API 0.2 console, AHI and message rings, the APP_STOP generation and
+      # the audio stream epoch).
       - uses: actions/checkout@v6
         with:
           repository: BlitterStudio/zz9000-firmware
-          ref: 5e82d5cbbb60342a44e627a7f412667077f5951b
+          ref: a78684ff207aa9459eab6852f74d0747754fdbaf
           path: zz9000-firmware
       - name: Build ZZRun
         env:
