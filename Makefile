@@ -2,8 +2,8 @@ AMIGA_IMAGE ?= sacredbanana/amiga-compiler:m68k-amigaos
 AMIGA_DOCKER = ./tools/amiga-docker.sh
 
 .PHONY: all build-all package-local check-release quality rtg-tests mhi-tests \
-	net-tests rtg zztop zzscanlines zzgamma zzfwupdate usb-poseidon sd-boot net \
-	ZZNetStats mhi ahi ahi-duplextest ZZDiag ZZCapture sdk amissl
+	net-tests zzrun-tests rtg zztop zzscanlines zzgamma zzdebugout zzfwupdate usb-poseidon sd-boot net \
+	ZZNetStats mhi ahi ahi-duplextest ZZDiag ZZCapture ZZRun sdk amissl
 
 all: build-all
 
@@ -31,6 +31,9 @@ mhi-tests:
 	./mhi/transport_geometry_test
 	rm -f mhi/transport_geometry_test
 
+zzrun-tests:
+	$(MAKE) -C ZZRun/tests test
+
 rtg:
 	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) rtg ./build.sh
 
@@ -47,6 +50,11 @@ zzgamma:
 		m68k-amigaos-gcc -O2 -noixemul -I../include \
 		-o ZZGamma ZZGamma.c -lamiga
 
+
+zzdebugout:
+	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) ZZDebugOut \
+		m68k-amigaos-gcc -O2 -noixemul -Wall -Wextra -Werror -I../include \
+		-o ZZDebugOut ZZDebugOut.c -lamiga
 zzfwupdate:
 	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) ZZFwUpdate \
 		m68k-amigaos-gcc -O2 -noixemul -Wall -Wextra \
@@ -82,6 +90,9 @@ ahi-duplextest:
 
 ZZCapture:
 	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) ZZCapture ./build.sh
+
+ZZRun:
+	AMIGA_IMAGE="$(AMIGA_IMAGE)" ZZRun/build.sh
 
 ZZDiag:
 	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) ZZDiag ./build.sh
