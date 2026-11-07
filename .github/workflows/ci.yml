@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       amiga_image:
-        description: m68k compiler image for every Amiga build (empty = the default below)
+        description: m68k compiler image for every Amiga build (empty = the pin in tools/amiga-docker.sh)
         required: false
         default: ''
 
