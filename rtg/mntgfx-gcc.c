@@ -60,7 +60,13 @@ struct GFXBase {
 
 struct DOSBase;
 
-#ifndef DEBUG
+#ifdef DEBUG
+/* NDK KPrintF takes CONST_STRPTR (UBYTE *), so every char literal/format
+ * would warn with -Wpointer-sign on both toolchains. Route the conversion
+ * through this macro instead of casting at each call site; the
+ * parenthesised (KPrintF) keeps the macro from expanding into itself. */
+#define KPrintF(fmt, ...) (KPrintF)((CONST_STRPTR)(fmt), ##__VA_ARGS__)
+#else
 #define KPrintF(...)
 #endif
 #define __saveds__
@@ -2854,6 +2860,25 @@ BOOL ZZ_DeleteFeature(__REGA0(struct BoardInfo *b), __REGA1(APTR fd), __REGD0(UL
 // The source bitmap that contains the data to be blitted is in the bm argument.
 // If one of its plane pointers is 0x0, the source data of that bitplane shall be considered to consist of all-zeros.
 // If one of its plane pointers is 0xffffffff, the data in this bitplane shall be considered to be all ones.
+//
+// The two planar blits forward to P96's default with all of d0-d7 loaded as
+// register arguments. Doing that inside the hook itself, next to its own
+// short compares, leaves GCC 16 no free data register: LRA loops forever
+// (AmigaPorts/m68k-amigaos-gcc#309) and -mno-lra fails to spill. These
+// out-of-line helpers take stack arguments, so only the forwarded call
+// needs the data registers.
+static void __attribute__((noinline)) planar2chunky_default(struct BoardInfo *b, struct BitMap *bm,
+	struct RenderInfo *r, SHORT x, SHORT y, SHORT dx, SHORT dy, SHORT w, SHORT h,
+	UBYTE minterm, UBYTE mask) {
+	b->BlitPlanar2ChunkyDefault(b, bm, r, x, y, dx, dy, w, h, minterm, mask);
+}
+
+static void __attribute__((noinline)) planar2direct_default(struct BoardInfo *b, struct BitMap *bm,
+	struct RenderInfo *r, struct ColorIndexMapping *clut, SHORT x, SHORT y, SHORT dx, SHORT dy,
+	SHORT w, SHORT h, UBYTE minterm, UBYTE mask) {
+	b->BlitPlanar2DirectDefault(b, bm, r, clut, x, y, dx, dy, w, h, minterm, mask);
+}
+
 void BlitPlanar2Chunky(__REGA0(struct BoardInfo *b), __REGA1(struct BitMap *bm), __REGA2(struct RenderInfo *r), __REGD0(SHORT x), __REGD1(SHORT y), __REGD2(SHORT dx), __REGD3(SHORT dy), __REGD4(SHORT w), __REGD5(SHORT h), __REGD6(UBYTE minterm), __REGD7(UBYTE mask)) {
 	if (!b || !r || !bm)
 		return;
@@ -2874,7 +2899,7 @@ void BlitPlanar2Chunky(__REGA0(struct BoardInfo *b), __REGA1(struct BitMap *bm),
 
 	if (!(b->CardFlags & CARDFLAG_ZORRO_3) &&
 		!zz_z2_staging_fits(0, output_plane_size, bm->Depth)) {
-		b->BlitPlanar2ChunkyDefault(b, bm, r, x, y, dx, dy, w, h, minterm, mask);
+		planar2chunky_default(b, bm, r, x, y, dx, dy, w, h, minterm, mask);
 		return;
 	}
 
@@ -2963,7 +2988,7 @@ void BlitPlanar2Direct(__REGA0(struct BoardInfo *b), __REGA1(struct BitMap *bm),
 
 	if (!(b->CardFlags & CARDFLAG_ZORRO_3) &&
 		!zz_z2_staging_fits((256 << 2), output_plane_size, bm->Depth)) {
-		b->BlitPlanar2DirectDefault(b, bm, r, clut, x, y, dx, dy, w, h, minterm, mask);
+		planar2direct_default(b, bm, r, clut, x, y, dx, dy, w, h, minterm, mask);
 		return;
 	}
 
