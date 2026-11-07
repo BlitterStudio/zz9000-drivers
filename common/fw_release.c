@@ -584,7 +584,10 @@ struct fwrel_zip {
     int found_boot;
     uint32_t crc;
     unsigned long out_total;
-    uint8_t head[FWREL_MODULE_HEADER_BYTES];
+    uint8_t head[FWREL_MODULE_HEADER_MAX_BYTES];
+    size_t module_header_have;
+    uint16_t module_header_bytes;
+    uint16_t module_sha256_offset;
     struct fwrel_sha256 sha256;
     uint32_t module_image_size;
     int module_header_ok;
@@ -859,16 +862,34 @@ static int bundle_target_name(struct fwrel_zip *z)
     return ZIP_ENTRY_MODULE;
 }
 
-static int module_header_ok(const uint8_t *head, uint32_t *image_size)
+static int module_header_format(const uint8_t *head, uint16_t *header_bytes,
+                                uint16_t *sha256_offset)
+{
+    if (memcmp(head, "ZZM2", 4) == 0 &&
+        le16(head + 4) == 256 && le16(head + 6) == 2) {
+        *header_bytes = 256;
+        *sha256_offset = 140;
+        return 1;
+    }
+    if (memcmp(head, "ZZM3", 4) == 0 &&
+        le16(head + 4) == 512 && le16(head + 6) == 3) {
+        *header_bytes = 512;
+        *sha256_offset = 272;
+        return 1;
+    }
+    return 0;
+}
+
+static int module_header_ok(const uint8_t *head, uint16_t *header_bytes,
+                            uint16_t *sha256_offset, uint32_t *image_size)
 {
     size_t i;
     int terminated = 0;
 
-    if (memcmp(head, "ZZM1", 4) != 0 || le16(head + 4) != 128 ||
-        le16(head + 6) != 1)
+    if (!module_header_format(head, header_bytes, sha256_offset))
         return 0;
     for (i = 0; i < 16; i++) {
-        uint8_t c = head[36 + i];
+        uint8_t c = head[40 + i];
         if (!c) {
             if (!i)
                 return 0;
@@ -881,11 +902,11 @@ static int module_header_ok(const uint8_t *head, uint32_t *image_size)
     }
     if (!terminated)
         return 0;
-    for (i = 84; i < FWREL_MODULE_HEADER_BYTES; i++)
+    for (i = *sha256_offset + 32; i < *header_bytes; i++)
         if (head[i])
             return 0;
     *image_size = le32(head + 24);
-    return *image_size <= UINT32_MAX - FWREL_MODULE_HEADER_BYTES;
+    return *image_size <= UINT32_MAX - *header_bytes;
 }
 
 /* Emit inflated or stored bytes of the current entry. */
@@ -907,21 +928,40 @@ static int zip_output(struct fwrel_zip *z, const uint8_t *data, size_t len)
         if (z->out_total + len > FWREL_BOOT_MAX_BYTES)
             return FWREL_ZIP_ERR_SIZE;
     } else if (z->target == ZIP_ENTRY_MODULE) {
-        if (z->out_total < FWREL_MODULE_HEADER_BYTES) {
-            size_t n = FWREL_MODULE_HEADER_BYTES - z->out_total;
-            if (n > len) n = len;
-            memcpy(z->head + z->out_total, data, n);
-            image_offset = n;
-            if (z->out_total + n == FWREL_MODULE_HEADER_BYTES) {
-                if (!module_header_ok(z->head, &z->module_image_size))
+        if (!z->module_header_ok) {
+            if (z->module_header_have < 8) {
+                size_t n = 8 - z->module_header_have;
+
+                if (n > len) n = len;
+                memcpy(z->head + z->module_header_have, data, n);
+                z->module_header_have += n;
+                image_offset += n;
+                if (z->module_header_have == 8 &&
+                    !module_header_format(z->head, &z->module_header_bytes,
+                                          &z->module_sha256_offset))
                     return FWREL_ZIP_ERR_MODULE;
-                z->module_header_ok = 1;
-                sha256_init(&z->sha256);
+            }
+            if (z->module_header_have < z->module_header_bytes) {
+                size_t n = z->module_header_bytes - z->module_header_have;
+
+                if (n > len - image_offset) n = len - image_offset;
+                memcpy(z->head + z->module_header_have, data + image_offset, n);
+                z->module_header_have += n;
+                image_offset += n;
+                if (z->module_header_have == z->module_header_bytes) {
+                    if (!module_header_ok(z->head, &z->module_header_bytes,
+                                          &z->module_sha256_offset,
+                                          &z->module_image_size))
+                        return FWREL_ZIP_ERR_MODULE;
+                    z->module_header_ok = 1;
+                    sha256_init(&z->sha256);
+                }
             }
         }
         if (z->module_header_ok) {
-            unsigned long limit = (unsigned long)FWREL_MODULE_HEADER_BYTES +
+            unsigned long limit = (unsigned long)z->module_header_bytes +
                                   z->module_image_size;
+
             if (z->out_total + len > limit)
                 return FWREL_ZIP_ERR_SIZE;
             if (image_offset < len)
@@ -952,11 +992,11 @@ static int zip_entry_done(struct fwrel_zip *z)
 
         if (!z->module_header_ok)
             return zip_fail(z, FWREL_ZIP_ERR_MODULE);
-        if (z->out_total != (unsigned long)FWREL_MODULE_HEADER_BYTES +
+        if (z->out_total != (unsigned long)z->module_header_bytes +
                             z->module_image_size)
             return zip_fail(z, FWREL_ZIP_ERR_SIZE);
         sha256_final(&z->sha256, digest);
-        if (memcmp(digest, z->head + 52, sizeof(digest)) != 0)
+        if (memcmp(digest, z->head + z->module_sha256_offset, sizeof(digest)) != 0)
             return zip_fail(z, FWREL_ZIP_ERR_MODULE);
     }
     if (z->target && z->end && z->end(z->ctx, z->entry_name))
@@ -985,6 +1025,9 @@ static int zip_begin_entry(struct fwrel_zip *z)
     z->target = target;
     z->crc = 0;
     z->out_total = 0;
+    z->module_header_have = 0;
+    z->module_header_bytes = 0;
+    z->module_sha256_offset = 0;
     z->module_header_ok = 0;
     if (z->flags & ZIP_FLAG_ENCRYPTED)
         return zip_fail(z, FWREL_ZIP_ERR_UNSUPPORTED);
