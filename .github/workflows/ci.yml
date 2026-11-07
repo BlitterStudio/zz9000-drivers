@@ -91,14 +91,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      # rtg/build.sh also fails the build if the link pulls a libnix
+      # auto-open library base (tools/check-link-map.sh).
       - name: Build ZZ9000.card
         run: |
-          docker run --rm -v "$PWD":/src -w /src/rtg "$AMIGA_IMAGE" \
-            m68k-amigaos-gcc mntgfx-gcc.c -m68020 -mtune=68020-60 -O2 \
-              -I../include \
-              -o ZZ9000.card -noixemul -Wall -Wextra \
-              -Wno-unused-parameter -fomit-frame-pointer \
-              -nostartfiles -lamiga
+          docker run --rm -v "$PWD":/src -w /src/rtg "$AMIGA_IMAGE" ./build.sh
       - uses: actions/upload-artifact@v7
         with:
           name: ZZ9000.card
@@ -106,12 +103,13 @@ jobs:
           if-no-files-found: error
       - name: Build ZZ9000.card (debug/probe, KPrintF via Sashimi)
         run: |
-          docker run --rm -v "$PWD":/src -w /src/rtg "$AMIGA_IMAGE" \
+          docker run --rm -v "$PWD":/src -w /src/rtg "$AMIGA_IMAGE" sh -c '
             m68k-amigaos-gcc mntgfx-gcc.c -DDEBUG -m68020 -mtune=68020-60 -O2 \
-              -I../include \
+              -I../include -Wl,-Map,ZZ9000-debug.card.map \
               -o ZZ9000-debug.card -noixemul -Wall -Wextra \
               -Wno-unused-parameter -fomit-frame-pointer \
-              -nostartfiles -ldebug -lamiga
+              -nostartfiles -ldebug -lamiga &&
+            ../tools/check-link-map.sh ZZ9000-debug.card ZZ9000-debug.card.map'
       - uses: actions/upload-artifact@v7
         with:
           name: ZZ9000-debug.card
@@ -404,6 +402,31 @@ jobs:
           path: ahi/duplextest/ZZAXDuplexTest
           if-no-files-found: error
 
+  m68k-smoke:
+    name: m68k startup smoke (vamos)
+    needs: [zztop, zzscanlines, zzgamma, zzfwupdate, ZZNetStats, ZZDiag, ZZNetReady, zzcapture, zzrun, ahi]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          pattern: ZZ*
+      # Start every command-line tool once under vamos. Without a ZZ9000
+      # they stop early; a CPU fault or vamos crash before that fails the
+      # job (an unopened library base, a broken stack swap).
+      - name: Run the tools under vamos
+        run: |
+          mkdir -p smoke
+          for f in ZZTop/ZZTop ZZScanlines/ZZScanlines ZZGamma/ZZGamma \
+                   ZZFwUpdate/ZZFwUpdate ZZNetStats/ZZNetStats ZZDiag/ZZDiag \
+                   ZZNetReady/ZZNetReady ZZCapture/ZZCapture ZZRun/ZZRun \
+                   ZZAXDuplexTest/ZZAXDuplexTest; do
+            cp "artifacts/$f" smoke/
+          done
+          docker run --rm -v "$PWD":/src -w /src "$AMIGA_IMAGE" sh -c \
+            'tools/smoke-m68k-vamos.sh smoke/*'
+
   sdk:
     name: sdk — zz9000-sdk runtime payloads
     runs-on: ubuntu-latest
@@ -470,7 +493,7 @@ jobs:
 
   release:
     name: Package installer
-    needs: [host-checks, rtg, zztop, zzscanlines, zzgamma, zzfwupdate, usb-poseidon, sd-boot, net, ZZNetStats, ZZDiag, ZZNetReady, zzcapture, zzrun, mhi, ahi, sdk, amissl]
+    needs: [host-checks, rtg, zztop, zzscanlines, zzgamma, zzfwupdate, usb-poseidon, sd-boot, net, ZZNetStats, ZZDiag, ZZNetReady, zzcapture, zzrun, mhi, ahi, m68k-smoke, sdk, amissl]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
