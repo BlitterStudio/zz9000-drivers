@@ -1,11 +1,11 @@
 # Follow the GCC 16 m68k compiler image. The tag below moves with every GCC 16
-# release candidate; tools/amiga-docker.sh and CI pin it by digest
+# release candidate; tools/amiga-docker.sh pins it by digest
 # (tools/m68k-toolchain-pin.sh). When the tag points at a new image, this job
-# moves the pins on the build/m68k-toolchain branch, runs the full CI there
-# (every driver, the m68k tests, the vamos smoke, the link-map checks) and
-# offers the branch as a pull request (or as an issue when Actions may not
-# open pull requests). Merging it is the decision; card runs of the current
-# compiler happen before releases.
+# moves the pin on the build/m68k-toolchain branch and opens or updates a
+# pull request for it; CI then builds every driver with the new image (the
+# m68k tests, the vamos smoke and the link-map checks included) on that pull
+# request. Merging it is the decision; card runs of the current compiler
+# happen before releases.
 name: m68k toolchain update
 
 on:
@@ -19,10 +19,7 @@ on:
         default: ''
 
 permissions:
-  actions: write
-  contents: write
-  pull-requests: write
-  issues: write
+  contents: read
 
 concurrency:
   group: m68k-toolchain-update
@@ -34,14 +31,29 @@ env:
   # try another tag first (input `image`).
   TOOLCHAIN_IMAGE: ${{ inputs.image || 'amigadev/crosstools:m68k-amigaos-gcc10' }}
   BRANCH: build/m68k-toolchain
-  GH_TOKEN: ${{ github.token }}
 
 jobs:
   update:
     name: Follow the m68k compiler image
     runs-on: ubuntu-latest
     steps:
+      # The bump is pushed and proposed as the ZZ9000 toolchain GitHub App,
+      # not with the workflow token: GitHub starts no workflows for workflow-
+      # token pushes and holds CI on pull requests opened by github-actions
+      # for manual approval. With the App token the branch and the pull
+      # request get their normal CI.
+      - name: App token
+        id: token
+        uses: actions/create-github-app-token@v3
+        with:
+          # app-id: actionlint does not know v3's client-id input yet.
+          app-id: ${{ vars.M68K_TOOLCHAIN_APP_ID }}
+          private-key: ${{ secrets.M68K_TOOLCHAIN_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
       - uses: actions/checkout@v6
+        with:
+          token: ${{ steps.token.outputs.token }}
       - name: Compare the pin with the tag
         id: pin
         run: |
@@ -64,9 +76,11 @@ jobs:
             echo "old_version=$old_version"
             echo "new_version=$new_version"
           } >> "$GITHUB_OUTPUT"
-      - name: Offer the update and run CI on it
+      - name: Push the bump and open or update its pull request
         if: steps.pin.outputs.changed == 'true'
         env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          APP_SLUG: ${{ steps.token.outputs.app-slug }}
           OLD: ${{ steps.pin.outputs.old }}
           NEW: ${{ steps.pin.outputs.new }}
           OLD_VERSION: ${{ steps.pin.outputs.old_version }}
@@ -74,33 +88,15 @@ jobs:
         run: |
           set -euo pipefail
           tools/m68k-toolchain-pin.sh set "$NEW"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          bot_id=$(gh api "users/${APP_SLUG}[bot]" --jq .id)
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "$bot_id+${APP_SLUG}[bot]@users.noreply.github.com"
           git checkout -B "$BRANCH"
           git add -u
           git commit -q -m "build: m68k toolchain $NEW_VERSION" \
             -m "Pin $NEW (was $OLD_VERSION, $OLD)."
           git push -f origin "$BRANCH"
-          # Pushes made with the workflow token start no workflows, and a
-          # pull request opened by github-actions gets its CI run parked for
-          # approval. Dispatch CI on the branch, wait for it, and put the
-          # result in the pull request itself.
-          run_url=$(gh workflow run ci.yml --ref "$BRANCH" 2>&1 | grep -o 'https://[^ ]*/actions/runs/[0-9]*' | tail -n 1 || true)
-          if [ -z "$run_url" ]; then
-            # Older gh does not print the run; take the newest dispatch on the branch.
-            sleep 15
-            run_url=$(gh run list --workflow ci.yml --branch "$BRANCH" --event workflow_dispatch \
-              --limit 1 --json url --jq '.[0].url // empty')
-          fi
-          if [ -n "$run_url" ] && gh run watch "${run_url##*/}" --exit-status --interval 60 > /dev/null; then
-            ci_ok=true
-            result="CI passed with the new image: $run_url"
-            title="m68k toolchain: $NEW_VERSION"
-          else
-            ci_ok=false
-            result="**CI FAILED with the new image** (or did not start): ${run_url:-no run}"
-            title="m68k toolchain: $NEW_VERSION (fails)"
-          fi
+          title="m68k toolchain: $NEW_VERSION"
           body=$(printf '%s\n' \
             "The \`$TOOLCHAIN_IMAGE\` tag points at a new image." \
             "" \
@@ -109,20 +105,11 @@ jobs:
             "| pinned | $OLD_VERSION | \`$OLD\` |" \
             "| new | $NEW_VERSION | \`$NEW\` |" \
             "" \
-            "$result" \
-            "" \
             "Merging moves every driver build to this compiler. The SDK payloads follow \`sdk/SDK_REF\`, i.e. the firmware repo's own pin. A card run of the current compiler is due before the next release.")
           pr=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
           if [ -n "$pr" ]; then
             gh pr edit "$pr" --title "$title" --body "$body"
-          elif ! gh pr create --head "$BRANCH" --base "${{ github.event.repository.default_branch }}" \
-              --title "$title" --body "$body"; then
-            issue=$(gh issue list --state open --search "in:title \"m68k toolchain:\"" --json number --jq '.[0].number // empty')
-            note="Actions may not open pull requests in this organisation; open one from \`$BRANCH\`."
-            if [ -n "$issue" ]; then
-              gh issue edit "$issue" --title "$title" --body "$body"$'\n\n'"$note"
-            else
-              gh issue create --title "$title" --body "$body"$'\n\n'"$note"
-            fi
+          else
+            gh pr create --head "$BRANCH" --base "${{ github.event.repository.default_branch }}" \
+              --title "$title" --body "$body"
           fi
-          [ "$ci_ok" = true ]

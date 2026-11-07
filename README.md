@@ -171,8 +171,10 @@ and [release guide](RELEASING.md) define the artifact and tag procedures.
 
 GCC 16 is still in release candidates, so the image tag moves often. The
 daily `m68k toolchain update` workflow compares the pin with the tag and, when
-they differ, moves every pin (`tools/m68k-toolchain-pin.sh set`), runs CI on
-the `build/m68k-toolchain` branch and offers it for merging.
+they differ, moves every pin (`tools/m68k-toolchain-pin.sh set`) on the
+`build/m68k-toolchain` branch and opens or updates a pull request, on which CI
+runs as usual. It acts as the ZZ9000 toolchain GitHub App (organization
+variable `M68K_TOOLCHAIN_APP_ID`, secret `M68K_TOOLCHAIN_APP_PRIVATE_KEY`).
 `tools/m68k-toolchain-pin.sh current` prints the pinned image.
 
 `make package-local` creates `zz9000-drivers-local.lha` and needs an `lha`
