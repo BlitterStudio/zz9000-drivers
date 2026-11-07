@@ -1,4 +1,5 @@
-AMIGA_IMAGE ?= sacredbanana/amiga-compiler:m68k-amigaos
+# Empty means tools/amiga-docker.sh's pinned GCC 16 image.
+AMIGA_IMAGE ?=
 AMIGA_DOCKER = ./tools/amiga-docker.sh
 
 .PHONY: all build-all package-local check-release quality rtg-tests mhi-tests \

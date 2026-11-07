@@ -162,9 +162,10 @@ GitHub for a newer firmware release and install the complete bundle.
 
 ## Building and releases
 
-GitHub Actions builds every component in
-`sacredbanana/amiga-compiler:m68k-amigaos`, assembles tag releases, and checks
-release contents. Run `make build-all` for the local equivalent. The
+GitHub Actions builds every component with GCC 16 in
+`amigadev/crosstools:m68k-amigaos-gcc10` (pinned by digest in
+[`tools/amiga-docker.sh`](tools/amiga-docker.sh)), assembles tag releases, and
+checks release contents. Run `make build-all` for the local equivalent. The
 [build script](tools/build-all.sh), [CI workflow](.github/workflows/ci.yml),
 and [release guide](RELEASING.md) define the artifact and tag procedures.
 

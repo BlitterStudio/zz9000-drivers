@@ -3,9 +3,13 @@
 #
 # (C) 2026 Dimitris Panokostas <midwan@gmail.com> — GCC-only build
 #
-# Uses m68k-amigaos-gcc from https://github.com/bebbo/amiga-gcc.
-# CI uses the `sacredbanana/amiga-compiler:m68k-amigaos` image; for
-# local builds this script puts /opt/amiga/bin on PATH before make.
-export PATH="$PATH":/opt/amiga/bin
+# Runs make with the local m68k-amigaos-gcc, or in the toolchain image
+# through tools/amiga-docker.sh when there is none on PATH.
+set -eu
+
+if ! command -v m68k-amigaos-gcc >/dev/null 2>&1; then
+  script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+  exec "$script_dir/../tools/amiga-docker.sh" net make "$@"
+fi
 
 exec make "$@"

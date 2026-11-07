@@ -565,8 +565,13 @@ class RepoToolingTests(unittest.TestCase):
             first_line = path.read_text(encoding="utf-8").splitlines()[0]
             self.assertTrue(first_line.startswith("#!"), relpath)
 
-        self.assertIn("sacredbanana/amiga-compiler:m68k-amigaos",
-                      self.read("tools/amiga-docker.sh"))
+        # Local builds (amiga-docker.sh) and CI must use the same pinned
+        # compiler image.
+        image = re.search(r"image=\$\{AMIGA_IMAGE:-([^}]+)\}",
+                          self.read("tools/amiga-docker.sh"))
+        self.assertIsNotNone(image)
+        self.assertIn("@sha256:", image.group(1))
+        self.assertIn(image.group(1), self.read(".github/workflows/ci.yml"))
 
     def test_ci_runs_host_checks_and_builds_diagnostics(self):
         ci = self.read(".github/workflows/ci.yml")
@@ -653,7 +658,6 @@ class RepoToolingTests(unittest.TestCase):
 
     def test_shell_scripts_avoid_ci_shellcheck_patterns(self):
         bad_cdpath = []
-        bad_path_export = []
         # Enumerate tracked files rather than walking the tree: CI checks the
         # firmware repo out inside this workspace (check-cfg-keys.sh needs it),
         # and rglob would lint that repo's scripts against this repo's rules.
@@ -665,16 +669,8 @@ class RepoToolingTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             if "CDPATH= cd" in text:
                 bad_cdpath.append(relpath)
-            if ("export PATH=/opt/amiga/bin:$PATH" in text and
-                    "shellcheck disable=SC2016" not in text):
-                bad_path_export.append(relpath)
-            if "export PATH=$PATH:/opt/amiga/bin" in text:
-                bad_path_export.append(relpath)
-            if 'export PATH=/opt/amiga/bin:""$PATH' in text:
-                bad_path_export.append(relpath)
 
         self.assertEqual([], bad_cdpath)
-        self.assertEqual([], bad_path_export)
 
     def test_sd_boot_header_generation_does_not_require_xxd(self):
         script = self.read("sd-boot/build.sh")

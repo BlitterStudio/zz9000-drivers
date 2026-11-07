@@ -186,13 +186,12 @@ the previous cache mode; the window stays cache-inhibited.
 ## Building
 
 Use the repository wrapper. It stages the zz9k client headers and the current
-`app/services` `zzapp_proto.h`, then uses GCC 6.5.0b in
-`sacredbanana/amiga-compiler:m68k-amigaos` when no local cross compiler is on
-`PATH`.
+`app/services` `zzapp_proto.h`, then builds in the repository's GCC 16 image
+(`tools/amiga-docker.sh`) when no local cross compiler is on `PATH`.
 
 ```sh
 cd ZZRun
-AMIGA_IMAGE=sacredbanana/amiga-compiler:m68k-amigaos ./build.sh
+./build.sh
 ```
 
 Set `ZZ9000_FIRMWARE` to a firmware checkout when it is not a sibling of this

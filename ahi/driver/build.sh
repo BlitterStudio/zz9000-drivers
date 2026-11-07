@@ -41,22 +41,12 @@ if ! command -v m68k-amigaos-gcc >/dev/null 2>&1; then
   exec "$script_dir/../../tools/amiga-docker.sh" ahi/driver ./build.sh --zz9k-staged "$@"
 fi
 
-export PATH=/opt/amiga/bin:"$PATH"
-
-# vasm needs the NDK and AHI assembler includes. Their root moved with the
-# toolchain image: /opt/amiga/m68k-amigaos on the GCC 6.5 image,
-# /opt/m68k-amigaos/m68k-amigaos on the GCC 16 one. Take the first root
-# that has devices/ahi.i, starting next to the m68k-amigaos-gcc in use.
+# vasm needs the NDK and AHI assembler includes, which sit next to the
+# compiler in use (/opt/m68k-amigaos/m68k-amigaos in the toolchain image).
 gcc_root=$(CDPATH='' cd -- "$(dirname -- "$(command -v m68k-amigaos-gcc)")/.." && pwd)
-ndk_root=
-for root in "$gcc_root/m68k-amigaos" /opt/amiga/m68k-amigaos /opt/m68k-amigaos/m68k-amigaos; do
-  if [ -f "$root/include/devices/ahi.i" ]; then
-    ndk_root=$root
-    break
-  fi
-done
-if [ -z "$ndk_root" ]; then
-  echo "ERROR: no m68k-amigaos include root with devices/ahi.i found" >&2
+ndk_root=$gcc_root/m68k-amigaos
+if [ ! -f "$ndk_root/include/devices/ahi.i" ]; then
+  echo "ERROR: $ndk_root/include/devices/ahi.i not found" >&2
   exit 1
 fi
 
