@@ -81,10 +81,26 @@ jobs:
           git commit -q -m "build: m68k toolchain $NEW_VERSION" \
             -m "Pin $NEW (was $OLD_VERSION, $OLD)."
           git push -f origin "$BRANCH"
-          # Pushes made with the workflow token start no workflows; a
-          # dispatch does, and its checks show on the branch commit.
-          gh workflow run ci.yml --ref "$BRANCH"
-          title="m68k toolchain: $NEW_VERSION"
+          # Pushes made with the workflow token start no workflows, and a
+          # pull request opened by github-actions gets its CI run parked for
+          # approval. Dispatch CI on the branch, wait for it, and put the
+          # result in the pull request itself.
+          run_url=$(gh workflow run ci.yml --ref "$BRANCH" 2>&1 | grep -o 'https://[^ ]*/actions/runs/[0-9]*' | tail -n 1 || true)
+          if [ -z "$run_url" ]; then
+            # Older gh does not print the run; take the newest dispatch on the branch.
+            sleep 15
+            run_url=$(gh run list --workflow ci.yml --branch "$BRANCH" --event workflow_dispatch \
+              --limit 1 --json url --jq '.[0].url // empty')
+          fi
+          if [ -n "$run_url" ] && gh run watch "${run_url##*/}" --exit-status --interval 60 > /dev/null; then
+            ci_ok=true
+            result="CI passed with the new image: $run_url"
+            title="m68k toolchain: $NEW_VERSION"
+          else
+            ci_ok=false
+            result="**CI FAILED with the new image** (or did not start): ${run_url:-no run}"
+            title="m68k toolchain: $NEW_VERSION (fails)"
+          fi
           body=$(printf '%s\n' \
             "The \`$TOOLCHAIN_IMAGE\` tag points at a new image." \
             "" \
@@ -93,7 +109,7 @@ jobs:
             "| pinned | $OLD_VERSION | \`$OLD\` |" \
             "| new | $NEW_VERSION | \`$NEW\` |" \
             "" \
-            "CI runs on this branch (manual run of the CI workflow); its checks show on the commit." \
+            "$result" \
             "" \
             "Merging moves every driver build to this compiler. The SDK payloads follow \`sdk/SDK_REF\`, i.e. the firmware repo's own pin. A card run of the current compiler is due before the next release.")
           pr=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
@@ -109,3 +125,4 @@ jobs:
               gh issue create --title "$title" --body "$body"$'\n\n'"$note"
             fi
           fi
+          [ "$ci_ok" = true ]
