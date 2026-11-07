@@ -136,6 +136,11 @@ jobs:
       - name: m68k release-archive extraction
         run: |
           common/tests/fw_release_m68k.sh
+      # ZZTop and ZZFwUpdate swap to a private stack when started with a
+      # small one; run that swap and the swap back natively under vamos.
+      - name: m68k private-stack swap
+        run: |
+          common/tests/amiga_stack_m68k.sh
       - uses: actions/upload-artifact@v7
         with:
           name: ZZTop
