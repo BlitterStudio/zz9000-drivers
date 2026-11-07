@@ -20,9 +20,9 @@ case "$(uname -s)" in
         export MSYS_NO_PATHCONV=1
         ;;
 esac
-# GCC 16.2.1b (AmigaDev 16.2-rc23-20), the compiler the A4000 runs passed
-# with. The tag follows release candidates, so the digest pins it. CI's
-# AMIGA_IMAGE (.github/workflows/ci.yml) names the same image.
+# GCC 16 (amigadev/crosstools), pinned by digest because the tag follows
+# release candidates. This is the only pin: CI builds through this wrapper,
+# and tools/m68k-toolchain-pin.sh moves it.
 image=${AMIGA_IMAGE:-amigadev/crosstools:m68k-amigaos-gcc10@sha256:47b5556f434ea10e6837c0db3011357f9a08cbc96cdb9c86cd84412cd0456fe1}
 engine=${CONTAINER_ENGINE:-}
 
