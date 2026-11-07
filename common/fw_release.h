@@ -139,7 +139,7 @@ int fwrel_chunked_feed(struct fwrel_chunked *c, const uint8_t *data,
 #define FWREL_BOOT_MIN_BYTES   65536UL
 #define FWREL_BOOT_MAX_BYTES   (32UL * 1024UL * 1024UL)
 #define FWREL_BOOT_HEADER_BYTES 0x28u
-#define FWREL_MODULE_HEADER_BYTES 128u
+#define FWREL_MODULE_HEADER_MAX_BYTES 512u
 
 enum fwrel_zip_result {
     FWREL_ZIP_MORE = 0,       /* feed more input */
@@ -167,11 +167,11 @@ struct fwrel_zip *fwrel_zip_new(fwrel_sink_fn sink, void *ctx);
 /* The bundle reader passes each selected member's safe relative destination
  * ("BOOT.bin" or "ZZ9K/NAME.ZZM") to `begin` before its bytes reach `sink`.
  * `end` follows successful ZIP integrity checks and image validation. Module
- * validation requires the fixed 128-byte ZZM1 little-endian header, a
- * matching exact file length, zero reserved bytes, and SHA-256 of its image.
- * A nonzero callback result aborts with FWREL_ZIP_ERR_WRITE. `begin` and
- * `end` may be NULL. Callers can keep per-member state between these
- * callbacks and the sink. */
+ * validation accepts the little-endian ZZM2 (256-byte) and ZZM3 (512-byte)
+ * headers, requires the matching exact file length and reserved bytes, and
+ * verifies the SHA-256 of the image. A nonzero callback result aborts with
+ * FWREL_ZIP_ERR_WRITE. `begin` and `end` may be NULL. Callers can keep
+ * per-member state between these callbacks and the sink. */
 typedef int (*fwrel_zip_entry_fn)(void *ctx, const char *path);
 
 /* Extract only dir/BOOT.bin and direct dir/ZZ9K/NAME.ZZM members from one
