@@ -22,10 +22,13 @@ concurrency:
 permissions:
   contents: write  # needed by the release job on tag pushes
 
-# GCC 16.2.1b (AmigaDev 16.2-rc23-20), pinned by digest because the tag
-# follows release candidates. Keep it equal to tools/amiga-docker.sh.
+# Every Amiga build runs through tools/amiga-docker.sh, whose default is the
+# pinned GCC 16 image (tools/m68k-toolchain-pin.sh). The pin must not live in
+# a workflow file: the m68k toolchain update workflow moves it, and the
+# workflow token may not push workflow changes. A manual run can still name
+# another image.
 env:
-  AMIGA_IMAGE: ${{ inputs.amiga_image || 'amigadev/crosstools:m68k-amigaos-gcc10@sha256:47b5556f434ea10e6837c0db3011357f9a08cbc96cdb9c86cd84412cd0456fe1' }}
+  AMIGA_IMAGE: ${{ inputs.amiga_image }}
 
 jobs:
   lint:
@@ -103,7 +106,7 @@ jobs:
       # auto-open library base (tools/check-link-map.sh).
       - name: Build ZZ9000.card
         run: |
-          docker run --rm -v "$PWD":/src -w /src/rtg "$AMIGA_IMAGE" ./build.sh
+          tools/amiga-docker.sh rtg ./build.sh
       - uses: actions/upload-artifact@v7
         with:
           name: ZZ9000.card
@@ -111,7 +114,7 @@ jobs:
           if-no-files-found: error
       - name: Build ZZ9000.card (debug/probe, KPrintF via Sashimi)
         run: |
-          docker run --rm -v "$PWD":/src -w /src/rtg "$AMIGA_IMAGE" sh -c '
+          tools/amiga-docker.sh rtg sh -c '
             m68k-amigaos-gcc mntgfx-gcc.c -DDEBUG -m68020 -mtune=68020-60 -O2 \
               -I../include -Wl,-Map,ZZ9000-debug.card.map \
               -o ZZ9000-debug.card -noixemul -Wall -Wextra \
@@ -161,7 +164,7 @@ jobs:
       - uses: actions/checkout@v6
       - name: Build ZZScanlines
         run: |
-          docker run --rm -v "$PWD":/src -w /src/ZZScanlines "$AMIGA_IMAGE" \
+          tools/amiga-docker.sh ZZScanlines \
             m68k-amigaos-gcc -O2 -noixemul -I../include \
               -o ZZScanlines ZZScanlines.c -lamiga
       - uses: actions/upload-artifact@v7
@@ -177,7 +180,7 @@ jobs:
       - uses: actions/checkout@v6
       - name: Build ZZGamma
         run: |
-          docker run --rm -v "$PWD":/src -w /src/ZZGamma "$AMIGA_IMAGE" \
+          tools/amiga-docker.sh ZZGamma \
             m68k-amigaos-gcc -O2 -noixemul -I../include \
             -o ZZGamma ZZGamma.c -lamiga
       - uses: actions/upload-artifact@v7
@@ -193,7 +196,7 @@ jobs:
       - uses: actions/checkout@v6
       - name: Build ZZFwUpdate
         run: |
-          docker run --rm -v "$PWD":/src -w /src/ZZFwUpdate "$AMIGA_IMAGE" \
+          tools/amiga-docker.sh ZZFwUpdate \
             m68k-amigaos-gcc -O2 -noixemul -Wall -Wextra -Wstack-usage=2048 -Werror \
               -I../include -I../common -o ZZFwUpdate ZZFwUpdate.c \
               ../common/amiga_stack.c ../common/fwup_amiga.c ../common/fwup_client.c -lamiga
@@ -210,7 +213,7 @@ jobs:
       - uses: actions/checkout@v6
       - name: Build zzusbhw.device
         run: |
-          docker run --rm -v "$PWD":/src -w /src/usb-poseidon "$AMIGA_IMAGE" \
+          tools/amiga-docker.sh usb-poseidon \
             m68k-amigaos-gcc -m68020 -mtune=68020-60 -msoft-float -s \
               -Wall -Wextra -Wno-unused-parameter -fomit-frame-pointer \
               -nostdlib -nostartfiles -O2 -I. -I../include \
@@ -229,7 +232,7 @@ jobs:
       - uses: actions/checkout@v6
       - name: Build zzsd.device
         run: |
-          docker run --rm -v "$PWD":/src -w /src/sd-boot "$AMIGA_IMAGE" \
+          tools/amiga-docker.sh sd-boot \
             m68k-amigaos-gcc -m68000 -s -Wall -Wextra \
               -Wno-unused-parameter -fomit-frame-pointer \
               -nostdlib -nostartfiles -Os \
@@ -255,7 +258,7 @@ jobs:
       - uses: actions/checkout@v6
       - name: Build ZZ9000Net.device
         run: |
-          docker run --rm -v "$PWD":/src -w /src/net "$AMIGA_IMAGE" \
+          tools/amiga-docker.sh net \
             sh -c 'make'
       - uses: actions/upload-artifact@v7
         with:
@@ -270,7 +273,7 @@ jobs:
       - uses: actions/checkout@v6
       - name: Build ZZNetStats
         run: |
-          docker run --rm -v "$PWD":/src -w /src/net/ZZNetStats "$AMIGA_IMAGE" \
+          tools/amiga-docker.sh net/ZZNetStats \
             m68k-amigaos-gcc -O2 -noixemul -Wall -Wextra \
               -Wno-unused-parameter -I../../include \
               -o ZZNetStats ZZNetStats.c -lamiga
@@ -287,7 +290,7 @@ jobs:
       - uses: actions/checkout@v6
       - name: Build ZZDiag
         run: |
-          docker run --rm -v "$PWD":/src -w /src/ZZDiag "$AMIGA_IMAGE" \
+          tools/amiga-docker.sh ZZDiag \
             m68k-amigaos-gcc ZZDiag.c -m68030 -O2 -o ZZDiag \
               -Wall -Wextra -Wno-unused-parameter -I../include -I../usb-poseidon \
               -lamiga -noixemul
@@ -304,7 +307,7 @@ jobs:
       - uses: actions/checkout@v6
       - name: Build zz9kcheck
         run: |
-          docker run --rm -v "$PWD":/src -w /src/ZZNetReady "$AMIGA_IMAGE" \
+          tools/amiga-docker.sh ZZNetReady \
             m68k-amigaos-gcc ZZNetReady.c -m68020 -O2 -o ZZNetReady \
               -Wall -Wextra -noixemul -lamiga
       - uses: actions/upload-artifact@v7
@@ -393,7 +396,7 @@ jobs:
           ahi/driver/build.sh
       - name: Build ZZAXDuplexTest
         run: |
-          docker run --rm -v "$PWD":/src -w /src/ahi/duplextest "$AMIGA_IMAGE" ./build.sh
+          tools/amiga-docker.sh ahi/duplextest ./build.sh
       - uses: actions/upload-artifact@v7
         with:
           name: zz9000ax.audio
@@ -432,7 +435,7 @@ jobs:
                    ZZAXDuplexTest/ZZAXDuplexTest; do
             cp "artifacts/$f" smoke/
           done
-          docker run --rm -v "$PWD":/src -w /src "$AMIGA_IMAGE" sh -c \
+          tools/amiga-docker.sh . sh -c \
             'tools/smoke-m68k-vamos.sh smoke/*'
 
   sdk:

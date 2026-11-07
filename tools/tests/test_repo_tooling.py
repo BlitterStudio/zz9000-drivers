@@ -565,13 +565,17 @@ class RepoToolingTests(unittest.TestCase):
             first_line = path.read_text(encoding="utf-8").splitlines()[0]
             self.assertTrue(first_line.startswith("#!"), relpath)
 
-        # Local builds (amiga-docker.sh) and CI must use the same pinned
-        # compiler image.
+        # The compiler image is pinned once, in amiga-docker.sh. Workflow
+        # files must not name it: CI builds through the wrapper, and the m68k
+        # toolchain update workflow moves the pin with a token that may not
+        # change workflow files.
         image = re.search(r"image=\$\{AMIGA_IMAGE:-([^}]+)\}",
                           self.read("tools/amiga-docker.sh"))
         self.assertIsNotNone(image)
         self.assertIn("@sha256:", image.group(1))
-        self.assertIn(image.group(1), self.read(".github/workflows/ci.yml"))
+        for workflow in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+            self.assertNotIn("@sha256:", workflow.read_text(encoding="utf-8"),
+                             workflow.name)
 
     def test_ci_runs_host_checks_and_builds_diagnostics(self):
         ci = self.read(".github/workflows/ci.yml")
