@@ -169,6 +169,12 @@ checks release contents. Run `make build-all` for the local equivalent. The
 [build script](tools/build-all.sh), [CI workflow](.github/workflows/ci.yml),
 and [release guide](RELEASING.md) define the artifact and tag procedures.
 
+GCC 16 is still in release candidates, so the image tag moves often. The
+daily `m68k toolchain update` workflow compares the pin with the tag and, when
+they differ, moves every pin (`tools/m68k-toolchain-pin.sh set`), runs CI on
+the `build/m68k-toolchain` branch and offers it for merging.
+`tools/m68k-toolchain-pin.sh current` prints the pinned image.
+
 `make package-local` creates `zz9000-drivers-local.lha` and needs an `lha`
 with compression support. CI uses the `lha` in the compiler image. Release
 binaries come from CI; [binary policy](docs/BINARY_POLICY.md) describes the
