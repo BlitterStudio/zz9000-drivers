@@ -531,8 +531,17 @@ SAVEDS LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
 
       if (port = CreateMsgPort()) {
         D(("ZZ9000Net: Starting Process\n"));
-        if ((db->db_Proc = CreateNewProcTags(NP_Entry, (ULONG)frame_proc, NP_Name,
-                                             (ULONG)frame_proc_name, NP_Priority, ZZNET_FRAMER_PRI, TAG_DONE))) {
+        /* Not CreateNewProcTags(): GCC 16's NDK makes the varargs call a
+         * static inline compiled before device.h maps DOSBase to
+         * db->db_DOSBase, so it reads a global DOSBase. Nothing opens one
+         * in a device; the TagList call stays a macro and uses ours. */
+        struct TagItem proc_tags[] = {
+          { NP_Entry, (ULONG)frame_proc },
+          { NP_Name, (ULONG)frame_proc_name },
+          { NP_Priority, ZZNET_FRAMER_PRI },
+          { TAG_DONE, 0 }
+        };
+        if ((db->db_Proc = CreateNewProcTagList(proc_tags))) {
           InitSemaphore(&db->db_ProcExitSem);
 
           init.error = 1;
