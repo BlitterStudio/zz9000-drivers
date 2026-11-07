@@ -257,7 +257,7 @@ static void describe_bundle_discovery_failure(const char *prefix,
 	}
 	Fault(bundle->directory_error, (STRPTR)"", (STRPTR)fault, sizeof(fault));
 	snprintf(message, sizeof(message),
-		"%s: cannot scan module drawer %s (DOS error %ld): %s", prefix,
+		"%.40s: cannot scan module drawer %.200s (DOS error %ld): %.100s", prefix,
 		bundle->module_dir, (long)bundle->directory_error, fault);
 }
 

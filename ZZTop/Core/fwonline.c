@@ -206,7 +206,10 @@ void fwonline_remove_bundle(const char *boot_path)
 
 	if (!bundle_directory(boot_path, directory, sizeof(directory)))
 		return;
-	snprintf(module_directory, sizeof(module_directory), "%s/ZZ9K", directory);
+	/* A cut-off path could name a different drawer: delete nothing then. */
+	if ((ULONG)snprintf(module_directory, sizeof(module_directory), "%s/ZZ9K",
+			directory) >= sizeof(module_directory))
+		return;
 	lock = Lock((CONST_STRPTR)module_directory, ACCESS_READ);
 	if (lock) {
 		fib = AllocVec(sizeof(*fib), MEMF_ANY);
@@ -214,8 +217,9 @@ void fwonline_remove_bundle(const char *boot_path)
 			while (ExNext(lock, fib)) {
 				if (fib->fib_DirEntryType >= 0)
 					continue;
-				snprintf(member, sizeof(member), "%s/%s", module_directory,
-					fib->fib_FileName);
+				if ((ULONG)snprintf(member, sizeof(member), "%s/%s",
+						module_directory, fib->fib_FileName) >= sizeof(member))
+					continue;
 				DeleteFile((CONST_STRPTR)member);
 			}
 		}

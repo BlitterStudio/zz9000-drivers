@@ -323,11 +323,17 @@ static enum https_result request(struct conn *c, const char *host,
 	}
 	*status = head.status;
 	if (head.status >= 300 && head.status < 400 && head.location[0]) {
+		int n;
+
 		if (head.location[0] == '/')
-			snprintf(next_url, next_size, "https://%s%s", host,
+			n = snprintf(next_url, next_size, "https://%s%s", host,
 				head.location);
 		else
-			snprintf(next_url, next_size, "%s", head.location);
+			n = snprintf(next_url, next_size, "%s", head.location);
+		if (n < 0 || (ULONG)n >= next_size) {
+			set_err(c, "%s", "Redirect target is too long");
+			return HTTPS_FAILED;
+		}
 		return HTTPS_OK;
 	}
 	if (head.status != 200)

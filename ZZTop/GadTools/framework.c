@@ -60,7 +60,9 @@ static BOOL advanced_mode;
 static BOOL quit_requested;
 static UWORD busy_depth;
 static struct Requester busy_requester;
-static char window_title[64];
+/* A 63-character base title plus the longest pending suffix,
+ * " - 4294967295 unsaved, reboot needed". */
+static char window_title[112];
 static char status_text[128] = "Ready.";
 static char list_names[GT_PAGE_COUNT][32];
 static struct List list_labels;
