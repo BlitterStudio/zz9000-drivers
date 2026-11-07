@@ -66,6 +66,11 @@ struct DOSBase;
  * through this macro instead of casting at each call site; the
  * parenthesised (KPrintF) keeps the macro from expanding into itself. */
 #define KPrintF(fmt, ...) (KPrintF)((CONST_STRPTR)(fmt), ##__VA_ARGS__)
+/* libdebug's KGetNum divides through libnix's __divsi3, which calls
+ * utility.library. The card never calls KGetNum, but without a definition
+ * here the link takes UtilityBase from libstubs' auto-open entry, which
+ * nothing opens in a startup-less card (tools/check-link-map.sh). */
+struct Library *UtilityBase = NULL;
 #else
 #define KPrintF(...)
 #endif
