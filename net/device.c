@@ -529,7 +529,7 @@ SAVEDS LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
       struct ProcInit init;
       struct MsgPort *port;
 
-      if (port = CreateMsgPort()) {
+      if ((port = CreateMsgPort()) != NULL) {
         D(("ZZ9000Net: Starting Process\n"));
         /* Not CreateNewProcTags(): GCC 16's NDK makes the varargs call a
          * static inline compiled before device.h maps DOSBase to
@@ -803,12 +803,11 @@ SAVEDS VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
     }
     break;
   case S2_BROADCAST:
-    /* set broadcast addr: ff:ff:ff:ff:ff:ff */
-    if (ioreq->ios2_DstAddr) {
-      memset(ioreq->ios2_DstAddr, 0xff, HW_ADDRFIELDSIZE);
-    } else {
-      D(("bcast: invalid dst addr\n"));
-    }
+    /* SANA-II: S2_BROADCAST writes the broadcast address into the
+     * request's inline ios2_DstAddr array. The old guard tested the array
+     * address, which can never be NULL (it is a member, not a pointer) —
+     * write the address unconditionally and drop the dead branch. */
+    memset(ioreq->ios2_DstAddr, 0xff, HW_ADDRFIELDSIZE);
     /* fall through */
   case S2_MULTICAST:
     if (!zznet_mcast_send_ok(ioreq->ios2_DstAddr)) {
