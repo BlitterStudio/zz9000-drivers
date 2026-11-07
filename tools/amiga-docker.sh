@@ -35,10 +35,12 @@ if [ -z "$engine" ]; then
 fi
 
 # The GCC 6.5 image installs its cross tools under /opt/m68k-amigaos; retain
-# the older location for local images that still use it.
+# the older location for local images that still use it. No login shell:
+# the GCC 16 image (amigadev/crosstools) aborts `sh -lc` on a missing
+# /root/.cargo/env.
 # shellcheck disable=SC2016
 exec "$engine" run --rm \
     -v "$repo_root":/src \
     -w "/src/$workdir" \
     "$image" \
-    sh -lc 'export PATH=/opt/m68k-amigaos/bin:/opt/amiga/bin:$PATH; exec "$@"' sh "$@"
+    sh -c 'export PATH=/opt/m68k-amigaos/bin:/opt/amiga/bin:$PATH; exec "$@"' sh "$@"
