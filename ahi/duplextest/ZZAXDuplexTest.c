@@ -418,7 +418,10 @@ int main(int argc, char **argv)
     goto cleanup;
   }
 
-  hook.h_Entry = (ULONG (*)())record_hook;
+  /* h_Entry is declared unprototyped (ULONG (*)()); bridge the reg-asm
+   * typed hook function to it through void (*)(void) — the cast chain GCC
+   * treats as intentional function-pointer conversion. */
+  hook.h_Entry = (ULONG (*)())(void (*)(void))record_hook;
   hook.h_Data = &context;
 
   {

@@ -112,20 +112,24 @@ struct ackprobe {
     ULONG tx_seq_max;   /* highest send seq+payload the Amiga reached  */
 };
 
+/* Room for the special-stat header plus eight probe records. */
+#define ACKPROBE_SBUF_SIZE (sizeof(struct Sana2SpecialStatHeader) + \
+                            8 * sizeof(struct Sana2SpecialStatRecord))
 /* Fetch all special-stat records once and extract the ACK-probe fields by
- * name. Missing records stay 0 (older device without the probe). */
-static void fetch_ackprobe(struct IOSana2Req *req, struct ackprobe *out)
+ * name. Missing records stay 0 (older device without the probe). The
+ * special-stat scratch buffer is caller-owned: the request object outlives
+ * this function, so a function-local buffer stored in ios2_StatData would
+ * leave a dangling pointer behind (GCC 16 -Wdangling-pointer). */
+static void fetch_ackprobe(struct IOSana2Req *req, UBYTE *sbuf,
+                           struct ackprobe *out)
 {
-    UBYTE sbuf[sizeof(struct Sana2SpecialStatHeader) +
-               8 * sizeof(struct Sana2SpecialStatRecord)]
-        __attribute__((aligned(4)));
     struct Sana2SpecialStatHeader *h = (struct Sana2SpecialStatHeader *)sbuf;
     struct Sana2SpecialStatRecord *rec =
         (struct Sana2SpecialStatRecord *)(h + 1);
     ULONG i;
 
     memset(out, 0, sizeof(*out));
-    memset(sbuf, 0, sizeof(sbuf));
+    memset(sbuf, 0, ACKPROBE_SBUF_SIZE);
     h->RecordCountMax        = 8;
     req->ios2_Req.io_Error   = 0;
     req->ios2_Req.io_Command = S2_GETSPECIALSTATS;
@@ -167,6 +171,7 @@ static int monitor_loop(struct IOSana2Req *req, LONG secs)
     for (;;) {
         struct Sana2DeviceStats stats;
         struct ackprobe ap;
+        UBYTE sbuf[ACKPROBE_SBUF_SIZE] __attribute__((aligned(4)));
         UWORD status = 0;
 
         memset(&stats, 0, sizeof(stats));
@@ -179,7 +184,7 @@ static int monitor_loop(struct IOSana2Req *req, LONG secs)
                    (unsigned long)n, (int)req->ios2_Req.io_Error);
             fflush(stdout);
         } else {
-            fetch_ackprobe(req, &ap);
+            fetch_ackprobe(req, sbuf, &ap);
             if (regs)
                 status = zz9000_read_reg16(regs, ZZ_REG_ETH_RX_STATUS);
             /* seq/ack numbers in hex so advance/pin is obvious at a glance. */
