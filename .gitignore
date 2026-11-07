@@ -30,6 +30,7 @@ ZZRun/ZZRun
 ZZRun/zz9k-headers/
 ZZRun/work/
 net/ZZ9000Net.device.68000
+net/ZZ9000Net.device.map
 net/ZZNetStats/ZZNetStats
 *.datatype
 sdk/work/
