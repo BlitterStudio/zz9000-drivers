@@ -1,0 +1,111 @@
+# Follow the GCC 16 m68k compiler image. The tag below moves with every GCC 16
+# release candidate; tools/amiga-docker.sh and CI pin it by digest
+# (tools/m68k-toolchain-pin.sh). When the tag points at a new image, this job
+# moves the pins on the build/m68k-toolchain branch, runs the full CI there
+# (every driver, the m68k tests, the vamos smoke, the link-map checks) and
+# offers the branch as a pull request (or as an issue when Actions may not
+# open pull requests). Merging it is the decision; card runs of the current
+# compiler happen before releases.
+name: m68k toolchain update
+
+on:
+  schedule:
+    - cron: '41 5 * * *'
+  workflow_dispatch:
+    inputs:
+      image:
+        description: image tag to follow for this run (empty = TOOLCHAIN_IMAGE below)
+        required: false
+        default: ''
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: m68k-toolchain-update
+
+env:
+  # The image tag to follow. amigadev/crosstools renames it to
+  # m68k-amigaos-16 when GCC 16 leaves release candidates: change it here
+  # then, and the next run moves every pin to the new tag. A manual run can
+  # try another tag first (input `image`).
+  TOOLCHAIN_IMAGE: ${{ inputs.image || 'amigadev/crosstools:m68k-amigaos-gcc10' }}
+  BRANCH: build/m68k-toolchain
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  update:
+    name: Follow the m68k compiler image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Compare the pin with the tag
+        id: pin
+        run: |
+          set -euo pipefail
+          old=$(tools/m68k-toolchain-pin.sh current)
+          digest=$(docker buildx imagetools inspect "$TOOLCHAIN_IMAGE" | awk '/^Digest:/ { print $2; exit }')
+          new="$TOOLCHAIN_IMAGE@$digest"
+          echo "pinned: $old"
+          echo "tag:    $new"
+          if [ "$old" = "$new" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          old_version=$(docker run --rm "$old" m68k-amigaos-gcc --version | head -n 1)
+          new_version=$(docker run --rm "$new" m68k-amigaos-gcc --version | head -n 1)
+          {
+            echo "changed=true"
+            echo "old=$old"
+            echo "new=$new"
+            echo "old_version=$old_version"
+            echo "new_version=$new_version"
+          } >> "$GITHUB_OUTPUT"
+      - name: Offer the update and run CI on it
+        if: steps.pin.outputs.changed == 'true'
+        env:
+          OLD: ${{ steps.pin.outputs.old }}
+          NEW: ${{ steps.pin.outputs.new }}
+          OLD_VERSION: ${{ steps.pin.outputs.old_version }}
+          NEW_VERSION: ${{ steps.pin.outputs.new_version }}
+        run: |
+          set -euo pipefail
+          tools/m68k-toolchain-pin.sh set "$NEW"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git add -u
+          git commit -q -m "build: m68k toolchain $NEW_VERSION" \
+            -m "Pin $NEW (was $OLD_VERSION, $OLD)."
+          git push -f origin "$BRANCH"
+          # Pushes made with the workflow token start no workflows; a
+          # dispatch does, and its checks show on the branch commit.
+          gh workflow run ci.yml --ref "$BRANCH"
+          title="m68k toolchain: $NEW_VERSION"
+          body=$(printf '%s\n' \
+            "The \`$TOOLCHAIN_IMAGE\` tag points at a new image." \
+            "" \
+            "| | Compiler | Image |" \
+            "|---|---|---|" \
+            "| pinned | $OLD_VERSION | \`$OLD\` |" \
+            "| new | $NEW_VERSION | \`$NEW\` |" \
+            "" \
+            "CI runs on this branch (manual run of the CI workflow); its checks show on the commit." \
+            "" \
+            "Merging moves every driver build to this compiler. The SDK payloads follow \`sdk/SDK_REF\`, i.e. the firmware repo's own pin. A card run of the current compiler is due before the next release.")
+          pr=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$pr" ]; then
+            gh pr edit "$pr" --title "$title" --body "$body"
+          elif ! gh pr create --head "$BRANCH" --base "${{ github.event.repository.default_branch }}" \
+              --title "$title" --body "$body"; then
+            issue=$(gh issue list --state open --search "in:title \"m68k toolchain:\"" --json number --jq '.[0].number // empty')
+            note="Actions may not open pull requests in this organisation; open one from \`$BRANCH\`."
+            if [ -n "$issue" ]; then
+              gh issue edit "$issue" --title "$title" --body "$body"$'\n\n'"$note"
+            else
+              gh issue create --title "$title" --body "$body"$'\n\n'"$note"
+            fi
+          fi
