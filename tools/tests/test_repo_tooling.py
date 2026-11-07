@@ -607,13 +607,11 @@ class RepoToolingTests(unittest.TestCase):
         # before re-execing into docker themselves, so CI calls all
         # three host-side.
         self.assertIn("mhi/build.sh", ci)
-        self.assertNotIn('-w /src/mhi "$AMIGA_IMAGE" ./build.sh', ci)
+        self.assertNotIn("tools/amiga-docker.sh mhi ", ci)
         self.assertIn("ahi/driver/build.sh", ci)
-        self.assertNotIn('-w /src/ahi/driver "$AMIGA_IMAGE" ./build.sh', ci)
+        self.assertNotIn("tools/amiga-docker.sh ahi/driver ", ci)
         self.assertIn("ZZTop/build-gcc.sh", ci)
-        self.assertIn(
-            '-w /src/ahi/duplextest "$AMIGA_IMAGE" ./build.sh', ci
-        )
+        self.assertIn("tools/amiga-docker.sh ahi/duplextest ./build.sh", ci)
 
     def test_release_script_mentions_every_packaged_artifact(self):
         script = self.read("tools/check-release.sh")
