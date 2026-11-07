@@ -43,9 +43,27 @@ fi
 
 export PATH=/opt/amiga/bin:"$PATH"
 
-vasmm68k_mot -quiet -phxass -Fhunk -m68020 -o PREFSFILE.uncut prefsfile.a -I/opt/amiga/m68k-amigaos/ndk-include -I/opt/amiga/m68k-amigaos/include
+# vasm needs the NDK and AHI assembler includes. Their root moved with the
+# toolchain image: /opt/amiga/m68k-amigaos on the GCC 6.5 image,
+# /opt/m68k-amigaos/m68k-amigaos on the GCC 16 one. Take the first root
+# that has devices/ahi.i, starting next to the m68k-amigaos-gcc in use.
+gcc_root=$(CDPATH='' cd -- "$(dirname -- "$(command -v m68k-amigaos-gcc)")/.." && pwd)
+ndk_root=
+for root in "$gcc_root/m68k-amigaos" /opt/amiga/m68k-amigaos /opt/m68k-amigaos/m68k-amigaos; do
+  if [ -f "$root/include/devices/ahi.i" ]; then
+    ndk_root=$root
+    break
+  fi
+done
+if [ -z "$ndk_root" ]; then
+  echo "ERROR: no m68k-amigaos include root with devices/ahi.i found" >&2
+  exit 1
+fi
+
+vasmm68k_mot -quiet -phxass -Fhunk -m68020 -o PREFSFILE.uncut prefsfile.a -I"$ndk_root/ndk-include" -I"$ndk_root/include"
 
 # remove 0x28 bytes from the start
 dd bs=1 skip=40 if=PREFSFILE.uncut of=ZZ9000AX
 
-m68k-amigaos-gcc zz9000ax-ahi.c asmfuncs.s -O3 -I../../include -Izz9k-headers -o zz9000ax.audio -Wall -Wextra -Wno-unused-parameter -nostartfiles -m68020 -ldebug
+m68k-amigaos-gcc zz9000ax-ahi.c asmfuncs.s -O3 -I../../include -Izz9k-headers -Wl,-Map,zz9000ax.audio.map -o zz9000ax.audio -Wall -Wextra -Wno-unused-parameter -nostartfiles -m68020 -ldebug
+../../tools/check-link-map.sh zz9000ax.audio zz9000ax.audio.map

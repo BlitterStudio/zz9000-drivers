@@ -64,7 +64,8 @@ fi
 
 export PATH=/opt/amiga/bin:"$PATH"
 
-m68k-amigaos-gcc StartUp.c LibInit.c mhizz9000.c asmfuncs.s -m68020 -O3 -I../include -Izz9k-headers -o mhizz9000.library.debug -g -ggdb -Wall -Wextra -Wno-unused-parameter -Wno-pointer-to-int-cast -Wno-pointer-sign -nostartfiles -ldebug
+m68k-amigaos-gcc StartUp.c LibInit.c mhizz9000.c asmfuncs.s -m68020 -O3 -I../include -Izz9k-headers -Wl,-Map,mhizz9000.library.map -o mhizz9000.library.debug -g -ggdb -Wall -Wextra -Wno-unused-parameter -Wno-pointer-to-int-cast -Wno-pointer-sign -nostartfiles -ldebug
+../tools/check-link-map.sh mhizz9000.library.debug mhizz9000.library.map
 m68k-amigaos-strip -s -o mhizz9000.library mhizz9000.library.debug
 
 # Trace variant: same driver with KPrintF tracing compiled in; capture
