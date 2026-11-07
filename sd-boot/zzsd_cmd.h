@@ -15,6 +15,9 @@
 #include <libraries/expansion.h>
 #include <stdint.h>
 
+/* The GCC 16 NDK's libraries/expansion.h no longer declares it. */
+struct ConfigDev;
+
 #define SD_SECTOR_BYTES  512
 #define SD_SECTOR_SHIFT  9
 #define SD_RETRY         10

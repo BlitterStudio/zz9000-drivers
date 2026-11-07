@@ -104,8 +104,13 @@ static void fabric_lease_release(struct z9ax *ahi_data);
 // and slightly below critical system servers (timer.device = 127).
 #define WORKER_PRIORITY 110
 
+// Every library base this startup-less driver uses is defined here. A base
+// left to libstubs/libnix would pull an auto-open entry that only libnix
+// startup code opens (tools/check-link-map.sh rejects that).
 struct ExecBase     *SysBase;
-struct Library      *UtilityBase;
+struct Library      *UtilityBase = NULL;
+struct ExpansionBase *ExpansionBase = NULL;
+struct IntuitionBase *IntuitionBase = NULL;
 struct Library      *AHIsubBase  = NULL;
 struct DosLibrary   *DOSBase     = NULL;
 struct Device       *TimerBase    = NULL;

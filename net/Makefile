@@ -2,11 +2,9 @@
 #
 # (C) 2026 Dimitris Panokostas <midwan@gmail.com> — GCC-only build
 #
-# Builds with m68k-amigaos-gcc from https://github.com/bebbo/amiga-gcc.
-# CI uses the `sacredbanana/amiga-compiler:m68k-amigaos` image, which has
-# the Bebbo toolchain plus the Roadshow SDK pre-installed under
-# /opt/amiga/m68k-amigaos. For local builds, run ./build.sh which puts
-# /opt/amiga/bin on PATH before invoking make.
+# Builds with m68k-amigaos-gcc (GCC 16, amigadev/crosstools image; see
+# tools/amiga-docker.sh). Run ./build.sh to build in that image when no
+# local cross compiler is on PATH.
 
 DEVICEID = ZZ9000Net.device
 

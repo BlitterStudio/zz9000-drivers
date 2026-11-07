@@ -6,7 +6,5 @@ if ! command -v m68k-amigaos-gcc >/dev/null 2>&1; then
     exec "$script_dir/../tools/amiga-docker.sh" ZZNetReady ./build.sh "$@"
 fi
 
-export PATH=/opt/amiga/bin:"$PATH"
-
 m68k-amigaos-gcc ZZNetReady.c -m68020 -O2 -o ZZNetReady \
     -Wall -Wextra -noixemul -lamiga

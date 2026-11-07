@@ -61,6 +61,11 @@
 // allocation (there is at most one decoder).
 struct Library *ZZ9KBase;
 
+// Defined here rather than taken from libstubs, whose auto-open entry only
+// libnix startup code would open (tools/check-link-map.sh rejects that).
+// Opened and closed again by the board probe.
+struct ExpansionBase *ExpansionBase = NULL;
+
 /* Transport geometry is selected per bus generation in
  * transport_geometry.h. Z2 keeps the qualified compact profile. Z3 uses the
  * same 64-KiB feed / 128-KiB compressed / 256-KiB PCM geometry as ZZPlay's

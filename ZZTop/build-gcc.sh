@@ -38,8 +38,6 @@ if ! command -v m68k-amigaos-gcc >/dev/null 2>&1; then
   exec "$script_dir/../tools/amiga-docker.sh" ZZTop ./build-gcc.sh --zz9k-staged "$@"
 fi
 
-export PATH=/opt/amiga/bin:"$PATH"
-
 # Core/ holds the logic (board, ZZ9000.CFG model, live video, audio control
 # plane, Save/Revert/Quit); GadTools/ is the user interface on top of it.
 # NO_INLINE_STDARG: the inline varargs macros warn on pointer tag values.

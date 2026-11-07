@@ -31,6 +31,11 @@ ZZRun/zz9k-headers/
 ZZRun/work/
 net/ZZ9000Net.device.68000
 net/ZZ9000Net.device.map
+usb-poseidon/zzusbhw.device.map
+rtg/ZZ9000.card.map
+rtg/ZZ9000-debug.card.map
+mhi/mhizz9000.library.map
+ahi/driver/zz9000ax.audio.map
 net/ZZNetStats/ZZNetStats
 *.datatype
 sdk/work/

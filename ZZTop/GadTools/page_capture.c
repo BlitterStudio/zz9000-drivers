@@ -224,7 +224,8 @@ static void refresh_applied(void)
 			(geometry_state.status & ZZ_VCAP_GEOMETRY_STATUS_PENDING) ?
 			" (pending)" : "");
 	} else if (snapshot_ready) {
-		snprintf(applied_buffer, sizeof(applied_buffer), "Crop %ux%u; %s",
+		/* Status text: a long reason is cut to fit the gadget. */
+		snprintf(applied_buffer, sizeof(applied_buffer), "Crop %ux%u; %.96s",
 			(unsigned)capture_snapshot.effective_h,
 			(unsigned)capture_snapshot.effective_v,
 			strstr(geometry_reason, "unsupported") ? "window unsupported" : geometry_reason);
@@ -302,7 +303,7 @@ static void sync_live(void)
 	} else if (!phase_ready) {
 		if (!video_geometry_supported()) {
 			snprintf(gate_buffer, sizeof(gate_buffer),
-				"%s Window and reset need firmware confirmation.", phase_reason);
+				"%.80s Window and reset need firmware confirmation.", phase_reason);
 		} else {
 			snprintf(gate_buffer, sizeof(gate_buffer), "%s", phase_reason);
 		}

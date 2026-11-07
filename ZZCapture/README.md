@@ -279,7 +279,7 @@ available, otherwise `tools/amiga-docker.sh`:
 
 ```sh
 cd ZZCapture
-AMIGA_IMAGE=sacredbanana/amiga-compiler:m68k-amigaos ./build.sh
+./build.sh
 ```
 
 The repository host suite includes the C99 calibration checks and the
