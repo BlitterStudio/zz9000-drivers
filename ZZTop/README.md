@@ -322,7 +322,8 @@ Automatic are omitted or commented out when saved.
 | `hdf` | Image filename in the microSD root, or `off` |
 
 The firmware audio save owns `audio_active`, `audio_baseline`,
-`audio_ceiling_paula`, `audio_ceiling_ax`, and the eight scene groups
+`audio_limiter`, `audio_ceiling_paula`, `audio_ceiling_ax`, and the eight
+scene groups
 `audio_scene<N>_{lpf,eq01,eq23,eq45,eq67,eq89,out,pan,nm1..nm8}` for
 zero-based `N=0..7`. ZZTop preserves these fields while completing a shared
 Save operation.

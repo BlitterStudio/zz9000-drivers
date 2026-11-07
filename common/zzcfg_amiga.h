@@ -135,6 +135,8 @@ struct zzcfg_values {
     UWORD audio_active_present;
     UWORD audio_baseline;
     UWORD audio_baseline_present;
+    UWORD audio_limiter;            /* hundredths of full scale, 1..100 */
+    UWORD audio_limiter_present;
     UWORD audio_ceiling_paula;
     UWORD audio_ceiling_paula_present;
     UWORD audio_ceiling_ax;
