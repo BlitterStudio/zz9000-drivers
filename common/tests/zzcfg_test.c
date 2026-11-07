@@ -1256,6 +1256,33 @@ int main(void)
           !a.audio_ceiling_ax_present,
           "out-of-range audio calibration stays absent");
 
+    /* The firmware's audio Save keeps audio_limiter only when present;
+     * a ZZTop Save must do the same, or the new Audio card silently
+     * drops back to the 0.47 FS boot limit. */
+    defaults(&a);
+    zzcfg_parse_text(text, (UWORD)strlen(text), &a);
+    check(has_exact_line(text, "#audio_limiter = 47") &&
+          !a.audio_limiter_present,
+          "absent audio_limiter stays a commented default");
+    defaults(&b);
+    zzcfg_parse_text("audio_active = 1\naudio_limiter = 95\n",
+                     (UWORD)strlen("audio_active = 1\naudio_limiter = 95\n"),
+                     &b);
+    check(b.audio_limiter == 95 && b.audio_limiter_present,
+          "audio_limiter parses with presence");
+    n = zzcfg_generate(&b, text, sizeof(text));
+    defaults(&a);
+    zzcfg_parse_text(text, n, &a);
+    check(has_exact_line(text, "audio_limiter = 95") &&
+          a.audio_limiter == 95 && a.audio_limiter_present,
+          "audio_limiter survives a save");
+    defaults(&a);
+    zzcfg_parse_text("audio_limiter = 0\naudio_limiter = 101\n",
+                     (UWORD)strlen("audio_limiter = 0\naudio_limiter = 101\n"),
+                     &a);
+    check(!a.audio_limiter_present,
+          "out-of-range audio_limiter stays absent");
+
     /* A hand-edited partial scene stays partial: only present keys are
      * regenerated, so one Settings save never zero-fills the absent
      * fields (the firmware would fold them into a silent scene). */
