@@ -90,6 +90,7 @@ static const char version[] __attribute__((used)) =
 #define ZZRUN_UNIX_DELTA    252460800UL
 #define ZZRUN_READ_CHUNK    8192u
 _Static_assert(ZZRUN_ST_IDLE == ZZAPP_ST_IDLE, "idle");
+_Static_assert(ZZRUN_ST_CLAIMED == ZZAPP_ST_CLAIMED, "claimed");
 _Static_assert(ZZRUN_ST_LOADING == ZZAPP_ST_LOADING, "loading");
 _Static_assert(ZZRUN_ST_STARTING == ZZAPP_ST_STARTING, "starting");
 _Static_assert(ZZRUN_ST_RUNNING == ZZAPP_ST_RUNNING, "running");
@@ -158,6 +159,9 @@ static uint32_t palette_generation;
 static struct Library *MMUBase;
 static struct mmu_context *mmu_context;
 static uint32_t owned_generation;
+static uint32_t owned_slot;
+static uint32_t maxmem_mib;
+static int slots_supported;
 static BPTR console_handle;
 static int console_failed;
 static int audio_ahi;
@@ -349,9 +353,10 @@ static int ctrl_c_set(void)
 
 static void usage(void)
 {
-    puts("ZZRun <app.elf> [AUDIO=AHI] [args]\n"
+    puts("ZZRun <app.elf> [MAXMEM=<MiB>] [AUDIO=AHI] [args]\n"
+         "ZZRun STATUS\n"
          "Run Stack 32768 in this Shell first.\n"
-         "Workbench ToolTypes: APP, ROOT, ABS, MODE, ARGS, JOYPORT0, AUDIO.\n"
+         "Workbench ToolTypes: APP, ROOT, ABS, MODE, ARGS, JOYPORT0, AUDIO, MAXMEM.\n"
          "ROOT defaults to the current directory, or the icon directory.");
 }
 
@@ -403,34 +408,48 @@ static const char *fault_name(uint32_t code)
 
 static const char *state_name(uint32_t state)
 {
-    switch (state) {
-    case ZZAPP_ST_IDLE: return "idle";
-    case ZZAPP_ST_LOADING: return "loading";
-    case ZZAPP_ST_STARTING: return "starting";
-    case ZZAPP_ST_RUNNING: return "running";
-    case ZZAPP_ST_PAUSED: return "paused";
-    case ZZAPP_ST_STOPPING: return "stopping";
-    case ZZAPP_ST_FAULTED: return "faulted";
-    default: return "unknown";
+    return zzrun_slot_state_name(state);
+}
+
+static int mailbox_selected(uint16_t opcode, const uint8_t *payload, uint16_t len,
+                            uint32_t slot, uint32_t generation,
+                            ZZ9KMailboxEntry *reply)
+{
+    ZZ9KRequest request;
+    uint8_t extended[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+    const uint8_t *wire_payload = payload;
+    uint16_t wire_len = len;
+    int status;
+
+    if (!reply)
+        return ZZ9K_STATUS_BAD_REQUEST;
+    if (slots_supported) {
+        wire_len = zzrun_request_build(extended, payload, len, 1, slot, generation);
+        if (wire_len != ZZAPP_MAILBOX_PAYLOAD_BYTES)
+            return ZZ9K_STATUS_BAD_REQUEST;
+        wire_payload = extended;
     }
+    zz9k_request_init(&request, opcode);
+    request.entry.payload_len = wire_len;
+    if (wire_len)
+        memcpy(request.entry.payload.inline_data, wire_payload, wire_len);
+    status = ZZ9KCall(&request, reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+    if (status == ZZ9K_STATUS_OK && reply->status != ZZ9K_STATUS_OK)
+        status = reply->status;
+    return status;
 }
 
 static int mailbox(uint16_t opcode, const uint8_t *payload, uint16_t len,
                    ZZ9KMailboxEntry *reply)
 {
-    ZZ9KRequest request;
-    int status;
+    return mailbox_selected(opcode, payload, len, owned_slot, owned_generation,
+                            reply);
+}
 
-    if (!reply)
-        return ZZ9K_STATUS_BAD_REQUEST;
-    zz9k_request_init(&request, opcode);
-    request.entry.payload_len = len;
-    if (len && payload)
-        memcpy(request.entry.payload.inline_data, payload, len);
-    status = ZZ9KCall(&request, reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
-    if (status == ZZ9K_STATUS_OK && reply->status != ZZ9K_STATUS_OK)
-        status = reply->status;
-    return status;
+static int mailbox_for_slot(uint16_t opcode, uint32_t slot,
+                            ZZ9KMailboxEntry *reply)
+{
+    return mailbox_selected(opcode, NULL, 0, slot, 0, reply);
 }
 
 static int mailbox_long(uint16_t opcode, const uint8_t *payload, uint16_t len,
@@ -438,6 +457,9 @@ static int mailbox_long(uint16_t opcode, const uint8_t *payload, uint16_t len,
 {
     ZZ9KRequest request;
     ZZ9KAsyncRequest async;
+    uint8_t extended[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+    const uint8_t *wire_payload = payload;
+    uint16_t wire_len = len;
     uint32_t started;
     int status;
 
@@ -445,10 +467,17 @@ static int mailbox_long(uint16_t opcode, const uint8_t *payload, uint16_t len,
         *submitted = 0;
     if (!reply)
         return ZZ9K_STATUS_BAD_REQUEST;
+    if (slots_supported) {
+        wire_len = zzrun_request_build(extended, payload, len, 1, owned_slot,
+                                       owned_generation);
+        if (wire_len != ZZAPP_MAILBOX_PAYLOAD_BYTES)
+            return ZZ9K_STATUS_BAD_REQUEST;
+        wire_payload = extended;
+    }
     zz9k_request_init(&request, opcode);
-    request.entry.payload_len = len;
-    if (len && payload)
-        memcpy(request.entry.payload.inline_data, payload, len);
+    request.entry.payload_len = wire_len;
+    if (wire_len)
+        memcpy(request.entry.payload.inline_data, wire_payload, wire_len);
     memset(&async, 0, sizeof(async));
     status = ZZ9KCallAsync(&async, &request, NULL, NULL);
     if (status != ZZ9K_STATUS_QUEUED)
@@ -483,8 +512,16 @@ static int op_empty(uint16_t opcode, ZZ9KMailboxEntry *reply)
 
 static int owns_current_generation(void)
 {
-    return window && owned_generation != 0 &&
-           life_get(ZZAPP_LIFE_GENERATION_OFF) == owned_generation;
+    uint32_t generation;
+    uint32_t state;
+
+    if (!window || owned_generation == 0)
+        return 0;
+    generation = life_get(ZZAPP_LIFE_GENERATION_OFF);
+    state = life_get(ZZAPP_LIFE_STATE_OFF);
+    return !zzrun_slot_ownership_lost(slots_supported, owned_slot,
+                                      owned_generation, owned_slot,
+                                      generation, state);
 }
 
 static void claim_load_begin(int status, int submitted, uint32_t prior)
@@ -492,6 +529,8 @@ static void claim_load_begin(int status, int submitted, uint32_t prior)
     uint32_t observed = 0;
     int idle = 1;
 
+    if (slots_supported)
+        return;
     if (window) {
         observed = life_get(ZZAPP_LIFE_GENERATION_OFF);
         idle = life_get(ZZAPP_LIFE_STATE_OFF) == ZZAPP_ST_IDLE;
@@ -512,6 +551,42 @@ static void stop_owned(void)
         return;
     zzrun_stop_payload(payload, owned_generation);
     (void)mailbox(ZZAPP_OP_STOP, payload, ZZRUN_STOP_REQ_BYTES, &reply);
+}
+
+static int print_status(uint32_t legacy_state,
+                        const struct zzrun_slots_query *query)
+{
+    ZZ9KMailboxEntry reply;
+    uint32_t slot;
+    int status;
+
+    if (!slots_supported) {
+        printf("slot 0 state %s (legacy runtime)\n", state_name(legacy_state));
+        return 0;
+    }
+    if (!query)
+        return 20;
+    for (slot = 0; slot < query->slots; slot++) {
+        struct zzrun_list_reply item;
+
+        status = mailbox_for_slot(ZZAPP_OP_LIST, slot, &reply);
+        if (status != ZZ9K_STATUS_OK ||
+            !zzrun_list_reply_decode(reply.payload.inline_data, reply.payload_len,
+                                     &item)) {
+            printf("ZZRun: APP_LIST slot %lu failed (%s)\n",
+                   (unsigned long)slot, status_name(status));
+            return 20;
+        }
+        printf("slot %lu state %s name %s committed %lu MiB limit %lu MiB "
+               "cpu %lu s reason %s\n",
+               (unsigned long)slot, state_name(item.state),
+               item.name[0] ? item.name : "-",
+               (unsigned long)(item.committed_bytes / ZZRUN_MIB_BYTES),
+               (unsigned long)(item.limit_bytes / ZZRUN_MIB_BYTES),
+               (unsigned long)(item.cpu_ms / 1000u),
+               zzrun_terminal_reason_name(item.terminal_reason));
+    }
+    return 0;
 }
 
 
@@ -602,7 +677,7 @@ static char *tool_value(struct DiskObject *icon, const char *name)
 
 static int read_tooltypes(struct DiskObject *icon, char *app_out, size_t app_n,
                           char *root_out, size_t root_n, ULONG *mode,
-                          int *have_mode)
+                          int *have_mode, uint32_t *maxmem)
 {
     char *value;
     if (!icon || !icon->do_ToolTypes)
@@ -625,6 +700,9 @@ static int read_tooltypes(struct DiskObject *icon, char *app_out, size_t app_n,
     value = tool_value(icon, "AUDIO");
     if (tool_is_ahi(value))
         audio_ahi = 1;
+    value = tool_value(icon, "MAXMEM");
+    if (value && !zzrun_parse_maxmem(value, maxmem))
+        return 0;
     value = tool_value(icon, "ARGS");
     return !value || add_args_split(value);
 }
@@ -638,7 +716,8 @@ static int tool_is_ahi(const char *value)
 }
 
 static int load_program_icon(char *app_out, size_t app_n, char *root_out,
-                             size_t root_n, ULONG *mode, int *have_mode)
+                             size_t root_n, ULONG *mode, int *have_mode,
+                             uint32_t *maxmem)
 {
     struct DiskObject *icon;
     BPTR old = 0;
@@ -654,7 +733,7 @@ static int load_program_icon(char *app_out, size_t app_n, char *root_out,
     }
     if (icon) {
         int ok = read_tooltypes(icon, app_out, app_n, root_out, root_n, mode,
-                                have_mode);
+                                have_mode, maxmem);
         FreeDiskObject(icon);
         if (!ok) {
             if (have_old)
@@ -2926,13 +3005,19 @@ static int fill_argv(void)
 static int load_elf(BPTR fh, LONG size)
 {
     uint8_t payload[ZZAPP_CHUNK_REQ_BYTES];
+    uint8_t begin_payload[4];
     ZZ9KMailboxEntry reply;
     uint32_t prior_generation = life_get(ZZAPP_LIFE_GENERATION_OFF);
     LONG offset = 0;
     int submitted;
     int status;
 
-    status = mailbox_long(ZZAPP_OP_LOAD_BEGIN, NULL, 0, &reply, &submitted);
+    if (slots_supported && maxmem_mib)
+        zzrun_put_be32(begin_payload + ZZAPP_LOAD_MEM_LIMIT_MIB, maxmem_mib);
+    status = mailbox_long(ZZAPP_OP_LOAD_BEGIN,
+                          slots_supported && maxmem_mib ? begin_payload : NULL,
+                          slots_supported && maxmem_mib ? sizeof(begin_payload) : 0,
+                          &reply, &submitted);
     claim_load_begin(status, submitted, prior_generation);
     if (status != ZZ9K_STATUS_OK) {
         printf("ZZRun: load begin failed (%s)\n", status_name(status));
@@ -3296,8 +3381,11 @@ int main(int argc, char **argv)
     BPTR fh = 0;
     LONG size;
     int rc = 20;
+    int show_status = 0;
     uint32_t abi_major, abi_minor, caps, state;
     uint32_t arm_address, host_offset, win_size;
+    struct zzrun_claim_reply claim;
+    struct zzrun_slots_query slots_query;
 
     app_from_icon[0] = 0;
     root_text[0] = 0;
@@ -3317,7 +3405,8 @@ int main(int argc, char **argv)
     }
     if (!load_program_icon(app_from_icon, sizeof(app_from_icon),
                            root_text, sizeof(root_text),
-                           &forced_mode, &have_mode)) {
+                           &forced_mode, &have_mode, &maxmem_mib)) {
+        usage();
         cleanup();
         return 10;
     }
@@ -3345,34 +3434,47 @@ int main(int argc, char **argv)
         }
     } else {
         int i;
-        if (argc < 2) {
-            usage();
-            cleanup();
-            return 10;
-        }
-        if (strlen(argv[1]) >= sizeof(elf_path)) {
-            tell("ELF path is too long.");
-            cleanup();
-            return 10;
-        }
-        memcpy(elf_path, argv[1], strlen(argv[1]) + 1);
-        for (i = 2; i < argc; i++) {
-            if (strncmp(argv[i], "AUDIO=", 6) == 0) {
-                if (!tool_is_ahi(argv[i] + 6)) {
-                    tell("AUDIO must be AHI.");
-                    cleanup();
-                    return 10;
-                }
-                audio_ahi = 1;
-                continue;
-            }
-            if (!add_arg(argv[i])) {
+
+        if (argc == 2 && strcmp(argv[1], "STATUS") == 0) {
+            show_status = 1;
+        } else {
+            if (argc < 2) {
+                usage();
                 cleanup();
                 return 10;
             }
+            if (strlen(argv[1]) >= sizeof(elf_path)) {
+                tell("ELF path is too long.");
+                cleanup();
+                return 10;
+            }
+            memcpy(elf_path, argv[1], strlen(argv[1]) + 1);
+            for (i = 2; i < argc; i++) {
+                if (strncmp(argv[i], "AUDIO=", 6) == 0) {
+                    if (!tool_is_ahi(argv[i] + 6)) {
+                        tell("AUDIO must be AHI.");
+                        cleanup();
+                        return 10;
+                    }
+                    audio_ahi = 1;
+                    continue;
+                }
+                if (strncmp(argv[i], "MAXMEM=", 7) == 0) {
+                    if (!zzrun_parse_maxmem(argv[i] + 7, &maxmem_mib)) {
+                        usage();
+                        cleanup();
+                        return 10;
+                    }
+                    continue;
+                }
+                if (!add_arg(argv[i])) {
+                    cleanup();
+                    return 10;
+                }
+            }
         }
     }
-    if (!open_root(root_text)) {
+    if (!show_status && !open_root(root_text)) {
         cleanup();
         return 20;
     }
@@ -3381,8 +3483,9 @@ int main(int argc, char **argv)
         cleanup();
         return 20;
     }
-    printf("ZZRun %s\nboard %08lx Zorro %lu\n", ZZRUN_VERSION,
-           (unsigned long)board.address, (unsigned long)board.zorro_version);
+    if (!show_status)
+        printf("ZZRun %s\nboard %08lx Zorro %lu\n", ZZRUN_VERSION,
+               (unsigned long)board.address, (unsigned long)board.zorro_version);
     ZZ9KBase = OpenLibrary((CONST_STRPTR)"zz9k.library", 0);
     if (!ZZ9KBase) {
         tell("zz9k.library is not installed.");
@@ -3400,28 +3503,49 @@ int main(int argc, char **argv)
     abi_minor = zzapp_get_be32(reply.payload.inline_data + ZZAPP_QUERY_ABI_MINOR);
     state = zzapp_get_be32(reply.payload.inline_data + ZZAPP_QUERY_STATE);
     caps = zzapp_get_be32(reply.payload.inline_data + ZZAPP_QUERY_CAPS);
-    printf("runtime abi %lu.%lu state %s caps %08lx\n",
-           (unsigned long)abi_major, (unsigned long)abi_minor,
-           state_name(state), (unsigned long)caps);
+    if (!show_status)
+        printf("runtime abi %lu.%lu state %s caps %08lx\n",
+               (unsigned long)abi_major, (unsigned long)abi_minor,
+               state_name(state), (unsigned long)caps);
     if (board.zorro_version != 3 || !(caps & ZZAPP_CAP_Z3) || abi_major != 0) {
         tell("ZZRun requires a Zorro III board and app-runtime firmware.");
         cleanup();
         return 20;
     }
-    if (state != ZZAPP_ST_IDLE) {
+    slots_supported = (caps & ZZAPP_CAP_SLOTS) != 0;
+    if (slots_supported) {
+        status = op_empty(ZZAPP_OP_QUERY, &reply);
+        if (status != ZZ9K_STATUS_OK ||
+            !zzrun_slots_query_decode(reply.payload.inline_data, reply.payload_len,
+                                      &slots_query)) {
+            printf("ZZRun: extended APP_QUERY failed (%s)\n", status_name(status));
+            cleanup();
+            return 20;
+        }
+    }
+    if (show_status) {
+        rc = print_status(state, slots_supported ? &slots_query : NULL);
+        cleanup();
+        return rc;
+    }
+    if (!slots_supported && state != ZZAPP_ST_IDLE) {
         puts("ZZRun: app runtime is already owned by another launcher.");
         cleanup();
         return 20;
     }
     status = op_empty(ZZAPP_OP_ALLOC_WINDOW, &reply);
-    if (status != ZZ9K_STATUS_OK || reply.payload_len < ZZAPP_ALLOC_REPLY_BYTES) {
+    if (status != ZZ9K_STATUS_OK ||
+        !zzrun_claim_reply_decode(reply.payload.inline_data, reply.payload_len,
+                                  slots_supported, &claim)) {
         printf("ZZRun: window allocation failed (%s)\n", status_name(status));
         cleanup();
         return 20;
     }
-    arm_address = zzapp_get_be32(reply.payload.inline_data + ZZAPP_ALLOC_ARM_ADDRESS);
-    win_size = zzapp_get_be32(reply.payload.inline_data + ZZAPP_ALLOC_SIZE);
-    host_offset = zzapp_get_be32(reply.payload.inline_data + ZZAPP_ALLOC_HOST_OFFSET);
+    arm_address = claim.arm_address;
+    win_size = claim.size;
+    host_offset = claim.host_offset;
+    owned_slot = claim.slot;
+    owned_generation = claim.generation;
     if (win_size < ZZAPP_WINDOW_BYTES ||
         host_offset > board.board_size ||
         win_size > board.board_size - host_offset) {

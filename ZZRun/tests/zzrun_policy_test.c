@@ -2,6 +2,36 @@
 #include <stdio.h>
 #include <string.h>
 
+#ifndef ZZAPP_CAP_SLOTS
+#define ZZAPP_CAP_SLOTS (1u << 5)
+#define ZZAPP_SLOT_COUNT 4u
+#define ZZAPP_MAILBOX_PAYLOAD_BYTES 48u
+#define ZZAPP_SEL_SLOT 40u
+#define ZZAPP_SEL_GENERATION 44u
+#define ZZAPP_LOAD_MEM_LIMIT_MIB 0u
+#define ZZAPP_QUERY_SLOTS 16u
+#define ZZAPP_QUERY_FREE_SLOTS 20u
+#define ZZAPP_QUERY_COMMIT_FREE 24u
+#define ZZAPP_QUERY_COMMIT_TOTAL 28u
+#define ZZAPP_QUERY_EXT_REPLY_BYTES 32u
+#define ZZAPP_ALLOC_ARM_ADDRESS 0u
+#define ZZAPP_ALLOC_SIZE 4u
+#define ZZAPP_ALLOC_HOST_OFFSET 8u
+#define ZZAPP_ALLOC_REPLY_BYTES 12u
+#define ZZAPP_ALLOC_SLOT 12u
+#define ZZAPP_ALLOC_GENERATION 16u
+#define ZZAPP_ALLOC_EXT_REPLY_BYTES 20u
+#define ZZAPP_LIST_STATE 0u
+#define ZZAPP_LIST_GENERATION 4u
+#define ZZAPP_LIST_COMMITTED 8u
+#define ZZAPP_LIST_LIMIT 12u
+#define ZZAPP_LIST_CPU_MS 16u
+#define ZZAPP_LIST_SERVICE_MS 20u
+#define ZZAPP_LIST_REASONS 24u
+#define ZZAPP_LIST_NAME 28u
+#define ZZAPP_LIST_REPLY_BYTES 48u
+#endif
+
 #include "zzrun_policy.h"
 
 static struct zzrun_exit_in exit_in(uint32_t state, uint32_t fault,
@@ -248,6 +278,104 @@ static void test_launcher_output_orders_queued_messages_before_app_output(void)
     assert(zzrun_output_next_source(12u, 12u) == ZZRUN_OUTPUT_LAUNCHER);
 }
 
+static void put_be32(uint8_t *p, uint32_t value)
+{
+    p[0] = (uint8_t)(value >> 24);
+    p[1] = (uint8_t)(value >> 16);
+    p[2] = (uint8_t)(value >> 8);
+    p[3] = (uint8_t)value;
+}
+
+static uint32_t get_be32(const uint8_t *p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+           ((uint32_t)p[2] << 8) | p[3];
+}
+
+static void test_slot_claim_selects_every_following_request(void)
+{
+    uint8_t claim[ZZAPP_ALLOC_EXT_REPLY_BYTES] = { 0 };
+    uint8_t legacy[] = { 1u, 2u, 3u, 4u };
+    uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+    struct zzrun_claim_reply parsed;
+
+    put_be32(claim + ZZAPP_ALLOC_ARM_ADDRESS, 0x01234567u);
+    put_be32(claim + ZZAPP_ALLOC_SIZE, 0x00094000u);
+    put_be32(claim + ZZAPP_ALLOC_HOST_OFFSET, 0x00100000u);
+    put_be32(claim + ZZAPP_ALLOC_SLOT, 2u);
+    put_be32(claim + ZZAPP_ALLOC_GENERATION, 0x10203040u);
+    assert(zzrun_claim_reply_decode(claim, sizeof(claim), 1, &parsed));
+    assert(parsed.slot == 2u);
+    assert(parsed.generation == 0x10203040u);
+    assert(zzrun_request_build(request, legacy, sizeof(legacy), 1, parsed.slot,
+                               parsed.generation) ==
+           ZZAPP_MAILBOX_PAYLOAD_BYTES);
+    assert(memcmp(request, legacy, sizeof(legacy)) == 0);
+    assert(get_be32(request + ZZAPP_SEL_SLOT) == 2u);
+    assert(get_be32(request + ZZAPP_SEL_GENERATION) == 0x10203040u);
+}
+
+static void test_slot_ownership_loss_is_local_to_its_slot(void)
+{
+    assert(zzrun_slot_ownership_lost(1, 2u, 0x10203040u, 2u, 0x10203041u,
+                                     ZZRUN_ST_RUNNING));
+    assert(!zzrun_slot_ownership_lost(1, 2u, 0x10203040u, 1u, 0x10203041u,
+                                      ZZRUN_ST_RUNNING));
+    assert(zzrun_slot_ownership_lost(1, 2u, 0x10203040u, 2u, 0x10203040u,
+                                     ZZRUN_ST_IDLE));
+}
+
+static void test_legacy_request_shape_is_unchanged_without_slots(void)
+{
+    uint8_t legacy[] = { 0xaa, 0xbb, 0xcc, 0xdd };
+    uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES];
+
+    memset(request, 0x5a, sizeof(request));
+    assert(zzrun_request_build(request, legacy, sizeof(legacy), 0, 2u,
+                               0x10203040u) == sizeof(legacy));
+    assert(memcmp(request, legacy, sizeof(legacy)) == 0);
+    assert(request[sizeof(legacy)] == 0x5a);
+}
+
+static void test_maxmem_requires_positive_decimal_mib(void)
+{
+    uint32_t mib = 0;
+
+    assert(zzrun_parse_maxmem("64", &mib) && mib == 64u);
+    assert(zzrun_parse_maxmem("4294967295", &mib) && mib == UINT32_MAX);
+    assert(!zzrun_parse_maxmem("0", &mib));
+    assert(!zzrun_parse_maxmem("", &mib));
+    assert(!zzrun_parse_maxmem("64MiB", &mib));
+    assert(!zzrun_parse_maxmem("4294967296", &mib));
+}
+
+static void test_list_reply_decoding(void)
+{
+    uint8_t reply[ZZAPP_LIST_REPLY_BYTES] = { 0 };
+    struct zzrun_list_reply parsed;
+
+    put_be32(reply + ZZAPP_LIST_STATE, ZZRUN_ST_RUNNING);
+    put_be32(reply + ZZAPP_LIST_GENERATION, 0x10203040u);
+    put_be32(reply + ZZAPP_LIST_COMMITTED, 12u * 1024u * 1024u);
+    put_be32(reply + ZZAPP_LIST_LIMIT, 64u * 1024u * 1024u);
+    put_be32(reply + ZZAPP_LIST_CPU_MS, 2500u);
+    put_be32(reply + ZZAPP_LIST_SERVICE_MS, 17u);
+    reply[ZZAPP_LIST_REASONS] = 3u;
+    reply[ZZAPP_LIST_REASONS + 1u] = 2u;
+    memcpy(reply + ZZAPP_LIST_NAME, "quake", 6u);
+    assert(zzrun_list_reply_decode(reply, sizeof(reply), &parsed));
+    assert(parsed.state == ZZRUN_ST_RUNNING);
+    assert(parsed.generation == 0x10203040u);
+    assert(parsed.committed_bytes == 12u * 1024u * 1024u);
+    assert(parsed.limit_bytes == 64u * 1024u * 1024u);
+    assert(parsed.cpu_ms == 2500u);
+    assert(parsed.block_reason == 3u);
+    assert(parsed.terminal_reason == 2u);
+    assert(strcmp(parsed.name, "quake") == 0);
+    assert(strcmp(zzrun_terminal_reason_name(parsed.terminal_reason),
+                  "forced stop") == 0);
+}
+
 int main(void)
 {
     test_output_failure_does_not_block_exit();
@@ -269,6 +397,11 @@ int main(void)
     test_screen_buffer_safe_messages_are_all_reaped();
     test_launcher_output_reserves_status_room();
     test_launcher_output_orders_queued_messages_before_app_output();
+    test_slot_claim_selects_every_following_request();
+    test_slot_ownership_loss_is_local_to_its_slot();
+    test_legacy_request_shape_is_unchanged_without_slots();
+    test_maxmem_requires_positive_decimal_mib();
+    test_list_reply_decoding();
     puts("zzrun_policy_test: ok");
     return 0;
 }

@@ -8,6 +8,7 @@
 #ifndef ZZRUN_POLICY_H
 #define ZZRUN_POLICY_H
 
+#include <string.h>
 #include <stdint.h>
 
 #define ZZRUN_POLICY_GRACE_MS 500u
@@ -21,6 +22,201 @@
 #define ZZRUN_ST_STOPPING 5u
 #define ZZRUN_ST_FAULTED 6u
 #define ZZRUN_FAULT_WATCHDOG_RESTART 6u
+
+#define ZZRUN_ST_CLAIMED 7u
+#define ZZRUN_MIB_BYTES (1024u * 1024u)
+
+struct zzrun_claim_reply {
+    uint32_t arm_address;
+    uint32_t size;
+    uint32_t host_offset;
+    uint32_t slot;
+    uint32_t generation;
+};
+
+struct zzrun_list_reply {
+    uint32_t state;
+    uint32_t generation;
+    uint32_t committed_bytes;
+    uint32_t limit_bytes;
+    uint32_t cpu_ms;
+    uint32_t service_ms;
+    uint8_t block_reason;
+    uint8_t terminal_reason;
+    uint16_t flags;
+    char name[21];
+};
+
+struct zzrun_slots_query {
+    uint32_t slots;
+    uint32_t free_slots;
+    uint32_t commit_free;
+    uint32_t commit_total;
+};
+
+static inline uint32_t zzrun_be32(const uint8_t *p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+           ((uint32_t)p[2] << 8) | p[3];
+}
+
+static inline void zzrun_put_be32(uint8_t *p, uint32_t value)
+{
+    p[0] = (uint8_t)(value >> 24);
+    p[1] = (uint8_t)(value >> 16);
+    p[2] = (uint8_t)(value >> 8);
+    p[3] = (uint8_t)value;
+}
+
+/* Extended requests preserve the legacy fields, zero unused bytes, and carry
+ * the owning slot and generation at the wire selector offsets. */
+static inline uint16_t zzrun_request_build(
+    uint8_t out[ZZAPP_MAILBOX_PAYLOAD_BYTES], const uint8_t *legacy,
+    uint16_t legacy_bytes, int slots, uint32_t slot, uint32_t generation)
+{
+    if (!out || (legacy_bytes && !legacy) ||
+        legacy_bytes > ZZAPP_MAILBOX_PAYLOAD_BYTES)
+        return 0;
+    if (!slots) {
+        if (legacy_bytes)
+            memcpy(out, legacy, legacy_bytes);
+        return legacy_bytes;
+    }
+    if (legacy_bytes > 32u)
+        return 0;
+    memset(out, 0, ZZAPP_MAILBOX_PAYLOAD_BYTES);
+    if (legacy_bytes)
+        memcpy(out, legacy, legacy_bytes);
+    zzrun_put_be32(out + ZZAPP_SEL_SLOT, slot);
+    zzrun_put_be32(out + ZZAPP_SEL_GENERATION, generation);
+    return ZZAPP_MAILBOX_PAYLOAD_BYTES;
+}
+
+static inline int zzrun_claim_reply_decode(const uint8_t *payload,
+                                           uint16_t bytes, int slots,
+                                           struct zzrun_claim_reply *out)
+{
+    if (!payload || !out || bytes < ZZAPP_ALLOC_REPLY_BYTES)
+        return 0;
+    out->arm_address = zzrun_be32(payload + ZZAPP_ALLOC_ARM_ADDRESS);
+    out->size = zzrun_be32(payload + ZZAPP_ALLOC_SIZE);
+    out->host_offset = zzrun_be32(payload + ZZAPP_ALLOC_HOST_OFFSET);
+    out->slot = 0;
+    out->generation = 0;
+    if (!slots)
+        return 1;
+    if (bytes < ZZAPP_ALLOC_EXT_REPLY_BYTES)
+        return 0;
+    out->slot = zzrun_be32(payload + ZZAPP_ALLOC_SLOT);
+    out->generation = zzrun_be32(payload + ZZAPP_ALLOC_GENERATION);
+    return out->slot < ZZAPP_SLOT_COUNT;
+}
+
+static inline int zzrun_slots_query_decode(const uint8_t *payload,
+                                           uint16_t bytes,
+                                           struct zzrun_slots_query *out)
+{
+    if (!payload || !out || bytes < ZZAPP_QUERY_EXT_REPLY_BYTES)
+        return 0;
+    out->slots = zzrun_be32(payload + ZZAPP_QUERY_SLOTS);
+    out->free_slots = zzrun_be32(payload + ZZAPP_QUERY_FREE_SLOTS);
+    out->commit_free = zzrun_be32(payload + ZZAPP_QUERY_COMMIT_FREE);
+    out->commit_total = zzrun_be32(payload + ZZAPP_QUERY_COMMIT_TOTAL);
+    return out->slots != 0 && out->slots <= ZZAPP_SLOT_COUNT;
+}
+
+static inline int zzrun_slot_ownership_lost(int slots, uint32_t owned_slot,
+                                             uint32_t owned_generation,
+                                             uint32_t observed_slot,
+                                             uint32_t observed_generation,
+                                             uint32_t observed_state)
+{
+    if (!slots)
+        return observed_generation != owned_generation;
+    if (observed_slot != owned_slot)
+        return 0;
+    return observed_generation != owned_generation ||
+           observed_state == ZZRUN_ST_IDLE ||
+           observed_state == ZZRUN_ST_FAULTED;
+}
+
+static inline int zzrun_parse_maxmem(const char *text, uint32_t *mib_out)
+{
+    uint32_t value = 0;
+    const unsigned char *p = (const unsigned char *)text;
+
+    if (!p || !*p || !mib_out)
+        return 0;
+    for (; *p; ++p) {
+        uint32_t digit;
+
+        if (*p < '0' || *p > '9')
+            return 0;
+        digit = (uint32_t)(*p - '0');
+        if (value > (UINT32_MAX - digit) / 10u)
+            return 0;
+        value = value * 10u + digit;
+    }
+    if (value == 0)
+        return 0;
+    *mib_out = value;
+    return 1;
+}
+
+static inline int zzrun_list_reply_decode(const uint8_t *payload,
+                                          uint16_t bytes,
+                                          struct zzrun_list_reply *out)
+{
+    uint32_t i;
+
+    if (!payload || !out || bytes < ZZAPP_LIST_REPLY_BYTES)
+        return 0;
+    out->state = zzrun_be32(payload + ZZAPP_LIST_STATE);
+    out->generation = zzrun_be32(payload + ZZAPP_LIST_GENERATION);
+    out->committed_bytes = zzrun_be32(payload + ZZAPP_LIST_COMMITTED);
+    out->limit_bytes = zzrun_be32(payload + ZZAPP_LIST_LIMIT);
+    out->cpu_ms = zzrun_be32(payload + ZZAPP_LIST_CPU_MS);
+    out->service_ms = zzrun_be32(payload + ZZAPP_LIST_SERVICE_MS);
+    out->block_reason = payload[ZZAPP_LIST_REASONS];
+    out->terminal_reason = payload[ZZAPP_LIST_REASONS + 1u];
+    out->flags = (uint16_t)(((uint16_t)payload[ZZAPP_LIST_REASONS + 2u] << 8) |
+                            payload[ZZAPP_LIST_REASONS + 3u]);
+    for (i = 0; i < 20u && payload[ZZAPP_LIST_NAME + i]; ++i)
+        out->name[i] = (char)payload[ZZAPP_LIST_NAME + i];
+    out->name[i] = '\0';
+    return 1;
+}
+
+static inline const char *zzrun_slot_state_name(uint32_t state)
+{
+    switch (state) {
+    case ZZRUN_ST_IDLE: return "idle";
+    case ZZRUN_ST_CLAIMED: return "claimed";
+    case ZZRUN_ST_LOADING: return "loading";
+    case ZZRUN_ST_STARTING: return "starting";
+    case ZZRUN_ST_RUNNING: return "running";
+    case ZZRUN_ST_PAUSED: return "paused";
+    case ZZRUN_ST_STOPPING: return "stopping";
+    case ZZRUN_ST_FAULTED: return "faulted";
+    default: return "unknown";
+    }
+}
+
+static inline const char *zzrun_terminal_reason_name(uint8_t reason)
+{
+    switch (reason) {
+    case 0u: return "none";
+    case 1u: return "exit";
+    case 2u: return "forced stop";
+    case 3u: return "user fault";
+    case 4u: return "stall watchdog";
+    case 5u: return "stuck-call watchdog";
+    case 6u: return "lease loss";
+    case 7u: return "Amiga reset";
+    case 8u: return "core restart";
+    default: return "unknown";
+    }
+}
 
 /* Launcher diagnostics share the asynchronous app-output writer. Keep space
  * for status/error text when a stalled destination has filled diagnostics. */

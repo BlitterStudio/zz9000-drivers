@@ -4,8 +4,9 @@
 launcher for GLQuake. It needs a Zorro III board, `zz9k.library`, app-runtime
 firmware, and Picasso96 when the app asks for a display.
 
-The launcher is a Shell command and a Workbench tool. It runs one app at a
-time; firmware rejects a second load while one is active.
+The launcher is a Shell command and a Workbench tool. On a runtime that
+advertises slots, every instance claims its own app slot, so up to four apps
+can run at once. Older firmware keeps the original single-app slot 0 behaviour.
 
 ## Starting an app
 
@@ -17,6 +18,13 @@ Stack 32768
 ZZRun RAM:glquake.elf +timedemo demo1
 ```
 
+`MAXMEM=<MiB>` caps the card memory committed by this app. The value must be a
+positive decimal MiB count:
+
+```text
+ZZRun RAM:glquake.elf MAXMEM=256 +timedemo demo1
+```
+
 `ROOT` controls files requested by the app. A Shell launch defaults to the
 current directory. A Workbench launch defaults to the directory holding the
 ZZRun icon. For Quake, set `ROOT` to the directory containing `id1/`.
@@ -25,6 +33,16 @@ On normal app exit, ZZRun returns the app exit code. It returns 20 after an
 app fault, an unavailable runtime, display failure, a console that cannot be
 opened or written, an AHI route that cannot be opened, or another launcher
 error. It returns 10 for invalid launcher arguments.
+
+## Runtime status
+
+```text
+ZZRun STATUS
+```
+
+On a slots runtime, this prints one line for each slot with its state, app
+name, committed and capped MiB, CPU seconds, and terminal reason. Older
+firmware prints its legacy slot 0 status.
 
 ## Workbench ToolTypes
 
@@ -36,6 +54,8 @@ error. It returns 10 for invalid launcher arguments.
 | `MODE` | Optional Picasso96 DisplayID, in decimal, `$` hexadecimal, or `0x` hexadecimal. The app still chooses width, height, and RGB format. |
 | `ARGS` | Optional space-separated arguments. Quoting is not parsed. |
 | `AUDIO=AHI` | Route app PCM to AHI. The default remains the card audio fabric. |
+| `MAXMEM=<MiB>` | Positive decimal MiB cap for the app's `APP_LOAD_BEGIN` request. |
+
 
 Dragging an ELF project onto the ZZRun icon takes precedence over `APP`.
 
@@ -46,15 +66,22 @@ another shared-memory convention.
 
 1. It finds the board through `expansion.library`, opens `zz9k.library`, and
    calls `APP_QUERY`. Zorro II has no app runtime: query is unsupported and
-   ZZRun stops before allocating a window.
-2. `APP_ALLOC_WINDOW` returns an ARM address, size, and `host_offset`. ZZRun
-   maps the rings at `board_base + host_offset`; it does not assume a board
-   offset. The returned block is the fixed 592 KiB `ZZAPP_WINDOW_BYTES`
-   layout in `zzapp_proto.h`.
-3. `APP_LOAD_BEGIN` reserves the app arena. ZZRun streams the ELF through
-   `ZZAPP_STAGING_OFF` in chunks no larger than `ZZAPP_STAGING_BYTES`, posting
-   `APP_LOAD_CHUNK` with the file offset, byte count, and that staging offset.
-   `APP_LOAD_END` asks firmware to validate and relocate the image.
+   ZZRun stops before allocating a window. A slots-capable runtime receives the
+   extended query and allocation requests; older firmware receives the
+   byte-identical legacy requests for slot 0.
+2. `APP_ALLOC_WINDOW` atomically claims a free slot and returns its ARM address,
+   size, host offset, slot, and generation. ZZRun maps the rings at
+   `board_base + host_offset`; it does not assume a board offset. The returned
+   block is the fixed 592 KiB `ZZAPP_WINDOW_BYTES` layout in `zzapp_proto.h`.
+3. `APP_LOAD_BEGIN` reserves the app arena and carries the optional `MAXMEM`
+   cap. ZZRun streams the ELF through `ZZAPP_STAGING_OFF` in chunks no larger
+   than `ZZAPP_STAGING_BYTES`, posting `APP_LOAD_CHUNK` with the file offset,
+   byte count, and that staging offset. `APP_LOAD_END` asks firmware to validate
+   and relocate the image.
+
+Every subsequent app mailbox request carries that slot and generation selector,
+so one launcher cannot affect another app.
+
 4. ZZRun packs `argc`, argument offsets, and strings in `ZZAPP_ARGV_OFF`, then
    calls `APP_START`. Strings are capped at 127 bytes plus NUL; the complete
    packed area must fit `ZZAPP_ARGV_BYTES`.
