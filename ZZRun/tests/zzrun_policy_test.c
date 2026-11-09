@@ -200,6 +200,19 @@ static void test_busy_load_begin_claims_nothing(void)
     assert(zzrun_load_generation_to_claim(0, 0, 7u, 8u, 0, 0, 0u) == 0u);
 }
 
+static void test_busy_deferred_operations_retry_only_until_deadline(void)
+{
+    const int busy = -4;
+    const int io_error = -1;
+
+    assert(zzrun_deferred_should_retry(busy, busy, 100u, 100u));
+    assert(zzrun_deferred_should_retry(busy, busy, 100u,
+                                       100u + ZZRUN_BUSY_RETRY_MS - 1u));
+    assert(!zzrun_deferred_should_retry(busy, busy, 100u,
+                                        100u + ZZRUN_BUSY_RETRY_MS));
+    assert(!zzrun_deferred_should_retry(io_error, busy, 100u, 101u));
+}
+
 static void test_stale_file_request_cannot_publish_or_claim(void)
 {
     assert(zzrun_file_request_is_current(8u, 3u, 8u, 3u));
@@ -315,14 +328,18 @@ static void test_slot_claim_selects_every_following_request(void)
     assert(get_be32(request + ZZAPP_SEL_GENERATION) == 0x10203040u);
 }
 
-static void test_slot_ownership_loss_is_local_to_its_slot(void)
+static void test_slot_replacement_requires_a_changed_generation(void)
 {
-    assert(zzrun_slot_ownership_lost(1, 2u, 0x10203040u, 2u, 0x10203041u,
-                                     ZZRUN_ST_RUNNING));
-    assert(!zzrun_slot_ownership_lost(1, 2u, 0x10203040u, 1u, 0x10203041u,
-                                      ZZRUN_ST_RUNNING));
-    assert(zzrun_slot_ownership_lost(1, 2u, 0x10203040u, 2u, 0x10203040u,
-                                     ZZRUN_ST_IDLE));
+    assert(!zzrun_slot_replaced(1, 2u, 0x10203040u, 2u, 0x10203040u,
+                                ZZRUN_ST_IDLE));
+    assert(!zzrun_slot_replaced(1, 2u, 0x10203040u, 2u, 0x10203040u,
+                                ZZRUN_ST_FAULTED));
+    assert(zzrun_slot_replaced(1, 2u, 0x10203040u, 2u, 0x10203041u,
+                               ZZRUN_ST_IDLE));
+    assert(!zzrun_slot_replaced(1, 2u, 0x10203040u, 1u, 0x10203041u,
+                                ZZRUN_ST_RUNNING));
+    assert(zzrun_slot_replaced(0, 0u, 0x10203040u, 0u, 0x10203041u,
+                               ZZRUN_ST_RUNNING));
 }
 
 static void test_legacy_request_shape_is_unchanged_without_slots(void)
@@ -387,8 +404,9 @@ int main(void)
     test_audio_epoch_discards_before_accept();
     test_stop_payload_carries_generation();
     test_finish_prompt_is_not_stdout();
-    test_ahi_open_failure_exits_20();
     test_busy_load_begin_claims_nothing();
+    test_ahi_open_failure_exits_20();
+    test_busy_deferred_operations_retry_only_until_deadline();
     test_stale_file_request_cannot_publish_or_claim();
     test_empty_argument_is_allowed();
     test_async_console_write_advances_only_on_completion();
@@ -397,8 +415,8 @@ int main(void)
     test_screen_buffer_safe_messages_are_all_reaped();
     test_launcher_output_reserves_status_room();
     test_launcher_output_orders_queued_messages_before_app_output();
+    test_slot_replacement_requires_a_changed_generation();
     test_slot_claim_selects_every_following_request();
-    test_slot_ownership_loss_is_local_to_its_slot();
     test_legacy_request_shape_is_unchanged_without_slots();
     test_maxmem_requires_positive_decimal_mib();
     test_list_reply_decoding();

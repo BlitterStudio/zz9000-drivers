@@ -125,19 +125,20 @@ static inline int zzrun_slots_query_decode(const uint8_t *payload,
     return out->slots != 0 && out->slots <= ZZAPP_SLOT_COUNT;
 }
 
-static inline int zzrun_slot_ownership_lost(int slots, uint32_t owned_slot,
-                                             uint32_t owned_generation,
-                                             uint32_t observed_slot,
-                                             uint32_t observed_generation,
-                                             uint32_t observed_state)
+/* A terminal state belongs to the launcher that owns its generation. Only a
+ * changed generation means another launcher replaced that app. */
+static inline int zzrun_slot_replaced(int slots, uint32_t owned_slot,
+                                      uint32_t owned_generation,
+                                      uint32_t observed_slot,
+                                      uint32_t observed_generation,
+                                      uint32_t observed_state)
 {
+    (void)observed_state;
     if (!slots)
         return observed_generation != owned_generation;
     if (observed_slot != owned_slot)
         return 0;
-    return observed_generation != owned_generation ||
-           observed_state == ZZRUN_ST_IDLE ||
-           observed_state == ZZRUN_ST_FAULTED;
+    return observed_generation != owned_generation;
 }
 
 static inline int zzrun_parse_maxmem(const char *text, uint32_t *mib_out)
@@ -377,6 +378,18 @@ static inline int zzrun_process_exit(int app_exit, int display_failed,
     if (display_failed || console_failed || ahi_open_failed)
         return 20;
     return app_exit;
+}
+
+/* Deferred load/start operations share one firmware queue. A BUSY result is
+ * therefore retryable contention, unlike every other mailbox error. */
+#define ZZRUN_BUSY_RETRY_MS 3000u
+
+static inline int zzrun_deferred_should_retry(int status, int busy_status,
+                                              uint32_t started_ms,
+                                              uint32_t now_ms)
+{
+    return status == busy_status &&
+           now_ms - started_ms < ZZRUN_BUSY_RETRY_MS;
 }
 
 /* A queued APP_LOAD_BEGIN that comes back busy did not publish a

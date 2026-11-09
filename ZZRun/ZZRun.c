@@ -460,7 +460,7 @@ static int mailbox_long(uint16_t opcode, const uint8_t *payload, uint16_t len,
     uint8_t extended[ZZAPP_MAILBOX_PAYLOAD_BYTES];
     const uint8_t *wire_payload = payload;
     uint16_t wire_len = len;
-    uint32_t started;
+    uint32_t retry_started;
     int status;
 
     if (submitted)
@@ -478,31 +478,38 @@ static int mailbox_long(uint16_t opcode, const uint8_t *payload, uint16_t len,
     request.entry.payload_len = wire_len;
     if (wire_len)
         memcpy(request.entry.payload.inline_data, wire_payload, wire_len);
-    memset(&async, 0, sizeof(async));
-    status = ZZ9KCallAsync(&async, &request, NULL, NULL);
-    if (status != ZZ9K_STATUS_QUEUED)
-        return status;
-    if (submitted)
-        *submitted = 1;
-    started = now_ms();
-    while (!async.completed) {
-        uint32_t completed = 0;
+    retry_started = now_ms();
+    for (;;) {
+        uint32_t operation_started;
 
-        status = ZZ9KPoll(1, &completed);
-        if (status != ZZ9K_STATUS_OK)
-            break;
-        if (async.completed)
-            break;
-        if (now_ms() - started >= ZZRUN_LONG_OP_MS) {
-            (void)ZZ9KCancelAsync(&async);
-            return ZZ9K_STATUS_TIMEOUT;
+        memset(&async, 0, sizeof(async));
+        status = ZZ9KCallAsync(&async, &request, NULL, NULL);
+        if (status == ZZ9K_STATUS_QUEUED) {
+            if (submitted)
+                *submitted = 1;
+            operation_started = now_ms();
+            while (!async.completed) {
+                uint32_t completed = 0;
+
+                status = ZZ9KPoll(1, &completed);
+                if (status != ZZ9K_STATUS_OK)
+                    return status;
+                if (async.completed)
+                    break;
+                if (now_ms() - operation_started >= ZZRUN_LONG_OP_MS) {
+                    (void)ZZ9KCancelAsync(&async);
+                    return ZZ9K_STATUS_TIMEOUT;
+                }
+                Delay(1);
+            }
+            *reply = async.reply;
+            status = async.status;
         }
+        if (!zzrun_deferred_should_retry(status, ZZ9K_STATUS_BUSY,
+                                         retry_started, now_ms()))
+            return status;
         Delay(1);
     }
-    if (!async.completed)
-        return status;
-    *reply = async.reply;
-    return async.status;
 }
 
 static int op_empty(uint16_t opcode, ZZ9KMailboxEntry *reply)
@@ -519,11 +526,9 @@ static int owns_current_generation(void)
         return 0;
     generation = life_get(ZZAPP_LIFE_GENERATION_OFF);
     state = life_get(ZZAPP_LIFE_STATE_OFF);
-    return !zzrun_slot_ownership_lost(slots_supported, owned_slot,
-                                      owned_generation, owned_slot,
-                                      generation, state);
+    return !zzrun_slot_replaced(slots_supported, owned_slot, owned_generation,
+                                owned_slot, generation, state);
 }
-
 static void claim_load_begin(int status, int submitted, uint32_t prior)
 {
     uint32_t observed = 0;
