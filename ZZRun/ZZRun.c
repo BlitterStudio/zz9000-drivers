@@ -3440,7 +3440,7 @@ int main(int argc, char **argv)
     } else {
         int i;
 
-        if (argc == 2 && strcmp(argv[1], "STATUS") == 0) {
+        if (argc == 2 && zzrun_is_status_keyword(argv[1])) {
             show_status = 1;
         } else {
             if (argc < 2) {

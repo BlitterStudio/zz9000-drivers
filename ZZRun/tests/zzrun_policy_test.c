@@ -393,6 +393,17 @@ static void test_list_reply_decoding(void)
                   "forced stop") == 0);
 }
 
+/* Kit 66: "zzrun status" tried to load a file called "status". */
+static void test_status_keyword_is_case_insensitive(void)
+{
+    assert(zzrun_is_status_keyword("STATUS"));
+    assert(zzrun_is_status_keyword("status"));
+    assert(zzrun_is_status_keyword("Status"));
+    assert(!zzrun_is_status_keyword("status.elf"));
+    assert(!zzrun_is_status_keyword("STATU"));
+    assert(!zzrun_is_status_keyword(""));
+}
+
 int main(void)
 {
     test_output_failure_does_not_block_exit();
@@ -420,6 +431,7 @@ int main(void)
     test_legacy_request_shape_is_unchanged_without_slots();
     test_maxmem_requires_positive_decimal_mib();
     test_list_reply_decoding();
+    test_status_keyword_is_case_insensitive();
     puts("zzrun_policy_test: ok");
     return 0;
 }

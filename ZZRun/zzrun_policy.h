@@ -466,4 +466,24 @@ static inline uint32_t zzrun_screen_safe_completed(uint32_t pending)
     return pending ? pending - 1u : 0u;
 }
 
+/* AmigaDOS keywords are case-insensitive: "ZZRun status" lists slots
+ * instead of trying to load a file called "status". */
+static inline int zzrun_is_status_keyword(const char *arg)
+{
+    static const char keyword[] = "STATUS";
+    unsigned i;
+
+    if (!arg)
+        return 0;
+    for (i = 0; keyword[i]; i++) {
+        char c = arg[i];
+
+        if (c >= 'a' && c <= 'z')
+            c = (char)(c - 'a' + 'A');
+        if (c != keyword[i])
+            return 0;
+    }
+    return arg[i] == '\0';
+}
+
 #endif /* ZZRUN_POLICY_H */
