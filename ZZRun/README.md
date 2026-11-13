@@ -88,8 +88,10 @@ so one launcher cannot affect another app.
 5. While the app runs, every poll writes `heartbeat_ms`, drains firmware log
    records and app console output, fills app console input when data is ready,
    forwards input, services one file request, binds a requested P96 screen,
-   loads changed CLUT8 palette entries, and acknowledges completed flips.
-   `APP_STATUS` is called when the app ends or faults.
+   loads changed CLUT8 palette entries, acknowledges completed flips, and when
+   extended `APP_QUERY` advertises the low-memory capability, reports each
+   changed crossing count as `ZZRun: card memory low (N)`. `APP_STATUS` is
+   called when the app ends or faults.
 6. Ctrl-C from the Shell or an app-display raw key requests a stop: ZZRun
    writes the lifecycle `stop` word, enqueues one `ZZ_EV_STOP`, and posts
    `APP_STOP` carrying the generation it owns. Firmware rejects a stop whose

@@ -162,6 +162,7 @@ static uint32_t owned_generation;
 static uint32_t owned_slot;
 static uint32_t maxmem_mib;
 static int slots_supported;
+static uint32_t runtime_caps;
 static BPTR console_handle;
 static int console_failed;
 static int audio_ahi;
@@ -3145,17 +3146,20 @@ static int run_loop(ULONG forced_mode)
     int display_failed = 0;
     int ownership_lost = 0;
     uint32_t last_gen = 0;
+    struct zzrun_low_memory_state low_memory = { 0 };
     uint32_t fault = ZZAPP_FAULT_NONE;
     int32_t exit_code = 0;
     ZZ9KMailboxEntry reply;
-    if (window)
+    if (window) {
         last_gen = life_get(ZZAPP_LIFE_GENERATION_OFF);
+        low_memory.generation = last_gen;
+    }
     timer_arm();
     for (;;) {
         ULONG mask = SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_D | SIGBREAKF_CTRL_E |
                      SIGBREAKF_CTRL_F;
         ULONG signals;
-        uint32_t state, flags;
+        uint32_t state, flags, crossings, generation;
         if (timer_port)
             mask |= 1UL << timer_port->mp_SigBit;
         if (con_port)
@@ -3204,6 +3208,14 @@ static int run_loop(ULONG forced_mode)
         state = life_get(ZZAPP_LIFE_STATE_OFF);
         flags = life_get(ZZAPP_LIFE_FLAGS_OFF);
         fault = life_get(ZZAPP_LIFE_FAULT_OFF);
+        generation = life_get(ZZAPP_LIFE_GENERATION_OFF);
+        if (zzrun_low_memory_supported(runtime_caps)) {
+            crossings = life_get(ZZAPP_LIFE_LOW_MEMORY_CROSSINGS_OFF);
+            if (zzrun_low_memory_changed(&low_memory, runtime_caps, generation,
+                                         crossings))
+                launcher_statusf("ZZRun: card memory low (%lu)\n",
+                                 (unsigned long)crossings);
+        }
         if ((flags & ZZAPP_F_DISPLAY_UNBOUND) && !screen) {
             if (!open_display(life_get(ZZAPP_LIFE_WIDTH_OFF),
                               life_get(ZZAPP_LIFE_HEIGHT_OFF),
@@ -3527,6 +3539,8 @@ int main(int argc, char **argv)
             cleanup();
             return 20;
         }
+        runtime_caps = zzapp_get_be32(reply.payload.inline_data +
+                                      ZZAPP_QUERY_CAPS);
     }
     if (show_status) {
         rc = print_status(state, slots_supported ? &slots_query : NULL);

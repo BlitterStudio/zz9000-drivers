@@ -47,6 +47,13 @@ struct zzrun_list_reply {
     char name[21];
 };
 
+/* The extended QUERY low-memory capability advertises a per-generation
+ * lifecycle crossing counter that wraps naturally as a u32. */
+struct zzrun_low_memory_state {
+    uint32_t generation;
+    uint32_t crossings;
+};
+
 struct zzrun_slots_query {
     uint32_t slots;
     uint32_t free_slots;
@@ -139,6 +146,28 @@ static inline int zzrun_slot_replaced(int slots, uint32_t owned_slot,
     if (observed_slot != owned_slot)
         return 0;
     return observed_generation != owned_generation;
+}
+
+static inline int zzrun_low_memory_supported(uint32_t caps)
+{
+    return (caps & ZZAPP_CAP_LOW_MEMORY) != 0;
+}
+
+static inline int zzrun_low_memory_changed(struct zzrun_low_memory_state *state,
+                                           uint32_t caps,
+                                           uint32_t generation,
+                                           uint32_t crossings)
+{
+    if (!zzrun_low_memory_supported(caps))
+        return 0;
+    if (state->generation != generation) {
+        state->generation = generation;
+        state->crossings = 0;
+    }
+    if (state->crossings == crossings)
+        return 0;
+    state->crossings = crossings;
+    return 1;
 }
 
 static inline int zzrun_parse_maxmem(const char *text, uint32_t *mib_out)

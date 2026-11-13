@@ -4,6 +4,7 @@
 
 #ifndef ZZAPP_CAP_SLOTS
 #define ZZAPP_CAP_SLOTS (1u << 5)
+#define ZZAPP_CAP_LOW_MEMORY (1u << 6)
 #define ZZAPP_SLOT_COUNT 4u
 #define ZZAPP_MAILBOX_PAYLOAD_BYTES 48u
 #define ZZAPP_SEL_SLOT 40u
@@ -342,6 +343,35 @@ static void test_slot_replacement_requires_a_changed_generation(void)
                                ZZRUN_ST_RUNNING));
 }
 
+static void test_low_memory_counter_reports_changes_when_advertised(void)
+{
+    struct zzrun_low_memory_state state = { 0 };
+
+    assert(!zzrun_low_memory_changed(&state, 0u, 1u, 1u));
+    assert(!zzrun_low_memory_changed(&state, ZZAPP_CAP_LOW_MEMORY, 1u, 0u));
+    assert(zzrun_low_memory_changed(&state, ZZAPP_CAP_LOW_MEMORY, 1u, 1u));
+    assert(!zzrun_low_memory_changed(&state, ZZAPP_CAP_LOW_MEMORY, 1u, 1u));
+    assert(zzrun_low_memory_changed(&state, ZZAPP_CAP_LOW_MEMORY, 1u, 2u));
+}
+
+static void test_low_memory_counter_handles_wrap(void)
+{
+    struct zzrun_low_memory_state state = { 0 };
+
+    assert(zzrun_low_memory_changed(&state, ZZAPP_CAP_LOW_MEMORY, 1u,
+                                    UINT32_MAX));
+    assert(zzrun_low_memory_changed(&state, ZZAPP_CAP_LOW_MEMORY, 1u, 0u));
+}
+
+static void test_low_memory_counter_resets_for_a_new_generation(void)
+{
+    struct zzrun_low_memory_state state = { 0 };
+
+    assert(zzrun_low_memory_changed(&state, ZZAPP_CAP_LOW_MEMORY, 1u, 1u));
+    assert(!zzrun_low_memory_changed(&state, ZZAPP_CAP_LOW_MEMORY, 2u, 0u));
+    assert(zzrun_low_memory_changed(&state, ZZAPP_CAP_LOW_MEMORY, 2u, 1u));
+}
+
 static void test_legacy_request_shape_is_unchanged_without_slots(void)
 {
     uint8_t legacy[] = { 0xaa, 0xbb, 0xcc, 0xdd };
@@ -428,6 +458,9 @@ int main(void)
     test_launcher_output_orders_queued_messages_before_app_output();
     test_slot_replacement_requires_a_changed_generation();
     test_slot_claim_selects_every_following_request();
+    test_low_memory_counter_reports_changes_when_advertised();
+    test_low_memory_counter_handles_wrap();
+    test_low_memory_counter_resets_for_a_new_generation();
     test_legacy_request_shape_is_unchanged_without_slots();
     test_maxmem_requires_positive_decimal_mib();
     test_list_reply_decoding();
