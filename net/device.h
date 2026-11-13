@@ -150,6 +150,9 @@ void DevTermIO( DEVBASETYPE*, struct IORequest * );
  * and must be accepted by RAW consumers (packet capture, bridging). */
 #define HW_ETH_MAX_RAW           (HW_ETH_MAX_STD + HW_ETH_VLAN_TAG)          /* 1518 */
 
+/* Most openers that can each get a copy of one received frame. */
+#define ZZNET_MAX_FRAME_READERS   8
+
 typedef BOOL (*BMFunc)(void* a __asm("a0"), void* b __asm("a1"), long c __asm("d0"));
 
 typedef struct BufferManagement

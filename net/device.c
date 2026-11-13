@@ -1453,7 +1453,9 @@ SAVEDS void frame_proc() {
     zznet_rx_hdr[2] = *(volatile ULONG*)(frm + 12);
     zznet_rx_hdr[3] = (ULONG)*(volatile USHORT*)(frm + 16) << 16;
     USHORT packet_type = (USHORT)(zznet_rx_hdr[3] >> 16);
-    struct IOSana2Req *match = NULL;
+    struct IOSana2Req *matches[ZZNET_MAX_FRAME_READERS];
+    struct IOSana2Req *next;
+    UWORD nmatch = 0, m;
 
     /* GEM hash collisions are not unknown packet types. Ack and drop
      * the exact miss before reader selection; UnknownTypesReceived
@@ -1470,34 +1472,55 @@ SAVEDS void frame_proc() {
       }
     }
 
-    /* Walk the read list only long enough to find a matching listener
-     * and detach it. Doing the payload copy (read_frame) and ReplyMsg
+    /* Walk the read list and detach one matching request per opener.
+     * SANA-II lets several programs have the device open at once (a
+     * TCP/IP stack and an emulator's network driver, say), and each of
+     * them expects its own copy of a frame of a type it reads. Handing
+     * the frame to the first matching request only makes the openers
+     * take each other's packets, and all of them starve. The opener is
+     * identified by its BufferManagement, which DevOpen allocates once
+     * per OpenDevice. Doing the payload copy (read_frame) and ReplyMsg
      * outside the semaphore keeps DevAbortIO / CMD_READ unblocked for
      * the duration of the Zorro bus copy. */
     ObtainSemaphore(&db->db_ReadListSem);
     for (ior = (struct IOSana2Req *)db->db_ReadList.lh_Head;
-         ior->ios2_Req.io_Message.mn_Node.ln_Succ;
-         ior = (struct IOSana2Req *)ior->ios2_Req.io_Message.mn_Node.ln_Succ) {
+         (next = (struct IOSana2Req *)ior->ios2_Req.io_Message.mn_Node.ln_Succ);
+         ior = next) {
       if (ior->ios2_PacketType == packet_type) {
-        Remove((struct Node*)ior);
-        match = ior;
-        break;
+        for (m = 0; m < nmatch; m++) {
+          if (matches[m]->ios2_BufferManagement == ior->ios2_BufferManagement)
+            break;
+        }
+        if (m == nmatch) {
+          Remove((struct Node*)ior);
+          matches[nmatch++] = ior;
+          if (nmatch == ZZNET_MAX_FRAME_READERS)
+            break;
+        }
       }
     }
     ReleaseSemaphore(&db->db_ReadListSem);
 
-    if (match) {
-      ULONG res = read_frame(db, match, frm, sz, packet_type);
-      if (res == 0) {
-        global_stats.PacketsReceived++;
-      } else {
-        /* read_frame already set io_Error/ios2_WireError; reply so the
-         * caller learns the request failed instead of leaving it on
-         * a now-dangling list entry. */
-        D(("RERR %ld\n", res));
-        global_stats.UnknownTypesReceived++;
+    if (nmatch) {
+      BOOL counted = FALSE;
+
+      for (m = 0; m < nmatch; m++) {
+        ULONG res = read_frame(db, matches[m], frm, sz, packet_type);
+        if (res == 0) {
+          /* one frame, however many openers got a copy of it */
+          if (!counted) {
+            global_stats.PacketsReceived++;
+            counted = TRUE;
+          }
+        } else {
+          /* read_frame already set io_Error/ios2_WireError; reply so the
+           * caller learns the request failed instead of leaving it on
+           * a now-dangling list entry. */
+          D(("RERR %ld\n", res));
+          global_stats.UnknownTypesReceived++;
+        }
+        ReplyMsg((struct Message *)matches[m]);
       }
-      ReplyMsg((struct Message *)match);
     } else {
       /* No listener matched — frame dropped. A future change could
        * route these to S2_READORPHAN requests. */
