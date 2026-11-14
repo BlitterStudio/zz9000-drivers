@@ -193,6 +193,23 @@ static inline int zzrun_parse_maxmem(const char *text, uint32_t *mib_out)
     return 1;
 }
 
+/* An explicit MAXMEM is a cap the launcher must honour. Firmware without
+ * slots cannot carry it on APP_LOAD_BEGIN, so that launch is rejected
+ * before loading. A launch that does not request a cap keeps the
+ * byte-identical legacy request: no cap field at all. */
+#define ZZRUN_MAXMEM_OMIT   0
+#define ZZRUN_MAXMEM_SEND   1
+#define ZZRUN_MAXMEM_REJECT 2
+
+static inline int zzrun_maxmem_decision(int slots_supported, uint32_t maxmem_mib)
+{
+    if (maxmem_mib == 0u)
+        return ZZRUN_MAXMEM_OMIT;
+    if (!slots_supported)
+        return ZZRUN_MAXMEM_REJECT;
+    return ZZRUN_MAXMEM_SEND;
+}
+
 static inline int zzrun_list_reply_decode(const uint8_t *payload,
                                           uint16_t bytes,
                                           struct zzrun_list_reply *out)
@@ -244,6 +261,30 @@ static inline const char *zzrun_terminal_reason_name(uint8_t reason)
     case 6u: return "lease loss";
     case 7u: return "Amiga reset";
     case 8u: return "core restart";
+    default: return "unknown";
+    }
+}
+
+/* Must match ZZAPP_BLOCK_*. ZZRun.c asserts it. Firmware reports both
+ * display-open and flip waits as vsync. */
+#define ZZRUN_BLOCK_NONE    0u
+#define ZZRUN_BLOCK_FILE    1u
+#define ZZRUN_BLOCK_CONSOLE 2u
+#define ZZRUN_BLOCK_EVENT   3u
+#define ZZRUN_BLOCK_SLEEP   4u
+#define ZZRUN_BLOCK_VSYNC   5u
+#define ZZRUN_BLOCK_AUDIO   6u
+
+static inline const char *zzrun_block_reason_name(uint8_t reason)
+{
+    switch (reason) {
+    case ZZRUN_BLOCK_NONE: return "none";
+    case ZZRUN_BLOCK_FILE: return "file";
+    case ZZRUN_BLOCK_CONSOLE: return "console";
+    case ZZRUN_BLOCK_EVENT: return "event";
+    case ZZRUN_BLOCK_SLEEP: return "sleep";
+    case ZZRUN_BLOCK_VSYNC: return "vsync";
+    case ZZRUN_BLOCK_AUDIO: return "audio";
     default: return "unknown";
     }
 }

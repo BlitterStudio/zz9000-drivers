@@ -102,6 +102,13 @@ _Static_assert(ZZRUN_POLICY_GRACE_MS == ZZRUN_GRACE_MS, "grace");
 _Static_assert(ZZAPP_AUDIO_EPOCH_OFF == 28u, "audio epoch offset");
 _Static_assert(ZZAPP_STOP_REQ_BYTES == ZZRUN_STOP_REQ_BYTES, "stop bytes");
 _Static_assert(ZZAPP_STOP_GENERATION == 0u, "stop generation offset");
+_Static_assert(ZZRUN_BLOCK_NONE == ZZAPP_BLOCK_NONE, "block none");
+_Static_assert(ZZRUN_BLOCK_FILE == ZZAPP_BLOCK_FILE, "block file");
+_Static_assert(ZZRUN_BLOCK_CONSOLE == ZZAPP_BLOCK_CONSOLE, "block console");
+_Static_assert(ZZRUN_BLOCK_EVENT == ZZAPP_BLOCK_EVENT, "block event");
+_Static_assert(ZZRUN_BLOCK_SLEEP == ZZAPP_BLOCK_SLEEP, "block sleep");
+_Static_assert(ZZRUN_BLOCK_VSYNC == ZZAPP_BLOCK_VSYNC, "block vsync");
+_Static_assert(ZZRUN_BLOCK_AUDIO == ZZAPP_BLOCK_AUDIO, "block audio");
 
 #define MMU_MAPP_CACHEINHIBIT 0x00000040UL
 #define MMU_MAPP_COPYBACK     0x00002000UL
@@ -583,13 +590,15 @@ static int print_status(uint32_t legacy_state,
                    (unsigned long)slot, status_name(status));
             return 20;
         }
-        printf("slot %lu state %s name %s committed %lu MiB limit %lu MiB "
-               "cpu %lu s reason %s\n",
+        printf("slot %lu state %s name %s generation %lu committed %lu MiB "
+               "limit %lu MiB cpu %lu s block %s reason %s\n",
                (unsigned long)slot, state_name(item.state),
                item.name[0] ? item.name : "-",
+               (unsigned long)item.generation,
                (unsigned long)(item.committed_bytes / ZZRUN_MIB_BYTES),
                (unsigned long)(item.limit_bytes / ZZRUN_MIB_BYTES),
                (unsigned long)(item.cpu_ms / 1000u),
+               zzrun_block_reason_name(item.block_reason),
                zzrun_terminal_reason_name(item.terminal_reason));
     }
     return 0;
@@ -3017,12 +3026,17 @@ static int load_elf(BPTR fh, LONG size)
     LONG offset = 0;
     int submitted;
     int status;
+    int maxmem_decision = zzrun_maxmem_decision(slots_supported, maxmem_mib);
 
-    if (slots_supported && maxmem_mib)
+    if (maxmem_decision == ZZRUN_MAXMEM_REJECT) {
+        tell("ZZRun: MAXMEM requires firmware with app slots.");
+        return 0;
+    }
+    if (maxmem_decision == ZZRUN_MAXMEM_SEND)
         zzrun_put_be32(begin_payload + ZZAPP_LOAD_MEM_LIMIT_MIB, maxmem_mib);
     status = mailbox_long(ZZAPP_OP_LOAD_BEGIN,
-                          slots_supported && maxmem_mib ? begin_payload : NULL,
-                          slots_supported && maxmem_mib ? sizeof(begin_payload) : 0,
+                          maxmem_decision == ZZRUN_MAXMEM_SEND ? begin_payload : NULL,
+                          maxmem_decision == ZZRUN_MAXMEM_SEND ? (uint16_t)sizeof(begin_payload) : 0,
                           &reply, &submitted);
     claim_load_begin(status, submitted, prior_generation);
     if (status != ZZ9K_STATUS_OK) {
@@ -3546,6 +3560,11 @@ int main(int argc, char **argv)
         rc = print_status(state, slots_supported ? &slots_query : NULL);
         cleanup();
         return rc;
+    }
+    if (zzrun_maxmem_decision(slots_supported, maxmem_mib) == ZZRUN_MAXMEM_REJECT) {
+        tell("ZZRun: MAXMEM requires firmware with app slots.");
+        cleanup();
+        return 20;
     }
     if (!slots_supported && state != ZZAPP_ST_IDLE) {
         puts("ZZRun: app runtime is already owned by another launcher.");

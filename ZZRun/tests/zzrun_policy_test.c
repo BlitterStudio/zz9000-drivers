@@ -396,6 +396,28 @@ static void test_maxmem_requires_positive_decimal_mib(void)
     assert(!zzrun_parse_maxmem("4294967296", &mib));
 }
 
+static void test_explicit_maxmem_is_rejected_without_slots(void)
+{
+    assert(zzrun_maxmem_decision(0, 16u) == ZZRUN_MAXMEM_REJECT);
+    assert(zzrun_maxmem_decision(0, 1u) == ZZRUN_MAXMEM_REJECT);
+    assert(zzrun_maxmem_decision(1, 16u) == ZZRUN_MAXMEM_SEND);
+    assert(zzrun_maxmem_decision(0, 0u) == ZZRUN_MAXMEM_OMIT);
+    assert(zzrun_maxmem_decision(1, 0u) == ZZRUN_MAXMEM_OMIT);
+}
+
+static void test_block_reason_names_match_protocol(void)
+{
+    assert(strcmp(zzrun_block_reason_name(ZZRUN_BLOCK_NONE), "none") == 0);
+    assert(strcmp(zzrun_block_reason_name(ZZRUN_BLOCK_FILE), "file") == 0);
+    assert(strcmp(zzrun_block_reason_name(ZZRUN_BLOCK_CONSOLE), "console") == 0);
+    assert(strcmp(zzrun_block_reason_name(ZZRUN_BLOCK_EVENT), "event") == 0);
+    assert(strcmp(zzrun_block_reason_name(ZZRUN_BLOCK_SLEEP), "sleep") == 0);
+    assert(strcmp(zzrun_block_reason_name(ZZRUN_BLOCK_VSYNC), "vsync") == 0);
+    assert(strcmp(zzrun_block_reason_name(ZZRUN_BLOCK_AUDIO), "audio") == 0);
+    assert(strcmp(zzrun_block_reason_name(7u), "unknown") == 0);
+    assert(strcmp(zzrun_block_reason_name(255u), "unknown") == 0);
+}
+
 static void test_list_reply_decoding(void)
 {
     uint8_t reply[ZZAPP_LIST_REPLY_BYTES] = { 0 };
@@ -419,6 +441,7 @@ static void test_list_reply_decoding(void)
     assert(parsed.block_reason == 3u);
     assert(parsed.terminal_reason == 2u);
     assert(strcmp(parsed.name, "quake") == 0);
+    assert(strcmp(zzrun_block_reason_name(parsed.block_reason), "event") == 0);
     assert(strcmp(zzrun_terminal_reason_name(parsed.terminal_reason),
                   "forced stop") == 0);
 }
@@ -463,6 +486,8 @@ int main(void)
     test_low_memory_counter_resets_for_a_new_generation();
     test_legacy_request_shape_is_unchanged_without_slots();
     test_maxmem_requires_positive_decimal_mib();
+    test_explicit_maxmem_is_rejected_without_slots();
+    test_block_reason_names_match_protocol();
     test_list_reply_decoding();
     test_status_keyword_is_case_insensitive();
     puts("zzrun_policy_test: ok");

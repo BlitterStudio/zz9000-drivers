@@ -19,7 +19,8 @@ ZZRun RAM:glquake.elf +timedemo demo1
 ```
 
 `MAXMEM=<MiB>` caps the card memory committed by this app. The value must be a
-positive decimal MiB count:
+positive decimal MiB count. Firmware without app slots cannot enforce the cap,
+so ZZRun refuses that launch before loading:
 
 ```text
 ZZRun RAM:glquake.elf MAXMEM=256 +timedemo demo1
@@ -41,8 +42,9 @@ ZZRun STATUS
 ```
 
 On a slots runtime, this prints one line for each slot with its state, app
-name, committed and capped MiB, CPU seconds, and terminal reason. Older
-firmware prints its legacy slot 0 status.
+name, generation, committed and capped MiB, CPU seconds, block reason, and
+terminal reason. The block reason is `none`, `file`, `console`, `event`,
+`sleep`, `vsync`, or `audio`. Older firmware prints its legacy slot 0 status.
 
 ## Workbench ToolTypes
 
@@ -54,7 +56,7 @@ firmware prints its legacy slot 0 status.
 | `MODE` | Optional Picasso96 DisplayID, in decimal, `$` hexadecimal, or `0x` hexadecimal. The app still chooses width, height, and RGB format. |
 | `ARGS` | Optional space-separated arguments. Quoting is not parsed. |
 | `AUDIO=AHI` | Route app PCM to AHI. The default remains the card audio fabric. |
-| `MAXMEM=<MiB>` | Positive decimal MiB cap for the app's `APP_LOAD_BEGIN` request. |
+| `MAXMEM=<MiB>` | Positive decimal MiB cap for the app's `APP_LOAD_BEGIN` request. Refused when the firmware has no app slots. |
 
 
 Dragging an ELF project onto the ZZRun icon takes precedence over `APP`.
@@ -73,8 +75,10 @@ another shared-memory convention.
    size, host offset, slot, and generation. ZZRun maps the rings at
    `board_base + host_offset`; it does not assume a board offset. The returned
    block is the fixed 592 KiB `ZZAPP_WINDOW_BYTES` layout in `zzapp_proto.h`.
-3. `APP_LOAD_BEGIN` reserves the app arena and carries the optional `MAXMEM`
-   cap. ZZRun streams the ELF through `ZZAPP_STAGING_OFF` in chunks no larger
+3. `APP_LOAD_BEGIN` reserves the app arena and, on a slots runtime, carries
+   the optional `MAXMEM` cap. An explicit cap on older firmware is refused
+   before this request. A launch without `MAXMEM` keeps the legacy request.
+   ZZRun streams the ELF through `ZZAPP_STAGING_OFF` in chunks no larger
    than `ZZAPP_STAGING_BYTES`, posting `APP_LOAD_CHUNK` with the file offset,
    byte count, and that staging offset. `APP_LOAD_END` asks firmware to validate
    and relocate the image.
