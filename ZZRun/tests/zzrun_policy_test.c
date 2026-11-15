@@ -239,6 +239,18 @@ static void test_async_console_write_advances_only_on_completion(void)
     assert(zzrun_console_write_failed(64u, 0));
 }
 
+/* The just-completed write advanced the launcher-owned tail from 218 to
+ * 234. A Zorro read still returning 218 must not re-send 218..250. */
+static void test_owned_cursor_ignores_stale_readback(void)
+{
+    struct zzrun_owned_cursor cursor = { 0 };
+
+    assert(zzrun_owned_cursor_adopt(&cursor, 7u, 0xfffffff0u) == 0xfffffff0u);
+    assert(zzrun_owned_cursor_advance(&cursor, 32u) == 16u);
+    assert(zzrun_owned_cursor_adopt(&cursor, 7u, 0xfffffff0u) == 16u);
+    assert(zzrun_owned_cursor_adopt(&cursor, 8u, 3u) == 3u);
+}
+
 static void test_terminal_output_drains_before_exit(void)
 {
     struct zzrun_exit_in idle =
@@ -474,6 +486,7 @@ int main(void)
     test_stale_file_request_cannot_publish_or_claim();
     test_empty_argument_is_allowed();
     test_async_console_write_advances_only_on_completion();
+    test_owned_cursor_ignores_stale_readback();
     test_terminal_output_drains_before_exit();
     test_raw_ctrl_c_requests_stop();
     test_screen_buffer_safe_messages_are_all_reaped();

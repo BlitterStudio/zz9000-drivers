@@ -524,6 +524,38 @@ static inline int zzrun_console_write_failed(uint32_t requested,
     return written <= 0 || (uint32_t)written != requested;
 }
 
+struct zzrun_owned_cursor {
+    uint32_t value;
+    uint32_t epoch;
+    int valid;
+};
+
+/* Adopt a locally-owned ring cursor only when its generation/epoch changes.
+ * Thereafter the counterpart word may be stale immediately after publish. */
+static inline uint32_t zzrun_owned_cursor_adopt(
+    struct zzrun_owned_cursor *cursor, uint32_t epoch, uint32_t observed)
+{
+    if (!cursor->valid || cursor->epoch != epoch) {
+        cursor->value = observed;
+        cursor->epoch = epoch;
+        cursor->valid = 1;
+    }
+    return cursor->value;
+}
+
+static inline uint32_t zzrun_owned_cursor_advance(
+    struct zzrun_owned_cursor *cursor, uint32_t amount)
+{
+    cursor->value += amount;
+    return cursor->value;
+}
+
+static inline uint32_t zzrun_console_output_available(uint32_t head,
+                                                       uint32_t local_tail)
+{
+    return head - local_tail;
+}
+
 /* Each successful ChangeScreenBuffer has one SafeMessage before the old
  * buffer and its reply port may be released. */
 static inline uint32_t zzrun_screen_safe_started(uint32_t pending)

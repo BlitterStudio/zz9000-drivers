@@ -188,6 +188,11 @@ static int console_output_failed;
 static int audio_open_failed;
 static int launcher_output_active;
 static uint32_t launcher_log_dropped;
+static struct zzrun_owned_cursor input_head_cursor;
+static struct zzrun_owned_cursor console_output_tail_cursor;
+static struct zzrun_owned_cursor console_input_head_cursor;
+static struct zzrun_owned_cursor log_tail_cursor;
+static struct zzrun_owned_cursor ahi_tail_cursor;
 
 
 struct file_slot {
@@ -1630,13 +1635,16 @@ static void push_event(uint16_t type, uint16_t code, int16_t dx, int16_t dy,
                        uint16_t buttons)
 {
     uint32_t head, tail;
+    uint32_t generation;
     uint8_t *hdr;
     uint8_t *ev;
     if (!window)
         return;
+    generation = life_get(ZZAPP_LIFE_GENERATION_OFF);
     win_cache(ZZAPP_INPUT_OFF, ZZAPP_INPUT_HDR);
     hdr = window + ZZAPP_INPUT_OFF;
-    head = zzapp_get_be32(hdr);
+    head = zzrun_owned_cursor_adopt(&input_head_cursor, generation,
+                                    zzapp_get_be32(hdr));
     tail = zzapp_get_be32(hdr + 4);
     if (head - tail >= ZZAPP_INPUT_CAP) {
         life_put(ZZAPP_LIFE_INPUT_DROPS_OFF,
@@ -1653,7 +1661,8 @@ static void push_event(uint16_t type, uint16_t code, int16_t dx, int16_t dy,
     zzapp_put_be16(ev + 10, 0);
     zzapp_put_be32(ev + 12, now_ms());
     win_cache((uint32_t)(ev - window), ZZAPP_EVENT_BYTES);
-    zzapp_put_be32(hdr, head + 1u);
+    head = zzrun_owned_cursor_advance(&input_head_cursor, 1u);
+    zzapp_put_be32(hdr, head);
     win_cache(ZZAPP_INPUT_OFF, 4);
 }
 
@@ -1847,12 +1856,15 @@ static void launcher_output_consume(uint32_t bytes)
 static void print_log(void)
 {
     uint32_t head, tail, usable, guard = 0;
+    uint32_t generation;
     if (!window)
         return;
+    generation = life_get(ZZAPP_LIFE_GENERATION_OFF);
     usable = ZZAPP_LOG_BYTES - ZZAPP_LOG_HDR;
     win_cache(ZZAPP_LOG_OFF, 8);
     head = zzapp_get_be32(window + ZZAPP_LOG_OFF);
-    tail = zzapp_get_be32(window + ZZAPP_LOG_OFF + 4);
+    tail = zzrun_owned_cursor_adopt(&log_tail_cursor, generation,
+                                    zzapp_get_be32(window + ZZAPP_LOG_OFF + 4));
     while (tail != head && guard++ < 64) {
         uint32_t avail = head - tail;
         uint16_t len;
@@ -1879,7 +1891,8 @@ static void print_log(void)
         }
         tail += step;
     }
-    zzapp_put_be32(window + ZZAPP_LOG_OFF + 4, tail);
+    log_tail_cursor.value = tail;
+    zzapp_put_be32(window + ZZAPP_LOG_OFF + 4, log_tail_cursor.value);
     win_cache(ZZAPP_LOG_OFF + 4, 4);
 }
 
@@ -1925,22 +1938,32 @@ static struct StandardPacket *con_write_packet;
 static UBYTE *con_write_buffer;
 static int con_write_pending;
 static int con_write_interactive;
-static uint32_t con_write_tail;
 static uint32_t con_write_bytes;
 static int con_write_source;
 
 
 static void console_reap_packets(void);
-static int console_write_start(BPTR fh, const uint8_t *data, uint32_t tail,
-                               uint32_t bytes, int source);
-
+static int console_write_start(BPTR fh, const uint8_t *data, uint32_t bytes,
+                               int source);
+static void console_write_fh(BPTR fh, const char *msg);
 
 static void console_output_error(void)
 {
-    if (!console_output_failed)
-        tell("ZZRun: cannot write app console output.");
-    console_output_failed = 1;
     request_stop();
+    if (!console_output_failed)
+        console_write_fh(console_output(),
+                         "ZZRun: cannot write app console output.\n");
+    console_output_failed = 1;
+}
+
+/* The app owns console head; ZZRun owns console tail. Read the tail only
+ * when adopting a generation. A Zorro read immediately after our tail store
+ * may return the previous value, so it must never choose the next range. */
+static uint32_t console_output_tail(uint8_t *hdr)
+{
+    return zzrun_owned_cursor_adopt(
+        &console_output_tail_cursor, life_get(ZZAPP_LIFE_GENERATION_OFF),
+        zzapp_get_be32(hdr + 4));
 }
 
 static void console_drain_output(void)
@@ -1956,9 +1979,10 @@ static void console_drain_output(void)
         hdr = window + ZZAPP_CONSOLE_OUT_OFF;
         win_cache(ZZAPP_CONSOLE_OUT_OFF, ZZAPP_CONSOLE_HDR);
         head = zzapp_get_be32(hdr);
-        tail = zzapp_get_be32(hdr + 4);
-        available = head - tail;
+        tail = console_output_tail(hdr);
+        available = zzrun_console_output_available(head, tail);
         if (available > ZZAPP_CONSOLE_OUT_CAP) {
+            console_output_tail_cursor.value = head;
             zzapp_put_be32(hdr + 4, head);
             win_cache(ZZAPP_CONSOLE_OUT_OFF + 4, 4);
             available = 0;
@@ -1977,7 +2001,7 @@ static void console_drain_output(void)
             chunk = ZZRUN_CONSOLE_WRITE_BYTES;
         if (!console_write_start(console_output(),
                                  launcher_output + launcher_output_tail,
-                                 0, chunk, source))
+                                 chunk, source))
             console_output_error();
         return;
     }
@@ -1991,7 +2015,7 @@ static void console_drain_output(void)
     if (!console_write_start(console_output(),
                              window + ZZAPP_CONSOLE_OUT_OFF +
                                  ZZAPP_CONSOLE_HDR + at,
-                             tail, chunk, source))
+                             chunk, source))
         console_output_error();
 }
 
@@ -2007,7 +2031,7 @@ static int console_output_pending(void)
     hdr = window + ZZAPP_CONSOLE_OUT_OFF;
     win_cache(ZZAPP_CONSOLE_OUT_OFF, ZZAPP_CONSOLE_HDR);
     head = zzapp_get_be32(hdr);
-    tail = zzapp_get_be32(hdr + 4);
+    tail = console_output_tail(hdr);
     return head - tail <= ZZAPP_CONSOLE_OUT_CAP && head != tail;
 }
 
@@ -2085,8 +2109,8 @@ static void console_user_note(const char *msg)
     }
 }
 
-static int console_write_start(BPTR fh, const uint8_t *data, uint32_t tail,
-                               uint32_t bytes, int source)
+static int console_write_start(BPTR fh, const uint8_t *data, uint32_t bytes,
+                               int source)
 {
     struct FileHandle *handle = (struct FileHandle *)BADDR(fh);
 
@@ -2112,7 +2136,6 @@ static int console_write_start(BPTR fh, const uint8_t *data, uint32_t tail,
     con_write_packet->sp_Pkt.dp_Arg1 = handle->fh_Arg1;
     con_write_packet->sp_Pkt.dp_Arg2 = (LONG)con_write_buffer;
     con_write_packet->sp_Pkt.dp_Arg3 = (LONG)bytes;
-    con_write_tail = tail;
     con_write_bytes = bytes;
     con_write_source = source;
     con_write_interactive = IsInteractive(fh);
@@ -2133,15 +2156,11 @@ static void console_write_complete(void)
             launcher_output_consume(advanced);
     } else if (advanced && window && owns_current_generation()) {
         uint8_t *hdr = window + ZZAPP_CONSOLE_OUT_OFF;
+        uint32_t tail = zzrun_owned_cursor_advance(
+            &console_output_tail_cursor, advanced);
 
-        win_cache(ZZAPP_CONSOLE_OUT_OFF, ZZAPP_CONSOLE_HDR);
-        if (zzapp_get_be32(hdr + 4) == con_write_tail) {
-            zzapp_put_be32(hdr + 4, con_write_tail + advanced);
-            win_cache(ZZAPP_CONSOLE_OUT_OFF + 4, 4);
-        } else {
-            console_output_error();
-            return;
-        }
+        zzapp_put_be32(hdr + 4, tail);
+        win_cache(ZZAPP_CONSOLE_OUT_OFF + 4, 4);
     }
     if (zzrun_console_write_failed(con_write_bytes, (int32_t)written))
         console_output_error();
@@ -2174,12 +2193,19 @@ static void console_reap_packets(void)
             console_write_complete();
     }
 }
+static uint32_t console_input_head(uint8_t *hdr)
+{
+    return zzrun_owned_cursor_adopt(
+        &console_input_head_cursor, life_get(ZZAPP_LIFE_GENERATION_OFF),
+        zzapp_get_be32(hdr));
+}
+
 
 /* Head and tail are loaded before WANT. The barrier stops the compiler
  * from moving the WANT load ahead of that observation. */
 static int console_keyboard_demand(uint8_t *hdr)
 {
-    uint32_t head = zzapp_get_be32(hdr);
+    uint32_t head = console_input_head(hdr);
     uint32_t tail = zzapp_get_be32(hdr + 4);
     uint32_t want;
 
@@ -2238,9 +2264,10 @@ static void console_read_finish(void)
     con_write_packet = NULL;
     con_write_pending = 0;
     con_write_interactive = 0;
-    con_write_tail = 0;
     con_write_bytes = 0;
     con_write_source = ZZRUN_OUTPUT_NONE;
+    memset(&console_output_tail_cursor, 0, sizeof(console_output_tail_cursor));
+    memset(&console_input_head_cursor, 0, sizeof(console_input_head_cursor));
     con_buffer = NULL;
     con_packet = NULL;
     con_port = NULL;
@@ -2254,7 +2281,7 @@ static void console_read_finish(void)
 /* Copies bytes into the stdin ring; returns how many fitted. */
 static uint32_t console_push(uint8_t *hdr, const uint8_t *data, uint32_t n)
 {
-    uint32_t head = zzapp_get_be32(hdr);
+    uint32_t head = console_input_head(hdr);
     uint32_t tail = zzapp_get_be32(hdr + 4);
     uint32_t free_bytes = ZZAPP_CONSOLE_IN_CAP - (head - tail);
     uint32_t done = 0;
@@ -2275,6 +2302,7 @@ static uint32_t console_push(uint8_t *hdr, const uint8_t *data, uint32_t n)
         done += chunk;
         free_bytes -= chunk;
     }
+    head = zzrun_owned_cursor_advance(&console_input_head_cursor, done);
     zzapp_put_be32(hdr, head);
     win_cache(ZZAPP_CONSOLE_IN_OFF, 4);
     return done;
@@ -2309,7 +2337,7 @@ static void console_fill_async(uint8_t *hdr, int keyboard)
         if (!console_keyboard_demand(hdr))
             return;
     } else {
-        head = zzapp_get_be32(hdr);
+        head = console_input_head(hdr);
         tail = zzapp_get_be32(hdr + 4);
         if (!zzrun_async_read_allowed(life_get(ZZAPP_LIFE_STATE_OFF),
                                       owns_current_generation(), stop_asked,
@@ -2393,6 +2421,7 @@ static void ahi_close(void)
     ahi_channels = 0u;
     ahi_stream_epoch = 0u;
     ahi_stream_epoch_valid = 0;
+    memset(&ahi_tail_cursor, 0, sizeof(ahi_tail_cursor));
 }
 
 static int ahi_open(uint32_t rate, uint32_t channels)
@@ -2542,11 +2571,13 @@ static void service_ahi_audio(void)
     ahi_stream_epoch = epoch;
     ahi_stream_epoch_valid = 1;
     head = zzapp_get_be32(hdr + ZZAPP_AUDIO_HEAD_OFF);
-    tail = zzapp_get_be32(hdr + ZZAPP_AUDIO_TAIL_OFF);
+    tail = zzrun_owned_cursor_adopt(&ahi_tail_cursor, epoch,
+                                    zzapp_get_be32(hdr + ZZAPP_AUDIO_TAIL_OFF));
     if (head - tail > ZZAPP_AUDIO_CAP)
         return;
     completed = ahi_reap(&tail);
     if (completed) {
+        ahi_tail_cursor.value = tail;
         zzapp_put_be32(hdr + ZZAPP_AUDIO_TAIL_OFF, tail);
         win_cache(ZZAPP_AUDIO_OFF + ZZAPP_AUDIO_TAIL_OFF, 4);
     }
