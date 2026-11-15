@@ -533,14 +533,20 @@
 
 
 ; --------------------------------------------------------------------
-; Accelerated amissl.library (ZZ9000 TLS offload)
+; Accelerated AmiSSL core libraries (ZZ9000 TLS offload)
 ; --------------------------------------------------------------------
+; AmiSSL 5.27 applications open amissl_v362.library; AmiSSL 6.1
+; applications open amissl_v41x.library. AmiSSL 6 installs alongside 5, so
+; a system can have either or both: replace each one that is installed.
 
-(if (OR (exists "Libs/AmiSSL/68020-40/amissl_v362.library")
-        (exists "Libs/AmiSSL/68060/amissl_v362.library"))
-   (if (exists "LIBS:AmiSSL/amissl_v362.library")
-       (if (askbool (prompt "Install the ZZ9000-accelerated amissl.library?\n\nReplaces LIBS:AmiSSL/amissl_v362.library with a build that offloads supported TLS crypto to the card; without compatible hardware or firmware it runs the stock AmiSSL software paths.\n\nThe original library is backed up as amissl_v362.library.bak.")
-                    (help "Drop-in AmiSSL 5.27 core with ZZ9000 crypto offload for existing applications. Zorro 2 requires a matched stack and shares its small host heap with other SDK clients; matched 2 MiB and 4 MiB stacks offload through the shared 64 KiB host window, and any allocation that cannot be made falls back to software. The combined binary is GPLv3; sources are in the BlitterStudio zz9000-sdk repository."))
+(if (OR (OR (exists "Libs/AmiSSL/68020-40/amissl_v362.library")
+            (exists "Libs/AmiSSL/68060/amissl_v362.library"))
+        (OR (exists "Libs/AmiSSL/68020-40/amissl_v41x.library")
+            (exists "Libs/AmiSSL/68060/amissl_v41x.library")))
+   (if (OR (exists "LIBS:AmiSSL/amissl_v362.library")
+           (exists "LIBS:AmiSSL/amissl_v41x.library"))
+       (if (askbool (prompt "Install the ZZ9000-accelerated AmiSSL libraries?\n\nReplaces the installed AmiSSL 5.27 (amissl_v362.library) and AmiSSL 6.1 (amissl_v41x.library) core libraries with builds that offload supported TLS crypto to the card; without compatible hardware or firmware they run the stock AmiSSL software paths.\n\nEach original library is backed up with a .bak suffix.")
+                    (help "Drop-in AmiSSL cores with ZZ9000 crypto offload: amissl_v362.library serves AmiSSL 5 applications, amissl_v41x.library AmiSSL 6 ones. Only libraries already in LIBS:AmiSSL are replaced. Zorro 2 needs a matched stack and shares its small host heap with other SDK clients; an allocation that cannot be made falls back to software. The combined binaries are GPLv3; sources are in the BlitterStudio zz9000-firmware repository."))
            (
               ; Pick the CPU build exactly as AmiSSL's own installer does: default
               ; to the 68060 build when the OS reports a 68060, or 68060.library /
@@ -554,29 +560,51 @@
                  1 0))
               (set #zz-amissl-cpu
                  (askchoice
-                    (prompt "Which CPU should the accelerated AmiSSL build target?")
+                    (prompt "Which CPU should the accelerated AmiSSL builds target?")
                     (help "Pick the AmiSSL core build matching this machine's CPU, exactly as AmiSSL's own installer does. The 68020-40 build is for 68020/030/040 (and the Apollo 68080); the 68060 build is for the 68060 (and Amithlon). Installing the 68020-40 build on a 68060 forces 64-bit multiplies to be trap-emulated in software, making TLS crypto markedly slower.")
                     (choices "68020/030/040/080 or MorphOS" "68060 or Amithlon")
                     (default #zz-amissl-cpu)))
-              (set #zz-amissl-dir (if (= 1 #zz-amissl-cpu) "68060" "68020-40"))
-              ; Always preserve the stock AmiSSL core library before overwriting
-              ; it, but only when no backup exists yet — so re-running the
-              ; installer never overwrites the genuine original with our
-              ; accelerated copy from a previous run (mirrors the
+              (set #zz-amissl-dir (tackon "Libs/AmiSSL" (if (= 1 #zz-amissl-cpu) "68060" "68020-40")))
+              ; Always preserve each stock AmiSSL core library before
+              ; overwriting it, but only when no backup exists yet — so
+              ; re-running the installer never overwrites the genuine original
+              ; with our accelerated copy from a previous run (mirrors the
               ; Picasso96Settings.bak handling above).
-              (if (not (exists "LIBS:AmiSSL/amissl_v362.library.bak"))
-                 (copyfiles
-                    (prompt "Back up the original amissl_v362.library to amissl_v362.library.bak")
-                    (help "Saves LIBS:AmiSSL/amissl_v362.library as amissl_v362.library.bak before we overwrite it, so you can revert: delete the accelerated amissl_v362.library and rename the .bak back. Made only if no .bak exists yet, so re-running this installer never overwrites your original stock library.")
-                    (source "LIBS:AmiSSL/amissl_v362.library")
-                    (newname "amissl_v362.library.bak")
-                    (dest "LIBS:AmiSSL")))
-              (copyfiles
-                 (prompt "Install the accelerated amissl_v362.library into LIBS:AmiSSL/")
-                 (help "The ZZ9000-accelerated AmiSSL core library for the selected CPU.")
-                 (source (tackon (tackon "Libs/AmiSSL" #zz-amissl-dir) "amissl_v362.library"))
-                 (dest "LIBS:AmiSSL"))
-              ; The AmiSSL manual follows the library it documents.
+              (if (AND (exists "LIBS:AmiSSL/amissl_v362.library")
+                       (exists (tackon #zz-amissl-dir "amissl_v362.library")))
+                 (
+                    (if (not (exists "LIBS:AmiSSL/amissl_v362.library.bak"))
+                       (copyfiles
+                          (prompt "Back up the original amissl_v362.library to amissl_v362.library.bak")
+                          (help "Saves LIBS:AmiSSL/amissl_v362.library as amissl_v362.library.bak before we overwrite it, so you can revert: delete the accelerated amissl_v362.library and rename the .bak back. Made only if no .bak exists yet, so re-running this installer never overwrites your original stock library.")
+                          (source "LIBS:AmiSSL/amissl_v362.library")
+                          (newname "amissl_v362.library.bak")
+                          (dest "LIBS:AmiSSL")))
+                    (copyfiles
+                       (prompt "Install the accelerated amissl_v362.library (AmiSSL 5.27) into LIBS:AmiSSL/")
+                       (help "The ZZ9000-accelerated AmiSSL 5.27 core library for the selected CPU, used by applications built for AmiSSL 5.")
+                       (source (tackon #zz-amissl-dir "amissl_v362.library"))
+                       (dest "LIBS:AmiSSL"))
+                 )
+              )
+              (if (AND (exists "LIBS:AmiSSL/amissl_v41x.library")
+                       (exists (tackon #zz-amissl-dir "amissl_v41x.library")))
+                 (
+                    (if (not (exists "LIBS:AmiSSL/amissl_v41x.library.bak"))
+                       (copyfiles
+                          (prompt "Back up the original amissl_v41x.library to amissl_v41x.library.bak")
+                          (help "Saves LIBS:AmiSSL/amissl_v41x.library as amissl_v41x.library.bak before we overwrite it, so you can revert: delete the accelerated amissl_v41x.library and rename the .bak back. Made only if no .bak exists yet, so re-running this installer never overwrites your original stock library.")
+                          (source "LIBS:AmiSSL/amissl_v41x.library")
+                          (newname "amissl_v41x.library.bak")
+                          (dest "LIBS:AmiSSL")))
+                    (copyfiles
+                       (prompt "Install the accelerated amissl_v41x.library (AmiSSL 6.1) into LIBS:AmiSSL/")
+                       (help "The ZZ9000-accelerated AmiSSL 6.1 core library for the selected CPU, used by applications built for AmiSSL 6.")
+                       (source (tackon #zz-amissl-dir "amissl_v41x.library"))
+                       (dest "LIBS:AmiSSL"))
+                 )
+              )
+              ; The AmiSSL manual follows the libraries it documents.
               (makedir #docs-dest (infos))
               (copyfiles
                  (prompt "amissl.guide (accelerated AmiSSL)")
@@ -585,7 +613,7 @@
                  (dest #docs-dest))
            )
        )
-       (message "The accelerated amissl.library was not installed:\n\nno existing AmiSSL 5.27 installation was found (LIBS:AmiSSL/amissl_v362.library).\n\nInstall AmiSSL 5.27 from Aminet first, then re-run this installer.")
+       (message "The accelerated AmiSSL libraries were not installed:\n\nno AmiSSL 5.27 or 6.1 installation was found (LIBS:AmiSSL/amissl_v362.library or LIBS:AmiSSL/amissl_v41x.library).\n\nInstall AmiSSL from Aminet first, then re-run this installer.")
    )
 )
 
