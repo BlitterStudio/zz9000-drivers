@@ -46,6 +46,20 @@ name, generation, committed and capped MiB, CPU seconds, block reason, and
 terminal reason. The block reason is `none`, `file`, `console`, `event`,
 `sleep`, `vsync`, or `audio`. Older firmware prints its legacy slot 0 status.
 
+An interrupted load is shown as `state stopping ... reason quarantined`. Its
+app memory has been reclaimed, but the window stays reserved so a late DOS
+`Read` from the old launcher cannot corrupt a new launch. ZZRun returns the
+stale ownership result when that old read finishes; firmware records it even
+while teardown is in progress and frees the window immediately afterwards.
+When the old launcher cannot return, confirm that it is gone and run:
+
+```text
+ZZRun RELEASE <slot>
+```
+
+`RELEASE` succeeds only for a fully torn-down quarantined slot and refuses
+every other state. A card reset also clears the reservation.
+
 ## Workbench ToolTypes
 
 | ToolType | Meaning |
@@ -80,8 +94,11 @@ another shared-memory convention.
    before this request. A launch without `MAXMEM` keeps the legacy request.
    ZZRun streams the ELF through `ZZAPP_STAGING_OFF` in chunks no larger
    than `ZZAPP_STAGING_BYTES`, posting `APP_LOAD_CHUNK` with the file offset,
-   byte count, and that staging offset. `APP_LOAD_END` asks firmware to validate
-   and relocate the image.
+   byte count, and that staging offset. ZZRun refreshes the claim heartbeat
+   around `Open` and `Seek`; its DOS reads are asynchronous, so a slow device
+   read keeps the loading lease alive and detects ownership loss while it is
+   outstanding. `APP_LOAD_END` asks firmware to validate and relocate the
+   image.
 
 Every subsequent app mailbox request carries that slot and generation selector,
 so one launcher cannot affect another app.
@@ -89,13 +106,15 @@ so one launcher cannot affect another app.
 4. ZZRun packs `argc`, argument offsets, and strings in `ZZAPP_ARGV_OFF`, then
    calls `APP_START`. Strings are capped at 127 bytes plus NUL; the complete
    packed area must fit `ZZAPP_ARGV_BYTES`.
-5. While the app runs, every poll writes `heartbeat_ms`, drains firmware log
-   records and app console output, fills app console input when data is ready,
-   forwards input, services one file request, binds a requested P96 screen,
-   loads changed CLUT8 palette entries, acknowledges completed flips, and when
-   extended `APP_QUERY` advertises the low-memory capability, reports each
-   changed crossing count as `ZZRun: card memory low (N)`. `APP_STATUS` is
-   called when the app ends or faults.
+5. ZZRun advertises its longer ten-second main-loop lease while retaining the
+   legacy `heartbeat_ms` write on every poll. Older firmware ignores that
+   capability bit and retains its two-second lease. The main loop drains
+   firmware log records and app console output, fills app console input when
+   data is ready, forwards input, services one file request, binds a requested
+   P96 screen, loads changed CLUT8 palette entries, acknowledges completed
+   flips, and when extended `APP_QUERY` advertises the low-memory capability,
+   reports each changed crossing count as `ZZRun: card memory low (N)`.
+   `APP_STATUS` is called when the app ends or faults.
 6. Ctrl-C from the Shell or an app-display raw key requests a stop: ZZRun
    writes the lifecycle `stop` word, enqueues one `ZZ_EV_STOP`, and posts
    `APP_STOP` carrying the generation it owns. Firmware rejects a stop whose

@@ -10,6 +10,7 @@
 #include <devices/timer.h>
 #include <devices/inputevent.h>
 #include <dos/dos.h>
+#include <dos/dosextens.h>
 #include <dos/dostags.h>
 #include <intuition/intuition.h>
 #include <intuition/screens.h>
@@ -216,6 +217,28 @@ static uint8_t file_io_buffer[ZZRUN_READ_CHUNK];
 static void cleanup(void);
 static int tool_is_ahi(const char *value);
 static void launcher_status(const char *msg);
+static int heartbeat_owned(uint32_t captured_generation);
+static int generation_owned(uint32_t captured_generation);
+static void request_stop(void);
+static int dos_packet_async(struct MsgPort *handler, LONG action, LONG arg1,
+                            LONG arg2, LONG arg3, LONG arg4, LONG arg5,
+                            uint32_t captured_generation, LONG *result_out,
+                            int *ownership_lost);
+static LONG file_packet_async(BPTR fh, LONG action, LONG arg2, LONG arg3,
+                              LONG arg4, LONG arg5, int *transport_ok);
+static int examine_lock_async(BPTR lock, struct FileInfoBlock *fib,
+                              int *transport_ok);
+static int examine_next_async(BPTR lock, struct FileInfoBlock *fib,
+                              int *transport_ok);
+static BPTR lock_async(BPTR dir, const char *name, LONG access,
+                       int *transport_ok);
+static BPTR lock_abs_async(const char *name, int *transport_ok);
+static BPTR open_find_async(BPTR dir, const char *name, LONG mode,
+                            int *transport_ok);
+static int end_async(BPTR fh, int *transport_ok);
+static void serve_file_request(const struct zzapp_file_wire *req);
+static void timer_arm(void);
+static void timer_reap(void);
 
 
 static int stack_ok(void)
@@ -405,6 +428,7 @@ static void heartbeat(void)
         life_put(ZZAPP_LIFE_HEARTBEAT_OFF, now_ms());
 }
 
+
 static int ctrl_c_set(void)
 {
     return (SetSignal(0, 0) & SIGBREAKF_CTRL_C) != 0;
@@ -414,6 +438,7 @@ static void usage(void)
 {
     puts("ZZRun <app.elf> [MAXMEM=<MiB>] [AUDIO=AHI] [args]\n"
          "ZZRun STATUS\n"
+         "ZZRun RELEASE <slot>\n"
          "Run Stack 32768 in this Shell first.\n"
          "Workbench ToolTypes: APP, ROOT, ABS, MODE, ARGS, JOYPORT0, AUDIO, MAXMEM.\n"
          "ROOT defaults to the current directory, or the icon directory.");
@@ -520,6 +545,7 @@ static int mailbox_long(uint16_t opcode, const uint8_t *payload, uint16_t len,
     const uint8_t *wire_payload = payload;
     uint16_t wire_len = len;
     uint32_t retry_started;
+    uint32_t lease_generation;
     int status;
 
     if (submitted)
@@ -538,6 +564,9 @@ static int mailbox_long(uint16_t opcode, const uint8_t *payload, uint16_t len,
     if (wire_len)
         memcpy(request.entry.payload.inline_data, wire_payload, wire_len);
     retry_started = now_ms();
+    lease_generation = owned_generation;
+    if (lease_generation && !heartbeat_owned(lease_generation))
+        return ZZ9K_STATUS_BAD_REQUEST;
     for (;;) {
         uint32_t operation_started;
 
@@ -549,7 +578,10 @@ static int mailbox_long(uint16_t opcode, const uint8_t *payload, uint16_t len,
             operation_started = now_ms();
             while (!async.completed) {
                 uint32_t completed = 0;
-
+                if (lease_generation && !heartbeat_owned(lease_generation)) {
+                    (void)ZZ9KCancelAsync(&async);
+                    return ZZ9K_STATUS_BAD_REQUEST;
+                }
                 status = ZZ9KPoll(1, &completed);
                 if (status != ZZ9K_STATUS_OK)
                     return status;
@@ -567,6 +599,8 @@ static int mailbox_long(uint16_t opcode, const uint8_t *payload, uint16_t len,
         if (!zzrun_deferred_should_retry(status, ZZ9K_STATUS_BUSY,
                                          retry_started, now_ms()))
             return status;
+        if (lease_generation && !heartbeat_owned(lease_generation))
+            return ZZ9K_STATUS_BAD_REQUEST;
         Delay(1);
     }
 }
@@ -587,6 +621,28 @@ static int owns_current_generation(void)
     state = life_get(ZZAPP_LIFE_STATE_OFF);
     return !zzrun_slot_replaced(slots_supported, owned_slot, owned_generation,
                                 owned_slot, generation, state);
+}
+
+static int heartbeat_owned(uint32_t captured_generation)
+{
+    uint32_t observed_generation;
+
+    if (!window || owned_generation == 0)
+        return 0;
+    observed_generation = life_get(ZZAPP_LIFE_GENERATION_OFF);
+    if (!zzrun_lease_renew_allowed(captured_generation, owned_generation,
+                                   observed_generation))
+        return 0;
+    heartbeat();
+    return 1;
+}
+
+static int generation_owned(uint32_t captured_generation)
+{
+    if (!window || owned_generation == 0)
+        return 0;
+    return zzrun_lease_renew_allowed(captured_generation, owned_generation,
+                                     life_get(ZZAPP_LIFE_GENERATION_OFF));
 }
 static void claim_load_begin(int status, int submitted, uint32_t prior)
 {
@@ -652,6 +708,36 @@ static int print_status(uint32_t legacy_state,
                zzrun_block_reason_name(item.block_reason),
                zzrun_terminal_reason_name(item.terminal_reason));
     }
+    return 0;
+}
+
+static int release_quarantined_slot(uint32_t slot)
+{
+    ZZ9KMailboxEntry reply;
+    struct zzrun_list_reply item;
+    int status;
+
+    status = mailbox_for_slot(ZZAPP_OP_LIST, slot, &reply);
+    if (status != ZZ9K_STATUS_OK ||
+        !zzrun_list_reply_decode(reply.payload.inline_data, reply.payload_len,
+                                 &item)) {
+        printf("ZZRun: APP_LIST slot %lu failed (%s)\n",
+               (unsigned long)slot, status_name(status));
+        return 20;
+    }
+    if (item.state != ZZAPP_ST_STOPPING ||
+        item.terminal_reason != ZZAPP_END_QUARANTINED) {
+        printf("ZZRun: slot %lu is not quarantined\n", (unsigned long)slot);
+        return 20;
+    }
+    status = mailbox_selected(ZZAPP_OP_RELEASE, NULL, 0, slot,
+                              item.generation, &reply);
+    if (status != ZZ9K_STATUS_OK) {
+        printf("ZZRun: release slot %lu failed (%s)\n",
+               (unsigned long)slot, status_name(status));
+        return 20;
+    }
+    printf("ZZRun: released quarantined slot %lu\n", (unsigned long)slot);
     return 0;
 }
 
@@ -844,9 +930,13 @@ static int step_parent(BPTR *cur, int *err)
 
 static int enter_dir(BPTR *cur, const char *name, int *err)
 {
-    BPTR old = CurrentDir(*cur);
-    BPTR child = Lock((STRPTR)name, ACCESS_READ);
-    CurrentDir(old);
+    int transport_ok;
+    BPTR child = lock_async(*cur, name, ACCESS_READ, &transport_ok);
+
+    if (!transport_ok) {
+        *err = ZZ_EIO;
+        return 0;
+    }
     if (!child) {
         *err = IoErr() == ERROR_OBJECT_NOT_FOUND ||
                IoErr() == ERROR_DIR_NOT_FOUND ? ZZ_ENOENT : ZZ_EIO;
@@ -1001,16 +1091,15 @@ static uint32_t amiga_unix(const struct DateStamp *ds)
            (uint32_t)ds->ds_Tick / 50u;
 }
 
-static int examine_lock(BPTR lock, struct FileInfoBlock *fib)
+static int examine_lock(BPTR lock, struct FileInfoBlock *fib,
+                        int *transport_ok)
 {
-    if (!Examine(lock, fib))
-        return 0;
-    return 1;
+    return examine_lock_async(lock, fib, transport_ok);
 }
 
 static int lock_target(BPTR dir, const char *leaf, BPTR *out, int *err)
 {
-    BPTR old;
+    int transport_ok;
     BPTR locked;
     if (!leaf[0]) {
         *out = DupLock(dir);
@@ -1020,9 +1109,11 @@ static int lock_target(BPTR dir, const char *leaf, BPTR *out, int *err)
         }
         return 1;
     }
-    old = CurrentDir(dir);
-    locked = Lock((STRPTR)leaf, ACCESS_READ);
-    CurrentDir(old);
+    locked = lock_async(dir, leaf, ACCESS_READ, &transport_ok);
+    if (!transport_ok) {
+        *err = ZZ_EIO;
+        return 0;
+    }
     if (!locked) {
         *err = zz_from_io();
         if (*err == ZZ_OK)
@@ -1041,12 +1132,13 @@ static int lock_target(BPTR dir, const char *leaf, BPTR *out, int *err)
 static int final_path_under_root(BPTR dir, const char *leaf, int create,
                                  int *err)
 {
-    BPTR old;
-    BPTR locked;
+    int transport_ok;
+    BPTR locked = lock_async(dir, leaf, ACCESS_READ, &transport_ok);
 
-    old = CurrentDir(dir);
-    locked = Lock((STRPTR)leaf, ACCESS_READ);
-    CurrentDir(old);
+    if (!transport_ok) {
+        *err = ZZ_EIO;
+        return 0;
+    }
     if (!locked) {
         if (create && IoErr() == ERROR_OBJECT_NOT_FOUND)
             return 1;
@@ -1203,7 +1295,7 @@ static void close_list_index(int index)
     if (index < 0 || index >= ZZAPP_FD_COUNT)
         return;
     if (lists[index].fib)
-        FreeMem(lists[index].fib, sizeof(struct FileInfoBlock));
+        FreeDosObject(DOS_FIB, lists[index].fib);
     if (lists[index].lock)
         UnLock(lists[index].lock);
     lists[index].fib = NULL;
@@ -1217,13 +1309,14 @@ static void serve_open(const struct zzapp_file_wire *req)
     char path[256];
     char leaf[108];
     BPTR dir = 0;
-    BPTR old;
     BPTR fh = 0;
     LONG mode = MODE_OLDFILE;
+    LONG examined;
     int err = ZZ_OK;
     int index;
     int absolute = 0;
-    struct FileInfoBlock fib;
+    int transport_ok;
+    struct FileInfoBlock *fib = NULL;
     uint64_t size = 0;
     uint32_t mtime = 0;
     uint32_t mode_out = ZZAPP_MODE_FILE;
@@ -1250,9 +1343,14 @@ static void serve_open(const struct zzapp_file_wire *req)
         }
         absolute = 1;
     }
-    heartbeat();
+    if (!generation_owned(file_generation))
+        goto done;
     if (absolute) {
-        fh = Open((STRPTR)path, mode);
+        fh = open_find_async(0, path, mode, &transport_ok);
+        if (!transport_ok) {
+            err = ZZ_EIO;
+            goto done;
+        }
     } else {
         dir = resolve_rel(path, leaf, sizeof(leaf), &err);
         if (!dir)
@@ -1265,9 +1363,11 @@ static void serve_open(const struct zzapp_file_wire *req)
                                    (req->flags & ZZAPP_FILE_CREATE) != 0,
                                    &err))
             goto done;
-        old = CurrentDir(dir);
-        fh = Open((STRPTR)leaf, mode);
-        CurrentDir(old);
+        fh = open_find_async(dir, leaf, mode, &transport_ok);
+        if (!transport_ok) {
+            err = ZZ_EIO;
+            goto done;
+        }
     }
     if (!fh) {
         err = zz_from_io();
@@ -1277,10 +1377,21 @@ static void serve_open(const struct zzapp_file_wire *req)
     }
     if (!file_request_is_current(req->seq))
         goto done;
-    if (ExamineFH(fh, &fib)) {
-        size = (uint32_t)fib.fib_Size;
-        mtime = amiga_unix(&fib.fib_Date);
-        if (fib.fib_DirEntryType > 0)
+    fib = AllocDosObject(DOS_FIB, NULL);
+    if (!fib) {
+        err = ZZ_ENOMEM;
+        goto done;
+    }
+    examined = file_packet_async(fh, ACTION_EXAMINE_FH, (LONG)MKBADDR(fib),
+                                 0, 0, 0, &transport_ok);
+    if (!transport_ok) {
+        err = ZZ_EIO;
+        goto done;
+    }
+    if (examined != 0) {
+        size = (uint32_t)fib->fib_Size;
+        mtime = amiga_unix(&fib->fib_Date);
+        if (fib->fib_DirEntryType > 0)
             mode_out = ZZAPP_MODE_DIR;
     }
     if (!file_request_is_current(req->seq))
@@ -1289,8 +1400,10 @@ static void serve_open(const struct zzapp_file_wire *req)
     files[index].used = 1;
     fh = 0;
 done:
+    if (fib)
+        FreeDosObject(DOS_FIB, fib);
     if (fh)
-        Close(fh);
+        (void)end_async(fh, &transport_ok);
     if (dir)
         UnLock(dir);
     file_reply(req->seq, req->fd, err, 0, mode_out, size, mtime);
@@ -1300,10 +1413,17 @@ static void serve_close(const struct zzapp_file_wire *req)
 {
     int err = ZZ_OK;
     int index = slot_index(req->fd, &err);
+    int transport_ok;
     if (index < 0 || !files[index].used)
         err = ZZ_EBADF;
-    else
-        close_fd_index(index);
+    else {
+        if (files[index].fh) {
+            if (!end_async(files[index].fh, &transport_ok))
+                err = transport_ok ? zz_from_io() : ZZ_EIO;
+            files[index].fh = 0;
+        }
+        files[index].used = 0;
+    }
     file_reply(req->seq, req->fd, err, 0, 0, 0, 0);
 }
 
@@ -1324,13 +1444,21 @@ static void serve_read(const struct zzapp_file_wire *req)
     while (left) {
         uint32_t chunk = left > ZZRUN_READ_CHUNK ? ZZRUN_READ_CHUNK : left;
         LONG n;
+        int transport_ok;
 
         if (!file_request_is_current(req->seq))
             return;
-        heartbeat();
+        if (!generation_owned(file_generation))
+            return;
         if (ctrl_c_set())
             break;
-        n = Read(files[index].fh, file_io_buffer, (LONG)chunk);
+        n = file_packet_async(files[index].fh, ACTION_READ,
+                              (LONG)file_io_buffer, (LONG)chunk, 0, 0,
+                              &transport_ok);
+        if (!transport_ok) {
+            err = ZZ_EIO;
+            break;
+        }
         if (n < 0) {
             err = zz_from_io();
             break;
@@ -1365,6 +1493,7 @@ static void serve_write(const struct zzapp_file_wire *req)
     while (left) {
         uint32_t chunk = left > ZZRUN_READ_CHUNK ? ZZRUN_READ_CHUNK : left;
         LONG n;
+        int transport_ok;
 
         if (!file_request_is_current(req->seq))
             return;
@@ -1372,8 +1501,15 @@ static void serve_write(const struct zzapp_file_wire *req)
         if (!file_request_is_current(req->seq))
             return;
         memcpy(file_io_buffer, window + ZZAPP_DATA_OFF + done, chunk);
-        heartbeat();
-        n = Write(files[index].fh, file_io_buffer, (LONG)chunk);
+        if (!generation_owned(file_generation))
+            return;
+        n = file_packet_async(files[index].fh, ACTION_WRITE,
+                              (LONG)file_io_buffer, (LONG)chunk, 0, 0,
+                              &transport_ok);
+        if (!transport_ok) {
+            err = ZZ_EIO;
+            break;
+        }
         if (n < 0) {
             err = zz_from_io();
             break;
@@ -1397,6 +1533,7 @@ static void serve_seek(const struct zzapp_file_wire *req)
     int err = ZZ_OK;
     int index = slot_index(req->fd, &err);
     LONG mode, pos, current;
+    int transport_ok;
     int64_t target;
     if (index < 0 || !files[index].used) {
         file_reply(req->seq, req->fd, ZZ_EBADF, 0, 0, 0, 0);
@@ -1423,13 +1560,18 @@ static void serve_seek(const struct zzapp_file_wire *req)
         file_reply(req->seq, req->fd, ZZ_EINVAL, 0, 0, 0, 0);
         return;
     }
-    pos = Seek(files[index].fh, (LONG)target, mode);
-    if (pos < 0) {
-        file_reply(req->seq, req->fd, zz_from_io(), 0, 0, 0, 0);
+    pos = file_packet_async(files[index].fh, ACTION_SEEK, (LONG)target,
+                            mode, 0, 0, &transport_ok);
+    if (!transport_ok || pos < 0) {
+        file_reply(req->seq, req->fd,
+                   transport_ok ? zz_from_io() : ZZ_EIO, 0, 0, 0, 0);
         return;
     }
-    current = Seek(files[index].fh, 0, OFFSET_CURRENT);
-    if (current < 0)
+    current = file_packet_async(files[index].fh, ACTION_SEEK, 0,
+                                OFFSET_CURRENT, 0, 0, &transport_ok);
+    if (!transport_ok)
+        err = ZZ_EIO;
+    else if (current < 0)
         err = zz_from_io();
     file_reply(req->seq, req->fd, err, 0, 0,
                err ? 0 : (uint64_t)current, 0);
@@ -1441,8 +1583,9 @@ static void serve_stat(const struct zzapp_file_wire *req)
     char leaf[108];
     BPTR dir = 0;
     BPTR locked = 0;
-    struct FileInfoBlock fib;
+    struct FileInfoBlock *fib = NULL;
     int err = ZZ_OK;
+    int transport_ok;
     uint32_t mode = 0;
     uint64_t size = 0;
     uint32_t mtime = 0;
@@ -1453,13 +1596,18 @@ static void serve_stat(const struct zzapp_file_wire *req)
         err = ZZ_EINVAL;
         goto done;
     }
-    heartbeat();
+    if (!generation_owned(file_generation))
+        goto done;
     if (strchr(path, ':')) {
         if (!abs_paths) {
             err = ZZ_EACCES;
             goto done;
         }
-        locked = Lock((STRPTR)path, ACCESS_READ);
+        locked = lock_abs_async(path, &transport_ok);
+        if (!transport_ok) {
+            err = ZZ_EIO;
+            goto done;
+        }
         if (!locked) {
             err = zz_from_io();
             goto done;
@@ -1471,14 +1619,21 @@ static void serve_stat(const struct zzapp_file_wire *req)
         if (!lock_target(dir, leaf, &locked, &err))
             goto done;
     }
-    if (!examine_lock(locked, &fib)) {
-        err = zz_from_io();
+    fib = AllocDosObject(DOS_FIB, NULL);
+    if (!fib) {
+        err = ZZ_ENOMEM;
         goto done;
     }
-    mode = fib.fib_DirEntryType > 0 ? ZZAPP_MODE_DIR : ZZAPP_MODE_FILE;
-    size = (uint32_t)fib.fib_Size;
-    mtime = amiga_unix(&fib.fib_Date);
+    if (!examine_lock(locked, fib, &transport_ok)) {
+        err = transport_ok ? zz_from_io() : ZZ_EIO;
+        goto done;
+    }
+    mode = fib->fib_DirEntryType > 0 ? ZZAPP_MODE_DIR : ZZAPP_MODE_FILE;
+    size = (uint32_t)fib->fib_Size;
+    mtime = amiga_unix(&fib->fib_Date);
 done:
+    if (fib)
+        FreeDosObject(DOS_FIB, fib);
     if (locked)
         UnLock(locked);
     if (dir)
@@ -1495,6 +1650,7 @@ static void serve_list_open(const struct zzapp_file_wire *req)
     struct FileInfoBlock *fib = NULL;
     int err = ZZ_OK;
     int index = slot_index(req->fd, &err);
+    int transport_ok;
 
     if (index < 0)
         goto done;
@@ -1504,13 +1660,18 @@ static void serve_list_open(const struct zzapp_file_wire *req)
     }
     if (!path_from_wire(req, path, &err))
         goto done;
-    heartbeat();
+    if (!generation_owned(file_generation))
+        goto done;
     if (strchr(path, ':')) {
         if (!abs_paths) {
             err = ZZ_EACCES;
             goto done;
         }
-        locked = Lock((STRPTR)path, ACCESS_READ);
+        locked = lock_abs_async(path, &transport_ok);
+        if (!transport_ok) {
+            err = ZZ_EIO;
+            goto done;
+        }
         if (!locked) {
             err = zz_from_io();
             goto done;
@@ -1528,13 +1689,13 @@ static void serve_list_open(const struct zzapp_file_wire *req)
     }
     if (!file_request_is_current(req->seq))
         goto done;
-    fib = AllocMem(sizeof(*fib), MEMF_PUBLIC | MEMF_CLEAR);
+    fib = AllocDosObject(DOS_FIB, NULL);
     if (!fib) {
         err = ZZ_ENOMEM;
         goto done;
     }
-    if (!Examine(locked, fib)) {
-        err = zz_from_io();
+    if (!examine_lock(locked, fib, &transport_ok)) {
+        err = transport_ok ? zz_from_io() : ZZ_EIO;
         goto done;
     }
     if (fib->fib_DirEntryType < 0) {
@@ -1551,7 +1712,7 @@ static void serve_list_open(const struct zzapp_file_wire *req)
     fib = NULL;
 done:
     if (fib)
-        FreeMem(fib, sizeof(*fib));
+        FreeDosObject(DOS_FIB, fib);
     if (locked)
         UnLock(locked);
     if (dir)
@@ -1564,6 +1725,7 @@ static void serve_list_next(const struct zzapp_file_wire *req)
 {
     int err = ZZ_OK;
     int index = slot_index(req->fd, &err);
+    int transport_ok;
     uint32_t mode = 0;
     uint32_t n = 0;
     size_t len;
@@ -1573,9 +1735,11 @@ static void serve_list_next(const struct zzapp_file_wire *req)
     }
     if (!file_request_is_current(req->seq))
         return;
-    heartbeat();
-    if (!ExNext(lists[index].lock, lists[index].fib)) {
-        err = zz_from_io();
+    if (!generation_owned(file_generation))
+        return;
+    if (!examine_next_async(lists[index].lock, lists[index].fib,
+                            &transport_ok)) {
+        err = transport_ok ? zz_from_io() : ZZ_EIO;
         file_reply(req->seq, req->fd, err, 0, 0, 0, 0);
         return;
     }
@@ -1605,9 +1769,29 @@ static void serve_list_close(const struct zzapp_file_wire *req)
     file_reply(req->seq, req->fd, err, 0, 0, 0, 0);
 }
 
+static void serve_file_request(const struct zzapp_file_wire *req)
+{
+    switch (req->op) {
+    case ZZAPP_FILE_OP_OPEN: serve_open(req); break;
+    case ZZAPP_FILE_OP_CLOSE: serve_close(req); break;
+    case ZZAPP_FILE_OP_READ: serve_read(req); break;
+    case ZZAPP_FILE_OP_WRITE: serve_write(req); break;
+    case ZZAPP_FILE_OP_SEEK: serve_seek(req); break;
+    case ZZAPP_FILE_OP_STAT: serve_stat(req); break;
+    case ZZAPP_FILE_OP_LIST_OPEN: serve_list_open(req); break;
+    case ZZAPP_FILE_OP_LIST_NEXT: serve_list_next(req); break;
+    case ZZAPP_FILE_OP_LIST_CLOSE: serve_list_close(req); break;
+    default:
+        file_reply(req->seq, req->fd, ZZ_ENOSYS, 0, 0, 0, 0);
+        break;
+    }
+}
+
+
 static void serve_files(void)
 {
     struct zzapp_file_wire req;
+
     if (!window)
         return;
     file_generation = life_get(ZZAPP_LIFE_GENERATION_OFF);
@@ -1615,20 +1799,8 @@ static void serve_files(void)
         return;
     if (req.seq == 0 || req.seq == file_reply_seq || (req.seq & 1u))
         return;
-    switch (req.op) {
-    case ZZAPP_FILE_OP_OPEN: serve_open(&req); break;
-    case ZZAPP_FILE_OP_CLOSE: serve_close(&req); break;
-    case ZZAPP_FILE_OP_READ: serve_read(&req); break;
-    case ZZAPP_FILE_OP_WRITE: serve_write(&req); break;
-    case ZZAPP_FILE_OP_SEEK: serve_seek(&req); break;
-    case ZZAPP_FILE_OP_STAT: serve_stat(&req); break;
-    case ZZAPP_FILE_OP_LIST_OPEN: serve_list_open(&req); break;
-    case ZZAPP_FILE_OP_LIST_NEXT: serve_list_next(&req); break;
-    case ZZAPP_FILE_OP_LIST_CLOSE: serve_list_close(&req); break;
-    default:
-        file_reply(req.seq, req.fd, ZZ_ENOSYS, 0, 0, 0, 0);
-        break;
-    }
+    serve_file_request(&req);
+    (void)heartbeat_owned(file_generation);
 }
 
 static void push_event(uint16_t type, uint16_t code, int16_t dx, int16_t dy,
@@ -2806,7 +2978,8 @@ static int open_display(uint32_t w, uint32_t h, uint32_t format, ULONG forced_mo
     mode = mode_for(w, h, format, forced_mode);
     if (mode == (ULONG)INVALID_ID)
         return 0;
-    heartbeat();
+    if (!heartbeat_owned(owned_generation))
+        return 0;
     screen = open_p96_screen(mode, w, h, depth, rgb);
     if (!screen)
         return 0;
@@ -3094,13 +3267,324 @@ static int fill_argv(void)
     return 1;
 }
 
+/*
+ * A DOS packet may block on slow media. ZZRun waits on a reply port it owns
+ * together with its lease timer and Ctrl-C, renewing the heartbeat while the
+ * captured generation is still its own. Only the reply ends the wait: packet
+ * and buffers stay alive until then, even after Ctrl-C or a lost generation.
+ */
+static int dos_packet_async(struct MsgPort *handler, LONG action, LONG arg1,
+                            LONG arg2, LONG arg3, LONG arg4, LONG arg5,
+                            uint32_t captured_generation, LONG *result_out,
+                            int *ownership_lost)
+{
+    struct MsgPort *port;
+    struct StandardPacket *packet;
+    struct Message *message;
+    ULONG mask;
+    ULONG signals;
+    int abandoned = 0;
+
+
+    if (result_out)
+        *result_out = -1;
+    if (ownership_lost)
+        *ownership_lost = 0;
+    if (!handler || !result_out)
+        return 0;
+    port = CreateMsgPort();
+    packet = AllocMem(sizeof(*packet), MEMF_PUBLIC | MEMF_CLEAR);
+    if (!port || !packet) {
+        if (packet)
+            FreeMem(packet, sizeof(*packet));
+        if (port)
+            DeleteMsgPort(port);
+        SetIoErr(zzrun_dos_error_code(0, 0, ERROR_NO_FREE_STORE));
+        return 0;
+    }
+    packet->sp_Msg.mn_Node.ln_Name = (char *)&packet->sp_Pkt;
+    packet->sp_Pkt.dp_Link = &packet->sp_Msg;
+    packet->sp_Pkt.dp_Port = port;
+    packet->sp_Pkt.dp_Type = action;
+    packet->sp_Pkt.dp_Arg1 = arg1;
+    packet->sp_Pkt.dp_Arg2 = arg2;
+    packet->sp_Pkt.dp_Arg3 = arg3;
+    packet->sp_Pkt.dp_Arg4 = arg4;
+    packet->sp_Pkt.dp_Arg5 = arg5;
+    PutMsg(handler, &packet->sp_Msg);
+    timer_reap();
+    timer_arm();
+    mask = (1UL << port->mp_SigBit) | SIGBREAKF_CTRL_C;
+    if (timer_port)
+        mask |= 1UL << timer_port->mp_SigBit;
+    for (;;) {
+        signals = Wait(mask);
+        if ((signals & SIGBREAKF_CTRL_C) || ctrl_c_set()) {
+            SetSignal(0, SIGBREAKF_CTRL_C);
+            user_stop = 1;
+            if (zzrun_ctrl_c_must_request_stop(1))
+                request_stop();
+            abandoned = zzrun_packet_abandoned(1, 1);
+        }
+        if (timer_port && (signals & (1UL << timer_port->mp_SigBit))) {
+            timer_reap();
+            if (captured_generation != 0 &&
+                zzrun_packet_abandoned(0,
+                    heartbeat_owned(captured_generation))) {
+                abandoned = 1;
+                if (ownership_lost)
+                    *ownership_lost = 1;
+            }
+            if (!abandoned)
+                timer_arm();
+        }
+        message = GetMsg(port);
+        if (!zzrun_packet_keep_waiting(message != NULL))
+            break;
+    }
+    timer_reap();
+    if (captured_generation != 0 && !generation_owned(captured_generation)) {
+        abandoned = 1;
+        if (ownership_lost)
+            *ownership_lost = 1;
+    }
+    SetIoErr(zzrun_dos_error_code(1, packet->sp_Pkt.dp_Res2,
+                                  ERROR_NO_FREE_STORE));
+    *result_out = packet->sp_Pkt.dp_Res1;
+    FreeMem(packet, sizeof(*packet));
+    DeleteMsgPort(port);
+    return !abandoned;
+}
+
+static LONG file_packet_async(BPTR fh, LONG action, LONG arg2, LONG arg3,
+                              LONG arg4, LONG arg5, int *transport_ok)
+{
+    struct FileHandle *handle = (struct FileHandle *)BADDR(fh);
+    LONG result;
+
+    if (transport_ok)
+        *transport_ok = 0;
+    if (!handle || !handle->fh_Type || !transport_ok)
+        return -1;
+    if (!dos_packet_async(handle->fh_Type, action, handle->fh_Arg1, arg2,
+                          arg3, arg4, arg5, file_generation, &result, NULL))
+        return -1;
+    *transport_ok = 1;
+    return result;
+}
+
+static int examine_lock_async(BPTR lock, struct FileInfoBlock *fib,
+                              int *transport_ok)
+{
+    struct FileLock *file_lock = (struct FileLock *)BADDR(lock);
+    LONG result;
+
+    if (transport_ok)
+        *transport_ok = 0;
+    if (!file_lock || !file_lock->fl_Task || !fib || !transport_ok)
+        return 0;
+    if (!dos_packet_async(file_lock->fl_Task, ACTION_EXAMINE_OBJECT,
+                          (LONG)lock, (LONG)MKBADDR(fib), 0, 0, 0,
+                          file_generation, &result, NULL))
+        return 0;
+    *transport_ok = 1;
+    return zzrun_dos_boolean_result(1, result);
+}
+
+static int examine_next_async(BPTR lock, struct FileInfoBlock *fib,
+                              int *transport_ok)
+{
+    struct FileLock *file_lock = (struct FileLock *)BADDR(lock);
+    LONG result;
+
+    if (transport_ok)
+        *transport_ok = 0;
+    if (!file_lock || !file_lock->fl_Task || !fib || !transport_ok)
+        return 0;
+    if (!dos_packet_async(file_lock->fl_Task, ACTION_EXAMINE_NEXT,
+                          (LONG)lock, (LONG)MKBADDR(fib), 0, 0, 0,
+                          file_generation, &result, NULL))
+        return 0;
+    *transport_ok = 1;
+    return zzrun_dos_boolean_result(1, result);
+}
+
+static LONG load_read_async(BPTR fh, uint8_t *buffer, LONG bytes,
+                            int *ownership_lost)
+{
+    struct FileHandle *handle = (struct FileHandle *)BADDR(fh);
+    LONG result;
+
+    if (ownership_lost)
+        *ownership_lost = 0;
+    if (!handle || !handle->fh_Type || !ownership_lost)
+        return -1;
+    if (!dos_packet_async(handle->fh_Type, ACTION_READ, handle->fh_Arg1,
+                          (LONG)buffer, bytes, 0, 0, owned_generation,
+                          &result, ownership_lost))
+        return -1;
+    return result;
+}
+
+/* DOS packet name arguments are BSTRs: a longword-aligned buffer holding the
+ * host-tested zzrun_bstr_encode layout. The storage is freed once the packet
+ * has been replied to. */
+static BPTR bstr_alloc(const char *name, uint8_t **storage)
+{
+    uint8_t *buf;
+
+    *storage = NULL;
+    if (!name)
+        return 0;
+    buf = AllocVec(258u, MEMF_PUBLIC);
+    if (!buf)
+        return 0;
+    if (zzrun_bstr_encode(name, buf, 258u) == 0u) {
+        FreeVec(buf);
+        SetIoErr(ERROR_OBJECT_TOO_LARGE);
+        return 0;
+    }
+    *storage = buf;
+    return MKBADDR(buf);
+}
+
+static BPTR lock_async(BPTR dir, const char *name, LONG access,
+                       int *transport_ok)
+{
+    struct FileLock *file_lock = (struct FileLock *)BADDR(dir);
+    uint8_t *storage;
+    BPTR name_bstr;
+    LONG result = -1;
+
+    if (transport_ok)
+        *transport_ok = 0;
+    if (!file_lock || !file_lock->fl_Task || !transport_ok)
+        return 0;
+    name_bstr = bstr_alloc(name, &storage);
+    if (!name_bstr) {
+        SetIoErr(zzrun_dos_error_code(0, 0, ERROR_OBJECT_TOO_LARGE));
+        return 0;
+    }
+    if (dos_packet_async(file_lock->fl_Task, ACTION_LOCATE_OBJECT,
+                         (LONG)dir, (LONG)name_bstr, access, 0, 0,
+                         file_generation, &result, NULL))
+        *transport_ok = 1;
+    else
+        result = -1;
+    FreeVec(storage);
+    if (result < 0)
+        return 0;
+    return (BPTR)result;
+}
+
+/* Absolute (ABS tooltype) paths. DeviceProc can block when the volume is
+ * unmounted or a late-binding assign loads its handler; ABS is opt-in, and
+ * the previous synchronous Lock/Open blocked identically at this point. */
+static BPTR lock_abs_async(const char *name, int *transport_ok)
+{
+    struct MsgPort *handler = DeviceProc((STRPTR)name);
+    uint8_t *storage;
+    BPTR name_bstr;
+    LONG result = -1;
+
+    if (transport_ok)
+        *transport_ok = 0;
+    if (!handler || !transport_ok)
+        return 0;
+    name_bstr = bstr_alloc(name, &storage);
+    if (!name_bstr) {
+        SetIoErr(zzrun_dos_error_code(0, 0, ERROR_OBJECT_TOO_LARGE));
+        return 0;
+    }
+    if (dos_packet_async(handler, ACTION_LOCATE_OBJECT, 0, (LONG)name_bstr,
+                         ACCESS_READ, 0, 0, file_generation, &result, NULL))
+        *transport_ok = 1;
+    else
+        result = -1;
+    FreeVec(storage);
+    if (result < 0)
+        return 0;
+    return (BPTR)result;
+}
+
+static BPTR open_find_async(BPTR dir, const char *name, LONG mode,
+                            int *transport_ok)
+{
+    struct FileLock *file_lock = (struct FileLock *)BADDR(dir);
+    struct FileHandle *handle;
+    struct MsgPort *handler;
+    uint8_t *storage;
+    BPTR name_bstr;
+    LONG action;
+    LONG result = 0;
+
+    if (transport_ok)
+        *transport_ok = 0;
+    handler = file_lock ? file_lock->fl_Task : DeviceProc((STRPTR)name);
+    if (!handler || !transport_ok)
+        return 0;
+    if (mode == MODE_NEWFILE)
+        action = ACTION_FINDOUTPUT;
+    else if (mode == MODE_READWRITE)
+        action = ACTION_FINDUPDATE;
+    else
+        action = ACTION_FINDINPUT;
+    handle = AllocDosObject(DOS_FILEHANDLE, NULL);
+    if (!handle) {
+        SetIoErr(ERROR_NO_FREE_STORE);
+        return 0;
+    }
+    handle->fh_Type = handler;
+    handle->fh_Arg1 = 0;
+    name_bstr = bstr_alloc(name, &storage);
+    if (!name_bstr) {
+        FreeDosObject(DOS_FILEHANDLE, handle);
+        SetIoErr(zzrun_dos_error_code(0, 0, ERROR_OBJECT_TOO_LARGE));
+        return 0;
+    }
+    if (dos_packet_async(handler, action, MKBADDR(handle), (LONG)dir,
+                         (LONG)name_bstr, 0, 0, file_generation, &result,
+                         NULL))
+        *transport_ok = 1;
+    else
+        result = 0;
+    FreeVec(storage);
+    if (result == 0) {
+        FreeDosObject(DOS_FILEHANDLE, handle);
+        return 0;
+    }
+    return MKBADDR(handle);
+}
+
+static int end_async(BPTR fh, int *transport_ok)
+{
+    struct FileHandle *handle = (struct FileHandle *)BADDR(fh);
+    LONG result;
+
+    if (transport_ok)
+        *transport_ok = 0;
+    if (!handle || !handle->fh_Type || !transport_ok)
+        return 0;
+    if (!dos_packet_async(handle->fh_Type, ACTION_END, handle->fh_Arg1,
+                          0, 0, 0, 0, file_generation, &result, NULL))
+        return 0;
+    *transport_ok = 1;
+    if (!zzrun_dos_boolean_result(1, result))
+        return 0;
+    FreeDosObject(DOS_FILEHANDLE, handle);
+    return 1;
+}
+
 static int load_elf(BPTR fh, LONG size)
 {
     uint8_t payload[ZZAPP_CHUNK_REQ_BYTES];
     uint8_t begin_payload[4];
     ZZ9KMailboxEntry reply;
     uint32_t prior_generation = life_get(ZZAPP_LIFE_GENERATION_OFF);
+    uint32_t load_slot;
+    uint32_t load_generation;
     LONG offset = 0;
+    int ownership_lost;
     int submitted;
     int status;
     int maxmem_decision = zzrun_maxmem_decision(slots_supported, maxmem_mib);
@@ -3125,6 +3609,8 @@ static int load_elf(BPTR fh, LONG size)
         puts("ZZRun: load begin did not claim this launcher generation");
         return 0;
     }
+    load_slot = owned_slot;
+    load_generation = owned_generation;
     if (!fill_argv()) {
         tell("Arguments do not fit in the argv area.");
         stop_owned();
@@ -3141,7 +3627,14 @@ static int load_elf(BPTR fh, LONG size)
             stop_owned();
             return 0;
         }
-        n = Read(fh, window + ZZAPP_STAGING_OFF, chunk);
+        ownership_lost = 0;
+        n = load_read_async(fh, window + ZZAPP_STAGING_OFF, chunk,
+                            &ownership_lost);
+        if (ownership_lost) {
+            (void)mailbox_selected(ZZAPP_OP_LOAD_END, NULL, 0, load_slot,
+                                   load_generation, &reply);
+            return 0;
+        }
         if (n != chunk) {
             puts("ZZRun: short read while loading the ELF");
             stop_owned();
@@ -3267,7 +3760,10 @@ static int run_loop(ULONG forced_mode)
             ownership_lost = 1;
             break;
         }
-        heartbeat();
+        if (!heartbeat_owned(owned_generation)) {
+            ownership_lost = 1;
+            break;
+        }
         if ((signals & SIGBREAKF_CTRL_C) || ctrl_c_set()) {
             SetSignal(0, SIGBREAKF_CTRL_C);
             user_stop = 1;
@@ -3490,6 +3986,7 @@ int main(int argc, char **argv)
     LONG size;
     int rc = 20;
     int show_status = 0;
+    int release_slot = -1;
     uint32_t abi_major, abi_minor, caps, state;
     uint32_t arm_address, host_offset, win_size;
     struct zzrun_claim_reply claim;
@@ -3543,7 +4040,17 @@ int main(int argc, char **argv)
     } else {
         int i;
 
-        if (argc == 2 && zzrun_is_status_keyword(argv[1])) {
+        if (argc == 3 && strcmp(argv[1], "RELEASE") == 0) {
+            char *end = NULL;
+            unsigned long slot = strtoul(argv[2], &end, 10);
+
+            if (!end || *end || slot >= ZZAPP_SLOT_COUNT) {
+                usage();
+                cleanup();
+                return 10;
+            }
+            release_slot = (int)slot;
+        } else if (argc == 2 && zzrun_is_status_keyword(argv[1])) {
             show_status = 1;
         } else {
             if (argc < 2) {
@@ -3582,7 +4089,7 @@ int main(int argc, char **argv)
             }
         }
     }
-    if (!show_status && !open_root(root_text)) {
+    if (!show_status && release_slot < 0 && !open_root(root_text)) {
         cleanup();
         return 20;
     }
@@ -3591,7 +4098,7 @@ int main(int argc, char **argv)
         cleanup();
         return 20;
     }
-    if (!show_status)
+    if (!show_status && release_slot < 0)
         printf("ZZRun %s\nboard %08lx Zorro %lu\n", ZZRUN_VERSION,
                (unsigned long)board.address, (unsigned long)board.zorro_version);
     ZZ9KBase = OpenLibrary((CONST_STRPTR)"zz9k.library", 0);
@@ -3635,6 +4142,16 @@ int main(int argc, char **argv)
     }
     if (show_status) {
         rc = print_status(state, slots_supported ? &slots_query : NULL);
+        cleanup();
+        return rc;
+    }
+    if (release_slot >= 0) {
+        if (!slots_supported) {
+            tell("ZZRun: RELEASE requires slot-capable firmware.");
+            cleanup();
+            return 20;
+        }
+        rc = release_quarantined_slot((uint32_t)release_slot);
         cleanup();
         return rc;
     }
@@ -3694,36 +4211,93 @@ int main(int argc, char **argv)
         return 20;
     }
     TimerBase = timer_io->tr_node.io_Device;
-    fh = Open((STRPTR)elf_path, MODE_OLDFILE);
-    if (!fh) {
-        printf("ZZRun: cannot open %s\n", elf_path);
+    if (zzrun_lease_gate_stops((int)owned_generation,
+                                heartbeat_owned(owned_generation))) {
         cleanup();
         return 20;
     }
-    Seek(fh, 0, OFFSET_END);
-    size = Seek(fh, 0, OFFSET_BEGINNING);
+    file_generation = owned_generation;
+    {
+        BPTR base_dir = 0;
+        int transport_ok;
+
+        if (!strchr(elf_path, ':')) {
+            base_dir = CurrentDir(0);
+            CurrentDir(base_dir);
+        }
+        fh = open_find_async(base_dir, elf_path, MODE_OLDFILE, &transport_ok);
+        if (!transport_ok || !fh) {
+            printf("ZZRun: cannot open %s\n", elf_path);
+            cleanup();
+            return 20;
+        }
+    }
+    if (zzrun_lease_gate_stops((int)owned_generation,
+                                heartbeat_owned(owned_generation))) {
+        (void)end_async(fh, &(int){0});
+        cleanup();
+        return 20;
+    }
+    {
+        int transport_ok = 0;
+        LONG end_seek = file_packet_async(fh, ACTION_SEEK, 0, OFFSET_END,
+                                          0, 0, &transport_ok);
+
+        if (!transport_ok || end_seek < 0) {
+            printf("ZZRun: cannot read %s (io error %ld)\n", elf_path,
+                   (long)zz_from_io());
+            (void)end_async(fh, &(int){0});
+            cleanup();
+            return 20;
+        }
+    }
+    if (zzrun_lease_gate_stops((int)owned_generation,
+                                heartbeat_owned(owned_generation))) {
+        (void)end_async(fh, &(int){0});
+        cleanup();
+        return 20;
+    }
+    {
+        int transport_ok = 0;
+
+        size = file_packet_async(fh, ACTION_SEEK, 0, OFFSET_BEGINNING, 0, 0,
+                                 &transport_ok);
+        if (!transport_ok || size < 0) {
+            printf("ZZRun: cannot read %s\n", elf_path);
+            (void)end_async(fh, &(int){0});
+            cleanup();
+            return 20;
+        }
+    }
+    if (zzrun_lease_gate_stops((int)owned_generation,
+                                heartbeat_owned(owned_generation))) {
+        (void)end_async(fh, &(int){0});
+        cleanup();
+        return 20;
+    }
     if (size <= 0 || (ULONG)size > ZZRUN_IMAGE_LIMIT) {
         printf("ZZRun: %s is empty or larger than the 16 MiB image limit\n",
                elf_path);
-        Close(fh);
+        (void)end_async(fh, &(int){0});
         cleanup();
         return 20;
     }
     printf("loading %s (%ld bytes)\n", elf_path, (long)size);
     if (!load_elf(fh, size)) {
-        Close(fh);
+        (void)end_async(fh, &(int){0});
         cleanup();
         return ctrl_c_set() ? 5 : 20;
     }
-    Close(fh);
+    (void)end_async(fh, &(int){0});
     fh = 0;
     /* Launcher capabilities go in after the load: LOAD_BEGIN clears the
      * flags word and LOAD_END replaces it with the ELF note's flags.  The
      * app is not running yet, so this read-modify-write cannot race. */
     life_put(ZZAPP_LIFE_FLAGS_OFF,
-             life_get(ZZAPP_LIFE_FLAGS_OFF) | ZZAPP_F_LAUNCHER_CLUT8 |
-             ZZAPP_F_LAUNCHER_SCANOUT_ACK | ZZAPP_F_LAUNCHER_MAILBOX |
-             (audio_ahi ? ZZAPP_F_LAUNCHER_AUDIO_AHI : 0u));
+             zzrun_launcher_lease_flags(
+                 life_get(ZZAPP_LIFE_FLAGS_OFF) | ZZAPP_F_LAUNCHER_CLUT8 |
+                 ZZAPP_F_LAUNCHER_SCANOUT_ACK | ZZAPP_F_LAUNCHER_MAILBOX |
+                 (audio_ahi ? ZZAPP_F_LAUNCHER_AUDIO_AHI : 0u)));
     zzapp_build_start_request(payload, (uint32_t)app_argc + 1u);
     status = mailbox_long(ZZAPP_OP_START, payload, ZZAPP_START_REQ_BYTES,
                           &reply, NULL);

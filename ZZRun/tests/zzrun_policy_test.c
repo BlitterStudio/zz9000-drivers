@@ -31,6 +31,7 @@
 #define ZZAPP_LIST_REASONS 24u
 #define ZZAPP_LIST_NAME 28u
 #define ZZAPP_LIST_REPLY_BYTES 48u
+#define ZZAPP_F_LAUNCHER_HEARTBEAT (1u << 18)
 #endif
 
 #include "zzrun_policy.h"
@@ -456,6 +457,7 @@ static void test_list_reply_decoding(void)
     assert(strcmp(zzrun_block_reason_name(parsed.block_reason), "event") == 0);
     assert(strcmp(zzrun_terminal_reason_name(parsed.terminal_reason),
                   "forced stop") == 0);
+    assert(strcmp(zzrun_terminal_reason_name(9u), "quarantined") == 0);
 }
 
 /* Kit 66: "zzrun status" tried to load a file called "status". */
@@ -468,6 +470,71 @@ static void test_status_keyword_is_case_insensitive(void)
     assert(!zzrun_is_status_keyword("STATU"));
     assert(!zzrun_is_status_keyword(""));
 }
+static void test_launcher_lease_is_advertised(void)
+{
+    const uint32_t flags = 0x1234u;
+
+    assert(zzrun_launcher_lease_flags(flags) ==
+           (flags | ZZAPP_F_LAUNCHER_HEARTBEAT));
+}
+static void test_lease_renewal_never_crosses_generations(void)
+{
+    assert(zzrun_lease_renew_allowed(7u, 7u, 7u));
+    assert(!zzrun_lease_renew_allowed(7u, 8u, 8u));
+    assert(!zzrun_lease_renew_allowed(7u, 7u, 8u));
+    assert(!zzrun_lease_renew_allowed(0u, 0u, 0u));
+}
+static void test_dos_packet_transport_and_error_are_distinct(void)
+{
+    assert(zzrun_dos_boolean_result(1, 1));
+    assert(!zzrun_dos_boolean_result(1, 0));
+    assert(!zzrun_dos_boolean_result(0, 1));
+    assert(zzrun_dos_error_code(1, 42, -1) == 42);
+    assert(zzrun_dos_error_code(0, 42, -1) == -1);
+}
+static void test_legacy_claim_passes_the_pre_load_gate(void)
+{
+    assert(!zzrun_lease_gate_stops(0u, 0));
+    assert(!zzrun_lease_gate_stops(0u, 1));
+    assert(zzrun_lease_gate_stops(7u, 0));
+    assert(!zzrun_lease_gate_stops(7u, 1));
+}
+static void test_packet_wait_outlives_abandonment(void)
+{
+    assert(zzrun_packet_abandoned(1, 1));
+    assert(zzrun_packet_abandoned(0, 0));
+    assert(!zzrun_packet_abandoned(0, 1));
+    assert(!zzrun_packet_keep_waiting(1));
+    assert(zzrun_packet_keep_waiting(0));
+}
+static void test_bstr_encoding_matches_dos_packets(void)
+{
+    uint8_t buf[16];
+
+    assert(zzrun_bstr_encode("Work:foo", buf, sizeof(buf)) == 10u);
+    assert(buf[0] == 8);
+    assert(memcmp(buf + 1, "Work:foo", 8) == 0);
+    assert(buf[9] == 0);
+    assert(zzrun_bstr_encode("", buf, sizeof(buf)) == 2u);
+    assert(buf[0] == 0);
+    assert(zzrun_bstr_encode("ab", buf, sizeof(buf)) == 4u);
+    assert(buf[3] == 0);
+    assert(zzrun_bstr_encode("abc", buf, 2u) == 0u);
+}
+
+static void test_pending_packet_ctrl_c_still_requests_stop(void)
+{
+    assert(zzrun_ctrl_c_must_request_stop(1));
+    assert(!zzrun_ctrl_c_must_request_stop(0));
+}
+
+
+
+
+
+
+
+
 
 int main(void)
 {
@@ -503,6 +570,13 @@ int main(void)
     test_block_reason_names_match_protocol();
     test_list_reply_decoding();
     test_status_keyword_is_case_insensitive();
+    test_launcher_lease_is_advertised();
+    test_lease_renewal_never_crosses_generations();
+    test_dos_packet_transport_and_error_are_distinct();
+    test_legacy_claim_passes_the_pre_load_gate();
+    test_packet_wait_outlives_abandonment();
+    test_bstr_encoding_matches_dos_packets();
+    test_pending_packet_ctrl_c_still_requests_stop();
     puts("zzrun_policy_test: ok");
     return 0;
 }

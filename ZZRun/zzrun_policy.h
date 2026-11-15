@@ -261,6 +261,7 @@ static inline const char *zzrun_terminal_reason_name(uint8_t reason)
     case 6u: return "lease loss";
     case 7u: return "Amiga reset";
     case 8u: return "core restart";
+    case 9u: return "quarantined";
     default: return "unknown";
     }
 }
@@ -567,6 +568,94 @@ static inline uint32_t zzrun_screen_safe_completed(uint32_t pending)
 {
     return pending ? pending - 1u : 0u;
 }
+/* A new ZZRun advertises the longer main-loop lease. */
+static inline uint32_t zzrun_launcher_lease_flags(uint32_t flags)
+{
+    return flags | ZZAPP_F_LAUNCHER_HEARTBEAT;
+}
+/* A renewal captured for one generation must not keep a replacement alive. */
+static inline int zzrun_lease_renew_allowed(uint32_t captured_generation,
+                                            uint32_t owned_generation,
+                                            uint32_t observed_generation)
+{
+    return captured_generation != 0u &&
+           captured_generation == owned_generation &&
+           captured_generation == observed_generation;
+}
+
+/* A raw DOS packet has two independent outcomes: delivery to the handler and
+ * the handler's DOS result. Callers must never treat a transport failure as a
+ * successful zero/one DOS result, and must preserve dp_Res2 as IoErr(). */
+static inline int zzrun_dos_boolean_result(int transport_ok, int32_t result)
+{
+    return transport_ok && result != 0;
+}
+
+static inline int32_t zzrun_dos_error_code(int transport_ok, int32_t result2,
+                                           int32_t transport_error)
+{
+    return transport_ok ? result2 : transport_error;
+}
+/* A lease gate before LOAD_BEGIN must not block a legacy claim: its
+ * generation is 0 until LOAD_BEGIN publishes one. */
+static inline int zzrun_lease_gate_stops(int owned_generation, int heartbeat_ok)
+{
+    return owned_generation != 0 && !heartbeat_ok;
+}
+
+/* Async DOS packet wait policy: only the reply ends the wait -- ZZRun keeps
+ * the packet and its buffers alive until then, even after Ctrl-C or losing
+ * the generation; those only mark the result abandoned. */
+static inline int zzrun_packet_abandoned(int ctrl_c, int heartbeat_ok)
+{
+    return ctrl_c || !heartbeat_ok;
+}
+
+static inline int zzrun_packet_keep_waiting(int reply_arrived)
+{
+    return !reply_arrived;
+}
+
+/* DOS packet name arguments are BCPL strings (BSTR): a length byte, the
+ * characters, padded to an even total. Returns the encoded byte count, or 0
+ * when the name is longer than a BSTR can carry or does not fit the buffer. */
+static inline uint32_t zzrun_bstr_encode(const char *name, uint8_t *out,
+                                         uint32_t cap)
+{
+    uint32_t len;
+    uint32_t i;
+    uint32_t total;
+
+    if (!name || !out)
+        return 0;
+    len = 0;
+    while (name[len]) {
+        if (len >= 255u)
+            return 0;
+        len++;
+    }
+    total = 1u + len;
+    if (total & 1u)
+        total++;
+    if (cap < total)
+        return 0;
+    out[0] = (uint8_t)len;
+    for (i = 0; i < len; i++)
+        out[1u + i] = (uint8_t)name[i];
+    if (!(len & 1u))
+        out[1u + len] = 0;
+    return total;
+}
+
+/* A Ctrl-C seen while a DOS packet is pending must still reach the app as a
+ * stop request; abandoning only the packet's result loses the stop. */
+static inline int zzrun_ctrl_c_must_request_stop(int ctrl_c)
+{
+    return ctrl_c;
+}
+
+
+
 
 /* AmigaDOS keywords are case-insensitive: "ZZRun status" lists slots
  * instead of trying to load a file called "status". */
