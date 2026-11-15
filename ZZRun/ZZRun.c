@@ -262,6 +262,41 @@ static int mmu_set_properties(struct mmu_context *context, uint32_t flags,
     return d0 != 0;
 }
 
+static void mmu_lock_context(struct mmu_context *context)
+{
+    register struct mmu_context *a0 __asm("a0") = context;
+    register struct Library *a6 __asm("a6") = MMUBase;
+
+    __asm volatile("jsr -72(a6)"
+                   : "+r"(a0)
+                   : "r"(a6)
+                   : "cc", "memory", "d0", "d1", "a1", "a2");
+}
+
+static void mmu_unlock_context(struct mmu_context *context)
+{
+    register struct mmu_context *a0 __asm("a0") = context;
+    register struct Library *a6 __asm("a6") = MMUBase;
+
+    __asm volatile("jsr -78(a6)"
+                   : "+r"(a0)
+                   : "r"(a6)
+                   : "cc", "memory", "d0", "d1", "a1", "a2");
+}
+
+static int mmu_rebuild_tree(struct mmu_context *context)
+{
+    register uint32_t d0 __asm("d0");
+    register struct mmu_context *a0 __asm("a0") = context;
+    register struct Library *a6 __asm("a6") = MMUBase;
+
+    __asm volatile("jsr -96(a6)"
+                   : "=r"(d0), "+r"(a0)
+                   : "r"(a6)
+                   : "cc", "memory", "d1", "a1", "a2");
+    return d0 != 0;
+}
+
 /* The shared window stays cache-inhibited once any page is inhibited.
  * Restoring the saved mode would make another client's live window
  * copyback-cacheable again. There is no snapshot: a failed inhibit must
@@ -275,32 +310,33 @@ static void window_cache_release(void)
     }
 }
 
-static void window_cache_disable(void)
+static int window_cache_disable(void)
 {
     uint32_t page_bytes;
     uint32_t first;
     uint32_t last;
     uint32_t count;
-    uint32_t i;
 
     MMUBase = OpenLibrary((CONST_STRPTR)"mmu.library", 41);
     if (!MMUBase) {
+        /* Without mmu.library the window stays cacheable; that is the
+         * long-standing behaviour, so keep running with the warning. */
         puts("ZZRun: mmu.library unavailable; shared window remains cacheable.");
-        return;
+        return 1;
     }
     mmu_context = mmu_default_context();
     page_bytes = mmu_context ? mmu_page_size(mmu_context) : 0;
     if (page_bytes == 0 || (page_bytes & (page_bytes - 1u)) != 0u) {
         puts("ZZRun: mmu.library has no usable page size.");
         window_cache_release();
-        return;
+        return 0;
     }
     first = (uint32_t)(uintptr_t)window & ~(page_bytes - 1u);
     if (window_bytes > UINT32_MAX - (uint32_t)(uintptr_t)window ||
         (uint32_t)(uintptr_t)window + window_bytes > UINT32_MAX - (page_bytes - 1u)) {
         puts("ZZRun: shared window range overflows.");
         window_cache_release();
-        return;
+        return 0;
     }
     last = ((uint32_t)(uintptr_t)window + window_bytes + page_bytes - 1u) &
            ~(page_bytes - 1u);
@@ -308,18 +344,28 @@ static void window_cache_disable(void)
     if (count == 0) {
         puts("ZZRun: shared window page count is invalid.");
         window_cache_release();
-        return;
+        return 0;
     }
-    for (i = 0; i < count; i++) {
-        uint32_t address = first + i * page_bytes;
 
-        if (!mmu_set_properties(mmu_context, MMU_MAPP_CACHEINHIBIT,
-                                MMU_CACHE_MASK, address, page_bytes)) {
-            puts("ZZRun: cannot make the shared window non-cacheable.");
-            break;
-        }
+    /* Write back and invalidate while the old mapping is still active. */
+    CacheClearE(window, window_bytes, CACRF_ClearD);
+    mmu_lock_context(mmu_context);
+    if (!mmu_set_properties(mmu_context, MMU_MAPP_CACHEINHIBIT,
+                            MMU_CACHE_MASK, first, last - first)) {
+        mmu_unlock_context(mmu_context);
+        puts("ZZRun: cannot configure a non-cacheable shared window.");
+        window_cache_release();
+        return 0;
     }
+    if (!mmu_rebuild_tree(mmu_context)) {
+        mmu_unlock_context(mmu_context);
+        puts("ZZRun: cannot activate a non-cacheable shared window.");
+        window_cache_release();
+        return 0;
+    }
+    mmu_unlock_context(mmu_context);
     window_cache_release();
+    return 1;
 }
 
 static void win_cache(uint32_t off, uint32_t len)
@@ -3595,7 +3641,10 @@ int main(int argc, char **argv)
     window = (uint8_t *)(board.address + host_offset);
     window_bytes = win_size;
     win_cache(0, 256);
-    window_cache_disable();
+    if (!window_cache_disable()) {
+        cleanup();
+        return 20;
+    }
     if (life_get(ZZAPP_LIFE_MAGIC_OFF) != ZZAPP_LIFE_MAGIC ||
         life_get(ZZAPP_LIFE_VERSION_OFF) != ZZAPP_LIFE_VERSION) {
         puts("ZZRun: rings window magic does not match");
