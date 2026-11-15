@@ -633,6 +633,7 @@ class RepoToolingTests(unittest.TestCase):
             "mpega.library",
             "zz9k-picture.datatype",
             "amissl_v362.library",
+            "amissl_v41x.library",
         ):
             self.assertIn(artifact, script)
 

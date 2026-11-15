@@ -598,12 +598,15 @@ jobs:
           # both have to be here, not just in the SDK's own package.
           install -Dm644 artifacts/sdk-payloads/Docs/ZZPlay.guide      "$INST/Docs/ZZPlay.guide"
           install -Dm644 artifacts/sdk-payloads/Docs/ZZPlay-project.info "$INST/Docs/ZZPlay-project.info"
-          # Accelerated amissl.library, per CPU (Libs/AmiSSL/<cpu>/) — laid out
-          # like AmiSSL's own release so the installer installs the CPU-matched
-          # build. Mirrors tools/package-local.sh.
+          # Accelerated AmiSSL core libraries, per CPU (Libs/AmiSSL/<cpu>/) —
+          # laid out like AmiSSL's own release so the installer installs the
+          # CPU-matched build. amissl_v362 serves AmiSSL 5 applications,
+          # amissl_v41x AmiSSL 6 ones. Mirrors tools/package-local.sh.
           for cpu in 68020-40 68060; do
-            install -Dm644 "artifacts/amissl-libs/$cpu/amissl_v362.library" \
-              "$INST/Libs/AmiSSL/$cpu/amissl_v362.library"
+            for lib in amissl_v362.library amissl_v41x.library; do
+              install -Dm644 "artifacts/amissl-libs/$cpu/$lib" \
+                "$INST/Libs/AmiSSL/$cpu/$lib"
+            done
           done
           make_guide amissl/README.md amissl
 

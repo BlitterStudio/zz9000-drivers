@@ -1,16 +1,27 @@
-# Accelerated `amissl.library`
+# Accelerated AmiSSL libraries
 
-This optional replacement for AmiSSL 5.27 adds the ZZ9000 OpenSSL provider to `amissl_v362.library`. Existing AmiSSL applications keep using the AmiSSL API. When matching board and firmware services are available, the provider uses the card for selected TLS operations; all other paths use AmiSSL's default software provider.
+These optional replacements add the ZZ9000 OpenSSL provider to the AmiSSL core libraries. Existing AmiSSL applications keep using the AmiSSL API. When matching board and firmware services are available, the provider uses the card for selected TLS operations; all other paths use AmiSSL's default software provider.
 
-The provider source and AmiSSL patch are in [`sdk/integration/amissl/`](https://github.com/BlitterStudio/zz9000-firmware/tree/master/sdk/integration/amissl) in the firmware repository. This directory builds and stages the two libraries for the drivers release.
+AmiSSL applications are tied to the major version they were built for, so two libraries are built:
+
+| AmiSSL release | OpenSSL | Library | Used by |
+| --- | --- | --- | --- |
+| 5.27 | 3.6 | `amissl_v362.library` | Applications built with the AmiSSL 5 SDK, including ZZTop and ZZPlay |
+| 6.1 | 4.1 | `amissl_v41x.library` | Applications built with the AmiSSL 6 SDK |
+
+Installing AmiSSL 6.1 adds `amissl_v41x.library` and keeps `amissl_v362.library`, so a system upgraded from 5.27 has both.
+
+The provider source and AmiSSL patch are in [`sdk/integration/amissl/`](https://github.com/BlitterStudio/zz9000-firmware/tree/master/sdk/integration/amissl) in the firmware repository. This directory builds and stages the libraries for the drivers release.
 
 ## Install
 
-1. Install AmiSSL 5.27 first. The installer requires `LIBS:AmiSSL/amissl_v362.library`.
-2. Run the ZZ9000 drivers installer and select the accelerated library when it is offered.
+1. Install AmiSSL 5.27, 6.1, or both. The installer replaces whichever of `LIBS:AmiSSL/amissl_v362.library` and `LIBS:AmiSSL/amissl_v41x.library` is present.
+2. Run the ZZ9000 drivers installer and select the accelerated libraries when they are offered.
 3. Select the CPU build that matches the machine. `68020-40` is for 68020, 68030, 68040, and Apollo 68080; `68060` is for 68060 and Amithlon.
 
-The installer saves the original library as `LIBS:AmiSSL/amissl_v362.library.bak` before replacing it. It creates that backup only when no `.bak` exists, so a later installation does not overwrite the original. To revert, delete the accelerated `amissl_v362.library` and rename the backup.
+The installer saves each original library with a `.bak` suffix, for example `LIBS:AmiSSL/amissl_v41x.library.bak`, before replacing it. It creates a backup only when no `.bak` exists, so a later installation does not overwrite the original. To revert, delete the accelerated library and rename its backup.
+
+Reinstalling AmiSSL from Aminet overwrites the accelerated copy of each library that its archive ships. Run the ZZ9000 installer again afterwards to restore acceleration.
 
 A `68020-40` library runs on a 68060, but 64-bit multiplies are trap-emulated there. Use the `68060` library on a 68060.
 
@@ -22,16 +33,16 @@ Run this from the repository root:
 make amissl
 ```
 
-`amissl/build.sh` builds the `zz9000-amissl-adtools` image, obtains the firmware repository at the ref in `sdk/SDK_REF` unless `ZZ9000_SDK` names an SDK tree, and invokes `sdk/integration/amissl/build.sh` in the container. `OS=os3-68020` or `OS=os3-68060` selects one target; the default builds both.
+`amissl/build.sh` builds the `zz9000-amissl-adtools` image, obtains the firmware repository at the ref in `sdk/SDK_REF` unless `ZZ9000_SDK` names an SDK tree, and invokes `sdk/integration/amissl/build.sh` in the container once per AmiSSL series and CPU target. `OS=os3-68020` or `OS=os3-68060` selects one target and `AMISSL_MAJOR=5` or `AMISSL_MAJOR=6` selects one series; the default builds all four libraries.
 
 The outputs are:
 
 | AmiSSL target | Release directory |
 | --- | --- |
-| `os3-68020` | `amissl/out/68020-40/amissl_v362.library` |
-| `os3-68060` | `amissl/out/68060/amissl_v362.library` |
+| `os3-68020` | `amissl/out/68020-40/amissl_v362.library`, `amissl/out/68020-40/amissl_v41x.library` |
+| `os3-68060` | `amissl/out/68060/amissl_v362.library`, `amissl/out/68060/amissl_v41x.library` |
 
-`make build-all` does not build these libraries. `tools/package-local.sh` stages either output when it exists. GitHub Actions stages both release artifacts.
+`make build-all` does not build these libraries. `tools/package-local.sh` stages each output that exists. GitHub Actions stages all four release artifacts.
 
 ## Offload coverage
 
@@ -56,4 +67,4 @@ Generation-1 2 MiB and 4 MiB layouts used a 64 KiB host window. Keep firmware, b
 
 ## Licensing
 
-The provider is GPL-3.0-or-later. AmiSSL and OpenSSL are Apache-2.0. The combined library is GPLv3, and redistribution must meet the GPLv3 source and notice requirements.
+The provider is GPL-3.0-or-later. AmiSSL and OpenSSL are Apache-2.0. The combined libraries are GPLv3, and redistribution must meet the GPLv3 source and notice requirements.

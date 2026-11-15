@@ -81,10 +81,10 @@ the drivers installer with the same `vX.Y.Z` tag.
    ```
 
    `make build-all` builds the driver components and SDK payloads. It does not
-   build AmiSSL. `amissl/build.sh` produces the required `68020-40` and
-   `68060` libraries, while `tools/package-local.sh` stages them only when
-   present. The package command creates `zz9000-drivers-vX.Y.Z.lha` after its
-   release check passes.
+   build AmiSSL. `amissl/build.sh` produces the required AmiSSL 5.27 and 6.1
+   libraries for `68020-40` and `68060`, while `tools/package-local.sh`
+   stages them only when present. The package command creates
+   `zz9000-drivers-vX.Y.Z.lha` after its release check passes.
 
 5. Publish the drivers installer.
 
@@ -108,8 +108,8 @@ the drivers installer with the same `vX.Y.Z` tag.
    ```
 
    Inspect the drivers LHA. It must include the SDK runtime payloads and
-   `Libs/AmiSSL/68020-40/amissl_v362.library` plus
-   `Libs/AmiSSL/68060/amissl_v362.library`.
+   `amissl_v362.library` plus `amissl_v41x.library` in both
+   `Libs/AmiSSL/68020-40/` and `Libs/AmiSSL/68060/`.
 
 ## Tag and packaging rules
 

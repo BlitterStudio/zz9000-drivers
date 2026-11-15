@@ -79,13 +79,16 @@ if [ "$quick" -eq 0 ]; then
     check_file sdk/out/C/zz9k-cryptobench
     check_file sdk/out/C/zz9k-archive
 
-    # amissl_v362.library (amissl/build.sh) is optional for local packaging;
-    # release CI builds both CPU variants (Libs/AmiSSL/<cpu>/). Warn without
-    # failing if neither is present.
-    if [ ! -f amissl/out/68020-40/amissl_v362.library ] && \
-       [ ! -f amissl/out/68060/amissl_v362.library ]; then
-        echo "NOTE: amissl/out/<cpu>/amissl_v362.library not built (amissl/build.sh)" >&2
-    fi
+    # The accelerated AmiSSL libraries (amissl/build.sh) are optional for
+    # local packaging; release CI builds amissl_v362 and amissl_v41x for both
+    # CPU variants (Libs/AmiSSL/<cpu>/). Warn without failing if any is missing.
+    for cpu in 68020-40 68060; do
+        for lib in amissl_v362.library amissl_v41x.library; do
+            if [ ! -f "amissl/out/$cpu/$lib" ]; then
+                echo "NOTE: amissl/out/$cpu/$lib not built (amissl/build.sh)" >&2
+            fi
+        done
+    done
 
     if [ -f sd-boot/zzsd.device ]; then
         size=$(wc -c < sd-boot/zzsd.device | tr -d ' ')

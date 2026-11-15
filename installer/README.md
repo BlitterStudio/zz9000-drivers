@@ -41,7 +41,7 @@ manuals always go in the program drawer.
 | Network | `Devs/Networks/ZZ9000Net.device`; `Devs/NetInterfaces/ZZ9000Net` | Saves the entered MAC address in `ENVARC:ZZ9K_MAC` and installs the SANA-II driver in `Devs:Networks/`. Then offers the DHCP Roadshow template for `Devs:NetInterfaces/`, defaulting to Yes when that drawer exists. Skip it with another TCP/IP stack. |
 | AHI and MHI audio | `Devs/AHI/zz9000ax.audio`; `Devs/AudioModes/ZZ9000AX`; `Libs/MHI/mhizz9000.library` | Installs the AHI subdriver in `Devs:AHI/`, its AudioMode in `Devs:AudioModes/`, and the MHI library in `LIBS:MHI/`. |
 | SDK runtime | `Libs/zz9k.library`; `Libs/mpega.library`; `Classes/DataTypes/zz9k-picture.datatype`; `Classes/DataTypes/zz9k-sound.datatype`; `Storage/DataTypes/`; `Tools/zz9k-#?`; `Tools/ZZPlay#?` | Offered only when `zz9k.library` is in the release drawer. Installs `zz9k.library` and optional `mpega.library` in `LIBS:`, the picture and sound datatype classes in `SYS:Classes/DataTypes/`, the JPEG, PNG, WebP, MP3, FLAC, and Ogg Vorbis descriptors in inactive `SYS:Storage/DataTypes/`, the `zz9k-*` commands in `C:`, and `ZZPlay` in the program drawer. |
-| Accelerated AmiSSL | `Libs/AmiSSL/68020-40/amissl_v362.library`; `Libs/AmiSSL/68060/amissl_v362.library` | Offered only when a staged build and `LIBS:AmiSSL/amissl_v362.library` already exist. Backs up the installed library once, then installs the chosen CPU build in `LIBS:AmiSSL/`. |
+| Accelerated AmiSSL | `Libs/AmiSSL/68020-40/amissl_v362.library`; `Libs/AmiSSL/68060/amissl_v362.library`; `Libs/AmiSSL/68020-40/amissl_v41x.library`; `Libs/AmiSSL/68060/amissl_v41x.library` | Offered only when a staged build and `LIBS:AmiSSL/amissl_v362.library` (AmiSSL 5.27) or `LIBS:AmiSSL/amissl_v41x.library` (AmiSSL 6.1) already exist. Replaces only the installed libraries: backs up each one once, then installs the chosen CPU build in `LIBS:AmiSSL/`. |
 | Control panel | `Tools/ZZTop` | Installs in the program drawer. |
 | Command-line tools | `Tools/ZZScanlines`; `Tools/ZZGamma`; `Tools/ZZFwUpdate`; `Tools/ZZNetStats`; `Tools/ZZDiag`; `Tools/ZZNetReady`; `Tools/ZZRun` | Installs each command in `C:`. |
 | Native capture diagnostic | `Tools/ZZCapture` | Optional. Installs in `C:` when selected. |
@@ -131,12 +131,13 @@ contend for that window. Legacy descriptor-free 4 MiB compatibility keeps the
 fixed 64 KiB window without negotiated layout or PIP; legacy 2 MiB and unknown
 sizes reject it.
 
-The accelerated AmiSSL option replaces
-`LIBS:AmiSSL/amissl_v362.library` only after preserving it as
-`amissl_v362.library.bak`, unless that backup already exists. Choose
+The accelerated AmiSSL option replaces `LIBS:AmiSSL/amissl_v362.library`
+(AmiSSL 5 applications) and `LIBS:AmiSSL/amissl_v41x.library` (AmiSSL 6
+applications), whichever are installed. It first copies each one to a `.bak`
+file, unless that backup already exists. Choose
 `68020/030/040/080 or MorphOS` for 68020, 68030, 68040, or Apollo 68080, and
 choose `68060 or Amithlon` for 68060 or Amithlon. To revert, delete the
-accelerated library and rename the `.bak` file. Supported TLS work uses the
+accelerated library and rename its `.bak` file. Supported TLS work uses the
 ZZ9000 path; unsupported algorithms use AmiSSL's software provider.
 
 ### ZZCapture
