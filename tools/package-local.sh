@@ -94,26 +94,28 @@ make_guide sdk/README.md sdk
 install -Dm644 sdk/out/Docs/ZZPlay.guide        "$inst/Docs/ZZPlay.guide"
 install -Dm644 sdk/out/Docs/ZZPlay-project.info "$inst/Docs/ZZPlay-project.info"
 
-# Accelerated amissl.library, per CPU (optional: built by amissl/build.sh,
-# slow). Laid out exactly like AmiSSL's own release — Libs/AmiSSL/<cpu>/ — so
-# the installer can pick the build matching the host CPU (68020-40 covers
-# 68020/030/040(/080); 68060 its own). An os3-68020 lib on a 68060 traps and
-# emulates 64-bit multiplies in software (~2.5x slower crypto), so this match
-# matters.
+# Accelerated AmiSSL core libraries, per CPU (optional: built by
+# amissl/build.sh, slow). amissl_v362 serves AmiSSL 5 applications,
+# amissl_v41x AmiSSL 6 ones. Laid out exactly like AmiSSL's own release —
+# Libs/AmiSSL/<cpu>/ — so the installer can pick the build matching the host
+# CPU (68020-40 covers 68020/030/040(/080); 68060 its own). An os3-68020 lib
+# on a 68060 traps and emulates 64-bit multiplies in software (~2.5x slower
+# crypto), so this match matters.
 staged_amissl=0
 # Drop any stale flat-layout copy from an earlier packaging run.
 rm -f "$inst/Libs/AmiSSL/amissl_v362.library"
 for cpu in 68020-40 68060; do
-    if [ -f "amissl/out/$cpu/amissl_v362.library" ]; then
-        install -Dm644 "amissl/out/$cpu/amissl_v362.library" \
-            "$inst/Libs/AmiSSL/$cpu/amissl_v362.library"
-        staged_amissl=1
-    fi
+    for lib in amissl_v362.library amissl_v41x.library; do
+        if [ -f "amissl/out/$cpu/$lib" ]; then
+            install -Dm644 "amissl/out/$cpu/$lib" "$inst/Libs/AmiSSL/$cpu/$lib"
+            staged_amissl=1
+        fi
+    done
 done
 if [ "$staged_amissl" = 1 ]; then
     make_guide amissl/README.md amissl
 else
-    echo "NOTE: amissl/out/<cpu>/amissl_v362.library not built; packaging without it" >&2
+    echo "NOTE: amissl/out/<cpu>/amissl_v*.library not built; packaging without it" >&2
 fi
 
 mkdir -p "$staging"
