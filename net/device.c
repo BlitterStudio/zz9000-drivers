@@ -524,6 +524,7 @@ SAVEDS LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
       rxv_tx_seq = rxv_tx_seq_max = rxv_p445_out = 0;
 
       NEWLIST(&db->db_ReadList);
+      NEWLIST(&db->db_OrphanList);
       InitSemaphore(&db->db_ReadListSem);
       InitSemaphore(&db->db_McastSem);
       zznet_mcast_reset(&db->db_Mcast, &zznet_mcast_hw);
@@ -860,11 +861,15 @@ SAVEDS VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
 			}
     else
 			{
+        /* Queue it like a CMD_READ: frame_proc replies to it with a
+         * frame that no read of its packet type wants, and DevAbortIO
+         * can find it. Setting ioreq = NULL without queueing it left the
+         * request with no reply and no way to abort it. AddTail keeps
+         * orphan readers first come, first served. */
         ioreq->ios2_Req.io_Flags &= ~SANA2IOF_QUICK;
-        // FIXME do we need this list?
-        //ObtainSemaphore(&db->db_Units[unit].du_Sem);
-        //AddHead((struct List*)&db->db_ReadOrphans,(struct Node*)ioreq);
-        //ReleaseSemaphore(&db->db_Units[unit].du_Sem);
+        ObtainSemaphore(&db->db_ReadListSem);
+        AddTail((struct List*)&db->db_OrphanList, (struct Node*)ioreq);
+        ReleaseSemaphore(&db->db_ReadListSem);
         ioreq = NULL;
 			}
     break;
@@ -958,6 +963,15 @@ SAVEDS LONG DevAbortIO( ASMR(a1) struct IORequest *ioreq        ASMREG(a1),
 			Remove(n);
 			ret = 0;
 			break;
+		}
+	}
+	if (ret != 0) {
+		for (n = db->db_OrphanList.lh_Head; n->ln_Succ; n = n->ln_Succ) {
+			if (n == (struct Node*)ioreq) {
+				Remove(n);
+				ret = 0;
+				break;
+			}
 		}
 	}
 	ReleaseSemaphore(&db->db_ReadListSem);
@@ -1311,6 +1325,41 @@ static ULONG write_frame_async(DEVBASETYPE *db, struct IOSana2Req *req)
 	return rc;
 }
 
+/* Detach from `list` at most one request per opener, up to `limit`
+ * requests in `matches`, and return how many. SANA-II lets several
+ * programs have the device open at once (a TCP/IP stack and an
+ * emulator's network driver, say), and each of them expects its own copy
+ * of a frame it reads; handing a frame to the first matching request only
+ * makes the openers take each other's packets, and all of them starve.
+ * The opener is identified by its BufferManagement, which DevOpen
+ * allocates once per OpenDevice. With any_type every request matches
+ * (S2_READORPHAN); otherwise only those reading packet type `type`.
+ * Taking `next` before Remove() keeps the walk safe. The caller holds
+ * db_ReadListSem. */
+static UWORD take_readers(DEVBASETYPE *db, struct List *list, BOOL any_type, USHORT type,
+                          struct IOSana2Req **matches, UWORD limit)
+{
+  struct IOSana2Req *ior, *next;
+  UWORD nmatch = 0, m;
+
+  for (ior = (struct IOSana2Req *)list->lh_Head;
+       nmatch < limit &&
+       (next = (struct IOSana2Req *)ior->ios2_Req.io_Message.mn_Node.ln_Succ);
+       ior = next) {
+    if (!any_type && ior->ios2_PacketType != type)
+      continue;
+    for (m = 0; m < nmatch; m++) {
+      if (matches[m]->ios2_BufferManagement == ior->ios2_BufferManagement)
+        break;
+    }
+    if (m == nmatch) {
+      Remove((struct Node*)ior);
+      matches[nmatch++] = ior;
+    }
+  }
+  return nmatch;
+}
+
 SAVEDS void frame_proc() {
   ULONG wmask;
 
@@ -1359,8 +1408,6 @@ SAVEDS void frame_proc() {
   volatile USHORT* irq_ctrl  = (volatile USHORT*)(ZZ9K_REGS+0x04);
 
   while (1) {
-    struct IOSana2Req *ior;
-
     if (recv & SIGBREAKF_CTRL_C) {
       D(("ZZ9000Net: process end\n"));
       break;
@@ -1412,8 +1459,8 @@ SAVEDS void frame_proc() {
     zznet_rx_hdr[3] = (ULONG)*(volatile USHORT*)(frm + 16) << 16;
     USHORT packet_type = (USHORT)(zznet_rx_hdr[3] >> 16);
     struct IOSana2Req *matches[ZZNET_MAX_FRAME_READERS];
-    struct IOSana2Req *next;
-    UWORD nmatch = 0, m, limit;
+    UWORD nmatch, m, limit;
+    BOOL typed;
 
     /* GEM hash collisions are not unknown packet types. Ack and drop
      * the exact miss before reader selection; UnknownTypesReceived
@@ -1430,40 +1477,24 @@ SAVEDS void frame_proc() {
       }
     }
 
-    /* Walk the read list and detach one matching request per opener.
-     * SANA-II lets several programs have the device open at once (a
-     * TCP/IP stack and an emulator's network driver, say), and each of
-     * them expects its own copy of a frame of a type it reads. Handing
-     * the frame to the first matching request only makes the openers
-     * take each other's packets, and all of them starve. The opener is
-     * identified by its BufferManagement, which DevOpen allocates once
-     * per OpenDevice. There can be no more matches than openers, so the
+    /* Detach one read request per opener for this packet type (see
+     * take_readers). There can be no more matches than openers, so the
      * walk stops there: with one opener (the usual case) it ends at the
      * first match, as it did before readers were per opener. lib_OpenCnt
      * also counts openers that never read (ZZNetStats), so it is only an
-     * upper bound, which is all the walk needs. Doing the payload copy
-     * (read_frame) and ReplyMsg outside the semaphore keeps DevAbortIO /
-     * CMD_READ unblocked for the duration of the copies. */
+     * upper bound, which is all the walk needs. A frame no read of its
+     * type wants goes to the S2_READORPHAN requests instead, one per
+     * opener as well. Doing the payload copy (read_frame) and ReplyMsg
+     * outside the semaphore keeps DevAbortIO / CMD_READ unblocked for
+     * the duration of the copies. */
     limit = db->db_Lib.lib_OpenCnt;
     if (limit > ZZNET_MAX_FRAME_READERS)
       limit = ZZNET_MAX_FRAME_READERS;
     ObtainSemaphore(&db->db_ReadListSem);
-    for (ior = (struct IOSana2Req *)db->db_ReadList.lh_Head;
-         (next = (struct IOSana2Req *)ior->ios2_Req.io_Message.mn_Node.ln_Succ);
-         ior = next) {
-      if (ior->ios2_PacketType == packet_type) {
-        for (m = 0; m < nmatch; m++) {
-          if (matches[m]->ios2_BufferManagement == ior->ios2_BufferManagement)
-            break;
-        }
-        if (m == nmatch) {
-          Remove((struct Node*)ior);
-          matches[nmatch++] = ior;
-          if (nmatch >= limit)
-            break;
-        }
-      }
-    }
+    nmatch = take_readers(db, &db->db_ReadList, FALSE, packet_type, matches, limit);
+    typed = (nmatch != 0);
+    if (!typed)
+      nmatch = take_readers(db, &db->db_OrphanList, TRUE, 0, matches, limit);
     ReleaseSemaphore(&db->db_ReadListSem);
 
     if (nmatch) {
@@ -1484,7 +1515,8 @@ SAVEDS void frame_proc() {
 
       /* Deliver step: one read_frame per opener. Statistics count the
        * frame, not the copies: one PacketsReceived however many readers
-       * got it, one UnknownTypesReceived if any of the reads failed. */
+       * got it, one UnknownTypesReceived if no read of its type wanted it
+       * (orphan readers or none) or any of the reads failed. */
       for (m = 0; m < nmatch; m++) {
         ULONG res = read_frame(matches[m], eth, zznet_rx_hdr, sz, packet_type);
         if (res == 0) {
@@ -1500,7 +1532,7 @@ SAVEDS void frame_proc() {
       }
       if (delivered)
         global_stats.PacketsReceived++;
-      if (failed)
+      if (failed || !typed)
         global_stats.UnknownTypesReceived++;
 
       /* issue #29 ACK probe, once per frame: for the SMB (445)
@@ -1522,8 +1554,7 @@ SAVEDS void frame_proc() {
         }
       }
     } else {
-      /* No listener matched — frame dropped. A future change could
-       * route these to S2_READORPHAN requests. */
+      /* No reader of this type and no orphan reader: frame dropped. */
       global_stats.UnknownTypesReceived++;
     }
 

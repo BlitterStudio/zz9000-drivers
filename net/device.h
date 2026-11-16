@@ -76,6 +76,9 @@ struct devbase {
 	struct Interrupt *db_interrupt;
 
 	struct List db_ReadList;
+	/* Pending S2_READORPHAN requests: they get a frame no CMD_READ of
+	 * its packet type wants. Guarded by db_ReadListSem as well. */
+	struct List db_OrphanList;
 	struct SignalSemaphore db_ReadListSem;
 	struct zznet_mcast db_Mcast; /* exact groups; lock is db_McastSem */
 	struct SignalSemaphore db_McastSem;
