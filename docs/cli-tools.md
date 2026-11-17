@@ -281,14 +281,15 @@ legacy single-app slot 0 path; it rejects `MAXMEM` and `RELEASE`.
 
 `STATUS` prints each slot's state, app name, generation, committed and capped
 MiB, CPU seconds, block reason, and terminal reason. The block reason is
-`none`, `file`, `console`, `sleep`, `vsync`, or `audio`; `event` is reserved
-and not emitted.
+`none`, `file`, `console`, `event`, `sleep`, `vsync`, or `audio`. `event`
+means the app is waiting in `zz_msg_wait` (app API 0.4 firmware).
 
 Ctrl-C requests app stop. Ctrl-D, Ctrl-E, and Ctrl-F enqueue break events 4, 5,
 and 6. Normal app exit returns the app exit code. Invalid launcher arguments
-return 10, and launcher errors return 20. After a failed ELF load, ZZRun
-returns 5 if Ctrl-C is still pending after cleanup, otherwise 20. DOS packet
-waits, including file reads and closing the ELF, can consume that signal.
+return 10, and launcher errors return 20. Ctrl-C while ZZRun opens or loads
+the ELF stops the load and returns 5, including when a DOS packet wait such as
+a file read or closing the ELF consumed the break. Other load failures return
+20.
 
 Workbench ToolTypes, file access below `ROOT`, assigns, console redirection,
 display, audio, cleanup, and the known `>NIL:` limitation are described in the

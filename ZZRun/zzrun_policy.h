@@ -787,6 +787,20 @@ static inline int zzrun_ctrl_c_must_request_stop(int ctrl_c)
     return ctrl_c;
 }
 
+/* A break counts as a user stop when it is still pending or when a DOS
+ * packet wait already consumed it and recorded user_stop. */
+static inline int zzrun_user_break(int ctrl_c_pending, int user_stop)
+{
+    return ctrl_c_pending != 0 || user_stop != 0;
+}
+
+/* Exit code after a failed ELF load: 5 (RETURN_WARN) when the user stopped
+ * it with Ctrl-C, 20 for any other load failure. */
+static inline int zzrun_load_failure_exit(int ctrl_c_pending, int user_stop)
+{
+    return zzrun_user_break(ctrl_c_pending, user_stop) ? 5 : 20;
+}
+
 
 
 
