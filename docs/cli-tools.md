@@ -20,7 +20,7 @@ The SDK tools, when installed, are documented in `sdk.guide`.
 | `ZZNetReady` | Returns an AmigaDOS status for a boot script that waits for Ethernet negotiation. |
 | `ZZScanlines` | Changes the active scandoubler scanline mode and parity. |
 | `ZZGamma` | Sets the output gamma filter live, or prints the current gamma. |
-| `ZZRun` | Loads one trusted ARM ELF through `zz9k.library`; requires the Zorro III app-runtime firmware. |
+| `ZZRun` | Loads up to four trusted ARM ELFs through `zz9k.library`; requires Zorro III app-runtime firmware. The current drivers release supplies library revision 39. |
 
 ## ZZFwUpdate: firmware updates
 
@@ -256,3 +256,40 @@ explanation and exits with `WARN` (5).
 `ZZGamma` changes the live setting only. To keep a value across a power
 cycle, write `gamma = 1.80` to `ZZ9000.CFG`, or set it with the **Gamma**
 slider on ZZTop's Display page and press Save.
+
+## ZZRun: ARM app launcher
+
+`ZZRun` needs a Zorro III board and app-runtime firmware that advertises the
+slots capability (ABI 0.3) for four-slot operation. Older app-runtime firmware
+uses the legacy single-slot path. Picasso96 is also required when an app
+requests a display. Run `Stack 32768` in the launching Shell; ZZRun rejects a
+process stack smaller than 16 KiB.
+
+ZZRun opens `zz9k.library` at version 0 for mailbox transport. It calls
+`ZZ9KCall`, `ZZ9KCallAsync`, `ZZ9KPoll`, and `ZZ9KCancelAsync`, so it needs
+library revision 2 or later. The current drivers release supplies revision 39.
+
+| Form | Result |
+| --- | --- |
+| `ZZRun <app.elf> [MAXMEM=<MiB>] [AUDIO=AHI] [args]` | Loads and starts the ELF. `MAXMEM` is a positive decimal MiB cap. `AUDIO=AHI` sends app PCM through AHI. Both forms are recognized anywhere after the ELF and are removed from app arguments. |
+| `ZZRun STATUS` | Lists all slots when the runtime supports slots. `STATUS` is case-insensitive. |
+| `ZZRun RELEASE <slot>` | Releases a fully torn-down quarantined slot numbered 0 through 3. |
+
+The slots runtime runs up to four apps. A fifth launch reports `window
+allocation failed (busy)` and returns 20. Firmware without slots retains the
+legacy single-app slot 0 path; it rejects `MAXMEM` and `RELEASE`.
+
+`STATUS` prints each slot's state, app name, generation, committed and capped
+MiB, CPU seconds, block reason, and terminal reason. The block reason is
+`none`, `file`, `console`, `sleep`, `vsync`, or `audio`; `event` is reserved
+and not emitted.
+
+Ctrl-C requests app stop. Ctrl-D, Ctrl-E, and Ctrl-F enqueue break events 4, 5,
+and 6. Normal app exit returns the app exit code. Invalid launcher arguments
+return 10, and launcher errors return 20. After a failed ELF load, ZZRun
+returns 5 if Ctrl-C is still pending after cleanup, otherwise 20. DOS packet
+waits, including file reads and closing the ELF, can consume that signal.
+
+Workbench ToolTypes, file access below `ROOT`, assigns, console redirection,
+display, audio, cleanup, and the known `>NIL:` limitation are described in the
+ZZRun manual (`ZZRun.guide`, source [ZZRun/README.md](../ZZRun/README.md)).
