@@ -1,10 +1,9 @@
 # ZZRun
 
-`ZZRun` loads a trusted ARM app into the ZZ9000 app runtime. It is the v0
-launcher for GLQuake. Full slot support needs a Zorro III board, app-runtime
-firmware that advertises the slots capability (ABI 0.3), and Picasso96 when
-the app asks for a display. Older app-runtime firmware uses the legacy
-single-slot path.
+`ZZRun` loads a trusted ARM app into the ZZ9000 app runtime. Full slot support
+needs a Zorro III board, app-runtime firmware that advertises the slots
+capability (ABI 0.3), and Picasso96 when the app asks for a display. Older
+app-runtime firmware uses the legacy single-slot path.
 
 ZZRun opens `zz9k.library` at version 0 for mailbox transport. It calls
 `ZZ9KCall`, `ZZ9KCallAsync`, `ZZ9KPoll`, and `ZZ9KCancelAsync`, so it needs
@@ -32,7 +31,7 @@ cannot be passed to the app as arguments with those exact forms.
 
 ```text
 Stack 32768
-ZZRun RAM:glquake.elf +timedemo demo1
+ZZRun RAM:swquake.elf +timedemo demo1
 ```
 
 `MAXMEM=<MiB>` caps the card memory committed by this app. The value must be a
@@ -40,7 +39,7 @@ positive decimal MiB count. Firmware without app slots cannot enforce the cap,
 so ZZRun refuses that launch before loading:
 
 ```text
-ZZRun RAM:glquake.elf MAXMEM=256 +timedemo demo1
+ZZRun RAM:swquake.elf MAXMEM=256 +timedemo demo1
 ```
 
 `ROOT` controls files requested by the app. A Shell launch defaults to the
