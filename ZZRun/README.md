@@ -54,9 +54,10 @@ multi-directory assign, ZZRun tries each directory after an
 On normal app exit, ZZRun returns the app exit code. It returns 20 after an
 app fault, an unavailable runtime, display failure, a console that cannot be
 opened or written, an AHI route that cannot be opened, or another launcher
-error. It returns 10 for invalid launcher arguments. After a failed ELF load,
-ZZRun returns 5 if Ctrl-C is still pending after cleanup, otherwise 20. DOS
-packet waits, including file reads and closing the ELF, can consume that signal.
+error. It returns 10 for invalid launcher arguments. Ctrl-C while ZZRun opens
+or loads the ELF stops the load and returns 5, including when a DOS packet
+wait such as a file read or closing the ELF consumed the break. Other load
+failures return 20.
 
 ## Runtime status
 
@@ -67,7 +68,8 @@ ZZRun STATUS
 `STATUS` is case-insensitive. On a slots runtime, it prints one line for each
 slot with its state, app name, generation, committed and capped MiB, CPU
 seconds, block reason, and terminal reason. The block reason is `none`, `file`,
-`console`, `sleep`, `vsync`, or `audio`; `event` is reserved and not emitted.
+`console`, `event`, `sleep`, `vsync`, or `audio`. `event` means the app is
+waiting in `zz_msg_wait`; firmware before app API 0.4 never reports it.
 Older firmware prints its legacy slot 0 status.
 
 An interrupted load is shown as `state stopping ... reason quarantined`. Its

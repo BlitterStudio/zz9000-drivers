@@ -3994,7 +3994,7 @@ static int load_elf(BPTR fh, LONG size)
 
         if (chunk > (LONG)ZZAPP_CHUNK_MAX)
             chunk = (LONG)ZZAPP_CHUNK_MAX;
-        if (ctrl_c_set()) {
+        if (zzrun_user_break(ctrl_c_set(), user_stop)) {
             puts("ZZRun: stopped during load");
             stop_owned();
             return 0;
@@ -4603,7 +4603,7 @@ int main(int argc, char **argv)
         if (!transport_ok || !fh) {
             printf("ZZRun: cannot open %s\n", elf_path);
             cleanup();
-            return 20;
+            return zzrun_load_failure_exit(ctrl_c_set(), user_stop);
         }
     }
     if (zzrun_lease_gate_stops((int)owned_generation,
@@ -4622,7 +4622,7 @@ int main(int argc, char **argv)
                    (long)zz_from_io());
             end_or_close(fh);
             cleanup();
-            return 20;
+            return zzrun_load_failure_exit(ctrl_c_set(), user_stop);
         }
     }
     if (zzrun_lease_gate_stops((int)owned_generation,
@@ -4640,7 +4640,7 @@ int main(int argc, char **argv)
             printf("ZZRun: cannot read %s\n", elf_path);
             end_or_close(fh);
             cleanup();
-            return 20;
+            return zzrun_load_failure_exit(ctrl_c_set(), user_stop);
         }
     }
     if (zzrun_lease_gate_stops((int)owned_generation,
@@ -4660,7 +4660,7 @@ int main(int argc, char **argv)
     if (!load_elf(fh, size)) {
         end_or_close(fh);
         cleanup();
-        return ctrl_c_set() ? 5 : 20;
+        return zzrun_load_failure_exit(ctrl_c_set(), user_stop);
     }
     end_or_close(fh);
     fh = 0;

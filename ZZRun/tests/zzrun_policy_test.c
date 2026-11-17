@@ -549,6 +549,18 @@ static void test_pending_packet_ctrl_c_still_requests_stop(void)
     assert(!zzrun_ctrl_c_must_request_stop(0));
 }
 
+static void test_load_break_consumed_by_packet_returns_warn(void)
+{
+    /* dos_packet_async() clears the signal and records user_stop. */
+    assert(zzrun_load_failure_exit(0, 1) == 5);
+    assert(zzrun_load_failure_exit(1, 0) == 5);
+    assert(zzrun_load_failure_exit(1, 1) == 5);
+    assert(zzrun_load_failure_exit(0, 0) == 20);
+    assert(zzrun_user_break(0, 1));
+    assert(zzrun_user_break(1, 0));
+    assert(!zzrun_user_break(0, 0));
+}
+
 
 struct fake_dos_path {
     struct zzrun_dos_path_candidate candidates[2];
@@ -916,6 +928,7 @@ int main(void)
     test_dos_path_dispatch_uses_assign_locks_and_retries();
     test_bstr_encoding_matches_dos_packets();
     test_pending_packet_ctrl_c_still_requests_stop();
+    test_load_break_consumed_by_packet_returns_warn();
     test_async_release_preserves_or_frees_resources_by_delivery();
     test_lost_generation_cannot_write_shared_window();
     puts("zzrun_policy_test: ok");
