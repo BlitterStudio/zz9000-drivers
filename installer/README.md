@@ -45,7 +45,7 @@ manuals always go in the program drawer.
 | Control panel | `Tools/ZZTop` | Installs in the program drawer. |
 | Command-line tools | `Tools/ZZScanlines`; `Tools/ZZGamma`; `Tools/ZZFwUpdate`; `Tools/ZZNetStats`; `Tools/ZZDiag`; `Tools/ZZNetReady`; `Tools/ZZRun` | Installs each command in `C:`. |
 | Native capture diagnostic | `Tools/ZZCapture` | Optional. Installs in `C:` when selected. |
-| Trusted app launcher | `Tools/ZZRun`; `Docs/ZZRun.guide` | Launches one trusted ARM app on a Zorro III card with app-runtime firmware. |
+| Trusted app launcher | `Tools/ZZRun`; `Docs/ZZRun.guide` | Launches up to four trusted ARM apps on a Zorro III card with app-runtime firmware. The SDK runtime in this release includes `zz9k.library` 2.39. |
 
 When `ZZTop` or `ZZPlay` is installed, the final prompt defaults to adding the
 program drawer to `S:User-Startup`. It writes a replaceable `;BEGIN ZZ9000` /
@@ -125,11 +125,12 @@ interrupt-conflict troubleshooting and affects both audio drivers.
 The SDK runtime needs SDK-service firmware. On matched Zorro II firmware,
 bitstream, SDK payload, and driver sets, SDK clients share one host window:
 16 KiB on current generation-2 layouts, which reserve the other 48 KiB for the
-audio direct ring, and 64 KiB on generation 1. The 4 MiB profile supports one
-bounded 224 KiB `ZZPlay` PIP source; the 2 MiB profile has no video PIP. Concurrent accelerated operations can
-contend for that window. Legacy descriptor-free 4 MiB compatibility keeps the
-fixed 64 KiB window without negotiated layout or PIP; legacy 2 MiB and unknown
-sizes reject it.
+audio direct ring, and 64 KiB on generation 1. A generation-1 4 MiB profile
+supports one bounded 224 KiB `ZZPlay` PIP source; current generation-2 2 MiB
+and 4 MiB profiles do not. Concurrent accelerated operations can contend for
+the host window. Legacy descriptor-free 4 MiB compatibility keeps the fixed
+64 KiB window without negotiated layout or PIP; legacy 2 MiB and unknown sizes
+reject it.
 
 The accelerated AmiSSL option replaces `LIBS:AmiSSL/amissl_v362.library`
 (AmiSSL 5 applications) and `LIBS:AmiSSL/amissl_v41x.library` (AmiSSL 6

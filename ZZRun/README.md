@@ -1,21 +1,37 @@
 # ZZRun
 
-`ZZRun` loads one trusted ARM app into the ZZ9000 app runtime. It is the v0
-launcher for GLQuake. It needs a Zorro III board, `zz9k.library`, app-runtime
-firmware, and Picasso96 when the app asks for a display.
+`ZZRun` loads a trusted ARM app into the ZZ9000 app runtime. Full slot support
+needs a Zorro III board, app-runtime firmware that advertises the slots
+capability (ABI 0.3), and Picasso96 when the app asks for a display. Older
+app-runtime firmware uses the legacy single-slot path.
+
+ZZRun opens `zz9k.library` at version 0 for mailbox transport. It calls
+`ZZ9KCall`, `ZZ9KCallAsync`, `ZZ9KPoll`, and `ZZ9KCancelAsync`, so it needs
+library revision 2 or later. The current drivers release includes revision 39.
 
 The launcher is a Shell command and a Workbench tool. On a runtime that
 advertises slots, every instance claims its own app slot, so up to four apps
 can run at once. Older firmware keeps the original single-app slot 0 behaviour.
+When every slot is claimed, a new launch reports `window allocation failed
+(busy)` and returns 20.
 
 ## Starting an app
 
+Run `Stack 32768` in the launching Shell first. ZZRun requires at least a
+16 KiB process stack.
+
+```text
+ZZRun <app.elf> [MAXMEM=<MiB>] [AUDIO=AHI] [args]
+```
+
 Give the ELF first. The app's `argv[0]` is the ELF's file name and the
 remaining Shell tokens follow it, as C programs expect (up to 15 arguments).
+`AUDIO=AHI` and `MAXMEM=<MiB>` are recognized anywhere after the ELF, so they
+cannot be passed to the app as arguments with those exact forms.
 
 ```text
 Stack 32768
-ZZRun RAM:glquake.elf +timedemo demo1
+ZZRun RAM:swquake.elf +timedemo demo1
 ```
 
 `MAXMEM=<MiB>` caps the card memory committed by this app. The value must be a
@@ -23,17 +39,24 @@ positive decimal MiB count. Firmware without app slots cannot enforce the cap,
 so ZZRun refuses that launch before loading:
 
 ```text
-ZZRun RAM:glquake.elf MAXMEM=256 +timedemo demo1
+ZZRun RAM:swquake.elf MAXMEM=256 +timedemo demo1
 ```
 
 `ROOT` controls files requested by the app. A Shell launch defaults to the
 current directory. A Workbench launch defaults to the directory holding the
 ZZRun icon. For Quake, set `ROOT` to the directory containing `id1/`.
 
+A relative ELF path is opened from ZZRun's current AmigaDOS directory. A path
+with a volume or assign prefix is resolved through `GetDeviceProc`; on a
+multi-directory assign, ZZRun tries each directory after an
+`ERROR_OBJECT_NOT_FOUND` result.
+
 On normal app exit, ZZRun returns the app exit code. It returns 20 after an
 app fault, an unavailable runtime, display failure, a console that cannot be
 opened or written, an AHI route that cannot be opened, or another launcher
-error. It returns 10 for invalid launcher arguments.
+error. It returns 10 for invalid launcher arguments. After a failed ELF load,
+ZZRun returns 5 if Ctrl-C is still pending after cleanup, otherwise 20. DOS
+packet waits, including file reads and closing the ELF, can consume that signal.
 
 ## Runtime status
 
@@ -41,10 +64,11 @@ error. It returns 10 for invalid launcher arguments.
 ZZRun STATUS
 ```
 
-On a slots runtime, this prints one line for each slot with its state, app
-name, generation, committed and capped MiB, CPU seconds, block reason, and
-terminal reason. The block reason is `none`, `file`, `console`, `event`,
-`sleep`, `vsync`, or `audio`. Older firmware prints its legacy slot 0 status.
+`STATUS` is case-insensitive. On a slots runtime, it prints one line for each
+slot with its state, app name, generation, committed and capped MiB, CPU
+seconds, block reason, and terminal reason. The block reason is `none`, `file`,
+`console`, `sleep`, `vsync`, or `audio`; `event` is reserved and not emitted.
+Older firmware prints its legacy slot 0 status.
 
 An interrupted load is shown as `state stopping ... reason quarantined`. Its
 app memory has been reclaimed, but the window stays reserved so a late DOS
@@ -57,8 +81,9 @@ When the old launcher cannot return, confirm that it is gone and run:
 ZZRun RELEASE <slot>
 ```
 
-`RELEASE` succeeds only for a fully torn-down quarantined slot and refuses
-every other state. A card reset also clears the reservation.
+`RELEASE` accepts slots 0 through 3. It succeeds only for a fully torn-down
+quarantined slot and refuses every other state. A card reset also clears the
+reservation.
 
 ## Workbench ToolTypes
 
@@ -66,9 +91,10 @@ every other state. A card reset also clears the reservation.
 | --- | --- |
 | `APP` | ELF path when ZZRun is started without a project file. |
 | `ROOT` | Root directory for relative app file paths. |
-| `ABS=1` | Permit app paths containing an Amiga volume or assign colon. The root check does not apply to those paths. |
+| `ABS` | Enabled when the ToolType has no value, is exactly `1` or `y`, or begins with `ye` or `t` (case-insensitive). Permits app paths containing an Amiga volume or assign colon. The root check does not apply to those paths. |
 | `MODE` | Optional Picasso96 DisplayID, in decimal, `$` hexadecimal, or `0x` hexadecimal. The app still chooses width, height, and RGB format. |
 | `ARGS` | Optional space-separated arguments. Quoting is not parsed. |
+| `JOYPORT0` | Enabled by the same values as `ABS`. Enables joystick port 0 as well as port 1. |
 | `AUDIO=AHI` | Route app PCM to AHI. The default remains the card audio fabric. |
 | `MAXMEM=<MiB>` | Positive decimal MiB cap for the app's `APP_LOAD_BEGIN` request. Refused when the firmware has no app slots. |
 
@@ -171,15 +197,14 @@ still pending at exit, ZZRun writes `waiting for pending input to finish.` to
 the user console (not stdout, and not the pipe) and waits, because a pipe read
 cannot be cancelled. The custom screen is closed before either of those waits,
 so the prompt is not hidden behind the app display. A Workbench launch opens
-no console by default; only when
-the app first uses console I/O does firmware set its console flag, causing
-ZZRun to open a closable `CON:` window. If opening that requested console
-fails, or if writing app output fails, ZZRun stops the app, does not wait for
-the output ring to empty, and returns 20.
+no console by default; only when the app first uses console I/O does firmware
+set its console flag, causing ZZRun to open a closable `CON:` window. If
+opening that requested console fails, or if writing app output fails, ZZRun
+stops the app, does not wait for the output ring to empty, and returns 20.
 
 The default audio route is the card fabric. Set `AUDIO=AHI` in the app icon or
-pass `AUDIO=AHI` before app arguments in a Shell command to request the AHI
-route; it is advertised to firmware before the app starts.
+pass `AUDIO=AHI` after the ELF in a Shell command to request the AHI route; it
+is advertised to firmware before the app starts.
 The shared PCM ring is interleaved S16LE and carries its requested rate and
 channel count. Each successful firmware audio open publishes a stream epoch in
 the audio header. If that epoch changes, ZZRun aborts and reaps its previous
@@ -189,6 +214,10 @@ exact requested stereo rate; if AHI cannot be opened, ZZRun stops the app and
 returns 20. It converts the ring's S16LE samples into AHI's
 S16BE bounce buffer without resampling or downmixing. AHI underruns are
 reported in the audio ring/lifecycle counters.
+
+Known limitation: running an app with stdout redirected to `NIL:` (`>NIL:`)
+made swquake's file seeks fail on the card with every ZZRun build tested,
+while `>file` works. This is under investigation.
 
 When firmware sets the display-unbound flag, ZZRun opens the requested P96
 screen. RGB565 is the first path; CLUT8 is supported and ZZRun loads changed
@@ -217,10 +246,12 @@ a list name is NUL-terminated and `out_n` excludes the NUL. A short read with
 
 Relative paths stay below `ROOT`. `..`, leading `/`, and empty path components
 that would leave the root are rejected. Paths containing `:` are rejected
-unless `ABS=1`. This is path hygiene for an app that is already trusted; it is
-not an isolation boundary. File reads and writes are chunked at 8 KiB so the
-launcher refreshes its heartbeat while serving a large request. A stalled
-AmigaDOS volume can still block its DOS call.
+unless `ABS` is enabled. With `ABS`, file open, stat, and directory-list
+requests use `GetDeviceProc` and try later multi-directory assign candidates
+after `ERROR_OBJECT_NOT_FOUND`. This is path hygiene for an app that is already
+trusted; it is not an isolation boundary. File reads and writes are chunked at
+8 KiB so the launcher refreshes its heartbeat while serving a large request. A
+stalled AmigaDOS volume can still block its DOS call.
 
 The launcher reports file modification times as Unix seconds derived from an
 Amiga `DateStamp`, or zero when the time is absent.

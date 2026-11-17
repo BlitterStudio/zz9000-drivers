@@ -433,8 +433,8 @@
 ; --------------------------------------------------------------------
 
 (if (exists "Libs/zz9k.library")
-   (if (askbool (prompt "Install the ZZ9000 SDK runtime?\n\nIncludes zz9k.library, ARM-accelerated mpega.library, zz9k-picture.datatype and zz9k-sound.datatype. Requires SDK-service firmware.\n\nOn matched current Zorro 2 stacks, supported services share one 64 KiB host window. The 4 MiB profile supports a bounded ZZPlay video/PIP source; the 2 MiB profile does not.")
-                (help "zz9k.library exposes firmware services; mpega.library accelerates MP3 decoding; zz9k-picture.datatype decodes JPEG, PNG and WebP images on the card; zz9k-sound.datatype decodes MP3, FLAC and Ogg Vorbis files on the card. The JPEG, PNG, WebP, MP3, FLAC and Ogg Vorbis descriptors are installed inactive under SYS:Storage/DataTypes. Zorro 2 clients share the 64 KiB host window and can contend; some low-level SDK diagnostics are not Zorro 2-safe."))
+   (if (askbool (prompt "Install the ZZ9000 SDK runtime?\n\nIncludes zz9k.library, ARM-accelerated mpega.library, zz9k-picture.datatype and zz9k-sound.datatype. Requires SDK-service firmware.\n\nOn matched current Zorro 2 stacks, supported services share one 16 KiB host window; the other 48 KiB are reserved for the audio direct ring. A generation-1 4 MiB profile supports one bounded ZZPlay video/PIP source. Current generation-2 2 MiB and 4 MiB profiles do not.")
+                (help "zz9k.library exposes firmware services; mpega.library accelerates MP3 decoding; zz9k-picture.datatype decodes JPEG, PNG and WebP images on the card; zz9k-sound.datatype decodes MP3, FLAC and Ogg Vorbis files on the card. Current Zorro 2 clients share the 16 KiB host window and can contend; some low-level SDK diagnostics are not Zorro 2-safe."))
       (
          (set #newver   (getversion "Libs/zz9k.library"))
          (set #newmajor (/ #newver 65536))
@@ -566,10 +566,9 @@
                     (default #zz-amissl-cpu)))
               (set #zz-amissl-dir (tackon "Libs/AmiSSL" (if (= 1 #zz-amissl-cpu) "68060" "68020-40")))
               ; Always preserve each stock AmiSSL core library before
-              ; overwriting it, but only when no backup exists yet — so
-              ; re-running the installer never overwrites the genuine original
-              ; with our accelerated copy from a previous run (mirrors the
-              ; Picasso96Settings.bak handling above).
+              ; overwriting it, but only when no backup exists yet. A later
+              ; installer run preserves the backup made before the
+              ; accelerated copy was installed (as with Picasso96Settings.bak).
               (if (AND (exists "LIBS:AmiSSL/amissl_v362.library")
                        (exists (tackon #zz-amissl-dir "amissl_v362.library")))
                  (
@@ -694,7 +693,7 @@
 
       (copyfiles
          (prompt "Install ZZRun into C:")
-         (help "Launches one trusted ARM ELF through zz9k.library on the Zorro III app runtime. It restores the public screen when the app exits or faults. See Docs/ZZRun.guide for ROOT, Workbench ToolTypes, and file access.")
+         (help "Launches up to four trusted ARM ELFs through zz9k.library's mailbox transport on the Zorro III app runtime. This release includes zz9k.library 2.39. It restores the public screen when an app exits or faults. See Docs/ZZRun.guide for ROOT, Workbench ToolTypes, and file access.")
          (source "Tools/ZZRun")
          (infos)
          (dest "C:"))
