@@ -623,24 +623,44 @@ static inline int zzrun_packet_result_usable(int completed, int abandoned)
     return completed && !abandoned;
 }
 
-#define ZZRUN_DOS_RELEASE_LOCK 1u
-#define ZZRUN_DOS_RELEASE_OPEN 2u
+/* A resource slot must survive a release packet that was never delivered;
+ * after delivery DOS owns no resource and its local handle may be freed even
+ * when the handler reported an error. The callback sends ACTION_END or
+ * ACTION_FREE_LOCK; fallback closes/unlocks after an undelivered packet. */
+struct zzrun_dos_release_ops {
+    void *context;
+    int (*send_release)(void *context, int32_t *result);
+    void (*free_local)(void *context);
+    void (*fallback_release)(void *context);
+    void (*forget_slot)(void *context);
+};
 
-typedef void (*zzrun_dos_release_fn)(void *context, uint32_t release_kind,
-                                     uint32_t resource);
+int zzrun_dos_close_slot(const struct zzrun_dos_release_ops *ops,
+                         int *delivered_out);
+void zzrun_dos_end_or_close(const struct zzrun_dos_release_ops *ops);
+void zzrun_dos_release_abandoned(const struct zzrun_dos_release_ops *ops,
+                                 int acquired);
 
-/* A reply can acquire a resource after the caller has abandoned its result.
- * Dispatch its matching cleanup exactly once before forgetting that reply. */
-static inline int zzrun_packet_release_abandoned_resource(
-    int completed, int abandoned, int32_t result, uint32_t release_kind,
-    uint32_t resource, zzrun_dos_release_fn release, void *context)
-{
-    if (!completed || !abandoned || result == 0)
-        return 0;
-    if (release)
-        release(context, release_kind, resource);
-    return 1;
-}
+/* Every shared-window write samples the current generation immediately before
+ * publishing bytes. A detached window must not invoke that sampler. */
+struct zzrun_shared_writer {
+    void *context;
+    uint32_t owned_generation;
+    int attached;
+    uint32_t (*read_current_generation)(void *context);
+};
+#define ZZRUN_POLICY_TYPES_DEFINED 1
+
+int zzrun_shared_write_be32(const struct zzrun_shared_writer *writer,
+                            uint8_t *out, uint32_t value);
+int zzrun_shared_write_bytes(const struct zzrun_shared_writer *writer,
+                             uint8_t *out, const uint8_t *in, uint32_t bytes);
+
+/* A file request is served only when the generation sampled with the request
+ * is still this launcher's. Keep that sampled value for every async DOS
+ * packet and reply in the operation. */
+int zzrun_file_service_generation_owned(uint32_t owned_generation,
+                                        uint32_t sampled_generation);
 
 /* Direct DOS packets receive the path relative to the lock selected by
  * GetDeviceProc(): strip only the device/assign prefix. */

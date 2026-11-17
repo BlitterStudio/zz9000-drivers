@@ -7,9 +7,9 @@ BUILD_DIR ?= build
 test: $(BUILD_DIR)/zzrun_policy_test
 	$(BUILD_DIR)/zzrun_policy_test
 
-$(BUILD_DIR)/zzrun_policy_test: zzrun_policy_test.c ../zzrun_policy.h
+$(BUILD_DIR)/zzrun_policy_test: zzrun_policy_test.c ../zzrun_policy.h ../zzrun_policy.c
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) -I.. -o $@ zzrun_policy_test.c
+	$(CC) $(CFLAGS) -I.. -o $@ zzrun_policy_test.c ../zzrun_policy.c
 
 clean:
 	rm -rf $(BUILD_DIR)

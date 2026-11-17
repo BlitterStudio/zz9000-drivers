@@ -220,6 +220,21 @@ static void test_stale_file_request_cannot_publish_or_claim(void)
     assert(zzrun_file_request_is_current(8u, 3u, 8u, 3u));
     assert(!zzrun_file_request_is_current(8u, 3u, 9u, 3u));
     assert(!zzrun_file_request_is_current(8u, 3u, 8u, 4u));
+    assert(!zzrun_file_service_generation_owned(0u, 0u));
+}
+
+/* serve_files() captures the live generation once, then every open/read/seek/
+ * close reply is fenced against that same value. */
+static void test_owning_file_service_accepts_open_read_seek_and_close(void)
+{
+    uint32_t generation = 0x31u;
+
+    assert(zzrun_file_service_generation_owned(generation, generation));
+    assert(zzrun_file_request_is_current(2u, generation, 2u, generation));
+    assert(zzrun_file_request_is_current(4u, generation, 4u, generation));
+    assert(zzrun_file_request_is_current(6u, generation, 6u, generation));
+    assert(zzrun_file_request_is_current(8u, generation, 8u, generation));
+    assert(!zzrun_file_service_generation_owned(generation, generation + 1u));
 }
 
 static void test_empty_argument_is_allowed(void)
@@ -534,20 +549,6 @@ static void test_pending_packet_ctrl_c_still_requests_stop(void)
     assert(!zzrun_ctrl_c_must_request_stop(0));
 }
 
-struct fake_dos_release {
-    uint32_t count;
-    uint32_t kind;
-    uint32_t resource;
-};
-
-static void fake_dos_release(void *context, uint32_t kind, uint32_t resource)
-{
-    struct fake_dos_release *release = context;
-
-    release->count++;
-    release->kind = kind;
-    release->resource = resource;
-}
 
 struct fake_dos_path {
     struct zzrun_dos_path_candidate candidates[2];
@@ -603,38 +604,6 @@ static void fake_dos_send(void *context,
     *reply = path->replies[index];
 }
 
-static void test_abandoned_packet_releases_acquired_resources(void)
-{
-    struct fake_dos_release release;
-
-    memset(&release, 0, sizeof(release));
-    assert(zzrun_packet_release_abandoned_resource(
-        1, 1, 1, ZZRUN_DOS_RELEASE_OPEN, 0x1234u, fake_dos_release,
-        &release));
-    assert(release.count == 1u);
-    assert(release.kind == ZZRUN_DOS_RELEASE_OPEN);
-    assert(release.resource == 0x1234u);
-
-    memset(&release, 0, sizeof(release));
-    assert(zzrun_packet_release_abandoned_resource(
-        1, 1, 0x5678, ZZRUN_DOS_RELEASE_LOCK, 0x5678u, fake_dos_release,
-        &release));
-    assert(release.count == 1u);
-    assert(release.kind == ZZRUN_DOS_RELEASE_LOCK);
-    assert(release.resource == 0x5678u);
-
-    memset(&release, 0, sizeof(release));
-    assert(!zzrun_packet_release_abandoned_resource(
-        1, 0, 1, ZZRUN_DOS_RELEASE_OPEN, 0x1234u, fake_dos_release,
-        &release));
-    assert(!zzrun_packet_release_abandoned_resource(
-        1, 1, 0, ZZRUN_DOS_RELEASE_OPEN, 0x1234u, fake_dos_release,
-        &release));
-    assert(!zzrun_packet_release_abandoned_resource(
-        0, 1, 1, ZZRUN_DOS_RELEASE_OPEN, 0x1234u, fake_dos_release,
-        &release));
-    assert(release.count == 0u);
-}
 
 static void test_dos_path_dispatch_uses_assign_locks_and_retries(void)
 {
@@ -741,6 +710,161 @@ static void test_dos_path_dispatch_uses_assign_locks_and_retries(void)
     assert(path.send_count == 0u);
 }
 
+struct fake_release {
+    int delivered;
+    int32_t result;
+    int sends;
+    int freed;
+    int fallback;
+    int forgotten;
+};
+
+static int fake_send_release(void *context, int32_t *result)
+{
+    struct fake_release *release = context;
+
+    release->sends++;
+    *result = release->result;
+    return release->delivered;
+}
+
+static void fake_free_local(void *context)
+{
+    ((struct fake_release *)context)->freed++;
+}
+
+static void fake_fallback_release(void *context)
+{
+    ((struct fake_release *)context)->fallback++;
+}
+
+static void fake_forget_slot(void *context)
+{
+    ((struct fake_release *)context)->forgotten++;
+}
+
+static struct zzrun_dos_release_ops fake_release_ops(
+    struct fake_release *release)
+{
+    struct zzrun_dos_release_ops ops;
+
+    ops.context = release;
+    ops.send_release = fake_send_release;
+    ops.free_local = fake_free_local;
+    ops.fallback_release = fake_fallback_release;
+    ops.forget_slot = fake_forget_slot;
+    return ops;
+}
+
+static void test_async_release_preserves_or_frees_resources_by_delivery(void)
+{
+    struct fake_release release;
+    struct zzrun_dos_release_ops ops;
+    int delivered;
+
+    memset(&release, 0, sizeof(release));
+    release.delivered = 1;
+    release.result = 1;
+    ops = fake_release_ops(&release);
+    assert(zzrun_dos_close_slot(&ops, &delivered));
+    assert(delivered && release.sends == 1 && release.freed == 1 &&
+           release.forgotten == 1 && release.fallback == 0);
+
+    memset(&release, 0, sizeof(release));
+    release.delivered = 1;
+    ops = fake_release_ops(&release);
+    assert(!zzrun_dos_close_slot(&ops, &delivered));
+    assert(delivered && release.freed == 1 && release.forgotten == 1 &&
+           release.fallback == 0);
+
+    memset(&release, 0, sizeof(release));
+    ops = fake_release_ops(&release);
+    assert(!zzrun_dos_close_slot(&ops, &delivered));
+    assert(!delivered && release.freed == 0 && release.forgotten == 0 &&
+           release.fallback == 0);
+    zzrun_dos_end_or_close(&ops);
+    assert(release.sends == 2 && release.freed == 0 && release.fallback == 1);
+
+    memset(&release, 0, sizeof(release));
+    release.delivered = 1;
+    ops = fake_release_ops(&release);
+    zzrun_dos_release_abandoned(&ops, 1);
+    assert(release.sends == 1 && release.freed == 1 && release.fallback == 0);
+
+    memset(&release, 0, sizeof(release));
+    ops = fake_release_ops(&release);
+    zzrun_dos_release_abandoned(&ops, 1);
+    assert(release.sends == 1 && release.freed == 0 && release.fallback == 1);
+    zzrun_dos_release_abandoned(&ops, 0);
+    assert(release.sends == 1);
+}
+
+struct fake_writer {
+    uint32_t current_generation;
+    unsigned reads;
+};
+
+static uint32_t fake_read_generation(void *context)
+{
+    struct fake_writer *writer = context;
+
+    writer->reads++;
+    return writer->current_generation;
+}
+
+static void test_lost_generation_cannot_write_shared_window(void)
+{
+    struct fake_writer state;
+    struct zzrun_shared_writer writer;
+    uint8_t window[20];
+    uint8_t before[20];
+    static const uint8_t input[] = { 'c', 't', 'r', 'l', '-', 'c' };
+
+    memset(window, 0xa5, sizeof(window));
+    memcpy(before, window, sizeof(window));
+    memset(&state, 0, sizeof(state));
+    writer.context = &state;
+    writer.owned_generation = 9u;
+    writer.attached = 0;
+    writer.read_current_generation = fake_read_generation;
+    assert(!zzrun_shared_write_be32(&writer, window, 1u));
+    assert(state.reads == 0u);
+    assert(memcmp(window, before, sizeof(window)) == 0);
+
+    writer.attached = 1;
+    assert(!zzrun_shared_write_be32(&writer, window + 0, 1u)); /* stop */
+    assert(!zzrun_shared_write_be32(&writer, window + 4, 2u)); /* file */
+    assert(!zzrun_shared_write_bytes(&writer, window + 8, input, sizeof(input)));
+    assert(!zzrun_shared_write_be32(&writer, window + 16, 3u)); /* AHI */
+    assert(memcmp(window, before, sizeof(window)) == 0);
+    assert(state.reads == 4u);
+
+    state.current_generation = 9u;
+    assert(zzrun_shared_write_be32(&writer, window + 0, 0x12345678u));
+    assert(window[0] == 0x12u && window[1] == 0x34u &&
+           window[2] == 0x56u && window[3] == 0x78u);
+    assert(zzrun_shared_write_be32(&writer, window + 4, 2u)); /* event/log */
+    assert(zzrun_shared_write_bytes(&writer, window + 8, input, sizeof(input)));
+    assert(memcmp(window + 8, input, sizeof(input)) == 0);
+    assert(zzrun_shared_write_be32(&writer, window + 16, 3u)); /* display */
+
+    writer.owned_generation = 0u;
+    state.current_generation = 0u;
+    state.reads = 0u;
+    assert(!zzrun_shared_write_be32(&writer, window, 4u));
+    assert(state.reads == 0u);
+}
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -764,6 +888,7 @@ int main(void)
     test_ahi_open_failure_exits_20();
     test_busy_deferred_operations_retry_only_until_deadline();
     test_stale_file_request_cannot_publish_or_claim();
+    test_owning_file_service_accepts_open_read_seek_and_close();
     test_empty_argument_is_allowed();
     test_async_console_write_advances_only_on_completion();
     test_owned_cursor_ignores_stale_readback();
@@ -788,10 +913,11 @@ int main(void)
     test_dos_packet_transport_and_error_are_distinct();
     test_legacy_claim_passes_the_pre_load_gate();
     test_packet_wait_outlives_abandonment();
-    test_abandoned_packet_releases_acquired_resources();
     test_dos_path_dispatch_uses_assign_locks_and_retries();
     test_bstr_encoding_matches_dos_packets();
     test_pending_packet_ctrl_c_still_requests_stop();
+    test_async_release_preserves_or_frees_resources_by_delivery();
+    test_lost_generation_cannot_write_shared_window();
     puts("zzrun_policy_test: ok");
     return 0;
 }
