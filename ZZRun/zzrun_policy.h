@@ -616,6 +616,119 @@ static inline int zzrun_packet_keep_waiting(int reply_arrived)
     return !reply_arrived;
 }
 
+/* Completion and abandonment are independent: handlers can allocate an
+ * object before ZZRun observes Ctrl-C or a replaced generation. */
+static inline int zzrun_packet_result_usable(int completed, int abandoned)
+{
+    return completed && !abandoned;
+}
+
+#define ZZRUN_DOS_RELEASE_LOCK 1u
+#define ZZRUN_DOS_RELEASE_OPEN 2u
+
+typedef void (*zzrun_dos_release_fn)(void *context, uint32_t release_kind,
+                                     uint32_t resource);
+
+/* A reply can acquire a resource after the caller has abandoned its result.
+ * Dispatch its matching cleanup exactly once before forgetting that reply. */
+static inline int zzrun_packet_release_abandoned_resource(
+    int completed, int abandoned, int32_t result, uint32_t release_kind,
+    uint32_t resource, zzrun_dos_release_fn release, void *context)
+{
+    if (!completed || !abandoned || result == 0)
+        return 0;
+    if (release)
+        release(context, release_kind, resource);
+    return 1;
+}
+
+/* Direct DOS packets receive the path relative to the lock selected by
+ * GetDeviceProc(): strip only the device/assign prefix. */
+static inline const char *zzrun_dos_packet_path(const char *name)
+{
+    const char *p;
+
+    if (!name)
+        return NULL;
+    for (p = name; *p; p++) {
+        if (*p == ':')
+            return p + 1;
+    }
+    return name;
+}
+
+static inline uint32_t zzrun_bstr_encode(const char *name, uint8_t *out,
+                                         uint32_t cap);
+
+struct zzrun_dos_path_candidate {
+    uintptr_t handler;
+    uint32_t directory;
+};
+
+struct zzrun_dos_path_reply {
+    int completed;
+    int abandoned;
+    int32_t result;
+    int32_t error;
+};
+
+typedef int (*zzrun_dos_path_resolve_fn)(
+    void *context, int advance, struct zzrun_dos_path_candidate *candidate);
+typedef void (*zzrun_dos_path_send_fn)(
+    void *context, const struct zzrun_dos_path_candidate *candidate,
+    const uint8_t *name_bstr, uint32_t name_bstr_bytes,
+    uint32_t name_bstr_bptr, struct zzrun_dos_path_reply *reply);
+
+/* Send an operation to GetDeviceProc candidates. name_bstr is public,
+ * longword-aligned storage that remains valid until the sender replies. A
+ * failed lookup only tries the next multi-assign directory for
+ * ERROR_OBJECT_NOT_FOUND; a colonless name is sent unchanged to the
+ * current-directory candidate. */
+static inline int zzrun_dos_dispatch_path(
+    const char *name, uint8_t *name_bstr, uint32_t name_bstr_capacity,
+    int32_t object_not_found, zzrun_dos_path_resolve_fn resolve,
+    void *resolve_context, zzrun_dos_path_send_fn send, void *send_context,
+    int *attempted_out, int *usable_out)
+{
+    const char *path = zzrun_dos_packet_path(name);
+    struct zzrun_dos_path_candidate candidate;
+    struct zzrun_dos_path_reply reply;
+    uint32_t name_bstr_bytes;
+    uint32_t name_bstr_bptr;
+    int advance = 0;
+
+    if (attempted_out)
+        *attempted_out = 0;
+    if (usable_out)
+        *usable_out = 0;
+    if (!path || !name_bstr || ((uintptr_t)name_bstr & 3u) != 0u ||
+        !resolve || !send)
+        return 0;
+    name_bstr_bytes = zzrun_bstr_encode(path, name_bstr, name_bstr_capacity);
+    if (name_bstr_bytes == 0u)
+        return 0;
+    name_bstr_bptr = (uint32_t)((uintptr_t)name_bstr >> 2);
+    while (resolve(resolve_context, advance, &candidate)) {
+        if (usable_out)
+            *usable_out = 0;
+        memset(&reply, 0, sizeof(reply));
+        send(send_context, &candidate, name_bstr, name_bstr_bytes,
+             name_bstr_bptr, &reply);
+        if (!reply.completed || reply.abandoned)
+            return 0;
+        if (attempted_out)
+            *attempted_out = 1;
+        if (usable_out)
+            *usable_out = 1;
+        if (reply.result != 0)
+            return 1;
+        if (reply.error != object_not_found)
+            return 0;
+        advance = 1;
+    }
+    return 0;
+}
+
 /* DOS packet name arguments are BCPL strings (BSTR): a length byte, the
  * characters, padded to an even total. Returns the encoded byte count, or 0
  * when the name is longer than a BSTR can carry or does not fit the buffer. */

@@ -520,12 +520,225 @@ static void test_bstr_encoding_matches_dos_packets(void)
     assert(zzrun_bstr_encode("ab", buf, sizeof(buf)) == 4u);
     assert(buf[3] == 0);
     assert(zzrun_bstr_encode("abc", buf, 2u) == 0u);
+    assert(strcmp(zzrun_dos_packet_path("Apps:demo.elf"), "demo.elf") == 0);
+    assert(strcmp(zzrun_dos_packet_path("Work:Apps/demo.elf"),
+                  "Apps/demo.elf") == 0);
+    assert(strcmp(zzrun_dos_packet_path("relative/demo.elf"),
+                  "relative/demo.elf") == 0);
+    assert(zzrun_dos_packet_path(NULL) == NULL);
 }
 
 static void test_pending_packet_ctrl_c_still_requests_stop(void)
 {
     assert(zzrun_ctrl_c_must_request_stop(1));
     assert(!zzrun_ctrl_c_must_request_stop(0));
+}
+
+struct fake_dos_release {
+    uint32_t count;
+    uint32_t kind;
+    uint32_t resource;
+};
+
+static void fake_dos_release(void *context, uint32_t kind, uint32_t resource)
+{
+    struct fake_dos_release *release = context;
+
+    release->count++;
+    release->kind = kind;
+    release->resource = resource;
+}
+
+struct fake_dos_path {
+    struct zzrun_dos_path_candidate candidates[2];
+    struct zzrun_dos_path_reply replies[2];
+    uintptr_t handlers[2];
+    uint32_t directories[2];
+    uintptr_t bstr_addresses[2];
+    uint32_t bstr_bptrs[2];
+    int advances[3];
+    uint32_t candidate_count;
+    uint32_t candidate_index;
+    uint32_t resolve_count;
+    uint32_t send_count;
+    uint32_t bstr_bytes;
+    uint8_t bstr[258];
+};
+
+static int fake_dos_resolve(void *context, int advance,
+                            struct zzrun_dos_path_candidate *candidate)
+{
+    struct fake_dos_path *path = context;
+
+    path->advances[path->resolve_count++] = advance;
+    if (advance)
+        path->candidate_index++;
+    else
+        path->candidate_index = 0;
+    if (path->candidate_index >= path->candidate_count)
+        return 0;
+    *candidate = path->candidates[path->candidate_index];
+    return 1;
+}
+
+static void fake_dos_send(void *context,
+                          const struct zzrun_dos_path_candidate *candidate,
+                          const uint8_t *name_bstr, uint32_t name_bstr_bytes,
+                          uint32_t name_bstr_bptr,
+                          struct zzrun_dos_path_reply *reply)
+{
+    struct fake_dos_path *path = context;
+    uint32_t index = path->send_count++;
+
+    assert(index < 2u);
+    assert(name_bstr_bytes <= sizeof(path->bstr));
+    assert(((uintptr_t)name_bstr & 3u) == 0u);
+    assert(name_bstr_bptr == (uint32_t)((uintptr_t)name_bstr >> 2));
+    path->handlers[index] = candidate->handler;
+    path->directories[index] = candidate->directory;
+    path->bstr_addresses[index] = (uintptr_t)name_bstr;
+    path->bstr_bptrs[index] = name_bstr_bptr;
+    path->bstr_bytes = name_bstr_bytes;
+    memcpy(path->bstr, name_bstr, name_bstr_bytes);
+    *reply = path->replies[index];
+}
+
+static void test_abandoned_packet_releases_acquired_resources(void)
+{
+    struct fake_dos_release release;
+
+    memset(&release, 0, sizeof(release));
+    assert(zzrun_packet_release_abandoned_resource(
+        1, 1, 1, ZZRUN_DOS_RELEASE_OPEN, 0x1234u, fake_dos_release,
+        &release));
+    assert(release.count == 1u);
+    assert(release.kind == ZZRUN_DOS_RELEASE_OPEN);
+    assert(release.resource == 0x1234u);
+
+    memset(&release, 0, sizeof(release));
+    assert(zzrun_packet_release_abandoned_resource(
+        1, 1, 0x5678, ZZRUN_DOS_RELEASE_LOCK, 0x5678u, fake_dos_release,
+        &release));
+    assert(release.count == 1u);
+    assert(release.kind == ZZRUN_DOS_RELEASE_LOCK);
+    assert(release.resource == 0x5678u);
+
+    memset(&release, 0, sizeof(release));
+    assert(!zzrun_packet_release_abandoned_resource(
+        1, 0, 1, ZZRUN_DOS_RELEASE_OPEN, 0x1234u, fake_dos_release,
+        &release));
+    assert(!zzrun_packet_release_abandoned_resource(
+        1, 1, 0, ZZRUN_DOS_RELEASE_OPEN, 0x1234u, fake_dos_release,
+        &release));
+    assert(!zzrun_packet_release_abandoned_resource(
+        0, 1, 1, ZZRUN_DOS_RELEASE_OPEN, 0x1234u, fake_dos_release,
+        &release));
+    assert(release.count == 0u);
+}
+
+static void test_dos_path_dispatch_uses_assign_locks_and_retries(void)
+{
+    const int32_t not_found = 404;
+    union {
+        uintptr_t alignment;
+        uint8_t bytes[260];
+    } name_bstr;
+    struct fake_dos_path path;
+    int attempted;
+    int usable;
+    memset(&path, 0, sizeof(path));
+    path.candidate_count = 1u;
+    path.candidates[0].handler = 0x11110000u;
+    path.candidates[0].directory = 0x1000u;
+    path.replies[0].completed = 1;
+    path.replies[0].result = 1;
+    assert(zzrun_dos_dispatch_path("Apps:demo.elf", name_bstr.bytes, 258u,
+                                   not_found, fake_dos_resolve, &path,
+                                   fake_dos_send, &path, &attempted, &usable));
+    assert(attempted && usable);
+    assert(path.send_count == 1u);
+    assert(path.handlers[0] == 0x11110000u);
+    assert(path.directories[0] == 0x1000u);
+    assert(path.bstr_bytes == 10u);
+    assert(path.bstr[0] == 8u);
+    assert(memcmp(path.bstr + 1, "demo.elf", 8u) == 0);
+    assert(path.bstr[9] == 0u);
+
+    memset(&path, 0, sizeof(path));
+    path.candidate_count = 2u;
+    path.candidates[0].handler = 0x11110000u;
+    path.candidates[0].directory = 0x1000u;
+    path.candidates[1].handler = 0x22220000u;
+    path.candidates[1].directory = 0x2000u;
+    path.replies[0].completed = 1;
+    path.replies[0].error = not_found;
+    path.replies[1].completed = 1;
+    path.replies[1].result = 1;
+    assert(zzrun_dos_dispatch_path("Apps:demo.elf", name_bstr.bytes, 258u,
+                                   not_found, fake_dos_resolve, &path,
+                                   fake_dos_send, &path, &attempted, &usable));
+    assert(attempted && usable);
+    assert(path.send_count == 2u);
+    assert(path.handlers[0] == 0x11110000u);
+    assert(path.handlers[1] == 0x22220000u);
+    assert(path.directories[0] == 0x1000u);
+    assert(path.directories[1] == 0x2000u);
+    assert(path.advances[0] == 0);
+    assert(path.advances[1] == 1);
+
+    memset(&path, 0, sizeof(path));
+    path.candidate_count = 2u;
+    path.candidates[0].directory = 0x1000u;
+    path.replies[0].completed = 1;
+    path.replies[0].error = 5;
+    assert(!zzrun_dos_dispatch_path("Apps:demo.elf", name_bstr.bytes, 258u,
+                                    not_found, fake_dos_resolve, &path,
+                                    fake_dos_send, &path, &attempted, &usable));
+    assert(attempted && usable);
+    assert(path.send_count == 1u);
+
+    memset(&path, 0, sizeof(path));
+    path.candidate_count = 2u;
+    path.candidates[0].directory = 0x1000u;
+    path.candidates[1].directory = 0x2000u;
+    path.replies[0].completed = 1;
+    path.replies[0].error = not_found;
+    path.replies[1].completed = 1;
+    path.replies[1].abandoned = 1;
+    path.replies[1].result = 1;
+    assert(!zzrun_dos_dispatch_path("Apps:demo.elf", name_bstr.bytes, 258u,
+                                    not_found, fake_dos_resolve, &path,
+                                    fake_dos_send, &path, &attempted, &usable));
+    assert(attempted && !usable);
+    assert(path.send_count == 2u);
+
+    memset(&path, 0, sizeof(path));
+    path.candidate_count = 1u;
+    path.candidates[0].handler = 0x33330000u;
+    path.candidates[0].directory = 0x3000u;
+    path.replies[0].completed = 1;
+    path.replies[0].result = 1;
+    assert(zzrun_dos_dispatch_path("relative/demo.elf", name_bstr.bytes,
+                                   258u, not_found, fake_dos_resolve, &path,
+                                   fake_dos_send, &path, &attempted, &usable));
+    assert(attempted && usable);
+    assert(path.handlers[0] == 0x33330000u);
+    assert(path.directories[0] == 0x3000u);
+    assert(path.bstr[0] == strlen("relative/demo.elf"));
+    assert(memcmp(path.bstr + 1, "relative/demo.elf",
+                  strlen("relative/demo.elf")) == 0);
+    assert(path.bstr_addresses[0] == (uintptr_t)name_bstr.bytes);
+    assert(path.bstr_bptrs[0] ==
+           (uint32_t)((uintptr_t)name_bstr.bytes >> 2));
+
+    memset(&path, 0, sizeof(path));
+    path.candidate_count = 1u;
+    path.replies[0].completed = 1;
+    path.replies[0].result = 1;
+    assert(!zzrun_dos_dispatch_path("Apps:demo.elf", name_bstr.bytes + 1,
+                                    258u, not_found, fake_dos_resolve, &path,
+                                    fake_dos_send, &path, &attempted, &usable));
+    assert(path.send_count == 0u);
 }
 
 
@@ -575,6 +788,8 @@ int main(void)
     test_dos_packet_transport_and_error_are_distinct();
     test_legacy_claim_passes_the_pre_load_gate();
     test_packet_wait_outlives_abandonment();
+    test_abandoned_packet_releases_acquired_resources();
+    test_dos_path_dispatch_uses_assign_locks_and_retries();
     test_bstr_encoding_matches_dos_packets();
     test_pending_packet_ctrl_c_still_requests_stop();
     puts("zzrun_policy_test: ok");

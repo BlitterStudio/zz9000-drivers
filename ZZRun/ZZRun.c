@@ -223,7 +223,7 @@ static void request_stop(void);
 static int dos_packet_async(struct MsgPort *handler, LONG action, LONG arg1,
                             LONG arg2, LONG arg3, LONG arg4, LONG arg5,
                             uint32_t captured_generation, LONG *result_out,
-                            int *ownership_lost);
+                            int *ownership_lost, int *abandoned_out);
 static LONG file_packet_async(BPTR fh, LONG action, LONG arg2, LONG arg3,
                               LONG arg4, LONG arg5, int *transport_ok);
 static int examine_lock_async(BPTR lock, struct FileInfoBlock *fib,
@@ -3276,7 +3276,7 @@ static int fill_argv(void)
 static int dos_packet_async(struct MsgPort *handler, LONG action, LONG arg1,
                             LONG arg2, LONG arg3, LONG arg4, LONG arg5,
                             uint32_t captured_generation, LONG *result_out,
-                            int *ownership_lost)
+                            int *ownership_lost, int *abandoned_out)
 {
     struct MsgPort *port;
     struct StandardPacket *packet;
@@ -3285,11 +3285,12 @@ static int dos_packet_async(struct MsgPort *handler, LONG action, LONG arg1,
     ULONG signals;
     int abandoned = 0;
 
-
     if (result_out)
         *result_out = -1;
     if (ownership_lost)
         *ownership_lost = 0;
+    if (abandoned_out)
+        *abandoned_out = 0;
     if (!handler || !result_out)
         return 0;
     port = CreateMsgPort();
@@ -3351,9 +3352,11 @@ static int dos_packet_async(struct MsgPort *handler, LONG action, LONG arg1,
     SetIoErr(zzrun_dos_error_code(1, packet->sp_Pkt.dp_Res2,
                                   ERROR_NO_FREE_STORE));
     *result_out = packet->sp_Pkt.dp_Res1;
+    if (abandoned_out)
+        *abandoned_out = abandoned;
     FreeMem(packet, sizeof(*packet));
     DeleteMsgPort(port);
-    return !abandoned;
+    return 1;
 }
 
 static LONG file_packet_async(BPTR fh, LONG action, LONG arg2, LONG arg3,
@@ -3361,13 +3364,16 @@ static LONG file_packet_async(BPTR fh, LONG action, LONG arg2, LONG arg3,
 {
     struct FileHandle *handle = (struct FileHandle *)BADDR(fh);
     LONG result;
+    int abandoned;
 
     if (transport_ok)
         *transport_ok = 0;
     if (!handle || !handle->fh_Type || !transport_ok)
         return -1;
     if (!dos_packet_async(handle->fh_Type, action, handle->fh_Arg1, arg2,
-                          arg3, arg4, arg5, file_generation, &result, NULL))
+                          arg3, arg4, arg5, file_generation, &result, NULL,
+                          &abandoned) ||
+        !zzrun_packet_result_usable(1, abandoned))
         return -1;
     *transport_ok = 1;
     return result;
@@ -3378,6 +3384,7 @@ static int examine_lock_async(BPTR lock, struct FileInfoBlock *fib,
 {
     struct FileLock *file_lock = (struct FileLock *)BADDR(lock);
     LONG result;
+    int abandoned;
 
     if (transport_ok)
         *transport_ok = 0;
@@ -3385,7 +3392,8 @@ static int examine_lock_async(BPTR lock, struct FileInfoBlock *fib,
         return 0;
     if (!dos_packet_async(file_lock->fl_Task, ACTION_EXAMINE_OBJECT,
                           (LONG)lock, (LONG)MKBADDR(fib), 0, 0, 0,
-                          file_generation, &result, NULL))
+                          file_generation, &result, NULL, &abandoned) ||
+        !zzrun_packet_result_usable(1, abandoned))
         return 0;
     *transport_ok = 1;
     return zzrun_dos_boolean_result(1, result);
@@ -3396,6 +3404,7 @@ static int examine_next_async(BPTR lock, struct FileInfoBlock *fib,
 {
     struct FileLock *file_lock = (struct FileLock *)BADDR(lock);
     LONG result;
+    int abandoned;
 
     if (transport_ok)
         *transport_ok = 0;
@@ -3403,7 +3412,8 @@ static int examine_next_async(BPTR lock, struct FileInfoBlock *fib,
         return 0;
     if (!dos_packet_async(file_lock->fl_Task, ACTION_EXAMINE_NEXT,
                           (LONG)lock, (LONG)MKBADDR(fib), 0, 0, 0,
-                          file_generation, &result, NULL))
+                          file_generation, &result, NULL, &abandoned) ||
+        !zzrun_packet_result_usable(1, abandoned))
         return 0;
     *transport_ok = 1;
     return zzrun_dos_boolean_result(1, result);
@@ -3414,6 +3424,7 @@ static LONG load_read_async(BPTR fh, uint8_t *buffer, LONG bytes,
 {
     struct FileHandle *handle = (struct FileHandle *)BADDR(fh);
     LONG result;
+    int abandoned;
 
     if (ownership_lost)
         *ownership_lost = 0;
@@ -3421,31 +3432,79 @@ static LONG load_read_async(BPTR fh, uint8_t *buffer, LONG bytes,
         return -1;
     if (!dos_packet_async(handle->fh_Type, ACTION_READ, handle->fh_Arg1,
                           (LONG)buffer, bytes, 0, 0, owned_generation,
-                          &result, ownership_lost))
+                          &result, ownership_lost, &abandoned) ||
+        !zzrun_packet_result_usable(1, abandoned))
         return -1;
     return result;
 }
 
-/* DOS packet name arguments are BSTRs: a longword-aligned buffer holding the
- * host-tested zzrun_bstr_encode layout. The storage is freed once the packet
- * has been replied to. */
-static BPTR bstr_alloc(const char *name, uint8_t **storage)
+/* DOS packet names must remain in public, longword-aligned storage until the
+ * handler replies. */
+static uint8_t *bstr_storage_alloc(void)
+{
+    return AllocVec(258u, MEMF_PUBLIC);
+}
+
+static uint8_t *bstr_alloc(const char *name)
 {
     uint8_t *buf;
 
-    *storage = NULL;
     if (!name)
-        return 0;
-    buf = AllocVec(258u, MEMF_PUBLIC);
+        return NULL;
+    buf = bstr_storage_alloc();
     if (!buf)
-        return 0;
+        return NULL;
     if (zzrun_bstr_encode(name, buf, 258u) == 0u) {
         FreeVec(buf);
         SetIoErr(ERROR_OBJECT_TOO_LARGE);
-        return 0;
+        return NULL;
     }
-    *storage = buf;
-    return MKBADDR(buf);
+    return buf;
+}
+
+static void release_abandoned_packet_resource(void *context,
+                                              uint32_t release_kind,
+                                              uint32_t resource)
+{
+    struct MsgPort *handler = context;
+    LONG result;
+    LONG action;
+
+    if (!handler)
+        return;
+    if (release_kind == ZZRUN_DOS_RELEASE_LOCK)
+        action = ACTION_FREE_LOCK;
+    else if (release_kind == ZZRUN_DOS_RELEASE_OPEN)
+        action = ACTION_END;
+    else
+        return;
+    (void)dos_packet_async(handler, action, (LONG)resource, 0, 0, 0, 0, 0,
+                           &result, NULL, NULL);
+}
+
+static BPTR lock_on_handler_async(struct MsgPort *handler, BPTR dir,
+                                  BPTR name_bstr, LONG access,
+                                  int *completed_out)
+{
+    LONG result;
+    int abandoned;
+
+    if (completed_out)
+        *completed_out = 0;
+    if (!handler || !name_bstr || !completed_out)
+        return 0;
+    if (!dos_packet_async(handler, ACTION_LOCATE_OBJECT, (LONG)dir,
+                          (LONG)name_bstr, access, 0, 0,
+                          file_generation, &result, NULL, &abandoned))
+        return 0;
+    if (zzrun_packet_release_abandoned_resource(
+            1, abandoned, result, ZZRUN_DOS_RELEASE_LOCK, (uint32_t)result,
+            release_abandoned_packet_resource, handler))
+        return 0;
+    if (!zzrun_packet_result_usable(1, abandoned))
+        return 0;
+    *completed_out = 1;
+    return (BPTR)result;
 }
 
 static BPTR lock_async(BPTR dir, const char *name, LONG access,
@@ -3453,82 +3512,136 @@ static BPTR lock_async(BPTR dir, const char *name, LONG access,
 {
     struct FileLock *file_lock = (struct FileLock *)BADDR(dir);
     uint8_t *storage;
-    BPTR name_bstr;
-    LONG result = -1;
+    BPTR lock;
+    int completed;
 
     if (transport_ok)
         *transport_ok = 0;
     if (!file_lock || !file_lock->fl_Task || !transport_ok)
         return 0;
-    name_bstr = bstr_alloc(name, &storage);
-    if (!name_bstr) {
+    storage = bstr_alloc(name);
+    if (!storage) {
         SetIoErr(zzrun_dos_error_code(0, 0, ERROR_OBJECT_TOO_LARGE));
         return 0;
     }
-    if (dos_packet_async(file_lock->fl_Task, ACTION_LOCATE_OBJECT,
-                         (LONG)dir, (LONG)name_bstr, access, 0, 0,
-                         file_generation, &result, NULL))
-        *transport_ok = 1;
-    else
-        result = -1;
+    lock = lock_on_handler_async(file_lock->fl_Task, dir, MKBADDR(storage),
+                                 access, &completed);
     FreeVec(storage);
-    if (result < 0)
-        return 0;
-    return (BPTR)result;
+    if (completed)
+        *transport_ok = 1;
+    return lock;
 }
 
-/* Absolute (ABS tooltype) paths. DeviceProc can block when the volume is
- * unmounted or a late-binding assign loads its handler; ABS is opt-in, and
- * the previous synchronous Lock/Open blocked identically at this point. */
+struct dos_path_resolver {
+    const char *name;
+    struct DevProc *devproc;
+    struct MsgPort *handler;
+    BPTR directory;
+    int fixed_used;
+};
+
+static int resolve_dos_path(void *context, int advance,
+                            struct zzrun_dos_path_candidate *candidate)
+{
+    struct dos_path_resolver *resolver = context;
+
+    if (resolver->handler) {
+        if (advance || resolver->fixed_used)
+            return 0;
+        resolver->fixed_used = 1;
+        candidate->handler = (uintptr_t)resolver->handler;
+        candidate->directory = (uint32_t)resolver->directory;
+        return 1;
+    }
+    resolver->devproc = GetDeviceProc((STRPTR)resolver->name,
+                                      advance ? resolver->devproc : NULL);
+    if (!resolver->devproc)
+        return 0;
+    candidate->handler = (uintptr_t)resolver->devproc->dvp_Port;
+    candidate->directory = (uint32_t)resolver->devproc->dvp_Lock;
+    return 1;
+}
+
+static void release_dos_path_resolver(struct dos_path_resolver *resolver)
+{
+    if (resolver->devproc)
+        FreeDeviceProc(resolver->devproc);
+}
+
+struct lock_path_request {
+    LONG access;
+    BPTR lock;
+    LONG error;
+};
+
+static void send_lock_path_packet(
+    void *context, const struct zzrun_dos_path_candidate *candidate,
+    const uint8_t *name_bstr, uint32_t name_bstr_bytes,
+    uint32_t name_bstr_bptr, struct zzrun_dos_path_reply *reply)
+{
+    struct lock_path_request *request = context;
+    int completed;
+
+    (void)name_bstr;
+    (void)name_bstr_bytes;
+    request->lock = lock_on_handler_async((struct MsgPort *)candidate->handler,
+                                          (BPTR)candidate->directory,
+                                          (BPTR)name_bstr_bptr,
+                                          request->access, &completed);
+    reply->completed = completed;
+    reply->abandoned = !completed;
+    reply->result = (int32_t)request->lock;
+    request->error = IoErr();
+    reply->error = request->error;
+}
+
+/* Absolute (ABS tooltype) paths use every GetDeviceProc candidate, including
+ * late-binding, nonbinding, and multi-directory assigns. */
 static BPTR lock_abs_async(const char *name, int *transport_ok)
 {
-    struct MsgPort *handler = DeviceProc((STRPTR)name);
-    uint8_t *storage;
-    BPTR name_bstr;
-    LONG result = -1;
+    struct dos_path_resolver resolver;
+    struct lock_path_request request;
+    uint8_t *name_bstr;
+    int usable;
 
     if (transport_ok)
         *transport_ok = 0;
-    if (!handler || !transport_ok)
+    if (!name || !transport_ok)
         return 0;
-    name_bstr = bstr_alloc(name, &storage);
+    name_bstr = bstr_storage_alloc();
     if (!name_bstr) {
-        SetIoErr(zzrun_dos_error_code(0, 0, ERROR_OBJECT_TOO_LARGE));
+        SetIoErr(ERROR_NO_FREE_STORE);
         return 0;
     }
-    if (dos_packet_async(handler, ACTION_LOCATE_OBJECT, 0, (LONG)name_bstr,
-                         ACCESS_READ, 0, 0, file_generation, &result, NULL))
+    memset(&resolver, 0, sizeof(resolver));
+    memset(&request, 0, sizeof(request));
+    resolver.name = name;
+    request.access = ACCESS_READ;
+    (void)zzrun_dos_dispatch_path(name, name_bstr, 258u,
+                                  ERROR_OBJECT_NOT_FOUND, resolve_dos_path,
+                                  &resolver, send_lock_path_packet, &request,
+                                  NULL, &usable);
+    release_dos_path_resolver(&resolver);
+    FreeVec(name_bstr);
+    if (usable)
         *transport_ok = 1;
-    else
-        result = -1;
-    FreeVec(storage);
-    if (result < 0)
-        return 0;
-    return (BPTR)result;
+    if (!request.lock && usable)
+        SetIoErr(request.error);
+    return request.lock;
 }
 
-static BPTR open_find_async(BPTR dir, const char *name, LONG mode,
-                            int *transport_ok)
+static BPTR open_on_handler_async(struct MsgPort *handler, BPTR dir,
+                                  BPTR name_bstr, LONG action,
+                                  int *completed_out)
 {
-    struct FileLock *file_lock = (struct FileLock *)BADDR(dir);
     struct FileHandle *handle;
-    struct MsgPort *handler;
-    uint8_t *storage;
-    BPTR name_bstr;
-    LONG action;
-    LONG result = 0;
+    LONG result;
+    int abandoned;
 
-    if (transport_ok)
-        *transport_ok = 0;
-    handler = file_lock ? file_lock->fl_Task : DeviceProc((STRPTR)name);
-    if (!handler || !transport_ok)
+    if (completed_out)
+        *completed_out = 0;
+    if (!handler || !name_bstr || !completed_out)
         return 0;
-    if (mode == MODE_NEWFILE)
-        action = ACTION_FINDOUTPUT;
-    else if (mode == MODE_READWRITE)
-        action = ACTION_FINDUPDATE;
-    else
-        action = ACTION_FINDINPUT;
     handle = AllocDosObject(DOS_FILEHANDLE, NULL);
     if (!handle) {
         SetIoErr(ERROR_NO_FREE_STORE);
@@ -3536,19 +3649,24 @@ static BPTR open_find_async(BPTR dir, const char *name, LONG mode,
     }
     handle->fh_Type = handler;
     handle->fh_Arg1 = 0;
-    name_bstr = bstr_alloc(name, &storage);
-    if (!name_bstr) {
+    if (!dos_packet_async(handler, action, MKBADDR(handle), (LONG)dir,
+                          (LONG)name_bstr, 0, 0,
+                          file_generation, &result, NULL, &abandoned)) {
         FreeDosObject(DOS_FILEHANDLE, handle);
-        SetIoErr(zzrun_dos_error_code(0, 0, ERROR_OBJECT_TOO_LARGE));
         return 0;
     }
-    if (dos_packet_async(handler, action, MKBADDR(handle), (LONG)dir,
-                         (LONG)name_bstr, 0, 0, file_generation, &result,
-                         NULL))
-        *transport_ok = 1;
-    else
-        result = 0;
-    FreeVec(storage);
+    if (zzrun_packet_release_abandoned_resource(
+            1, abandoned, result, ZZRUN_DOS_RELEASE_OPEN,
+            (uint32_t)handle->fh_Arg1, release_abandoned_packet_resource,
+            handler)) {
+        FreeDosObject(DOS_FILEHANDLE, handle);
+        return 0;
+    }
+    if (!zzrun_packet_result_usable(1, abandoned)) {
+        FreeDosObject(DOS_FILEHANDLE, handle);
+        return 0;
+    }
+    *completed_out = 1;
     if (result == 0) {
         FreeDosObject(DOS_FILEHANDLE, handle);
         return 0;
@@ -3556,23 +3674,102 @@ static BPTR open_find_async(BPTR dir, const char *name, LONG mode,
     return MKBADDR(handle);
 }
 
+
+struct open_path_request {
+    LONG action;
+    BPTR fh;
+    LONG error;
+};
+
+static void send_open_path_packet(
+    void *context, const struct zzrun_dos_path_candidate *candidate,
+    const uint8_t *name_bstr, uint32_t name_bstr_bytes,
+    uint32_t name_bstr_bptr, struct zzrun_dos_path_reply *reply)
+{
+    struct open_path_request *request = context;
+    int completed;
+
+    (void)name_bstr;
+    (void)name_bstr_bytes;
+    request->fh = open_on_handler_async((struct MsgPort *)candidate->handler,
+                                        (BPTR)candidate->directory,
+                                        (BPTR)name_bstr_bptr,
+                                        request->action, &completed);
+    reply->completed = completed;
+    reply->abandoned = !completed;
+    reply->result = (int32_t)request->fh;
+    request->error = IoErr();
+    reply->error = request->error;
+}
+static BPTR open_find_async(BPTR dir, const char *name, LONG mode,
+                            int *transport_ok)
+{
+    struct FileLock *file_lock = (struct FileLock *)BADDR(dir);
+    struct dos_path_resolver resolver;
+    struct open_path_request request;
+    uint8_t *name_bstr;
+    int usable;
+
+    if (transport_ok)
+        *transport_ok = 0;
+    if (!name || !transport_ok)
+        return 0;
+    name_bstr = bstr_storage_alloc();
+    if (!name_bstr) {
+        SetIoErr(ERROR_NO_FREE_STORE);
+        return 0;
+    }
+    memset(&resolver, 0, sizeof(resolver));
+    if (dir) {
+        if (!file_lock || !file_lock->fl_Task) {
+            FreeVec(name_bstr);
+            return 0;
+        }
+        resolver.handler = file_lock->fl_Task;
+        resolver.directory = dir;
+    } else {
+        resolver.name = name;
+    }
+    memset(&request, 0, sizeof(request));
+    if (mode == MODE_NEWFILE)
+        request.action = ACTION_FINDOUTPUT;
+    else if (mode == MODE_READWRITE)
+        request.action = ACTION_FINDUPDATE;
+    else
+        request.action = ACTION_FINDINPUT;
+    (void)zzrun_dos_dispatch_path(name, name_bstr, 258u,
+                                  ERROR_OBJECT_NOT_FOUND, resolve_dos_path,
+                                  &resolver, send_open_path_packet, &request,
+                                  NULL, &usable);
+    release_dos_path_resolver(&resolver);
+    FreeVec(name_bstr);
+    if (usable)
+        *transport_ok = 1;
+    if (!request.fh && usable)
+        SetIoErr(request.error);
+    return request.fh;
+}
+
 static int end_async(BPTR fh, int *transport_ok)
 {
     struct FileHandle *handle = (struct FileHandle *)BADDR(fh);
     LONG result;
+    int abandoned;
 
     if (transport_ok)
         *transport_ok = 0;
     if (!handle || !handle->fh_Type || !transport_ok)
         return 0;
     if (!dos_packet_async(handle->fh_Type, ACTION_END, handle->fh_Arg1,
-                          0, 0, 0, 0, file_generation, &result, NULL))
+                          0, 0, 0, 0, file_generation, &result, NULL,
+                          &abandoned))
+        return 0;
+    if (zzrun_dos_boolean_result(1, result))
+        FreeDosObject(DOS_FILEHANDLE, handle);
+    if (!zzrun_packet_result_usable(1, abandoned))
         return 0;
     *transport_ok = 1;
-    if (!zzrun_dos_boolean_result(1, result))
-        return 0;
-    FreeDosObject(DOS_FILEHANDLE, handle);
-    return 1;
+    return zzrun_dos_boolean_result(1, result);
 }
 
 static int load_elf(BPTR fh, LONG size)
