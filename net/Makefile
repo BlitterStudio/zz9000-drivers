@@ -35,7 +35,7 @@ endif
 
 all: $(DEVICEID)
 
-$(DEVICEID): $(SOURCES) device.h compiler.h debug.h macros.h sana2.h version.h mcast.h rx.h tx.h \
+$(DEVICEID): $(SOURCES) device.h compiler.h debug.h macros.h sana2.h version.h mcast.h rx.h tx.h readers.h \
               ../include/zzcfg_query.h ../include/zz9000_hw.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(SOURCES) $(LDLIBS)
 	@if grep -q __LIB_LIST__ $(DEVICEID).map; then \
