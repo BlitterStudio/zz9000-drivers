@@ -1415,6 +1415,37 @@ static void test_launcher_output_keeps_status_room_for_non_diagnostics(void)
     }
 }
 
+static void test_log_records_become_lines(void)
+{
+    static const uint8_t plain[] = "boot ok";
+    static const uint8_t with_nl[] = "line\n";
+    uint8_t big[1000];
+    uint32_t i;
+
+    console_fixture();
+    /* a record without a newline gets one; one with it is left alone */
+    zzrun_console_launcher_log(&serve.console, plain, 7u);
+    assert(serve.console.launcher_used == 8u);
+    zzrun_console_launcher_log(&serve.console, with_nl, 5u);
+    assert(serve.console.launcher_used == 13u);
+    zzrun_console_launcher_log(&serve.console, plain, 0u); /* empty: a blank line */
+    assert(serve.console.launcher_used == 14u);
+    zzrun_console_pump(&serve.console);
+    assert(fc.writes == 1 && fc.last_write == 14u);
+    assert(memcmp(fc.written, "boot ok\nline\n\n", 14u) == 0);
+    write_finishes(14);
+    assert(!zzrun_console_output_pending(&serve.console));
+
+    /* logs are diagnostics: they stop at the limit and are counted */
+    console_fixture();
+    memset(big, 'l', sizeof(big));
+    for (i = 0; i < 20u; i++)
+        zzrun_console_launcher_log(&serve.console, big, sizeof(big));
+    assert(serve.console.launcher_dropped > 0u);
+    assert(serve.console.launcher_used <= ZZRUN_LAUNCHER_OUTPUT_BYTES -
+                                          ZZRUN_LAUNCHER_STATUS_RESERVE_BYTES);
+}
+
 static void test_console_read_waits_for_demand_and_returns_what_was_read(void)
 {
     uint8_t buf[512];
@@ -2108,6 +2139,7 @@ int main(void)
     test_a_short_write_fails_the_output_after_its_partial_advance();
     test_launcher_text_goes_before_app_text();
     test_launcher_output_keeps_status_room_for_non_diagnostics();
+    test_log_records_become_lines();
     test_console_read_waits_for_demand_and_returns_what_was_read();
     test_console_read_end_of_input_is_sticky();
     test_display_open_validates_and_reports_what_was_made();

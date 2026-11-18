@@ -818,4 +818,15 @@ static inline int zzrun_open_step_allowed(int request_current,
     return request_current && !zzrun_user_break(ctrl_c_pending, user_stop);
 }
 
+/* RELEASE <handle> ends a claim an administrator names. It is for claims that
+ * are finished: an app that ended or faulted, a claim the card revoked, or one
+ * whose launcher lost its lease. A claim whose app still runs, or is being
+ * claimed or loaded by a live launcher, is refused. */
+static inline int zzrun_release_allowed(uint32_t state, uint32_t end_reason)
+{
+    if (end_reason == AAR_END_QUARANTINED || end_reason == AAR_END_LEASE)
+        return 1;
+    return state == ZZRUN_ST_IDLE || state == ZZRUN_ST_FAULTED;
+}
+
 #endif /* ZZRUN_POLICY_H */

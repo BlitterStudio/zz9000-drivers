@@ -5,8 +5,10 @@ BUILD_DIR ?= build
 # The tests include the AAR transport contract (aar/transport.h) and the
 # ZZ9000 private wire (zzapp_proto.h), the same two headers ZZRun builds
 # against. AAR_DIR is an aar checkout (the commit the firmware pins in
-# sdk/AAR_REF); FIRMWARE_DIR is the zz9000-firmware checkout at sdk/SDK_REF.
-FIRMWARE_DIR ?= $(abspath ../../../zz9000-firmware)
+# sdk/AAR_REF); FIRMWARE_DIR is the zz9000-firmware checkout (ZZ9K_FIRMWARE_DIR
+# as CI sets it, else the sibling checkout), run `sh sdk/scripts/fetch-aar.sh`
+# in it for sdk/aar.
+FIRMWARE_DIR ?= $(if $(ZZ9K_FIRMWARE_DIR),$(ZZ9K_FIRMWARE_DIR),$(abspath ../../../zz9000-firmware))
 AAR_DIR ?= $(FIRMWARE_DIR)/sdk/aar
 PROTO_DIR ?= $(FIRMWARE_DIR)/ZZ9000_proto.sdk/ZZ9000OS/src
 INCLUDES = -I.. -I$(AAR_DIR)/include -I$(PROTO_DIR)

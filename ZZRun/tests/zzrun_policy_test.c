@@ -298,6 +298,21 @@ static void test_app_exit_code(void)
     assert(zzrun_app_exit_code(AAR_END_FORCED, 3, 1) == 3);
 }
 
+static void test_release_is_for_finished_claims(void)
+{
+    /* an app that ended, faulted, or whose claim the card quarantined */
+    assert(zzrun_release_allowed(ZZRUN_ST_IDLE, AAR_END_EXIT));
+    assert(zzrun_release_allowed(ZZRUN_ST_FAULTED, AAR_END_USER_FAULT));
+    assert(zzrun_release_allowed(ZZRUN_ST_STOPPING, AAR_END_QUARANTINED));
+    assert(zzrun_release_allowed(ZZRUN_ST_RUNNING, AAR_END_LEASE));
+    /* a claim somebody is using */
+    assert(!zzrun_release_allowed(ZZRUN_ST_RUNNING, AAR_END_NONE));
+    assert(!zzrun_release_allowed(ZZRUN_ST_CLAIMED, AAR_END_NONE));
+    assert(!zzrun_release_allowed(ZZRUN_ST_LOADING, AAR_END_NONE));
+    assert(!zzrun_release_allowed(ZZRUN_ST_STARTING, AAR_END_NONE));
+    assert(!zzrun_release_allowed(ZZRUN_ST_STOPPING, AAR_END_FORCED));
+}
+
 static void test_block_reason_names_match_protocol(void)
 {
     assert(strcmp(zzrun_block_reason_name(ZZRUN_BLOCK_NONE), "none") == 0);
@@ -933,6 +948,7 @@ int main(void)
     test_refusal_text_names_each_reason();
     test_client_caps();
     test_app_exit_code();
+    test_release_is_for_finished_claims();
     test_block_reason_names_match_protocol();
     test_list_reply_decoding();
     test_open_flags_map_to_one_plan_each();

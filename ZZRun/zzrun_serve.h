@@ -238,6 +238,10 @@ void zzrun_console_init(struct zzrun_console *c,
 void zzrun_console_launcher_put(struct zzrun_console *c, const uint8_t *data,
                                 uint32_t bytes, int diagnostic);
 void zzrun_console_launcher_status(struct zzrun_console *c, const char *msg);
+/* One AAR_OP_LOG record from the app: queued as a diagnostic line, with a
+ * newline added unless the record already ends in one. */
+void zzrun_console_launcher_log(struct zzrun_console *c, const uint8_t *data,
+                                uint32_t bytes);
 /* CONSOLE_WRITE and CONSOLE_READ. Both complete through the sink. */
 void zzrun_console_write_request(struct zzrun_console *c,
                                  const struct zzrun_req *req,

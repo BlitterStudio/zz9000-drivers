@@ -82,6 +82,8 @@ jobs:
           path: zz9000-firmware
           fetch-depth: 1
           ref: ${{ steps.firmware-ref.outputs.ref }}
+      - name: Fetch the AAR headers pinned by the firmware
+        run: sh zz9000-firmware/sdk/scripts/fetch-aar.sh
       - name: Run host-side tests and repository checks
         env:
           ZZ9K_FIRMWARE_DIR: ${{ github.workspace }}/zz9000-firmware
@@ -335,16 +337,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      # ZZRun builds against zzapp_proto.h from this firmware commit; it
-      # must carry every lifecycle field, flag and window region ZZRun uses
-      # (API 0.3 slots, leases, RELEASE and load progress, plus the API 0.2
-      # console, AHI and message rings, the APP_STOP generation and the audio
-      # stream epoch).
+      # ZZRun builds against the firmware's client transport module
+      # (sdk/amiga/src/aar_xport_zz9000.[ch]), the ZZ9000 private wire
+      # (zzapp_proto.h) and the AAR headers the firmware pins in
+      # sdk/AAR_REF. This commit must carry all three: the claim, the queue
+      # pair, the service requests and the lease are the module's.
       - uses: actions/checkout@v6
         with:
           repository: BlitterStudio/zz9000-firmware
           ref: f1a2f309406d3c4d442309230ce83fa551d3193e
           path: zz9000-firmware
+      - name: Fetch the AAR headers pinned by the firmware
+        run: sh zz9000-firmware/sdk/scripts/fetch-aar.sh
       - name: Build ZZRun
         env:
           ZZ9000_FIRMWARE: ${{ github.workspace }}/zz9000-firmware

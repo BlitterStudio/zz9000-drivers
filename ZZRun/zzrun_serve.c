@@ -924,6 +924,23 @@ void zzrun_console_launcher_status(struct zzrun_console *c, const char *msg)
     launcher_put_byte(c, '\n');
 }
 
+void zzrun_console_launcher_log(struct zzrun_console *c, const uint8_t *data,
+                                uint32_t bytes)
+{
+    uint32_t i;
+    int newline = bytes == 0 || data[bytes - 1u] != '\n';
+
+    if (!zzrun_launcher_output_accept(c->launcher_used,
+                                      bytes + (uint32_t)newline, 1)) {
+        c->launcher_dropped++;
+        return;
+    }
+    for (i = 0; i < bytes; i++)
+        launcher_put_byte(c, data[i]);
+    if (newline)
+        launcher_put_byte(c, '\n');
+}
+
 static void app_write_finish(struct zzrun_console *c, int32_t result)
 {
     struct zzrun_done done;
