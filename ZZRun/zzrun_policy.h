@@ -881,24 +881,8 @@ static inline int zzrun_is_status_keyword(const char *arg)
     return arg[i] == '\0';
 }
 
-/* File open flags on the launcher window carry the AAR values. The firmware
- * adds TRUNCATE and EXCL to zzapp_proto.h; ZZRun still builds against a
- * firmware export that lacks them. */
-#ifndef ZZAPP_FILE_READ
-#define ZZAPP_FILE_READ 1u
-#endif
-#ifndef ZZAPP_FILE_WRITE
-#define ZZAPP_FILE_WRITE 2u
-#endif
-#ifndef ZZAPP_FILE_CREATE
-#define ZZAPP_FILE_CREATE 4u
-#endif
-#ifndef ZZAPP_FILE_TRUNCATE
-#define ZZAPP_FILE_TRUNCATE 8u
-#endif
-#ifndef ZZAPP_FILE_EXCL
-#define ZZAPP_FILE_EXCL 16u
-#endif
+/* File open flags on the launcher window carry the AAR values from
+ * zzapp_proto.h. */
 
 /* How ZZRun opens a file for one valid flags word. Zero is not a plan: the
  * flags are invalid and ZZRun answers EINVAL before it touches AmigaDOS. */

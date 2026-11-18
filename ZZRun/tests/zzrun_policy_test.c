@@ -36,6 +36,15 @@
 #define ZZAPP_F_LAUNCHER_HEARTBEAT (1u << 18)
 #endif
 
+/* AAR file open flags from zzapp_proto.h. */
+#ifndef ZZAPP_FILE_EXCL
+#define ZZAPP_FILE_READ 1u
+#define ZZAPP_FILE_WRITE 2u
+#define ZZAPP_FILE_CREATE 4u
+#define ZZAPP_FILE_TRUNCATE 8u
+#define ZZAPP_FILE_EXCL 16u
+#endif
+
 #include "zzrun_policy.h"
 
 static struct zzrun_exit_in exit_in(uint32_t state, uint32_t fault,
