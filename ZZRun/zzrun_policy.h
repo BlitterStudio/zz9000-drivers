@@ -760,12 +760,17 @@ typedef void (*zzrun_dos_path_send_fn)(
  * longword-aligned storage that remains valid until the sender replies. A
  * failed lookup only tries the next multi-assign directory for
  * ERROR_OBJECT_NOT_FOUND; a colonless name is sent unchanged to the
- * current-directory candidate. */
+ * current-directory candidate. selected_out (optional) receives the
+ * candidate of the last packet sent: the one that decided the outcome. A
+ * caller that must act on that same object afterwards (probe, then open)
+ * pins its resolver to this candidate instead of resolving the name again,
+ * which would restart at the first directory of a multi-directory assign. */
 static inline int zzrun_dos_dispatch_path(
     const char *name, uint8_t *name_bstr, uint32_t name_bstr_capacity,
     int32_t object_not_found, zzrun_dos_path_resolve_fn resolve,
     void *resolve_context, zzrun_dos_path_send_fn send, void *send_context,
-    int *attempted_out, int *usable_out)
+    int *attempted_out, int *usable_out,
+    struct zzrun_dos_path_candidate *selected_out)
 {
     const char *path = zzrun_dos_packet_path(name);
     struct zzrun_dos_path_candidate candidate;
@@ -788,6 +793,8 @@ static inline int zzrun_dos_dispatch_path(
     while (resolve(resolve_context, advance, &candidate)) {
         if (usable_out)
             *usable_out = 0;
+        if (selected_out)
+            *selected_out = candidate;
         memset(&reply, 0, sizeof(reply));
         send(send_context, &candidate, name_bstr, name_bstr_bytes,
              name_bstr_bptr, &reply);
@@ -930,6 +937,51 @@ static inline enum zzrun_open_plan zzrun_open_plan_for_flags(uint32_t flags)
     if (truncate)
         return ZZRUN_OPEN_TRUNCATE_EXISTING;
     return write ? ZZRUN_OPEN_UPDATE_EXISTING : ZZRUN_OPEN_READ_EXISTING;
+}
+
+/* Outcome of the existence probe, a Lock(name, ACCESS_READ). A refused lock
+ * with ERROR_OBJECT_IN_USE still proves the object exists: the handler holds
+ * it for someone else. Any other failure is the caller's error. */
+enum zzrun_probe_result {
+    ZZRUN_PROBE_ERROR = 0,
+    ZZRUN_PROBE_EXISTS,
+    ZZRUN_PROBE_MISSING
+};
+
+static inline enum zzrun_probe_result zzrun_probe_result_for_lock(
+    int locked, int32_t io_error, int32_t object_not_found,
+    int32_t object_in_use)
+{
+    if (locked)
+        return ZZRUN_PROBE_EXISTS;
+    if (io_error == object_not_found)
+        return ZZRUN_PROBE_MISSING;
+    if (io_error == object_in_use)
+        return ZZRUN_PROBE_EXISTS;
+    return ZZRUN_PROBE_ERROR;
+}
+
+/* Which plans probe the target before the open packet. UPDATE, TRUNCATE and
+ * EXCL decide on the answer. CREATE (keep or replace) acts on an existing
+ * file whichever directory of a multi-directory assign holds it, so an
+ * absolute path probes to find that directory; a relative path already has
+ * one fixed parent lock. After an EXISTS answer every later packet of the
+ * open (update, truncate, NEWFILE fallback) goes to the probe's candidate;
+ * a MISSING answer leaves the name unresolved for the creating open. */
+static inline int zzrun_plan_probes_target(enum zzrun_open_plan plan,
+                                           int absolute)
+{
+    switch (plan) {
+    case ZZRUN_OPEN_UPDATE_EXISTING:
+    case ZZRUN_OPEN_TRUNCATE_EXISTING:
+    case ZZRUN_OPEN_CREATE_EXCLUSIVE:
+        return 1;
+    case ZZRUN_OPEN_CREATE_KEEP:
+    case ZZRUN_OPEN_CREATE_REPLACE:
+        return absolute != 0;
+    default:
+        return 0;
+    }
 }
 
 #endif /* ZZRUN_POLICY_H */
