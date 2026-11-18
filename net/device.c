@@ -210,7 +210,9 @@ static int zznet_parse_ip_tcp(volatile const UBYTE *ip, ULONG len,
  * and then hand Roadshow a RAM source, where its generic memcpy is
  * essentially free relative to the MMIO read cost.
  *
- * 1536 covers any MTU up to 1514 plus a 2-byte alignment offset. The
+ * frame_proc stages each accepted frame once, whole (up to
+ * HW_ETH_MAX_RAW = 1518 bytes, plus a 2-byte alignment offset: 1536 is
+ * enough), and every reader of that frame copies its part from RAM. The
  * buffer is single-use per frame and only touched from frame_proc
  * (single worker process per devbase, serialized by AmigaOS Forbid()
  * semantics on OpenDevice/CloseDevice), so no locking is needed. The
@@ -522,6 +524,7 @@ SAVEDS LONG DevOpen( ASMR(a1) struct IOSana2Req *ioreq           ASMREG(a1),
       rxv_tx_seq = rxv_tx_seq_max = rxv_p445_out = 0;
 
       NEWLIST(&db->db_ReadList);
+      NEWLIST(&db->db_OrphanList);
       InitSemaphore(&db->db_ReadListSem);
       InitSemaphore(&db->db_McastSem);
       zznet_mcast_reset(&db->db_Mcast, &zznet_mcast_hw);
@@ -770,7 +773,7 @@ static void set_last_start()
   }
 }
 
-ULONG read_frame(DEVBASETYPE *db, struct IOSana2Req *req, volatile UBYTE *frame, USHORT sz, USHORT tp);
+ULONG read_frame(struct IOSana2Req *req, volatile UBYTE *eth, const ULONG *hdr, USHORT sz, USHORT tp);
 ULONG write_frame(DEVBASETYPE *db, struct IOSana2Req *req, UBYTE *frame, int slot);
 static ULONG write_frame_async(DEVBASETYPE *db, struct IOSana2Req *req);
 
@@ -858,11 +861,15 @@ SAVEDS VOID DevBeginIO( ASMR(a1) struct IOSana2Req *ioreq       ASMREG(a1),
 			}
     else
 			{
+        /* Queue it like a CMD_READ: frame_proc replies to it with a
+         * frame that no read of its packet type wants, and DevAbortIO
+         * can find it. Setting ioreq = NULL without queueing it left the
+         * request with no reply and no way to abort it. AddTail keeps
+         * orphan readers first come, first served. */
         ioreq->ios2_Req.io_Flags &= ~SANA2IOF_QUICK;
-        // FIXME do we need this list?
-        //ObtainSemaphore(&db->db_Units[unit].du_Sem);
-        //AddHead((struct List*)&db->db_ReadOrphans,(struct Node*)ioreq);
-        //ReleaseSemaphore(&db->db_Units[unit].du_Sem);
+        ObtainSemaphore(&db->db_ReadListSem);
+        AddTail((struct List*)&db->db_OrphanList, (struct Node*)ioreq);
+        ReleaseSemaphore(&db->db_ReadListSem);
         ioreq = NULL;
 			}
     break;
@@ -956,6 +963,15 @@ SAVEDS LONG DevAbortIO( ASMR(a1) struct IORequest *ioreq        ASMREG(a1),
 			Remove(n);
 			ret = 0;
 			break;
+		}
+	}
+	if (ret != 0) {
+		for (n = db->db_OrphanList.lh_Head; n->ln_Succ; n = n->ln_Succ) {
+			if (n == (struct Node*)ioreq) {
+				Remove(n);
+				ret = 0;
+				break;
+			}
 		}
 	}
 	ReleaseSemaphore(&db->db_ReadListSem);
@@ -1104,7 +1120,14 @@ static inline UBYTE* zznet_mmio_read_block(volatile UBYTE *src, UBYTE *base, ULO
 	return dst_start;
 }
 
-ULONG read_frame(DEVBASETYPE *db, struct IOSana2Req *req, volatile UBYTE *frame, USHORT sz, USHORT tp)
+/* Deliver one received frame to one read request. frame_proc has already
+ * staged the frame: `eth` is its first byte, in db_RxStage (RAM), or in
+ * the RX window itself when no staging buffer could be allocated. `hdr`
+ * is the frame's header as frame_proc read it (zznet_rx_hdr). When
+ * several openers read the same packet type, frame_proc calls this once
+ * per opener on the same staged frame, so the frame crosses the Zorro bus
+ * only once. */
+ULONG read_frame(struct IOSana2Req *req, volatile UBYTE *eth, const ULONG *hdr, USHORT sz, USHORT tp)
 {
 	struct BufferManagement *bm;
 	volatile UBYTE *frame_ptr;
@@ -1129,7 +1152,7 @@ ULONG read_frame(DEVBASETYPE *db, struct IOSana2Req *req, volatile UBYTE *frame,
 			req->ios2_WireError    = S2WERR_BUFF_ERROR;
 			return 1;
 		}
-		frame_ptr = frame + 4;
+		frame_ptr = eth;
 		datasize  = sz;
 		req->ios2_Req.io_Flags = SANA2IOF_RAW;
 	} else {
@@ -1138,87 +1161,36 @@ ULONG read_frame(DEVBASETYPE *db, struct IOSana2Req *req, volatile UBYTE *frame,
 			req->ios2_WireError    = S2WERR_BUFF_ERROR;
 			return 1;
 		}
-		frame_ptr = frame + 4 + HW_ETH_HDR_SIZE;
+		frame_ptr = eth + HW_ETH_HDR_SIZE;
 		datasize  = (ULONG)sz - HW_ETH_HDR_SIZE;   /* ≤ HW_ETH_MTU by the check above */
 		req->ios2_Req.io_Flags = 0;
 	}
 
-	/* Internal assertion: staging buffer must fit datasize + 2-byte
-	 * phase offset. With the protocol caps above, datasize ≤ 1518
-	 * (RAW, VLAN-tagged) and RX_STAGE_SIZE is 1536, so this is always
-	 * true — the check exists only as a backstop for future MTU /
-	 * staging-size changes. */
-	if (datasize + 2 > RX_STAGE_SIZE) {
-		req->ios2_Req.io_Error = S2ERR_SOFTWARE;
-		req->ios2_WireError    = S2WERR_BUFF_ERROR;
-		return 1;
-	}
-
 	req->ios2_DataLength = datasize;
 
+	/* SANA-II contract: bm_CopyToBuffer is a synchronous copy — it reads
+	 * `datasize` bytes from the source into the client-owned destination
+	 * and returns success/failure of a completed copy. frame_proc relies
+	 * on that twice: it reuses db_RxStage for the next frame, and it acks
+	 * the firmware slot (rx_accept) once every reader has been served. */
 	bm = (struct BufferManagement *)req->ios2_BufferManagement;
-	{
-		/* SANA-II contract: bm_CopyToBuffer is a synchronous copy — it
-		 * reads `datasize` bytes from `source` into the client-owned
-		 * destination and returns success/failure of a completed copy.
-		 * It is not a descriptor submission. This routine (and the
-		 * pre-rev-20 direct-MMIO path before it) already depended on
-		 * that contract: on return we write `rx_accept`, which hands
-		 * the backlog slot back to the firmware for reuse by the next
-		 * inbound frame. If the callback deferred consumption, the
-		 * hardware slot would be overwritten by incoming traffic long
-		 * before the client finished copying — so reusing db_RxStage
-		 * across successive frames adds no new lifetime assumption
-		 * beyond what the SANA-II spec already requires.
-		 *
-		 * Fast path: stage the payload through Fast RAM so Roadshow's
-		 * generic memcpy sees a longword-aligned RAM source and can copy
-		 * at memory speed instead of stalling the Zorro bus word by
-		 * word. Fallback: if no staging buffer is available (Fast RAM
-		 * allocation failed at open time), hand Roadshow the MMIO
-		 * source directly — slower, but functionally identical to the
-		 * pre-rev-20 behavior. */
-		void *copy_src = db->db_RxStage
-			? (void *)zznet_mmio_read_block(frame_ptr, db->db_RxStage, datasize)
-			: (void *)frame_ptr;
-
-		if (!(*bm->bm_CopyToBuffer)((void*)req->ios2_Data, copy_src, datasize)) {
-			req->ios2_Req.io_Error = S2ERR_SOFTWARE;
-			req->ios2_WireError    = S2WERR_BUFF_ERROR;
-			err = 1;
-		} else {
-			req->ios2_Req.io_Error = req->ios2_WireError = 0;
-
-			/* issue #29 ACK probe: for the SMB (445) connection, record the
-			 * server's cumulative ack from the SAME bytes the stack receives
-			 * (copy_src = the staged IP packet, non-RAW). src port 445 =
-			 * server -> Amiga. */
-			if (tp == 0x0800) {
-				USHORT sp = 0, dp = 0;
-				ULONG  ack = 0;
-				if (zznet_parse_ip_tcp((volatile const UBYTE *)copy_src,
-				                       datasize, &sp, &dp, NULL, &ack, NULL) &&
-				    sp == 445) {
-					rxv_p445_in++;
-					if (ack != rxv_srv_ack) {
-						if ((LONG)(ack - rxv_srv_ack) > 0)
-							rxv_srv_ack_upd++;
-						rxv_srv_ack = ack;
-					}
-				}
-			}
-		}
+	if (!(*bm->bm_CopyToBuffer)((void*)req->ios2_Data, (void*)frame_ptr, datasize)) {
+		req->ios2_Req.io_Error = S2ERR_SOFTWARE;
+		req->ios2_WireError    = S2WERR_BUFF_ERROR;
+		err = 1;
+	} else {
+		req->ios2_Req.io_Error = req->ios2_WireError = 0;
 	}
 
-	/* Coalesce the 12-byte dst+src MAC header into three longword MMIO reads
-	 * instead of six word reads (and a second pass of three for the broadcast
-	 * check). On Z3 that's 3 bus cycles instead of 9. The destination
-	 * ios2_DstAddr / ios2_SrcAddr fields are word-aligned per SANA-II, so
-	 * splitting each long back into two word stores is safe. */
+	/* The 12-byte dst+src MAC header comes from the copy frame_proc made
+	 * of it (three longwords), so a second reader costs no bus cycles
+	 * here. The destination ios2_DstAddr / ios2_SrcAddr fields are
+	 * word-aligned per SANA-II, so splitting each long back into two word
+	 * stores is safe. */
 	{
-		ULONG m0 = *(volatile ULONG*)(frame + 4);    /* dst[0..3]           */
-		ULONG m1 = *(volatile ULONG*)(frame + 8);    /* dst[4..5] src[0..1] */
-		ULONG m2 = *(volatile ULONG*)(frame + 12);   /* src[2..5]           */
+		ULONG m0 = hdr[0];    /* dst[0..3]           */
+		ULONG m1 = hdr[1];    /* dst[4..5] src[0..1] */
+		ULONG m2 = hdr[2];    /* src[2..5]           */
 
 		USHORT *wd = (USHORT*)req->ios2_DstAddr;
 		USHORT *ws = (USHORT*)req->ios2_SrcAddr;
@@ -1353,6 +1325,41 @@ static ULONG write_frame_async(DEVBASETYPE *db, struct IOSana2Req *req)
 	return rc;
 }
 
+/* Detach from `list` at most one request per opener, up to `limit`
+ * requests in `matches`, and return how many. SANA-II lets several
+ * programs have the device open at once (a TCP/IP stack and an
+ * emulator's network driver, say), and each of them expects its own copy
+ * of a frame it reads; handing a frame to the first matching request only
+ * makes the openers take each other's packets, and all of them starve.
+ * The opener is identified by its BufferManagement, which DevOpen
+ * allocates once per OpenDevice. With any_type every request matches
+ * (S2_READORPHAN); otherwise only those reading packet type `type`.
+ * Taking `next` before Remove() keeps the walk safe. The caller holds
+ * db_ReadListSem. */
+static UWORD take_readers(DEVBASETYPE *db, struct List *list, BOOL any_type, USHORT type,
+                          struct IOSana2Req **matches, UWORD limit)
+{
+  struct IOSana2Req *ior, *next;
+  UWORD nmatch = 0, m;
+
+  for (ior = (struct IOSana2Req *)list->lh_Head;
+       nmatch < limit &&
+       (next = (struct IOSana2Req *)ior->ios2_Req.io_Message.mn_Node.ln_Succ);
+       ior = next) {
+    if (!any_type && ior->ios2_PacketType != type)
+      continue;
+    for (m = 0; m < nmatch; m++) {
+      if (matches[m]->ios2_BufferManagement == ior->ios2_BufferManagement)
+        break;
+    }
+    if (m == nmatch) {
+      Remove((struct Node*)ior);
+      matches[nmatch++] = ior;
+    }
+  }
+  return nmatch;
+}
+
 SAVEDS void frame_proc() {
   ULONG wmask;
 
@@ -1401,8 +1408,6 @@ SAVEDS void frame_proc() {
   volatile USHORT* irq_ctrl  = (volatile USHORT*)(ZZ9K_REGS+0x04);
 
   while (1) {
-    struct IOSana2Req *ior;
-
     if (recv & SIGBREAKF_CTRL_C) {
       D(("ZZ9000Net: process end\n"));
       break;
@@ -1453,7 +1458,9 @@ SAVEDS void frame_proc() {
     zznet_rx_hdr[2] = *(volatile ULONG*)(frm + 12);
     zznet_rx_hdr[3] = (ULONG)*(volatile USHORT*)(frm + 16) << 16;
     USHORT packet_type = (USHORT)(zznet_rx_hdr[3] >> 16);
-    struct IOSana2Req *match = NULL;
+    struct IOSana2Req *matches[ZZNET_MAX_FRAME_READERS];
+    UWORD nmatch, m, limit;
+    BOOL typed;
 
     /* GEM hash collisions are not unknown packet types. Ack and drop
      * the exact miss before reader selection; UnknownTypesReceived
@@ -1470,37 +1477,84 @@ SAVEDS void frame_proc() {
       }
     }
 
-    /* Walk the read list only long enough to find a matching listener
-     * and detach it. Doing the payload copy (read_frame) and ReplyMsg
+    /* Detach one read request per opener for this packet type (see
+     * take_readers). There can be no more matches than openers, so the
+     * walk stops there: with one opener (the usual case) it ends at the
+     * first match, as it did before readers were per opener. lib_OpenCnt
+     * also counts openers that never read (ZZNetStats), so it is only an
+     * upper bound, which is all the walk needs. A frame no read of its
+     * type wants goes to the S2_READORPHAN requests instead, one per
+     * opener as well. Doing the payload copy (read_frame) and ReplyMsg
      * outside the semaphore keeps DevAbortIO / CMD_READ unblocked for
-     * the duration of the Zorro bus copy. */
+     * the duration of the copies. */
+    limit = db->db_Lib.lib_OpenCnt;
+    if (limit > ZZNET_MAX_FRAME_READERS)
+      limit = ZZNET_MAX_FRAME_READERS;
     ObtainSemaphore(&db->db_ReadListSem);
-    for (ior = (struct IOSana2Req *)db->db_ReadList.lh_Head;
-         ior->ios2_Req.io_Message.mn_Node.ln_Succ;
-         ior = (struct IOSana2Req *)ior->ios2_Req.io_Message.mn_Node.ln_Succ) {
-      if (ior->ios2_PacketType == packet_type) {
-        Remove((struct Node*)ior);
-        match = ior;
-        break;
-      }
-    }
+    nmatch = take_readers(db, &db->db_ReadList, FALSE, packet_type, matches, limit);
+    typed = (nmatch != 0);
+    if (!typed)
+      nmatch = take_readers(db, &db->db_OrphanList, TRUE, 0, matches, limit);
     ReleaseSemaphore(&db->db_ReadListSem);
 
-    if (match) {
-      ULONG res = read_frame(db, match, frm, sz, packet_type);
-      if (res == 0) {
-        global_stats.PacketsReceived++;
-      } else {
-        /* read_frame already set io_Error/ios2_WireError; reply so the
-         * caller learns the request failed instead of leaving it on
-         * a now-dangling list entry. */
-        D(("RERR %ld\n", res));
-        global_stats.UnknownTypesReceived++;
+    if (nmatch) {
+      /* Stage step: read the whole frame out of the RX window once, into
+       * Fast RAM, so that every reader's bm_CopyToBuffer (Roadshow's
+       * generic memcpy) sees a RAM source and copies at memory speed
+       * instead of stalling the Zorro bus word by word, and so that a
+       * second reader does not cross the bus again. The copy keeps the
+       * window's 2-byte phase (zznet_mmio_read_block), so a non-RAW
+       * reader's IP header lands just as it did before. Without a
+       * staging buffer (the Fast RAM allocation failed at open time)
+       * every reader copies from the window: slower, same result. */
+      volatile UBYTE *eth = frm + 4;
+      BOOL delivered = FALSE, failed = FALSE;
+
+      if (db->db_RxStage && (ULONG)sz + 2 <= RX_STAGE_SIZE)
+        eth = zznet_mmio_read_block(frm + 4, db->db_RxStage, sz);
+
+      /* Deliver step: one read_frame per opener. Statistics count the
+       * frame, not the copies: one PacketsReceived however many readers
+       * got it, one UnknownTypesReceived if no read of its type wanted it
+       * (orphan readers or none) or any of the reads failed. */
+      for (m = 0; m < nmatch; m++) {
+        ULONG res = read_frame(matches[m], eth, zznet_rx_hdr, sz, packet_type);
+        if (res == 0) {
+          delivered = TRUE;
+        } else {
+          /* read_frame already set io_Error/ios2_WireError; reply so the
+           * caller learns the request failed instead of leaving it on
+           * a now-dangling list entry. */
+          D(("RERR %ld\n", res));
+          failed = TRUE;
+        }
+        ReplyMsg((struct Message *)matches[m]);
       }
-      ReplyMsg((struct Message *)match);
+      if (delivered)
+        global_stats.PacketsReceived++;
+      if (failed || !typed)
+        global_stats.UnknownTypesReceived++;
+
+      /* issue #29 ACK probe, once per frame: for the SMB (445)
+       * connection, record the server's cumulative ack from the same
+       * bytes the stack received (the staged IP packet). src port 445 =
+       * server -> Amiga. */
+      if (delivered && packet_type == 0x0800 && sz > HW_ETH_HDR_SIZE) {
+        USHORT sp = 0, dp = 0;
+        ULONG  ack = 0;
+        if (zznet_parse_ip_tcp(eth + HW_ETH_HDR_SIZE, (ULONG)sz - HW_ETH_HDR_SIZE,
+                               &sp, &dp, NULL, &ack, NULL) &&
+            sp == 445) {
+          rxv_p445_in++;
+          if (ack != rxv_srv_ack) {
+            if ((LONG)(ack - rxv_srv_ack) > 0)
+              rxv_srv_ack_upd++;
+            rxv_srv_ack = ack;
+          }
+        }
+      }
     } else {
-      /* No listener matched — frame dropped. A future change could
-       * route these to S2_READORPHAN requests. */
+      /* No reader of this type and no orphan reader: frame dropped. */
       global_stats.UnknownTypesReceived++;
     }
 

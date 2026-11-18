@@ -76,6 +76,9 @@ struct devbase {
 	struct Interrupt *db_interrupt;
 
 	struct List db_ReadList;
+	/* Pending S2_READORPHAN requests: they get a frame no CMD_READ of
+	 * its packet type wants. Guarded by db_ReadListSem as well. */
+	struct List db_OrphanList;
 	struct SignalSemaphore db_ReadListSem;
 	struct zznet_mcast db_Mcast; /* exact groups; lock is db_McastSem */
 	struct SignalSemaphore db_McastSem;
@@ -149,6 +152,9 @@ void DevTermIO( DEVBASETYPE*, struct IORequest * );
  * size ceiling. Frames up to 802.1Q size are legitimate on tagged links
  * and must be accepted by RAW consumers (packet capture, bridging). */
 #define HW_ETH_MAX_RAW           (HW_ETH_MAX_STD + HW_ETH_VLAN_TAG)          /* 1518 */
+
+/* Most openers that can each get a copy of one received frame. */
+#define ZZNET_MAX_FRAME_READERS   8
 
 typedef BOOL (*BMFunc)(void* a __asm("a0"), void* b __asm("a1"), long c __asm("d0"));
 
