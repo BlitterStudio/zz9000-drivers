@@ -75,6 +75,7 @@ const struct NSDeviceQueryResult NSDQueryAnswer = {
 #include "macros.h"
 #include "rx.h"
 #include "tx.h"
+#include "readers.h"
 
 #if ZZNET_S2ERR_NO_RESOURCES != S2ERR_NO_RESOURCES || \
     ZZNET_S2ERR_BAD_STATE != S2ERR_BAD_STATE || \
@@ -1326,21 +1327,17 @@ static ULONG write_frame_async(DEVBASETYPE *db, struct IOSana2Req *req)
 }
 
 /* Detach from `list` at most one request per opener, up to `limit`
- * requests in `matches`, and return how many. SANA-II lets several
- * programs have the device open at once (a TCP/IP stack and an
- * emulator's network driver, say), and each of them expects its own copy
- * of a frame it reads; handing a frame to the first matching request only
- * makes the openers take each other's packets, and all of them starve.
- * The opener is identified by its BufferManagement, which DevOpen
- * allocates once per OpenDevice. With any_type every request matches
- * (S2_READORPHAN); otherwise only those reading packet type `type`.
- * Taking `next` before Remove() keeps the walk safe. The caller holds
- * db_ReadListSem. */
+ * requests in `matches`, and return how many. The selection rule is
+ * zznet_reader_take (readers.h, host-tested in net/tests). With any_type
+ * every request matches (S2_READORPHAN); otherwise only those reading
+ * packet type `type`. Taking `next` before Remove() keeps the walk safe.
+ * The caller holds db_ReadListSem. */
 static UWORD take_readers(DEVBASETYPE *db, struct List *list, BOOL any_type, USHORT type,
                           struct IOSana2Req **matches, UWORD limit)
 {
+  const void *owners[ZZNET_MAX_FRAME_READERS];
   struct IOSana2Req *ior, *next;
-  UWORD nmatch = 0, m;
+  unsigned nmatch = 0;
 
   for (ior = (struct IOSana2Req *)list->lh_Head;
        nmatch < limit &&
@@ -1348,16 +1345,12 @@ static UWORD take_readers(DEVBASETYPE *db, struct List *list, BOOL any_type, USH
        ior = next) {
     if (!any_type && ior->ios2_PacketType != type)
       continue;
-    for (m = 0; m < nmatch; m++) {
-      if (matches[m]->ios2_BufferManagement == ior->ios2_BufferManagement)
-        break;
-    }
-    if (m == nmatch) {
+    if (zznet_reader_take(owners, &nmatch, limit, ior->ios2_BufferManagement)) {
       Remove((struct Node*)ior);
-      matches[nmatch++] = ior;
+      matches[nmatch - 1] = ior;
     }
   }
-  return nmatch;
+  return (UWORD)nmatch;
 }
 
 SAVEDS void frame_proc() {

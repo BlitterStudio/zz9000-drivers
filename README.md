@@ -133,7 +133,11 @@ precedence over the card file. Remove `ZZ9K_INT2`, `ZZ9K_MAC`,
 
 `ZZ9000Net.device` is a SANA-II Ethernet driver and works with any SANA-II
 TCP/IP stack, including Roadshow, Miami DX, and AmiTCP. It programs the
-firmware multicast hash filter for joined groups. `ZZNetReady` reports whether
+firmware multicast hash filter for joined groups. Several programs can have it
+open at once, for example a TCP/IP stack and ShapeShifter's network driver:
+each one gets its own copy of a received frame of a type it reads, for up to
+eight programs. `S2_READORPHAN` requests get the frames no program reads.
+`ZZNetReady` reports whether
 the card is present and Ethernet has negotiated; `ZZNetStats` reports SANA-II
 counters and firmware receive-backlog and drop registers. `ZZDiag` reports
 board, firmware, VideoCap, USB, SD, audio, and Ethernet diagnostics.
