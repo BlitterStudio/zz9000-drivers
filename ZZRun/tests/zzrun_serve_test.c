@@ -527,6 +527,19 @@ static int f_list_next(void *ctx, uintptr_t list, struct zzrun_info *info,
 
         if (fk.nodes[i].used && fk.nodes[i].parent == l->lock_node) {
             info_from(i, info);
+            {
+                /* A real ACTION_EXAMINE_NEXT result: counted name, with no
+                 * NUL and unrelated bytes after its counted end. */
+                uint8_t fib_name[108];
+                size_t n = strlen(fk.nodes[i].name);
+
+                assert(n < sizeof(fib_name));
+                memset(fib_name, 0xa5, sizeof(fib_name));
+                fib_name[0] = (uint8_t)n;
+                memcpy(fib_name + 1, fk.nodes[i].name, n);
+                zzrun_bstr_decode(fib_name, sizeof(fib_name),
+                                  info->name, sizeof(info->name));
+            }
             return 1;
         }
     }

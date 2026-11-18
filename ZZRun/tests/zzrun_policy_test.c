@@ -479,6 +479,46 @@ static void test_bstr_encoding_matches_dos_packets(void)
     assert(zzrun_dos_packet_path(NULL) == NULL);
 }
 
+static void test_examine_packet_names_are_bcpl_strings(void)
+{
+    uint8_t fib_name[108];
+    char out[256];
+
+    /* A short name with no NUL and stale bytes after its counted end. */
+    memset(fib_name, 'x', sizeof(fib_name));
+    fib_name[0] = 7;
+    memcpy(fib_name + 1, "f00.bin", 7);
+    assert(zzrun_bstr_decode(fib_name, sizeof(fib_name), out, sizeof(out)) == 7u);
+    assert(strcmp(out, "f00.bin") == 0);
+    assert(zzrun_bstr_decode(fib_name, sizeof(fib_name), out, 4u) == 3u);
+    assert(strcmp(out, "f00") == 0);
+    /* One byte, with and without a trailing NUL outside the counted name. */
+    fib_name[0] = 1;
+    fib_name[1] = 'a';
+    fib_name[2] = 0;
+    assert(zzrun_bstr_decode(fib_name, sizeof(fib_name), out, sizeof(out)) == 1u);
+    assert(strcmp(out, "a") == 0);
+    fib_name[2] = 'x';
+    assert(zzrun_bstr_decode(fib_name, sizeof(fib_name), out, sizeof(out)) == 1u);
+    assert(strcmp(out, "a") == 0);
+    fib_name[0] = 0;
+    assert(zzrun_bstr_decode(fib_name, sizeof(fib_name), out, sizeof(out)) == 0u);
+    assert(out[0] == 0);
+    fib_name[0] = sizeof(fib_name) - 1u;
+    assert(zzrun_bstr_decode(fib_name, sizeof(fib_name), out, sizeof(out)) == 107u);
+    assert(memcmp(out, fib_name + 1, 107) == 0 && out[107] == 0);
+}
+
+static void test_claim_loss_does_not_look_like_a_clean_exit(void)
+{
+    assert(strcmp(zzrun_claim_loss_text(0, AAR_END_LEASE), "lease expired") == 0);
+    assert(strcmp(zzrun_claim_loss_text(0, AAR_END_QUARANTINED), "quarantined") == 0);
+    assert(strcmp(zzrun_claim_loss_text(1, AAR_END_NONE),
+                  "stale handle; final status unavailable") == 0);
+    assert(zzrun_claim_loss_text(0, AAR_END_EXIT) == NULL);
+    assert(zzrun_claim_loss_text(0, AAR_END_NONE) == NULL);
+}
+
 static void test_pending_packet_ctrl_c_still_requests_stop(void)
 {
     assert(zzrun_ctrl_c_must_request_stop(1));
@@ -964,6 +1004,8 @@ int main(void)
     test_lost_operation_packets_are_not_sent_but_releases_are();
     test_destructive_open_steps_stop_when_the_request_is_cancelled();
     test_bstr_encoding_matches_dos_packets();
+    test_examine_packet_names_are_bcpl_strings();
+    test_claim_loss_does_not_look_like_a_clean_exit();
     test_pending_packet_ctrl_c_still_requests_stop();
     test_load_break_consumed_by_packet_returns_warn();
     test_async_release_preserves_or_frees_resources_by_delivery();

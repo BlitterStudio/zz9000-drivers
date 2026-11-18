@@ -73,6 +73,12 @@ or loads the ELF stops the load and returns 5, including when a DOS packet
 wait such as a file read or closing the ELF consumed the break. Other load
 failures return 20.
 
+Lease expiry prints `ZZRun: claim lost (lease expired).` and quarantine prints
+`ZZRun: claim lost (quarantined).` rather than a normal app exit. If a mailbox
+call reports a stale handle and the final status is no longer available, ZZRun
+reports `claim lost (stale handle; final status unavailable)` without guessing
+why the claim was revoked.
+
 ## Runtime status
 
 ```text
@@ -195,6 +201,11 @@ diagnostic log records but reserves space for launcher status and errors; after
 pending writes finish during cleanup it reports the number of dropped records.
 ZZRun does not write to stderr while the app is running.
 
+ZZRun has no app-message consumer. Its transport holds unread app messages
+without dropping them. Once the transport inbox fills, a message stays at the
+submission queue head and requests behind it wait too. Apps exchanging custom
+messages need a client that takes them, such as the SDK echo and ringtest tools.
+
 ### Console and audio routes
 
 The app's console output arrives as `CONSOLE_WRITE` requests naming bytes in a
@@ -257,8 +268,10 @@ every flip and ZZRun sees none: it does not pan or change buffers.
 File requests (`FILE_OPEN`, `FILE_READ`, `FILE_WRITE`, `FILE_SEEK`,
 `FILE_STAT`, `FILE_CLOSE`, `LIST_OPEN`, `LIST_NEXT`, `LIST_CLOSE`) carry paths
 and data in buffers the card names. The app has up to 16 open files and 16 open
-directory lists. A short read is end of file. A list name is NUL-terminated;
-the end of a list is `ENOENT`.
+directory lists. A short read is end of file. Raw AmigaDOS Examine packets
+return length-prefixed BCPL names; ZZRun converts them to NUL-terminated
+names in the request buffer before posting the list completion. The end of a
+list is `ENOENT`.
 
 The open request carries the AAR file flags: `READ` 1, `WRITE` 2, `CREATE` 4,
 `TRUNCATE` 8, and `EXCL` 16. ZZRun refuses an invalid combination with

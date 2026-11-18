@@ -622,18 +622,14 @@ static uintptr_t be_lock_abs(void *ctx, const char *name, int *transport_ok,
 static void info_from_fib(const struct FileInfoBlock *fib,
                           struct zzrun_info *info)
 {
-    size_t n = strlen((const char *)fib->fib_FileName);
-
     memset(info, 0, sizeof(*info));
     info->is_dir = fib->fib_DirEntryType > 0;
     info->size = (uint32_t)fib->fib_Size;
     info->mtime = zzrun_amiga_unix((uint32_t)fib->fib_Date.ds_Days,
                                    (uint32_t)fib->fib_Date.ds_Minute,
                                    (uint32_t)fib->fib_Date.ds_Tick);
-    if (n > AAR_NAME_MAX)
-        n = AAR_NAME_MAX;
-    memcpy(info->name, fib->fib_FileName, n);
-    info->name[n] = 0;
+    zzrun_bstr_decode((const uint8_t *)fib->fib_FileName,
+                      sizeof(fib->fib_FileName), info->name, sizeof(info->name));
 }
 
 static int be_lock_examine(void *ctx, uintptr_t lock, struct zzrun_info *info,
@@ -2868,7 +2864,8 @@ static int run_loop(void)
     }
     timer_reap();
     if (ownership_lost) {
-        launcher_status("ZZRun: the card revoked this app's claim; its exit status is lost.");
+        launcher_statusf("ZZRun: claim lost (%s).\n",
+                         zzrun_claim_loss_text(1, AAR_END_NONE));
         return 20;
     }
     if (aar_xport_status_get(&xport, &st) != AAR_OK) {
@@ -2880,6 +2877,9 @@ static int run_loop(void)
                      (uint32_t)st.fault_sp, (uint32_t)st.fault_lr,
                      (uint32_t)st.fault_addr, st.fault_syndrome,
                      st.fault_pstate, st.handle);
+    else if (zzrun_claim_loss_text(0, st.end_reason))
+        launcher_statusf("ZZRun: claim lost (%s).\n",
+                         zzrun_claim_loss_text(0, st.end_reason));
     else
         launcher_statusf("ZZRun: exit %ld (%s)\n", (long)st.exit_code,
                          state_name(st.state));

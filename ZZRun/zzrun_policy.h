@@ -226,6 +226,19 @@ static inline const char *zzrun_end_reason_name(uint32_t reason)
     }
 }
 
+/* STALE alone does not identify a lease expiry. Only name a cause when the
+ * final control block supplied it. */
+static inline const char *zzrun_claim_loss_text(int stale, uint32_t end_reason)
+{
+    if (stale)
+        return "stale handle; final status unavailable";
+    if (end_reason == AAR_END_LEASE)
+        return "lease expired";
+    if (end_reason == AAR_END_QUARANTINED)
+        return "quarantined";
+    return NULL;
+}
+
 static inline const char *zzrun_fault_class_name(uint32_t fault)
 {
     switch (fault) {
@@ -638,6 +651,24 @@ static inline uint32_t zzrun_bstr_encode(const char *name, uint8_t *out,
     if (!(len & 1u))
         out[1u + len] = 0;
     return total;
+}
+
+/* ACTION_EXAMINE_OBJECT/NEXT return a BCPL name in the FIB, not the C string
+ * dos.library's Examine/ExNext wrappers return. No trailing NUL is required. */
+static inline uint32_t zzrun_bstr_decode(const uint8_t *name, uint32_t bytes,
+                                         char *out, uint32_t cap)
+{
+    uint32_t n = bytes ? name[0] : 0u;
+
+    if (cap == 0u)
+        return 0u;
+    if (bytes && n > bytes - 1u)
+        n = bytes - 1u;
+    if (n >= cap)
+        n = cap - 1u;
+    memcpy(out, name + (bytes != 0u), n);
+    out[n] = 0;
+    return n;
 }
 
 /* A Ctrl-C seen while a DOS packet is pending must still reach the app as a
