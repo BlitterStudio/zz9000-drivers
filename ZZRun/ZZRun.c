@@ -224,6 +224,7 @@ static void launcher_status(const char *msg);
 static int heartbeat_owned(uint32_t captured_generation);
 static int generation_owned(uint32_t captured_generation);
 static void request_stop(void);
+static int file_request_is_current(uint32_t request_seq);
 static int dos_packet_async(struct MsgPort *handler, LONG action, LONG arg1,
                             LONG arg2, LONG arg3, LONG arg4, LONG arg5,
                             uint32_t captured_generation, LONG *result_out,
@@ -239,6 +240,30 @@ static BPTR lock_async(BPTR dir, const char *name, LONG access,
 static BPTR lock_abs_async(const char *name, int *transport_ok);
 static BPTR open_find_async(BPTR dir, const char *name, LONG mode,
                             int *transport_ok);
+
+/* One walk over the candidates of a DOS name: GetDeviceProc candidates, or
+ * one fixed handler and directory lock (a relative parent, or a candidate
+ * pinned after a probe). A pinned resolver may still own the DevProc that
+ * its directory lock belongs to, so it is released only when the operation
+ * ends. */
+struct dos_path_resolver {
+    const char *name;
+    struct DevProc *devproc;
+    struct MsgPort *handler;
+    BPTR directory;
+    int fixed_used;
+};
+
+static void release_dos_path_resolver(struct dos_path_resolver *resolver);
+static int dos_path_resolver_start(struct dos_path_resolver *resolver,
+                                   BPTR dir, const char *name);
+static BPTR lock_resolved_async(struct dos_path_resolver *resolver,
+                                const char *name,
+                                struct zzrun_dos_path_candidate *selected,
+                                int *transport_ok);
+static BPTR open_resolved_async(struct dos_path_resolver *resolver,
+                                const char *name, LONG mode,
+                                int *transport_ok);
 static int end_async(int slot, BPTR fh, int *transport_ok);
 static void end_or_close(BPTR fh);
 static int life_put_owned(uint32_t off, uint32_t value);
@@ -1139,8 +1164,8 @@ static int lock_target(BPTR dir, const char *leaf, BPTR *out, int *err)
     return 1;
 }
 
-static int final_path_under_root(BPTR dir, const char *leaf, int create,
-                                 int *err)
+static int final_path_under_root(BPTR dir, const char *leaf,
+                                 enum zzrun_open_plan plan, int *err)
 {
     int transport_ok;
     BPTR locked = lock_async(dir, leaf, ACCESS_READ, &transport_ok);
@@ -1150,8 +1175,16 @@ static int final_path_under_root(BPTR dir, const char *leaf, int create,
         return 0;
     }
     if (!locked) {
-        if (create && IoErr() == ERROR_OBJECT_NOT_FOUND)
+        switch (zzrun_leaf_lock_failure(plan, IoErr(), ERROR_OBJECT_NOT_FOUND,
+                                        ERROR_OBJECT_IN_USE)) {
+        case ZZRUN_LEAF_PROCEED:
             return 1;
+        case ZZRUN_LEAF_EXISTS:
+            *err = ZZ_EEXIST;
+            return 0;
+        default:
+            break;
+        }
         *err = zz_from_io();
         if (*err == ZZ_OK)
             *err = ZZ_ENOENT;
@@ -1186,23 +1219,219 @@ static int path_from_wire(const struct zzapp_file_wire *req, char *out, int *err
     return 0;
 }
 
-static int open_mode(int32_t flags, LONG *mode, int *err)
+/* The object one open acts on. dir is the parent lock of a relative name,
+ * or 0 for an absolute (ABS) name that GetDeviceProc resolves. Resolving an
+ * absolute name restarts at the first directory of a multi-directory assign,
+ * so the probe pins the resolver to the candidate that holds the file and
+ * every later packet of the same open (update, truncate, NEWFILE fallback)
+ * reaches that file, never a new one made in an earlier directory. */
+struct open_target {
+    const char *name;
+    BPTR dir;
+    uint32_t request_seq;
+    struct dos_path_resolver resolver;
+};
+
+static void open_target_init(struct open_target *target, BPTR dir,
+                             const char *name, uint32_t request_seq)
 {
-    if (flags & ~(ZZAPP_FILE_READ | ZZAPP_FILE_WRITE | ZZAPP_FILE_CREATE)) {
-        *err = ZZ_EINVAL;
+    memset(target, 0, sizeof(*target));
+    target->name = name;
+    target->dir = dir;
+    target->request_seq = request_seq;
+}
+
+/* A step that creates, truncates or replaces a file runs only while its
+ * request is live: this launcher still owns the generation, the window
+ * still holds the request, and no stop was asked. A Ctrl-C that an earlier
+ * packet wait already consumed survives only in user_stop, which is how the
+ * cleanup wait just before a fallback open (end_or_close) can abandon the
+ * request without the fallback noticing. */
+static int open_step_allowed(uint32_t request_seq)
+{
+    return zzrun_open_step_allowed(file_request_is_current(request_seq),
+                                   ctrl_c_set(), user_stop);
+}
+
+static void open_target_release(struct open_target *target)
+{
+    release_dos_path_resolver(&target->resolver);
+}
+
+/* Ready the resolver for the next packet. A pinned or relative resolver
+ * (handler set) replays its one candidate; an unresolved absolute name
+ * starts a new walk and drops the previous walk's DevProc. */
+static int open_target_arm(struct open_target *target)
+{
+    if (target->resolver.handler) {
+        target->resolver.fixed_used = 0;
+        return 1;
+    }
+    release_dos_path_resolver(&target->resolver);
+    return dos_path_resolver_start(&target->resolver, target->dir,
+                                   target->name);
+}
+
+/* Every open that can create or replace a file (anything but MODE_OLDFILE)
+ * checks that the request is still live before its packet goes out. */
+static BPTR open_target_open(struct open_target *target, LONG mode,
+                             int *transport_ok)
+{
+    *transport_ok = 0;
+    if (mode != MODE_OLDFILE && !open_step_allowed(target->request_seq)) {
+        SetIoErr(ERROR_BREAK);
         return 0;
     }
-    if (!(flags & (ZZAPP_FILE_READ | ZZAPP_FILE_WRITE | ZZAPP_FILE_CREATE))) {
-        *err = ZZ_EINVAL;
+    if (!open_target_arm(target))
+        return 0;
+    return open_resolved_async(&target->resolver, target->name, mode,
+                               transport_ok);
+}
+
+/* Does the object exist? ERROR_OBJECT_IN_USE counts as existing: the handler
+ * refused the lock because someone holds the object. Any other lock failure
+ * is the caller's error. An absolute name that exists pins the resolver to
+ * the candidate that answered; one that does not exist stays unresolved. */
+static int open_target_probe(struct open_target *target, int *exists,
+                             int *err)
+{
+    struct zzrun_dos_path_candidate selected;
+    enum zzrun_probe_result found;
+    int transport_ok;
+    BPTR locked;
+
+    memset(&selected, 0, sizeof(selected));
+    if (target->dir) {
+        locked = lock_async(target->dir, target->name, ACCESS_READ,
+                            &transport_ok);
+    } else {
+        if (!open_target_arm(target)) {
+            *err = ZZ_EIO;
+            return 0;
+        }
+        locked = lock_resolved_async(&target->resolver, target->name,
+                                     &selected, &transport_ok);
+    }
+    if (!transport_ok) {
+        *err = ZZ_EIO;
         return 0;
     }
-    if (flags & ZZAPP_FILE_CREATE)
-        *mode = MODE_NEWFILE;
-    else if (flags & ZZAPP_FILE_WRITE)
-        *mode = MODE_READWRITE;
-    else
-        *mode = MODE_OLDFILE;
+    found = zzrun_probe_result_for_lock(locked != 0, locked ? 0 : IoErr(),
+                                        ERROR_OBJECT_NOT_FOUND,
+                                        ERROR_OBJECT_IN_USE);
+    if (found == ZZRUN_PROBE_ERROR) {
+        *err = zz_from_io();
+        if (*err == ZZ_OK)
+            *err = ZZ_ENOENT;
+        return 0;
+    }
+    if (locked)
+        UnLock(locked);
+    *exists = found == ZZRUN_PROBE_EXISTS;
+    if (!target->dir && *exists) {
+        target->resolver.handler = (struct MsgPort *)selected.handler;
+        target->resolver.directory = (BPTR)selected.directory;
+        target->resolver.fixed_used = 0;
+    }
     return 1;
+}
+
+/* Open one file for the flags word's plan (zzrun_open_plan_for_flags).
+ * Returns 1 with *fh_out set, or 0 with *err set. Failing to get a handle
+ * with *err still ZZ_OK means the caller maps IoErr().
+ *
+ * AmigaDOS has no atomic exclusive create. EXCL is a Lock probe followed by
+ * MODE_NEWFILE, so it is exclusive against the other apps ZZRun serves (one
+ * serving loop handles every file request) but not against other Amiga
+ * programs that create the same name between the probe and the open. */
+static int open_with_plan(enum zzrun_open_plan plan, BPTR dir,
+                          const char *name, int absolute,
+                          uint32_t request_seq, BPTR *fh_out, int *err)
+{
+    struct open_target target;
+    BPTR fh = 0;
+    LONG io;
+    int transport_ok = 0;
+    int exists = 0;
+    int ok = 0;
+
+    *fh_out = 0;
+    open_target_init(&target, absolute ? 0 : dir, name, request_seq);
+    if (zzrun_plan_probes_target(plan, absolute) &&
+        !open_target_probe(&target, &exists, err))
+        goto out;
+    switch (plan) {
+    case ZZRUN_OPEN_READ_EXISTING:
+        fh = open_target_open(&target, MODE_OLDFILE, &transport_ok);
+        break;
+    case ZZRUN_OPEN_UPDATE_EXISTING:
+    case ZZRUN_OPEN_TRUNCATE_EXISTING:
+        if (!exists) {
+            *err = ZZ_ENOENT;
+            goto out;
+        }
+        fh = open_target_open(&target, MODE_READWRITE, &transport_ok);
+        if (fh && plan == ZZRUN_OPEN_TRUNCATE_EXISTING) {
+            LONG size;
+
+            if (!open_step_allowed(request_seq)) {
+                end_or_close(fh);
+                *err = ZZ_EIO;
+                goto out;
+            }
+            size = file_packet_async(fh, ACTION_SET_FILE_SIZE, 0,
+                                     OFFSET_BEGINNING, 0, 0, &transport_ok);
+            if (!transport_ok) {
+                end_or_close(fh);
+                *err = ZZ_EIO;
+                goto out;
+            }
+            if (size < 0) {
+                io = IoErr();
+
+                end_or_close(fh);
+                fh = 0;
+                if (io != ERROR_ACTION_NOT_KNOWN) {
+                    *err = io == ERROR_DISK_FULL ? ZZ_ENOSPC :
+                           io == ERROR_WRITE_PROTECTED ? ZZ_EACCES : ZZ_EIO;
+                    goto out;
+                }
+                /* No ACTION_SET_FILE_SIZE: the probe found the file, so
+                 * MODE_NEWFILE replaces it, on the probe's candidate. */
+                fh = open_target_open(&target, MODE_NEWFILE, &transport_ok);
+            }
+        }
+        break;
+    case ZZRUN_OPEN_CREATE_KEEP:
+        fh = open_target_open(&target, MODE_READWRITE, &transport_ok);
+        if (!fh && transport_ok && IoErr() == ERROR_OBJECT_NOT_FOUND)
+            fh = open_target_open(&target, MODE_NEWFILE, &transport_ok);
+        break;
+    case ZZRUN_OPEN_CREATE_REPLACE:
+        fh = open_target_open(&target, MODE_NEWFILE, &transport_ok);
+        break;
+    case ZZRUN_OPEN_CREATE_EXCLUSIVE:
+        if (exists) {
+            *err = ZZ_EEXIST;
+            goto out;
+        }
+        fh = open_target_open(&target, MODE_NEWFILE, &transport_ok);
+        break;
+    default:
+        *err = ZZ_EINVAL;
+        goto out;
+    }
+    if (!transport_ok) {
+        *err = ZZ_EIO;
+        goto out;
+    }
+    *fh_out = fh;
+    ok = fh != 0;
+out:
+    io = IoErr();
+    open_target_release(&target);
+    SetIoErr(io);
+    return ok;
 }
 
 static int file_request_is_current(uint32_t request_seq)
@@ -1323,7 +1552,7 @@ static void serve_open(const struct zzapp_file_wire *req)
     char leaf[108];
     BPTR dir = 0;
     BPTR fh = 0;
-    LONG mode = MODE_OLDFILE;
+    enum zzrun_open_plan plan;
     LONG examined;
     int err = ZZ_OK;
     int index;
@@ -1341,8 +1570,11 @@ static void serve_open(const struct zzapp_file_wire *req)
         err = ZZ_EBUSY;
         goto done;
     }
-    if (!open_mode(req->flags, &mode, &err))
+    plan = zzrun_open_plan_for_flags((uint32_t)req->flags);
+    if (plan == ZZRUN_OPEN_INVALID) {
+        err = ZZ_EINVAL;
         goto done;
+    }
     if (!path_from_wire(req, path, &err))
         goto done;
     if (path[0] == 0) {
@@ -1358,13 +1590,7 @@ static void serve_open(const struct zzapp_file_wire *req)
     }
     if (!generation_owned(file_generation))
         goto done;
-    if (absolute) {
-        fh = open_find_async(0, path, mode, &transport_ok);
-        if (!transport_ok) {
-            err = ZZ_EIO;
-            goto done;
-        }
-    } else {
+    if (!absolute) {
         dir = resolve_rel(path, leaf, sizeof(leaf), &err);
         if (!dir)
             goto done;
@@ -1372,22 +1598,17 @@ static void serve_open(const struct zzapp_file_wire *req)
             err = ZZ_EIO;
             goto done;
         }
-        if (!final_path_under_root(dir, leaf,
-                                   (req->flags & ZZAPP_FILE_CREATE) != 0,
-                                   &err))
+        if (!final_path_under_root(dir, leaf, plan, &err))
             goto done;
-        fh = open_find_async(dir, leaf, mode, &transport_ok);
-        if (!transport_ok) {
-            err = ZZ_EIO;
-            goto done;
-        }
     }
-    if (!fh) {
+    if (!open_with_plan(plan, dir, absolute ? path : leaf, absolute, req->seq,
+                        &fh, &err) && err == ZZ_OK) {
         err = zz_from_io();
         if (err == ZZ_OK)
             err = ZZ_ENOENT;
-        goto done;
     }
+    if (!fh)
+        goto done;
     if (!file_request_is_current(req->seq))
         goto done;
     fib = AllocDosObject(DOS_FIB, NULL);
@@ -3342,6 +3563,8 @@ static int dos_packet_async(struct MsgPort *handler, LONG action, LONG arg1,
     ULONG mask;
     ULONG signals;
     int abandoned = 0;
+    int ctrl_c;
+    int owned;
 
     if (result_out)
         *result_out = -1;
@@ -3351,6 +3574,27 @@ static int dos_packet_async(struct MsgPort *handler, LONG action, LONG arg1,
         *abandoned_out = 0;
     if (!handler || !result_out)
         return 0;
+    /* A packet whose operation is already lost is not sent at all: the
+     * handler would act on it (create, truncate, write) before the result
+     * is discarded as abandoned. Releases always go out. */
+    ctrl_c = ctrl_c_set();
+    owned = captured_generation == 0 || generation_owned(captured_generation);
+    if (!zzrun_packet_may_send(action == ACTION_END ||
+                               action == ACTION_FREE_LOCK, owned, ctrl_c)) {
+        if (ctrl_c) {
+            SetSignal(0, SIGBREAKF_CTRL_C);
+            user_stop = 1;
+            if (zzrun_ctrl_c_must_request_stop(1))
+                request_stop();
+        }
+        if (!owned && ownership_lost)
+            *ownership_lost = 1;
+        *result_out = 0;
+        if (abandoned_out)
+            *abandoned_out = 1;
+        SetIoErr(ERROR_BREAK);
+        return 1;
+    }
     port = CreateMsgPort();
     packet = AllocMem(sizeof(*packet), MEMF_PUBLIC | MEMF_CLEAR);
     if (!port || !packet) {
@@ -3613,14 +3857,6 @@ static BPTR lock_async(BPTR dir, const char *name, LONG access,
     return lock;
 }
 
-struct dos_path_resolver {
-    const char *name;
-    struct DevProc *devproc;
-    struct MsgPort *handler;
-    BPTR directory;
-    int fixed_used;
-};
-
 static int resolve_dos_path(void *context, int advance,
                             struct zzrun_dos_path_candidate *candidate)
 {
@@ -3676,11 +3912,15 @@ static void send_lock_path_packet(
     reply->error = request->error;
 }
 
-/* Absolute (ABS tooltype) paths use every GetDeviceProc candidate, including
- * late-binding, nonbinding, and multi-directory assigns. */
-static BPTR lock_abs_async(const char *name, int *transport_ok)
+/* Locks name through resolver: every GetDeviceProc candidate, including
+ * late-binding, nonbinding, and multi-directory assigns, or the one fixed
+ * candidate of a pinned resolver. selected (optional) receives the candidate
+ * that decided the answer. The caller releases the resolver. */
+static BPTR lock_resolved_async(struct dos_path_resolver *resolver,
+                                const char *name,
+                                struct zzrun_dos_path_candidate *selected,
+                                int *transport_ok)
 {
-    struct dos_path_resolver resolver;
     struct lock_path_request request;
     uint8_t *name_bstr;
     int usable;
@@ -3694,21 +3934,34 @@ static BPTR lock_abs_async(const char *name, int *transport_ok)
         SetIoErr(ERROR_NO_FREE_STORE);
         return 0;
     }
-    memset(&resolver, 0, sizeof(resolver));
     memset(&request, 0, sizeof(request));
-    resolver.name = name;
     request.access = ACCESS_READ;
     (void)zzrun_dos_dispatch_path(name, name_bstr, 258u,
                                   ERROR_OBJECT_NOT_FOUND, resolve_dos_path,
-                                  &resolver, send_lock_path_packet, &request,
-                                  NULL, &usable);
-    release_dos_path_resolver(&resolver);
+                                  resolver, send_lock_path_packet, &request,
+                                  NULL, &usable, selected);
     FreeVec(name_bstr);
     if (usable)
         *transport_ok = 1;
     if (!request.lock && usable)
         SetIoErr(request.error);
     return request.lock;
+}
+
+/* Absolute (ABS tooltype) paths use every GetDeviceProc candidate. */
+static BPTR lock_abs_async(const char *name, int *transport_ok)
+{
+    struct dos_path_resolver resolver;
+    BPTR lock;
+    LONG io;
+
+    memset(&resolver, 0, sizeof(resolver));
+    resolver.name = name;
+    lock = lock_resolved_async(&resolver, name, NULL, transport_ok);
+    io = IoErr();
+    release_dos_path_resolver(&resolver);
+    SetIoErr(io);
+    return lock;
 }
 
 static BPTR open_on_handler_async(struct MsgPort *handler, BPTR dir,
@@ -3782,11 +4035,31 @@ static void send_open_path_packet(
     request->error = IoErr();
     reply->error = request->error;
 }
-static BPTR open_find_async(BPTR dir, const char *name, LONG mode,
-                            int *transport_ok)
+
+/* A resolver for name: one fixed candidate on dir's handler when dir is a
+ * lock, GetDeviceProc candidates when dir is 0. Returns 0 for a lock that
+ * has no handler. */
+static int dos_path_resolver_start(struct dos_path_resolver *resolver,
+                                   BPTR dir, const char *name)
 {
     struct FileLock *file_lock = (struct FileLock *)BADDR(dir);
-    struct dos_path_resolver resolver;
+
+    memset(resolver, 0, sizeof(*resolver));
+    if (dir) {
+        if (!file_lock || !file_lock->fl_Task)
+            return 0;
+        resolver->handler = file_lock->fl_Task;
+        resolver->directory = dir;
+    } else {
+        resolver->name = name;
+    }
+    return 1;
+}
+
+static BPTR open_resolved_async(struct dos_path_resolver *resolver,
+                                const char *name, LONG mode,
+                                int *transport_ok)
+{
     struct open_path_request request;
     uint8_t *name_bstr;
     int usable;
@@ -3800,17 +4073,6 @@ static BPTR open_find_async(BPTR dir, const char *name, LONG mode,
         SetIoErr(ERROR_NO_FREE_STORE);
         return 0;
     }
-    memset(&resolver, 0, sizeof(resolver));
-    if (dir) {
-        if (!file_lock || !file_lock->fl_Task) {
-            FreeVec(name_bstr);
-            return 0;
-        }
-        resolver.handler = file_lock->fl_Task;
-        resolver.directory = dir;
-    } else {
-        resolver.name = name;
-    }
     memset(&request, 0, sizeof(request));
     if (mode == MODE_NEWFILE)
         request.action = ACTION_FINDOUTPUT;
@@ -3820,15 +4082,34 @@ static BPTR open_find_async(BPTR dir, const char *name, LONG mode,
         request.action = ACTION_FINDINPUT;
     (void)zzrun_dos_dispatch_path(name, name_bstr, 258u,
                                   ERROR_OBJECT_NOT_FOUND, resolve_dos_path,
-                                  &resolver, send_open_path_packet, &request,
-                                  NULL, &usable);
-    release_dos_path_resolver(&resolver);
+                                  resolver, send_open_path_packet, &request,
+                                  NULL, &usable, NULL);
     FreeVec(name_bstr);
     if (usable)
         *transport_ok = 1;
     if (!request.fh && usable)
         SetIoErr(request.error);
     return request.fh;
+}
+
+static BPTR open_find_async(BPTR dir, const char *name, LONG mode,
+                            int *transport_ok)
+{
+    struct dos_path_resolver resolver;
+    BPTR fh;
+    LONG io;
+
+    if (transport_ok)
+        *transport_ok = 0;
+    if (!name || !transport_ok)
+        return 0;
+    if (!dos_path_resolver_start(&resolver, dir, name))
+        return 0;
+    fh = open_resolved_async(&resolver, name, mode, transport_ok);
+    io = IoErr();
+    release_dos_path_resolver(&resolver);
+    SetIoErr(io);
+    return fh;
 }
 
 struct file_handle_release {

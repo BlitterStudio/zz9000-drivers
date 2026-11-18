@@ -36,6 +36,15 @@
 #define ZZAPP_F_LAUNCHER_HEARTBEAT (1u << 18)
 #endif
 
+/* AAR file open flags from zzapp_proto.h. */
+#ifndef ZZAPP_FILE_EXCL
+#define ZZAPP_FILE_READ 1u
+#define ZZAPP_FILE_WRITE 2u
+#define ZZAPP_FILE_CREATE 4u
+#define ZZAPP_FILE_TRUNCATE 8u
+#define ZZAPP_FILE_EXCL 16u
+#endif
+
 #include "zzrun_policy.h"
 
 static struct zzrun_exit_in exit_in(uint32_t state, uint32_t fault,
@@ -557,6 +566,74 @@ static void test_list_reply_decoding(void)
     assert(strcmp(zzrun_terminal_reason_name(9u), "quarantined") == 0);
 }
 
+/* The flags word carries AAR values: READ 1, WRITE 2, CREATE 4, TRUNCATE 8,
+ * EXCL 16. Every valid combination has one plan; everything else, including
+ * unknown bits, is refused before AmigaDOS is touched. */
+static void test_open_flags_map_to_one_plan_each(void)
+{
+    static const struct {
+        uint32_t flags;
+        enum zzrun_open_plan plan;
+    } valid[] = {
+        {1u, ZZRUN_OPEN_READ_EXISTING},
+        {2u, ZZRUN_OPEN_UPDATE_EXISTING},
+        {3u, ZZRUN_OPEN_UPDATE_EXISTING},
+        {2u | 8u, ZZRUN_OPEN_TRUNCATE_EXISTING},
+        {3u | 8u, ZZRUN_OPEN_TRUNCATE_EXISTING},
+        {2u | 4u, ZZRUN_OPEN_CREATE_KEEP},
+        {3u | 4u, ZZRUN_OPEN_CREATE_KEEP},
+        {2u | 4u | 8u, ZZRUN_OPEN_CREATE_REPLACE},
+        {3u | 4u | 8u, ZZRUN_OPEN_CREATE_REPLACE},
+        {2u | 4u | 16u, ZZRUN_OPEN_CREATE_EXCLUSIVE},
+        {3u | 4u | 16u, ZZRUN_OPEN_CREATE_EXCLUSIVE},
+        {2u | 4u | 8u | 16u, ZZRUN_OPEN_CREATE_EXCLUSIVE},
+        {3u | 4u | 8u | 16u, ZZRUN_OPEN_CREATE_EXCLUSIVE},
+    };
+    uint32_t flags;
+    size_t i;
+
+    assert(ZZAPP_FILE_READ == 1u && ZZAPP_FILE_WRITE == 2u &&
+           ZZAPP_FILE_CREATE == 4u && ZZAPP_FILE_TRUNCATE == 8u &&
+           ZZAPP_FILE_EXCL == 16u);
+    for (flags = 0; flags < 256u; flags++) {
+        enum zzrun_open_plan expect = ZZRUN_OPEN_INVALID;
+
+        for (i = 0; i < sizeof(valid) / sizeof(valid[0]); i++)
+            if (valid[i].flags == flags)
+                expect = valid[i].plan;
+        assert(zzrun_open_plan_for_flags(flags) == expect);
+    }
+    assert(zzrun_open_plan_for_flags(0x80000000u | 3u) ==
+           ZZRUN_OPEN_INVALID);
+    assert(zzrun_open_plan_for_flags(0xffffffffu) == ZZRUN_OPEN_INVALID);
+}
+
+static void test_open_flag_refusals_are_the_invalid_combinations(void)
+{
+    /* Neither READ nor WRITE. */
+    assert(zzrun_open_plan_for_flags(0u) == ZZRUN_OPEN_INVALID);
+    assert(zzrun_open_plan_for_flags(ZZAPP_FILE_CREATE) ==
+           ZZRUN_OPEN_INVALID);
+    /* CREATE or TRUNCATE without WRITE. */
+    assert(zzrun_open_plan_for_flags(ZZAPP_FILE_READ | ZZAPP_FILE_CREATE) ==
+           ZZRUN_OPEN_INVALID);
+    assert(zzrun_open_plan_for_flags(ZZAPP_FILE_READ | ZZAPP_FILE_TRUNCATE) ==
+           ZZRUN_OPEN_INVALID);
+    /* EXCL without CREATE. */
+    assert(zzrun_open_plan_for_flags(ZZAPP_FILE_WRITE | ZZAPP_FILE_EXCL) ==
+           ZZRUN_OPEN_INVALID);
+    assert(zzrun_open_plan_for_flags(ZZAPP_FILE_READ | ZZAPP_FILE_WRITE |
+                                     ZZAPP_FILE_TRUNCATE |
+                                     ZZAPP_FILE_EXCL) == ZZRUN_OPEN_INVALID);
+    /* Unknown bit. */
+    assert(zzrun_open_plan_for_flags(ZZAPP_FILE_READ | 32u) ==
+           ZZRUN_OPEN_INVALID);
+    /* The old CREATE (create or replace) is CREATE|TRUNCATE now. */
+    assert(zzrun_open_plan_for_flags(ZZAPP_FILE_WRITE | ZZAPP_FILE_CREATE |
+                                     ZZAPP_FILE_TRUNCATE) ==
+           ZZRUN_OPEN_CREATE_REPLACE);
+}
+
 /* Kit 66: "zzrun status" tried to load a file called "status". */
 static void test_status_keyword_is_case_insensitive(void)
 {
@@ -717,7 +794,8 @@ static void test_dos_path_dispatch_uses_assign_locks_and_retries(void)
     path.replies[0].result = 1;
     assert(zzrun_dos_dispatch_path("Apps:demo.elf", name_bstr.bytes, 258u,
                                    not_found, fake_dos_resolve, &path,
-                                   fake_dos_send, &path, &attempted, &usable));
+                                   fake_dos_send, &path, &attempted, &usable,
+                                   NULL));
     assert(attempted && usable);
     assert(path.send_count == 1u);
     assert(path.handlers[0] == 0x11110000u);
@@ -739,7 +817,8 @@ static void test_dos_path_dispatch_uses_assign_locks_and_retries(void)
     path.replies[1].result = 1;
     assert(zzrun_dos_dispatch_path("Apps:demo.elf", name_bstr.bytes, 258u,
                                    not_found, fake_dos_resolve, &path,
-                                   fake_dos_send, &path, &attempted, &usable));
+                                   fake_dos_send, &path, &attempted, &usable,
+                                   NULL));
     assert(attempted && usable);
     assert(path.send_count == 2u);
     assert(path.handlers[0] == 0x11110000u);
@@ -756,7 +835,8 @@ static void test_dos_path_dispatch_uses_assign_locks_and_retries(void)
     path.replies[0].error = 5;
     assert(!zzrun_dos_dispatch_path("Apps:demo.elf", name_bstr.bytes, 258u,
                                     not_found, fake_dos_resolve, &path,
-                                    fake_dos_send, &path, &attempted, &usable));
+                                    fake_dos_send, &path, &attempted, &usable,
+                                    NULL));
     assert(attempted && usable);
     assert(path.send_count == 1u);
 
@@ -771,7 +851,8 @@ static void test_dos_path_dispatch_uses_assign_locks_and_retries(void)
     path.replies[1].result = 1;
     assert(!zzrun_dos_dispatch_path("Apps:demo.elf", name_bstr.bytes, 258u,
                                     not_found, fake_dos_resolve, &path,
-                                    fake_dos_send, &path, &attempted, &usable));
+                                    fake_dos_send, &path, &attempted, &usable,
+                                    NULL));
     assert(attempted && !usable);
     assert(path.send_count == 2u);
 
@@ -783,7 +864,8 @@ static void test_dos_path_dispatch_uses_assign_locks_and_retries(void)
     path.replies[0].result = 1;
     assert(zzrun_dos_dispatch_path("relative/demo.elf", name_bstr.bytes,
                                    258u, not_found, fake_dos_resolve, &path,
-                                   fake_dos_send, &path, &attempted, &usable));
+                                   fake_dos_send, &path, &attempted, &usable,
+                                   NULL));
     assert(attempted && usable);
     assert(path.handlers[0] == 0x33330000u);
     assert(path.directories[0] == 0x3000u);
@@ -800,8 +882,182 @@ static void test_dos_path_dispatch_uses_assign_locks_and_retries(void)
     path.replies[0].result = 1;
     assert(!zzrun_dos_dispatch_path("Apps:demo.elf", name_bstr.bytes + 1,
                                     258u, not_found, fake_dos_resolve, &path,
-                                    fake_dos_send, &path, &attempted, &usable));
+                                    fake_dos_send, &path, &attempted, &usable,
+                                    NULL));
     assert(path.send_count == 0u);
+}
+
+/* The probe of an absolute name walks a multi-directory assign and finds the
+ * file in the second directory. Resolving the name again for the open would
+ * restart at the first directory (where FINDUPDATE creates a new file); the
+ * open must instead go to the candidate the probe reported. */
+static void test_probe_candidate_is_reported_and_reused_for_the_open(void)
+{
+    const int32_t not_found = 404;
+    union {
+        uintptr_t alignment;
+        uint8_t bytes[260];
+    } name_bstr;
+    struct zzrun_dos_path_candidate selected;
+    struct fake_dos_path probe;
+    struct fake_dos_path open;
+    int attempted;
+    int usable;
+
+    memset(&probe, 0, sizeof(probe));
+    probe.candidate_count = 2u;
+    probe.candidates[0].handler = 0x11110000u;
+    probe.candidates[0].directory = 0x1000u;
+    probe.candidates[1].handler = 0x22220000u;
+    probe.candidates[1].directory = 0x2000u;
+    probe.replies[0].completed = 1;
+    probe.replies[0].error = not_found;
+    probe.replies[1].completed = 1;
+    probe.replies[1].result = 1;
+    memset(&selected, 0, sizeof(selected));
+    assert(zzrun_dos_dispatch_path("Apps:data/save.dat", name_bstr.bytes,
+                                   258u, not_found, fake_dos_resolve, &probe,
+                                   fake_dos_send, &probe, &attempted, &usable,
+                                   &selected));
+    assert(selected.handler == 0x22220000u);
+    assert(selected.directory == 0x2000u);
+
+    /* A pinned resolver offers only that candidate. */
+    memset(&open, 0, sizeof(open));
+    open.candidate_count = 1u;
+    open.candidates[0] = selected;
+    open.replies[0].completed = 1;
+    open.replies[0].result = 1;
+    assert(zzrun_dos_dispatch_path("Apps:data/save.dat", name_bstr.bytes,
+                                   258u, not_found, fake_dos_resolve, &open,
+                                   fake_dos_send, &open, &attempted, &usable,
+                                   NULL));
+    assert(open.send_count == 1u);
+    assert(open.handlers[0] == 0x22220000u);
+    assert(open.directories[0] == 0x2000u);
+
+    /* An in-use answer decides at its own candidate: no later directory is
+     * tried, and that candidate is the one reported. */
+    memset(&probe, 0, sizeof(probe));
+    probe.candidate_count = 2u;
+    probe.candidates[0].handler = 0x11110000u;
+    probe.candidates[0].directory = 0x1000u;
+    probe.candidates[1].handler = 0x22220000u;
+    probe.candidates[1].directory = 0x2000u;
+    probe.replies[0].completed = 1;
+    probe.replies[0].error = not_found;
+    probe.replies[1].completed = 1;
+    probe.replies[1].error = 202;
+    memset(&selected, 0, sizeof(selected));
+    assert(!zzrun_dos_dispatch_path("Apps:data/save.dat", name_bstr.bytes,
+                                    258u, not_found, fake_dos_resolve, &probe,
+                                    fake_dos_send, &probe, &attempted,
+                                    &usable, &selected));
+    assert(usable);
+    assert(probe.send_count == 2u);
+    assert(selected.handler == 0x22220000u);
+    assert(selected.directory == 0x2000u);
+}
+
+static void test_probe_result_distinguishes_missing_in_use_and_errors(void)
+{
+    const int32_t not_found = 205;
+    const int32_t in_use = 202;
+
+    assert(zzrun_probe_result_for_lock(1, 0, not_found, in_use) ==
+           ZZRUN_PROBE_EXISTS);
+    assert(zzrun_probe_result_for_lock(0, not_found, not_found, in_use) ==
+           ZZRUN_PROBE_MISSING);
+    assert(zzrun_probe_result_for_lock(0, in_use, not_found, in_use) ==
+           ZZRUN_PROBE_EXISTS);
+    assert(zzrun_probe_result_for_lock(0, 218, not_found, in_use) ==
+           ZZRUN_PROBE_ERROR);
+    assert(zzrun_probe_result_for_lock(0, 0, not_found, in_use) ==
+           ZZRUN_PROBE_ERROR);
+}
+
+static void test_plans_that_act_on_an_existing_file_probe_the_target(void)
+{
+    assert(!zzrun_plan_probes_target(ZZRUN_OPEN_READ_EXISTING, 0));
+    assert(!zzrun_plan_probes_target(ZZRUN_OPEN_READ_EXISTING, 1));
+    assert(zzrun_plan_probes_target(ZZRUN_OPEN_UPDATE_EXISTING, 0));
+    assert(zzrun_plan_probes_target(ZZRUN_OPEN_UPDATE_EXISTING, 1));
+    assert(zzrun_plan_probes_target(ZZRUN_OPEN_TRUNCATE_EXISTING, 0));
+    assert(zzrun_plan_probes_target(ZZRUN_OPEN_TRUNCATE_EXISTING, 1));
+    assert(zzrun_plan_probes_target(ZZRUN_OPEN_CREATE_EXCLUSIVE, 0));
+    assert(zzrun_plan_probes_target(ZZRUN_OPEN_CREATE_EXCLUSIVE, 1));
+    /* CREATE acts on an existing file too (keep contents, or replace it);
+     * only an absolute name needs the probe to find its directory. */
+    assert(!zzrun_plan_probes_target(ZZRUN_OPEN_CREATE_KEEP, 0));
+    assert(zzrun_plan_probes_target(ZZRUN_OPEN_CREATE_KEEP, 1));
+    assert(!zzrun_plan_probes_target(ZZRUN_OPEN_CREATE_REPLACE, 0));
+    assert(zzrun_plan_probes_target(ZZRUN_OPEN_CREATE_REPLACE, 1));
+    assert(!zzrun_plan_probes_target(ZZRUN_OPEN_INVALID, 1));
+}
+
+/* A relative exclusive create whose target another program holds open: the
+ * handler refuses the lock with ERROR_OBJECT_IN_USE. The file exists, so the
+ * answer is EEXIST, not the EBUSY that any other plan reports. */
+static void test_leaf_lock_failure_answers_by_plan(void)
+{
+    const int32_t not_found = 205;
+    const int32_t in_use = 202;
+    const enum zzrun_open_plan creates[] = {
+        ZZRUN_OPEN_CREATE_KEEP, ZZRUN_OPEN_CREATE_REPLACE,
+        ZZRUN_OPEN_CREATE_EXCLUSIVE
+    };
+    const enum zzrun_open_plan existing[] = {
+        ZZRUN_OPEN_READ_EXISTING, ZZRUN_OPEN_UPDATE_EXISTING,
+        ZZRUN_OPEN_TRUNCATE_EXISTING
+    };
+    unsigned i;
+
+    assert(zzrun_leaf_lock_failure(ZZRUN_OPEN_CREATE_EXCLUSIVE, in_use,
+                                   not_found, in_use) == ZZRUN_LEAF_EXISTS);
+    assert(zzrun_leaf_lock_failure(ZZRUN_OPEN_CREATE_KEEP, in_use, not_found,
+                                   in_use) == ZZRUN_LEAF_REFUSE);
+    assert(zzrun_leaf_lock_failure(ZZRUN_OPEN_CREATE_REPLACE, in_use,
+                                   not_found, in_use) == ZZRUN_LEAF_REFUSE);
+    for (i = 0; i < sizeof(creates) / sizeof(creates[0]); i++) {
+        assert(zzrun_leaf_lock_failure(creates[i], not_found, not_found,
+                                       in_use) == ZZRUN_LEAF_PROCEED);
+        assert(zzrun_leaf_lock_failure(creates[i], 218, not_found, in_use) ==
+               ZZRUN_LEAF_REFUSE);
+        assert(zzrun_leaf_lock_failure(creates[i], 0, not_found, in_use) ==
+               ZZRUN_LEAF_REFUSE);
+    }
+    for (i = 0; i < sizeof(existing) / sizeof(existing[0]); i++) {
+        assert(zzrun_leaf_lock_failure(existing[i], not_found, not_found,
+                                       in_use) == ZZRUN_LEAF_REFUSE);
+        assert(zzrun_leaf_lock_failure(existing[i], in_use, not_found,
+                                       in_use) == ZZRUN_LEAF_REFUSE);
+    }
+}
+
+/* A packet from a lost generation or after Ctrl-C never reaches the handler,
+ * except releases, which give back what an earlier packet acquired. */
+static void test_lost_operation_packets_are_not_sent_but_releases_are(void)
+{
+    assert(zzrun_packet_may_send(0, 1, 0));
+    assert(!zzrun_packet_may_send(0, 0, 0));
+    assert(!zzrun_packet_may_send(0, 1, 1));
+    assert(!zzrun_packet_may_send(0, 0, 1));
+    assert(zzrun_packet_may_send(1, 0, 0));
+    assert(zzrun_packet_may_send(1, 1, 1));
+    assert(zzrun_packet_may_send(1, 0, 1));
+}
+
+/* The NEWFILE fallback after a handler without ACTION_SET_FILE_SIZE follows
+ * an ACTION_END wait that Ctrl-C or a generation change may have abandoned.
+ * Ownership, a Ctrl-C still pending, and a Ctrl-C an earlier wait already
+ * consumed (user_stop) each stop the destructive step. */
+static void test_destructive_open_steps_stop_when_the_request_is_cancelled(void)
+{
+    assert(zzrun_open_step_allowed(1, 0, 0));
+    assert(!zzrun_open_step_allowed(0, 0, 0));
+    assert(!zzrun_open_step_allowed(1, 1, 0));
+    assert(!zzrun_open_step_allowed(1, 0, 1));
+    assert(!zzrun_open_step_allowed(0, 1, 1));
 }
 
 struct fake_release {
@@ -1005,6 +1261,8 @@ int main(void)
     test_extended_query_reply_is_required_and_carries_every_cap();
     test_block_reason_names_match_protocol();
     test_list_reply_decoding();
+    test_open_flags_map_to_one_plan_each();
+    test_open_flag_refusals_are_the_invalid_combinations();
     test_status_keyword_is_case_insensitive();
     test_launcher_lease_is_advertised();
     test_lease_renewal_never_crosses_generations();
@@ -1012,6 +1270,12 @@ int main(void)
     test_legacy_claim_passes_the_pre_load_gate();
     test_packet_wait_outlives_abandonment();
     test_dos_path_dispatch_uses_assign_locks_and_retries();
+    test_probe_candidate_is_reported_and_reused_for_the_open();
+    test_probe_result_distinguishes_missing_in_use_and_errors();
+    test_plans_that_act_on_an_existing_file_probe_the_target();
+    test_leaf_lock_failure_answers_by_plan();
+    test_lost_operation_packets_are_not_sent_but_releases_are();
+    test_destructive_open_steps_stop_when_the_request_is_cancelled();
     test_bstr_encoding_matches_dos_packets();
     test_pending_packet_ctrl_c_still_requests_stop();
     test_load_break_consumed_by_packet_returns_warn();

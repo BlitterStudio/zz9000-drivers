@@ -680,6 +680,17 @@ static inline int zzrun_packet_result_usable(int completed, int abandoned)
     return completed && !abandoned;
 }
 
+/* A packet is sent only while its operation is live. A lost generation or a
+ * pending Ctrl-C means the result will be discarded, but the handler would
+ * still act on the packet first (create, truncate, write), so such a packet
+ * stays unsent. Releases (ACTION_END, ACTION_FREE_LOCK) always go out: they
+ * give back what an earlier packet acquired. */
+static inline int zzrun_packet_may_send(int release, int ownership_ok,
+                                        int ctrl_c_pending)
+{
+    return release || (ownership_ok && !ctrl_c_pending);
+}
+
 /* A resource slot must survive a release packet that was never delivered;
  * after delivery DOS owns no resource and its local handle may be freed even
  * when the handler reported an error. The callback sends ACTION_END or
@@ -760,12 +771,17 @@ typedef void (*zzrun_dos_path_send_fn)(
  * longword-aligned storage that remains valid until the sender replies. A
  * failed lookup only tries the next multi-assign directory for
  * ERROR_OBJECT_NOT_FOUND; a colonless name is sent unchanged to the
- * current-directory candidate. */
+ * current-directory candidate. selected_out (optional) receives the
+ * candidate of the last packet sent: the one that decided the outcome. A
+ * caller that must act on that same object afterwards (probe, then open)
+ * pins its resolver to this candidate instead of resolving the name again,
+ * which would restart at the first directory of a multi-directory assign. */
 static inline int zzrun_dos_dispatch_path(
     const char *name, uint8_t *name_bstr, uint32_t name_bstr_capacity,
     int32_t object_not_found, zzrun_dos_path_resolve_fn resolve,
     void *resolve_context, zzrun_dos_path_send_fn send, void *send_context,
-    int *attempted_out, int *usable_out)
+    int *attempted_out, int *usable_out,
+    struct zzrun_dos_path_candidate *selected_out)
 {
     const char *path = zzrun_dos_packet_path(name);
     struct zzrun_dos_path_candidate candidate;
@@ -788,6 +804,8 @@ static inline int zzrun_dos_dispatch_path(
     while (resolve(resolve_context, advance, &candidate)) {
         if (usable_out)
             *usable_out = 0;
+        if (selected_out)
+            *selected_out = candidate;
         memset(&reply, 0, sizeof(reply));
         send(send_context, &candidate, name_bstr, name_bstr_bytes,
              name_bstr_bptr, &reply);
@@ -879,6 +897,147 @@ static inline int zzrun_is_status_keyword(const char *arg)
             return 0;
     }
     return arg[i] == '\0';
+}
+
+/* File open flags on the launcher window carry the AAR values from
+ * zzapp_proto.h. */
+
+/* How ZZRun opens a file for one valid flags word. Zero is not a plan: the
+ * flags are invalid and ZZRun answers EINVAL before it touches AmigaDOS. */
+enum zzrun_open_plan {
+    ZZRUN_OPEN_INVALID = 0,
+    /* READ only: MODE_OLDFILE, the file must exist. */
+    ZZRUN_OPEN_READ_EXISTING,
+    /* WRITE without CREATE: the file must exist (Lock probe, because
+     * MODE_READWRITE creates a missing file); open it MODE_READWRITE. */
+    ZZRUN_OPEN_UPDATE_EXISTING,
+    /* TRUNCATE without CREATE: as above, then SetFileSize(0). Handlers that
+     * lack ACTION_SET_FILE_SIZE get MODE_NEWFILE after the probe. */
+    ZZRUN_OPEN_TRUNCATE_EXISTING,
+    /* CREATE only: MODE_READWRITE on the existing file, else MODE_NEWFILE.
+     * An existing file keeps its contents. */
+    ZZRUN_OPEN_CREATE_KEEP,
+    /* CREATE|TRUNCATE: MODE_NEWFILE (create or replace). */
+    ZZRUN_OPEN_CREATE_REPLACE,
+    /* CREATE|EXCL, with or without TRUNCATE: Lock probe, EEXIST if the file
+     * exists, else MODE_NEWFILE. */
+    ZZRUN_OPEN_CREATE_EXCLUSIVE
+};
+
+static inline enum zzrun_open_plan zzrun_open_plan_for_flags(uint32_t flags)
+{
+    const uint32_t known = ZZAPP_FILE_READ | ZZAPP_FILE_WRITE |
+                           ZZAPP_FILE_CREATE | ZZAPP_FILE_TRUNCATE |
+                           ZZAPP_FILE_EXCL;
+    int create = (flags & ZZAPP_FILE_CREATE) != 0;
+    int truncate = (flags & ZZAPP_FILE_TRUNCATE) != 0;
+    int write = (flags & ZZAPP_FILE_WRITE) != 0;
+
+    if (flags & ~known)
+        return ZZRUN_OPEN_INVALID;
+    if (!(flags & (ZZAPP_FILE_READ | ZZAPP_FILE_WRITE)))
+        return ZZRUN_OPEN_INVALID;
+    if ((create || truncate) && !write)
+        return ZZRUN_OPEN_INVALID;
+    if ((flags & ZZAPP_FILE_EXCL) && !create)
+        return ZZRUN_OPEN_INVALID;
+    if (flags & ZZAPP_FILE_EXCL)
+        return ZZRUN_OPEN_CREATE_EXCLUSIVE;
+    if (create)
+        return truncate ? ZZRUN_OPEN_CREATE_REPLACE : ZZRUN_OPEN_CREATE_KEEP;
+    if (truncate)
+        return ZZRUN_OPEN_TRUNCATE_EXISTING;
+    return write ? ZZRUN_OPEN_UPDATE_EXISTING : ZZRUN_OPEN_READ_EXISTING;
+}
+
+/* Outcome of the existence probe, a Lock(name, ACCESS_READ). A refused lock
+ * with ERROR_OBJECT_IN_USE still proves the object exists: the handler holds
+ * it for someone else. Any other failure is the caller's error. */
+enum zzrun_probe_result {
+    ZZRUN_PROBE_ERROR = 0,
+    ZZRUN_PROBE_EXISTS,
+    ZZRUN_PROBE_MISSING
+};
+
+static inline enum zzrun_probe_result zzrun_probe_result_for_lock(
+    int locked, int32_t io_error, int32_t object_not_found,
+    int32_t object_in_use)
+{
+    if (locked)
+        return ZZRUN_PROBE_EXISTS;
+    if (io_error == object_not_found)
+        return ZZRUN_PROBE_MISSING;
+    if (io_error == object_in_use)
+        return ZZRUN_PROBE_EXISTS;
+    return ZZRUN_PROBE_ERROR;
+}
+
+/* Which plans probe the target before the open packet. UPDATE, TRUNCATE and
+ * EXCL decide on the answer. CREATE (keep or replace) acts on an existing
+ * file whichever directory of a multi-directory assign holds it, so an
+ * absolute path probes to find that directory; a relative path already has
+ * one fixed parent lock. After an EXISTS answer every later packet of the
+ * open (update, truncate, NEWFILE fallback) goes to the probe's candidate;
+ * a MISSING answer leaves the name unresolved for the creating open. */
+static inline int zzrun_plan_probes_target(enum zzrun_open_plan plan,
+                                           int absolute)
+{
+    switch (plan) {
+    case ZZRUN_OPEN_UPDATE_EXISTING:
+    case ZZRUN_OPEN_TRUNCATE_EXISTING:
+    case ZZRUN_OPEN_CREATE_EXCLUSIVE:
+        return 1;
+    case ZZRUN_OPEN_CREATE_KEEP:
+    case ZZRUN_OPEN_CREATE_REPLACE:
+        return absolute != 0;
+    default:
+        return 0;
+    }
+}
+
+/* What a failed Lock of a relative name's final component means for one
+ * plan. The lock also proves the leaf stays under the ROOT when it succeeds,
+ * so a refusal ends the open unless it already answers the plan's question:
+ * a missing leaf is what a create plan wants, and an exclusive create must
+ * report a leaf that exists but is held by another program (the handler
+ * refuses the lock with ERROR_OBJECT_IN_USE) as EEXIST, the same answer an
+ * absolute name gets from its probe. Nothing is opened on the EXISTS answer,
+ * so no open bypasses the ROOT check. */
+enum zzrun_leaf_action {
+    ZZRUN_LEAF_REFUSE = 0,
+    ZZRUN_LEAF_PROCEED,
+    ZZRUN_LEAF_EXISTS
+};
+
+static inline enum zzrun_leaf_action zzrun_leaf_lock_failure(
+    enum zzrun_open_plan plan, int32_t io_error, int32_t object_not_found,
+    int32_t object_in_use)
+{
+    int create = plan == ZZRUN_OPEN_CREATE_KEEP ||
+                 plan == ZZRUN_OPEN_CREATE_REPLACE ||
+                 plan == ZZRUN_OPEN_CREATE_EXCLUSIVE;
+
+    switch (zzrun_probe_result_for_lock(0, io_error, object_not_found,
+                                        object_in_use)) {
+    case ZZRUN_PROBE_MISSING:
+        return create ? ZZRUN_LEAF_PROCEED : ZZRUN_LEAF_REFUSE;
+    case ZZRUN_PROBE_EXISTS:
+        return plan == ZZRUN_OPEN_CREATE_EXCLUSIVE ? ZZRUN_LEAF_EXISTS :
+                                                     ZZRUN_LEAF_REFUSE;
+    default:
+        return ZZRUN_LEAF_REFUSE;
+    }
+}
+
+/* A step that creates, truncates or replaces a file runs only while the
+ * request is current (launcher still owns the generation, the window still
+ * holds the request) and no stop was asked. user_stop records a Ctrl-C that
+ * an earlier packet wait consumed, so a cancelled request stays cancelled
+ * for the steps that follow it. */
+static inline int zzrun_open_step_allowed(int request_current,
+                                          int ctrl_c_pending, int user_stop)
+{
+    return request_current && !zzrun_user_break(ctrl_c_pending, user_stop);
 }
 
 #endif /* ZZRUN_POLICY_H */

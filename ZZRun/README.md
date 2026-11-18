@@ -269,6 +269,40 @@ next even sequence. Read and list-next bytes are written to `ZZAPP_DATA_OFF`;
 a list name is NUL-terminated and `out_n` excludes the NUL. A short read with
 `err == 0` is EOF.
 
+The open request carries the AAR file flags: `READ` 1, `WRITE` 2, `CREATE` 4,
+`TRUNCATE` 8, and `EXCL` 16. ZZRun refuses an invalid combination with
+`EINVAL` (-2) before it touches AmigaDOS: neither `READ` nor `WRITE`, `CREATE`
+or `TRUNCATE` without `WRITE`, `EXCL` without `CREATE`, or an unknown bit.
+Valid combinations open as follows.
+
+- `READ`: `MODE_OLDFILE`; a missing file is `ENOENT` (-5).
+- `WRITE` or `READ|WRITE`: the file must exist (ZZRun probes with `Lock`,
+  because `MODE_READWRITE` creates a missing file); then `MODE_READWRITE`. A
+  missing file is `ENOENT`.
+- `WRITE|TRUNCATE`: as above, then the file is set to size 0 with
+  `ACTION_SET_FILE_SIZE`. A handler without that action gets `MODE_NEWFILE`
+  after the probe.
+- `WRITE|CREATE`: `MODE_READWRITE` on an existing file, keeping its contents;
+  `MODE_NEWFILE` if it is missing.
+- `WRITE|CREATE|TRUNCATE`: `MODE_NEWFILE`; create, or replace an existing file.
+- `WRITE|CREATE|EXCL`, with or without `TRUNCATE`: ZZRun probes with `Lock`. An
+  existing file is `EEXIST` (-11), including one that another program holds
+  open exclusively (the handler refuses the lock with `ERROR_OBJECT_IN_USE`),
+  for relative and `ABS` paths alike; otherwise `MODE_NEWFILE`.
+
+`READ` may be added to any of the `WRITE` entries. AmigaDOS has no atomic exclusive
+create, so `EXCL` is exclusive against the other apps ZZRun serves, which share
+one serving loop, but not against other Amiga programs that create the same name
+between the probe and the open.
+
+With `ABS` on a multi-directory assign, the probe finds the directory that holds
+the file and the open, `SetFileSize` and `MODE_NEWFILE` fallback all go to that
+same directory, so an existing file is updated, truncated, kept or replaced
+where it is rather than shadowed by a new file in the first directory. Every
+step that can create, truncate or replace a file is skipped, and answers `EIO`,
+once the request is no longer current: the app's generation was replaced, a
+Ctrl-C or stop is pending, or an earlier wait for AmigaDOS was abandoned.
+
 Relative paths stay below `ROOT`. `..`, leading `/`, and empty path components
 that would leave the root are rejected. Paths containing `:` are rejected
 unless `ABS` is enabled. With `ABS`, file open, stat, and directory-list
