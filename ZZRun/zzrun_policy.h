@@ -2,63 +2,51 @@
  * Decisions ZZRun makes from launcher state. No AmigaOS types, so a host
  * test can exercise them without DOS or Exec.
  *
+ * ZZRun serves its app over the AAR queue transport (aar/transport.h plus
+ * the ZZ9000 private wire, zzapp_proto.h). The window of the earlier
+ * launcher protocol is gone, and with it the generation fences.
+ *
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 #ifndef ZZRUN_POLICY_H
 #define ZZRUN_POLICY_H
 
-#include <string.h>
+#include <stddef.h>
 #include <stdint.h>
+#include <string.h>
+
+#ifndef ZZAPP_PROTO_NO_WINDOW
+#define ZZAPP_PROTO_NO_WINDOW 1
+#endif
+#include "aar/transport.h"
+#include "zzapp_proto.h"
 
 #define ZZRUN_POLICY_GRACE_MS 500u
 
-/* Must match ZZAPP_ST_* / ZZAPP_FAULT_WATCHDOG_RESTART. ZZRun.c asserts it. */
-#define ZZRUN_ST_IDLE 0u
-#define ZZRUN_ST_LOADING 1u
-#define ZZRUN_ST_STARTING 2u
-#define ZZRUN_ST_RUNNING 3u
-#define ZZRUN_ST_PAUSED 4u
-#define ZZRUN_ST_STOPPING 5u
-#define ZZRUN_ST_FAULTED 6u
-#define ZZRUN_FAULT_WATCHDOG_RESTART 6u
-
-#define ZZRUN_ST_CLAIMED 7u
+/* Lifecycle states (AAR_CB_STATE). State 4 of the old launcher protocol
+ * (paused) no longer exists. */
+#define ZZRUN_ST_IDLE AAR_STATE_IDLE
+#define ZZRUN_ST_LOADING AAR_STATE_LOADING
+#define ZZRUN_ST_STARTING AAR_STATE_STARTING
+#define ZZRUN_ST_RUNNING AAR_STATE_RUNNING
+#define ZZRUN_ST_STOPPING AAR_STATE_STOPPING
+#define ZZRUN_ST_FAULTED AAR_STATE_FAULTED
+#define ZZRUN_ST_CLAIMED AAR_STATE_CLAIMED
 #define ZZRUN_MIB_BYTES (1024u * 1024u)
 
-struct zzrun_claim_reply {
-    uint32_t arm_address;
-    uint32_t size;
-    uint32_t host_offset;
-    uint32_t slot;
-    uint32_t generation;
-};
-
+/* One claim as LIST reports it (ZZAPP_LIST_* of the private wire). */
 struct zzrun_list_reply {
     uint32_t state;
-    uint32_t generation;
+    uint32_t handle; /* 0: no further claim */
     uint32_t committed_bytes;
-    uint32_t limit_bytes;
+    uint32_t index;
     uint32_t cpu_ms;
     uint32_t service_ms;
     uint8_t block_reason;
-    uint8_t terminal_reason;
+    uint8_t end_reason;
     uint16_t flags;
-    char name[21];
-};
-
-/* The extended QUERY low-memory capability advertises a per-generation
- * lifecycle crossing counter that wraps naturally as a u32. */
-struct zzrun_low_memory_state {
-    uint32_t generation;
-    uint32_t crossings;
-};
-
-struct zzrun_slots_query {
-    uint32_t slots;
-    uint32_t free_slots;
-    uint32_t commit_free;
-    uint32_t commit_total;
+    char name[ZZAPP_LIST_NAME_BYTES + 1];
 };
 
 static inline uint32_t zzrun_be32(const uint8_t *p)
@@ -75,101 +63,7 @@ static inline void zzrun_put_be32(uint8_t *p, uint32_t value)
     p[3] = (uint8_t)value;
 }
 
-/* Extended requests preserve the legacy fields, zero unused bytes, and carry
- * the owning slot and generation at the wire selector offsets. */
-static inline uint16_t zzrun_request_build(
-    uint8_t out[ZZAPP_MAILBOX_PAYLOAD_BYTES], const uint8_t *legacy,
-    uint16_t legacy_bytes, int slots, uint32_t slot, uint32_t generation)
-{
-    if (!out || (legacy_bytes && !legacy) ||
-        legacy_bytes > ZZAPP_MAILBOX_PAYLOAD_BYTES)
-        return 0;
-    if (!slots) {
-        if (legacy_bytes)
-            memcpy(out, legacy, legacy_bytes);
-        return legacy_bytes;
-    }
-    if (legacy_bytes > 32u)
-        return 0;
-    memset(out, 0, ZZAPP_MAILBOX_PAYLOAD_BYTES);
-    if (legacy_bytes)
-        memcpy(out, legacy, legacy_bytes);
-    zzrun_put_be32(out + ZZAPP_SEL_SLOT, slot);
-    zzrun_put_be32(out + ZZAPP_SEL_GENERATION, generation);
-    return ZZAPP_MAILBOX_PAYLOAD_BYTES;
-}
-
-static inline int zzrun_claim_reply_decode(const uint8_t *payload,
-                                           uint16_t bytes, int slots,
-                                           struct zzrun_claim_reply *out)
-{
-    if (!payload || !out || bytes < ZZAPP_ALLOC_REPLY_BYTES)
-        return 0;
-    out->arm_address = zzrun_be32(payload + ZZAPP_ALLOC_ARM_ADDRESS);
-    out->size = zzrun_be32(payload + ZZAPP_ALLOC_SIZE);
-    out->host_offset = zzrun_be32(payload + ZZAPP_ALLOC_HOST_OFFSET);
-    out->slot = 0;
-    out->generation = 0;
-    if (!slots)
-        return 1;
-    if (bytes < ZZAPP_ALLOC_EXT_REPLY_BYTES)
-        return 0;
-    out->slot = zzrun_be32(payload + ZZAPP_ALLOC_SLOT);
-    out->generation = zzrun_be32(payload + ZZAPP_ALLOC_GENERATION);
-    return out->slot < ZZAPP_SLOT_COUNT;
-}
-
-static inline int zzrun_slots_query_decode(const uint8_t *payload,
-                                           uint16_t bytes,
-                                           struct zzrun_slots_query *out)
-{
-    if (!payload || !out || bytes < ZZAPP_QUERY_EXT_REPLY_BYTES)
-        return 0;
-    out->slots = zzrun_be32(payload + ZZAPP_QUERY_SLOTS);
-    out->free_slots = zzrun_be32(payload + ZZAPP_QUERY_FREE_SLOTS);
-    out->commit_free = zzrun_be32(payload + ZZAPP_QUERY_COMMIT_FREE);
-    out->commit_total = zzrun_be32(payload + ZZAPP_QUERY_COMMIT_TOTAL);
-    return out->slots != 0 && out->slots <= ZZAPP_SLOT_COUNT;
-}
-
-/* A terminal state belongs to the launcher that owns its generation. Only a
- * changed generation means another launcher replaced that app. */
-static inline int zzrun_slot_replaced(int slots, uint32_t owned_slot,
-                                      uint32_t owned_generation,
-                                      uint32_t observed_slot,
-                                      uint32_t observed_generation,
-                                      uint32_t observed_state)
-{
-    (void)observed_state;
-    if (!slots)
-        return observed_generation != owned_generation;
-    if (observed_slot != owned_slot)
-        return 0;
-    return observed_generation != owned_generation;
-}
-
-static inline int zzrun_low_memory_supported(uint32_t caps)
-{
-    return (caps & ZZAPP_CAP_LOW_MEMORY) != 0;
-}
-
-static inline int zzrun_low_memory_changed(struct zzrun_low_memory_state *state,
-                                           uint32_t caps,
-                                           uint32_t generation,
-                                           uint32_t crossings)
-{
-    if (!zzrun_low_memory_supported(caps))
-        return 0;
-    if (state->generation != generation) {
-        state->generation = generation;
-        state->crossings = 0;
-    }
-    if (state->crossings == crossings)
-        return 0;
-    state->crossings = crossings;
-    return 1;
-}
-
+/* MAXMEM and HOSTMEM are decimal MiB, at least 1. */
 static inline int zzrun_parse_maxmem(const char *text, uint32_t *mib_out)
 {
     uint32_t value = 0;
@@ -193,16 +87,11 @@ static inline int zzrun_parse_maxmem(const char *text, uint32_t *mib_out)
     return 1;
 }
 
-/* HOSTMEM: per-app host-visible memory limit in MiB, carried by the
- * extended LOAD_BEGIN at ZZAPP_LOAD_HOST_VISIBLE_MIB. The request field is
- * valid for 0..4095; the firmware refuses a larger limit than its heap can
- * hold with NO_MEMORY. A launch without HOSTMEM keeps the firmware default. */
+/* HOSTMEM is the shared (host-visible) memory limit in MiB. The client
+ * writes it to AAR_CB_SHARED_MIB before the load; the platform checks it at
+ * LOAD_BEGIN. The field takes 0..4095; a launch without HOSTMEM writes 0 and
+ * keeps the platform default. */
 #define ZZRUN_HOSTMEM_MAX_MIB 4095u
-#define ZZRUN_HOSTMEM_OMIT    0
-#define ZZRUN_HOSTMEM_SEND    1
-#define ZZRUN_HOSTMEM_REJECT  2
-#define ZZRUN_LOAD_BEGIN_BYTES 8u
-#define ZZRUN_STATUS_NO_MEMORY 6u
 
 static inline int zzrun_parse_hostmem(const char *text, uint32_t *mib_out)
 {
@@ -215,56 +104,71 @@ static inline int zzrun_parse_hostmem(const char *text, uint32_t *mib_out)
     return 1;
 }
 
-/* HOSTMEM needs the extended LOAD_BEGIN field, which only a runtime that
- * advertises ZZAPP_CAP_HOST_LIMIT on slots understands. Older firmware would
- * ignore the word and run the app with the default limit, so refuse instead. */
-static inline int zzrun_hostmem_decision(uint32_t caps, uint32_t hostmem_mib)
+/* A claim handle named on the command line: decimal, $hex or 0x hex, never
+ * zero. */
+static inline int zzrun_parse_handle(const char *text, uint32_t *handle_out)
 {
-    if (hostmem_mib == 0u)
-        return ZZRUN_HOSTMEM_OMIT;
-    if (!(caps & ZZAPP_CAP_SLOTS) || !(caps & ZZAPP_CAP_HOST_LIMIT))
-        return ZZRUN_HOSTMEM_REJECT;
-    return ZZRUN_HOSTMEM_SEND;
+    const unsigned char *p = (const unsigned char *)text;
+    uint32_t base = 10u;
+    uint32_t value = 0;
+    int digits = 0;
+
+    if (!p || !handle_out)
+        return 0;
+    if (p[0] == '$') {
+        base = 16u;
+        p++;
+    } else if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+        base = 16u;
+        p += 2;
+    }
+    for (; *p; ++p) {
+        uint32_t digit;
+
+        if (*p >= '0' && *p <= '9')
+            digit = (uint32_t)(*p - '0');
+        else if (base == 16u && *p >= 'a' && *p <= 'f')
+            digit = (uint32_t)(*p - 'a') + 10u;
+        else if (base == 16u && *p >= 'A' && *p <= 'F')
+            digit = (uint32_t)(*p - 'A') + 10u;
+        else
+            return 0;
+        if (value > (UINT32_MAX - digit) / base)
+            return 0;
+        value = value * base + digit;
+        digits++;
+    }
+    if (!digits || value == 0)
+        return 0;
+    *handle_out = value;
+    return 1;
 }
 
-/* Builds the LOAD_BEGIN payload; returns its length. A launch that sends no
- * host-visible limit keeps the four-byte request, and none at all keeps the
- * byte-identical legacy empty request. */
-static inline uint16_t zzrun_load_begin_payload(
-    uint8_t out[ZZRUN_LOAD_BEGIN_BYTES], int send_maxmem, uint32_t maxmem_mib,
-    int send_hostmem, uint32_t hostmem_mib)
+/* A refused CLAIM, LOAD_BEGIN or LOAD_END carries an AAR_REASON_* code. */
+static inline const char *zzrun_refusal_text(uint32_t reason)
 {
-    uint16_t len = 0;
-
-    if (send_maxmem || send_hostmem) {
-        memset(out, 0, ZZRUN_LOAD_BEGIN_BYTES);
-        zzrun_put_be32(out + ZZAPP_LOAD_MEM_LIMIT_MIB,
-                       send_maxmem ? maxmem_mib : 0u);
-        len = 4u;
+    switch (reason) {
+    case AAR_REASON_MEMORY:
+        return "not enough card memory for the app record and stack";
+    case AAR_REASON_TABLES:
+        return "no address-space translation tables left";
+    case AAR_REASON_HOSTHEAP:
+        return "not enough shared card memory for the queues and buffers";
+    case AAR_REASON_LIMIT:
+        return "a platform limit was reached (HOSTMEM or MAXMEM too large?)";
+    default:
+        return "refused by the platform";
     }
-    if (send_hostmem) {
-        zzrun_put_be32(out + ZZAPP_LOAD_HOST_VISIBLE_MIB, hostmem_mib);
-        len = ZZRUN_LOAD_BEGIN_BYTES;
-    }
-    return len;
 }
 
-/* The firmware refuses a limit it cannot grant with NO_MEMORY at LOAD_BEGIN,
- * but it returns the same status when the loader cannot allocate its private
- * staging arena, and it has no query for the ceiling. Only a request above
- * the per-app alias-window ceiling is certainly too large. */
-#define ZZRUN_HOSTMEM_CEILING_MIB 62u
-#define ZZRUN_HOSTMEM_FAIL_NONE      0
-#define ZZRUN_HOSTMEM_FAIL_TOO_LARGE 1
-#define ZZRUN_HOSTMEM_FAIL_NO_MEMORY 2
-
-static inline int zzrun_hostmem_failure(uint32_t hostmem_mib, int status)
+/* The capabilities ZZRun passes at LOAD_BEGIN (ZZAPP_CLIENT_*). It serves
+ * CLUT8 screens, acknowledges pan flips by completion flag, accepts
+ * card-owned flips, and renews its lease from the main loop. */
+static inline uint32_t zzrun_client_caps(int audio_ahi)
 {
-    if (hostmem_mib == 0u || status != (int)ZZRUN_STATUS_NO_MEMORY)
-        return ZZRUN_HOSTMEM_FAIL_NONE;
-    return hostmem_mib > ZZRUN_HOSTMEM_CEILING_MIB
-               ? ZZRUN_HOSTMEM_FAIL_TOO_LARGE
-               : ZZRUN_HOSTMEM_FAIL_NO_MEMORY;
+    return ZZAPP_CLIENT_LEASE_EXTENDED | ZZAPP_CLIENT_CLUT8 |
+           ZZAPP_CLIENT_SCANOUT_ACK | ZZAPP_CLIENT_LATEST |
+           (audio_ahi ? ZZAPP_CLIENT_AUDIO_AHI : 0u);
 }
 
 static inline int zzrun_list_reply_decode(const uint8_t *payload,
@@ -276,16 +180,16 @@ static inline int zzrun_list_reply_decode(const uint8_t *payload,
     if (!payload || !out || bytes < ZZAPP_LIST_REPLY_BYTES)
         return 0;
     out->state = zzrun_be32(payload + ZZAPP_LIST_STATE);
-    out->generation = zzrun_be32(payload + ZZAPP_LIST_GENERATION);
+    out->handle = zzrun_be32(payload + ZZAPP_LIST_HANDLE);
     out->committed_bytes = zzrun_be32(payload + ZZAPP_LIST_COMMITTED);
-    out->limit_bytes = zzrun_be32(payload + ZZAPP_LIST_LIMIT);
+    out->index = zzrun_be32(payload + ZZAPP_LIST_INDEX);
     out->cpu_ms = zzrun_be32(payload + ZZAPP_LIST_CPU_MS);
     out->service_ms = zzrun_be32(payload + ZZAPP_LIST_SERVICE_MS);
     out->block_reason = payload[ZZAPP_LIST_REASONS];
-    out->terminal_reason = payload[ZZAPP_LIST_REASONS + 1u];
+    out->end_reason = payload[ZZAPP_LIST_REASONS + 1u];
     out->flags = (uint16_t)(((uint16_t)payload[ZZAPP_LIST_REASONS + 2u] << 8) |
                             payload[ZZAPP_LIST_REASONS + 3u]);
-    for (i = 0; i < 20u && payload[ZZAPP_LIST_NAME + i]; ++i)
+    for (i = 0; i < ZZAPP_LIST_NAME_BYTES && payload[ZZAPP_LIST_NAME + i]; ++i)
         out->name[i] = (char)payload[ZZAPP_LIST_NAME + i];
     out->name[i] = '\0';
     return 1;
@@ -299,39 +203,51 @@ static inline const char *zzrun_slot_state_name(uint32_t state)
     case ZZRUN_ST_LOADING: return "loading";
     case ZZRUN_ST_STARTING: return "starting";
     case ZZRUN_ST_RUNNING: return "running";
-    case ZZRUN_ST_PAUSED: return "paused";
     case ZZRUN_ST_STOPPING: return "stopping";
     case ZZRUN_ST_FAULTED: return "faulted";
     default: return "unknown";
     }
 }
 
-static inline const char *zzrun_terminal_reason_name(uint8_t reason)
+static inline const char *zzrun_end_reason_name(uint32_t reason)
 {
     switch (reason) {
-    case 0u: return "none";
-    case 1u: return "exit";
-    case 2u: return "forced stop";
-    case 3u: return "user fault";
-    case 4u: return "stall watchdog";
-    case 5u: return "stuck-call watchdog";
-    case 6u: return "lease loss";
-    case 7u: return "Amiga reset";
-    case 8u: return "core restart";
-    case 9u: return "quarantined";
+    case AAR_END_NONE: return "none";
+    case AAR_END_EXIT: return "exit";
+    case AAR_END_FORCED: return "forced stop";
+    case AAR_END_USER_FAULT: return "user fault";
+    case AAR_END_STALL: return "stall watchdog";
+    case AAR_END_STUCK_CALL: return "stuck-call watchdog";
+    case AAR_END_LEASE: return "lease loss";
+    case AAR_END_PLATFORM_RESET: return "Amiga reset";
+    case AAR_END_RUNTIME_RESTART: return "core restart";
+    case AAR_END_QUARANTINED: return "quarantined";
     default: return "unknown";
     }
 }
 
-/* Must match ZZAPP_BLOCK_*. ZZRun.c asserts it. Firmware reports both
- * display-open and flip waits as vsync. */
-#define ZZRUN_BLOCK_NONE    0u
-#define ZZRUN_BLOCK_FILE    1u
-#define ZZRUN_BLOCK_CONSOLE 2u
-#define ZZRUN_BLOCK_EVENT   3u
-#define ZZRUN_BLOCK_SLEEP   4u
-#define ZZRUN_BLOCK_VSYNC   5u
-#define ZZRUN_BLOCK_AUDIO   6u
+static inline const char *zzrun_fault_class_name(uint32_t fault)
+{
+    switch (fault) {
+    case AAR_FAULT_NONE: return "none";
+    case AAR_FAULT_DATA: return "data abort";
+    case AAR_FAULT_FETCH: return "prefetch abort";
+    case AAR_FAULT_ILLEGAL: return "undefined instruction";
+    case AAR_FAULT_ALIGN: return "alignment fault";
+    case AAR_FAULT_OTHER: return "fault";
+    default: return "unknown";
+    }
+}
+
+/* What LIST reports an app is blocked on (ZZAPP_BLOCK_*). Firmware reports
+ * both display-open and flip waits as vsync. */
+#define ZZRUN_BLOCK_NONE    ZZAPP_BLOCK_NONE
+#define ZZRUN_BLOCK_FILE    ZZAPP_BLOCK_FILE
+#define ZZRUN_BLOCK_CONSOLE ZZAPP_BLOCK_CONSOLE
+#define ZZRUN_BLOCK_EVENT   ZZAPP_BLOCK_EVENT
+#define ZZRUN_BLOCK_SLEEP   ZZAPP_BLOCK_SLEEP
+#define ZZRUN_BLOCK_VSYNC   ZZAPP_BLOCK_VSYNC
+#define ZZRUN_BLOCK_AUDIO   ZZAPP_BLOCK_AUDIO
 
 static inline const char *zzrun_block_reason_name(uint8_t reason)
 {
@@ -380,8 +296,6 @@ static inline int zzrun_output_next_source(uint32_t launcher_bytes,
 #error "launcher status reserve must leave diagnostic space"
 #endif
 
-#define ZZRUN_STOP_REQ_BYTES 4u
-
 /* console_read_finish: never stdout. */
 #define ZZRUN_FINISH_NONE 0
 #define ZZRUN_FINISH_RETURN_ON_READ_HANDLE 1
@@ -389,10 +303,9 @@ static inline int zzrun_output_next_source(uint32_t launcher_bytes,
 
 struct zzrun_exit_in {
     uint32_t state;
-    uint32_t fault;
+    uint32_t end_reason;
     uint32_t elapsed_ms;
-    uint32_t generation;
-    uint32_t last_generation;
+    int lost;          /* the claim's handle went stale: not this launcher's */
     int entered;
     int stop_asked;
     int user_stop;
@@ -413,9 +326,8 @@ static inline int zzrun_run_should_exit(const struct zzrun_exit_in *in)
 
     if (!in)
         return 0;
-    /* The generation is the ownership token. A different value belongs to
-     * another launcher even when its app is already live. */
-    if (in->generation != in->last_generation)
+    /* A stale handle belongs to nobody this launcher can serve. */
+    if (in->lost)
         return 1;
     blocked = zzrun_output_blocks_exit(in->output_pending, in->output_failed);
     /* Ctrl-C ends the process once both grace periods have elapsed, even
@@ -424,7 +336,7 @@ static inline int zzrun_run_should_exit(const struct zzrun_exit_in *in)
     if (in->user_stop && in->elapsed_ms >= ZZRUN_POLICY_GRACE_MS * 2u)
         return 1;
     if ((in->state == ZZRUN_ST_FAULTED ||
-         in->fault == ZZRUN_FAULT_WATCHDOG_RESTART) &&
+         in->end_reason == AAR_END_RUNTIME_RESTART) &&
         !blocked)
         return 1;
     if (in->entered &&
@@ -440,52 +352,12 @@ static inline int zzrun_run_should_exit(const struct zzrun_exit_in *in)
     return 0;
 }
 
-/* Ring head/tail are the caller's earlier samples. WANT is sampled after
- * them; forced unwind leaves WANT set, so state and stop are required. */
-static inline int zzrun_keyboard_read_allowed(uint32_t state, int owns,
-                                              int stop_asked, uint32_t head,
-                                              uint32_t tail, uint32_t want,
-                                              int read_pending, int at_eof)
+/* A CONSOLE_READ request is the demand for input. It starts a DOS read only
+ * while the app is RUNNING and no stop was asked: a forced unwind can leave
+ * the request outstanding after the app is gone. */
+static inline int zzrun_console_read_allowed(uint32_t state, int stop_asked)
 {
-    if (read_pending || at_eof || stop_asked || !owns)
-        return 0;
-    if (state != ZZRUN_ST_RUNNING)
-        return 0;
-    if (head != tail)
-        return 0;
-    return want == 1u;
-}
-
-static inline int zzrun_async_read_allowed(uint32_t state, int owns,
-                                           int stop_asked, uint32_t head,
-                                           uint32_t tail, uint32_t cap,
-                                           int read_pending, int at_eof)
-{
-    uint32_t used;
-
-    if (read_pending || at_eof || stop_asked || !owns)
-        return 0;
-    if (state != ZZRUN_ST_RUNNING)
-        return 0;
-    used = head - tail;
-    if (used > cap)
-        return 0;
-    return (cap - used) != 0u;
-}
-
-static inline int zzrun_audio_epoch_replaced(int have_epoch, uint32_t accepted,
-                                             uint32_t observed)
-{
-    return have_epoch && observed != accepted;
-}
-
-static inline void zzrun_stop_payload(uint8_t out[ZZRUN_STOP_REQ_BYTES],
-                                      uint32_t generation)
-{
-    out[0] = (uint8_t)(generation >> 24);
-    out[1] = (uint8_t)(generation >> 16);
-    out[2] = (uint8_t)(generation >> 8);
-    out[3] = (uint8_t)generation;
+    return state == ZZRUN_ST_RUNNING && !stop_asked;
 }
 
 static inline int zzrun_finish_prompt(int pending, int interactive_read)
@@ -508,45 +380,32 @@ static inline int zzrun_process_exit(int app_exit, int display_failed,
     return app_exit;
 }
 
-/* Deferred load/start operations share one firmware queue. A BUSY result is
- * therefore retryable contention, unlike every other mailbox error. */
-#define ZZRUN_BUSY_RETRY_MS 3000u
-
-static inline int zzrun_deferred_should_retry(int status, int busy_status,
-                                              uint32_t started_ms,
-                                              uint32_t now_ms)
+/* The process exit code for an app that ended with end_reason and exit_code
+ * (AAR_CB_END_REASON, AAR_CB_EXIT_CODE). Every platform-ended case is a
+ * launcher error, a forced end is one unless the user asked for it, and an
+ * exit code outside 0..255 is the app's mistake unless the user stopped it. */
+static inline int zzrun_app_exit_code(uint32_t end_reason, int32_t exit_code,
+                                      int user_stop)
 {
-    return status == busy_status &&
-           now_ms - started_ms < ZZRUN_BUSY_RETRY_MS;
-}
-
-/* A queued APP_LOAD_BEGIN that comes back busy did not publish a
- * generation: the shared word may already belong to the launcher that won
- * the race. Claim nothing then. Other submitted outcomes retain the
- * existing cleanup behaviour. A reply generation, when firmware includes
- * one, is the value this request published; otherwise adopt the observed
- * non-idle generation that replaced the one sampled before the request. */
-static inline uint32_t zzrun_load_generation_to_claim(
-    int submitted, int begin_busy, uint32_t prior, uint32_t observed,
-    int observed_idle, int reply_has_generation, uint32_t reply_generation)
-{
-    if (!submitted || begin_busy)
-        return 0;
-    if (reply_has_generation)
-        return reply_generation;
-    if (observed_idle || observed == 0u || observed == prior)
-        return 0;
-    return observed;
-}
-
-/* A request captured by the launcher remains usable only while both the
- * request sequence and the owning app generation still match the window. */
-static inline int zzrun_file_request_is_current(uint32_t request_seq,
-                                                uint32_t request_generation,
-                                                uint32_t live_seq,
-                                                uint32_t live_generation)
-{
-    return request_seq == live_seq && request_generation == live_generation;
+    switch (end_reason) {
+    case AAR_END_USER_FAULT:
+    case AAR_END_STALL:
+    case AAR_END_STUCK_CALL:
+    case AAR_END_LEASE:
+    case AAR_END_PLATFORM_RESET:
+    case AAR_END_RUNTIME_RESTART:
+    case AAR_END_QUARANTINED:
+        return 20;
+    case AAR_END_FORCED:
+        if (!user_stop)
+            return 20;
+        break;
+    default:
+        break;
+    }
+    if (exit_code < 0 || exit_code > 255)
+        return user_stop ? 0 : 20;
+    return (int)exit_code;
 }
 
 /* argv accepts an empty NUL-terminated string; only oversized strings are
@@ -565,9 +424,8 @@ static inline int zzrun_rawkey_requests_stop(uint16_t code, uint16_t qualifiers,
     return (qualifiers & control_qualifier) != 0 && code == 0x33u;
 }
 
-
-/* A DOS write may advance the consumer tail only by the completed byte
- * count. A short completion is an output failure after that partial advance. */
+/* A DOS write may advance the consumer only by the completed byte count. A
+ * short completion is an output failure after that partial advance. */
 static inline uint32_t zzrun_console_write_advance(uint32_t requested,
                                                     int32_t written)
 {
@@ -582,38 +440,6 @@ static inline int zzrun_console_write_failed(uint32_t requested,
     return written <= 0 || (uint32_t)written != requested;
 }
 
-struct zzrun_owned_cursor {
-    uint32_t value;
-    uint32_t epoch;
-    int valid;
-};
-
-/* Adopt a locally-owned ring cursor only when its generation/epoch changes.
- * Thereafter the counterpart word may be stale immediately after publish. */
-static inline uint32_t zzrun_owned_cursor_adopt(
-    struct zzrun_owned_cursor *cursor, uint32_t epoch, uint32_t observed)
-{
-    if (!cursor->valid || cursor->epoch != epoch) {
-        cursor->value = observed;
-        cursor->epoch = epoch;
-        cursor->valid = 1;
-    }
-    return cursor->value;
-}
-
-static inline uint32_t zzrun_owned_cursor_advance(
-    struct zzrun_owned_cursor *cursor, uint32_t amount)
-{
-    cursor->value += amount;
-    return cursor->value;
-}
-
-static inline uint32_t zzrun_console_output_available(uint32_t head,
-                                                       uint32_t local_tail)
-{
-    return head - local_tail;
-}
-
 /* Each successful ChangeScreenBuffer has one SafeMessage before the old
  * buffer and its reply port may be released. */
 static inline uint32_t zzrun_screen_safe_started(uint32_t pending)
@@ -624,20 +450,6 @@ static inline uint32_t zzrun_screen_safe_started(uint32_t pending)
 static inline uint32_t zzrun_screen_safe_completed(uint32_t pending)
 {
     return pending ? pending - 1u : 0u;
-}
-/* A new ZZRun advertises the longer main-loop lease. */
-static inline uint32_t zzrun_launcher_lease_flags(uint32_t flags)
-{
-    return flags | ZZAPP_F_LAUNCHER_HEARTBEAT;
-}
-/* A renewal captured for one generation must not keep a replacement alive. */
-static inline int zzrun_lease_renew_allowed(uint32_t captured_generation,
-                                            uint32_t owned_generation,
-                                            uint32_t observed_generation)
-{
-    return captured_generation != 0u &&
-           captured_generation == owned_generation &&
-           captured_generation == observed_generation;
 }
 
 /* A raw DOS packet has two independent outcomes: delivery to the handler and
@@ -653,19 +465,13 @@ static inline int32_t zzrun_dos_error_code(int transport_ok, int32_t result2,
 {
     return transport_ok ? result2 : transport_error;
 }
-/* A lease gate before LOAD_BEGIN must not block a legacy claim: its
- * generation is 0 until LOAD_BEGIN publishes one. */
-static inline int zzrun_lease_gate_stops(int owned_generation, int heartbeat_ok)
-{
-    return owned_generation != 0 && !heartbeat_ok;
-}
 
 /* Async DOS packet wait policy: only the reply ends the wait -- ZZRun keeps
  * the packet and its buffers alive until then, even after Ctrl-C or losing
- * the generation; those only mark the result abandoned. */
-static inline int zzrun_packet_abandoned(int ctrl_c, int heartbeat_ok)
+ * the claim; those only mark the result abandoned. */
+static inline int zzrun_packet_abandoned(int ctrl_c, int claim_live)
 {
-    return ctrl_c || !heartbeat_ok;
+    return ctrl_c || !claim_live;
 }
 
 static inline int zzrun_packet_keep_waiting(int reply_arrived)
@@ -674,13 +480,13 @@ static inline int zzrun_packet_keep_waiting(int reply_arrived)
 }
 
 /* Completion and abandonment are independent: handlers can allocate an
- * object before ZZRun observes Ctrl-C or a replaced generation. */
+ * object before ZZRun observes Ctrl-C or a lost claim. */
 static inline int zzrun_packet_result_usable(int completed, int abandoned)
 {
     return completed && !abandoned;
 }
 
-/* A packet is sent only while its operation is live. A lost generation or a
+/* A packet is sent only while its operation is live. A lost claim or a
  * pending Ctrl-C means the result will be discarded, but the handler would
  * still act on the packet first (create, truncate, write), so such a packet
  * stays unsent. Releases (ACTION_END, ACTION_FREE_LOCK) always go out: they
@@ -708,27 +514,6 @@ int zzrun_dos_close_slot(const struct zzrun_dos_release_ops *ops,
 void zzrun_dos_end_or_close(const struct zzrun_dos_release_ops *ops);
 void zzrun_dos_release_abandoned(const struct zzrun_dos_release_ops *ops,
                                  int acquired);
-
-/* Every shared-window write samples the current generation immediately before
- * publishing bytes. A detached window must not invoke that sampler. */
-struct zzrun_shared_writer {
-    void *context;
-    uint32_t owned_generation;
-    int attached;
-    uint32_t (*read_current_generation)(void *context);
-};
-#define ZZRUN_POLICY_TYPES_DEFINED 1
-
-int zzrun_shared_write_be32(const struct zzrun_shared_writer *writer,
-                            uint8_t *out, uint32_t value);
-int zzrun_shared_write_bytes(const struct zzrun_shared_writer *writer,
-                             uint8_t *out, const uint8_t *in, uint32_t bytes);
-
-/* A file request is served only when the generation sampled with the request
- * is still this launcher's. Keep that sampled value for every async DOS
- * packet and reply in the operation. */
-int zzrun_file_service_generation_owned(uint32_t owned_generation,
-                                        uint32_t sampled_generation);
 
 /* Direct DOS packets receive the path relative to the lock selected by
  * GetDeviceProc(): strip only the device/assign prefix. */
@@ -876,10 +661,7 @@ static inline int zzrun_load_failure_exit(int ctrl_c_pending, int user_stop)
     return zzrun_user_break(ctrl_c_pending, user_stop) ? 5 : 20;
 }
 
-
-
-
-/* AmigaDOS keywords are case-insensitive: "ZZRun status" lists slots
+/* AmigaDOS keywords are case-insensitive: "ZZRun status" lists claims
  * instead of trying to load a file called "status". */
 static inline int zzrun_is_status_keyword(const char *arg)
 {
@@ -899,11 +681,9 @@ static inline int zzrun_is_status_keyword(const char *arg)
     return arg[i] == '\0';
 }
 
-/* File open flags on the launcher window carry the AAR values from
- * zzapp_proto.h. */
-
-/* How ZZRun opens a file for one valid flags word. Zero is not a plan: the
- * flags are invalid and ZZRun answers EINVAL before it touches AmigaDOS. */
+/* How ZZRun opens a file for one valid flags word (AAR_FILE_*). Zero is not
+ * a plan: the flags are invalid and ZZRun answers EINVAL before it touches
+ * AmigaDOS. */
 enum zzrun_open_plan {
     ZZRUN_OPEN_INVALID = 0,
     /* READ only: MODE_OLDFILE, the file must exist. */
@@ -926,22 +706,21 @@ enum zzrun_open_plan {
 
 static inline enum zzrun_open_plan zzrun_open_plan_for_flags(uint32_t flags)
 {
-    const uint32_t known = ZZAPP_FILE_READ | ZZAPP_FILE_WRITE |
-                           ZZAPP_FILE_CREATE | ZZAPP_FILE_TRUNCATE |
-                           ZZAPP_FILE_EXCL;
-    int create = (flags & ZZAPP_FILE_CREATE) != 0;
-    int truncate = (flags & ZZAPP_FILE_TRUNCATE) != 0;
-    int write = (flags & ZZAPP_FILE_WRITE) != 0;
+    const uint32_t known = AAR_FILE_READ | AAR_FILE_WRITE | AAR_FILE_CREATE |
+                           AAR_FILE_TRUNCATE | AAR_FILE_EXCL;
+    int create = (flags & AAR_FILE_CREATE) != 0;
+    int truncate = (flags & AAR_FILE_TRUNCATE) != 0;
+    int write = (flags & AAR_FILE_WRITE) != 0;
 
     if (flags & ~known)
         return ZZRUN_OPEN_INVALID;
-    if (!(flags & (ZZAPP_FILE_READ | ZZAPP_FILE_WRITE)))
+    if (!(flags & (AAR_FILE_READ | AAR_FILE_WRITE)))
         return ZZRUN_OPEN_INVALID;
     if ((create || truncate) && !write)
         return ZZRUN_OPEN_INVALID;
-    if ((flags & ZZAPP_FILE_EXCL) && !create)
+    if ((flags & AAR_FILE_EXCL) && !create)
         return ZZRUN_OPEN_INVALID;
-    if (flags & ZZAPP_FILE_EXCL)
+    if (flags & AAR_FILE_EXCL)
         return ZZRUN_OPEN_CREATE_EXCLUSIVE;
     if (create)
         return truncate ? ZZRUN_OPEN_CREATE_REPLACE : ZZRUN_OPEN_CREATE_KEEP;
@@ -1030,10 +809,9 @@ static inline enum zzrun_leaf_action zzrun_leaf_lock_failure(
 }
 
 /* A step that creates, truncates or replaces a file runs only while the
- * request is current (launcher still owns the generation, the window still
- * holds the request) and no stop was asked. user_stop records a Ctrl-C that
- * an earlier packet wait consumed, so a cancelled request stays cancelled
- * for the steps that follow it. */
+ * request is live (the claim is still served) and no stop was asked.
+ * user_stop records a Ctrl-C that an earlier packet wait consumed, so a
+ * cancelled request stays cancelled for the steps that follow it. */
 static inline int zzrun_open_step_allowed(int request_current,
                                           int ctrl_c_pending, int user_stop)
 {
