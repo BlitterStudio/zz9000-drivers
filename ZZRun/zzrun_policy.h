@@ -881,4 +881,71 @@ static inline int zzrun_is_status_keyword(const char *arg)
     return arg[i] == '\0';
 }
 
+/* File open flags on the launcher window carry the AAR values. The firmware
+ * adds TRUNCATE and EXCL to zzapp_proto.h; ZZRun still builds against a
+ * firmware export that lacks them. */
+#ifndef ZZAPP_FILE_READ
+#define ZZAPP_FILE_READ 1u
+#endif
+#ifndef ZZAPP_FILE_WRITE
+#define ZZAPP_FILE_WRITE 2u
+#endif
+#ifndef ZZAPP_FILE_CREATE
+#define ZZAPP_FILE_CREATE 4u
+#endif
+#ifndef ZZAPP_FILE_TRUNCATE
+#define ZZAPP_FILE_TRUNCATE 8u
+#endif
+#ifndef ZZAPP_FILE_EXCL
+#define ZZAPP_FILE_EXCL 16u
+#endif
+
+/* How ZZRun opens a file for one valid flags word. Zero is not a plan: the
+ * flags are invalid and ZZRun answers EINVAL before it touches AmigaDOS. */
+enum zzrun_open_plan {
+    ZZRUN_OPEN_INVALID = 0,
+    /* READ only: MODE_OLDFILE, the file must exist. */
+    ZZRUN_OPEN_READ_EXISTING,
+    /* WRITE without CREATE: the file must exist (Lock probe, because
+     * MODE_READWRITE creates a missing file); open it MODE_READWRITE. */
+    ZZRUN_OPEN_UPDATE_EXISTING,
+    /* TRUNCATE without CREATE: as above, then SetFileSize(0). Handlers that
+     * lack ACTION_SET_FILE_SIZE get MODE_NEWFILE after the probe. */
+    ZZRUN_OPEN_TRUNCATE_EXISTING,
+    /* CREATE only: MODE_READWRITE on the existing file, else MODE_NEWFILE.
+     * An existing file keeps its contents. */
+    ZZRUN_OPEN_CREATE_KEEP,
+    /* CREATE|TRUNCATE: MODE_NEWFILE (create or replace). */
+    ZZRUN_OPEN_CREATE_REPLACE,
+    /* CREATE|EXCL, with or without TRUNCATE: Lock probe, EEXIST if the file
+     * exists, else MODE_NEWFILE. */
+    ZZRUN_OPEN_CREATE_EXCLUSIVE
+};
+
+static inline enum zzrun_open_plan zzrun_open_plan_for_flags(uint32_t flags)
+{
+    const uint32_t known = ZZAPP_FILE_READ | ZZAPP_FILE_WRITE |
+                           ZZAPP_FILE_CREATE | ZZAPP_FILE_TRUNCATE |
+                           ZZAPP_FILE_EXCL;
+    int create = (flags & ZZAPP_FILE_CREATE) != 0;
+    int truncate = (flags & ZZAPP_FILE_TRUNCATE) != 0;
+    int write = (flags & ZZAPP_FILE_WRITE) != 0;
+
+    if (flags & ~known)
+        return ZZRUN_OPEN_INVALID;
+    if (!(flags & (ZZAPP_FILE_READ | ZZAPP_FILE_WRITE)))
+        return ZZRUN_OPEN_INVALID;
+    if ((create || truncate) && !write)
+        return ZZRUN_OPEN_INVALID;
+    if ((flags & ZZAPP_FILE_EXCL) && !create)
+        return ZZRUN_OPEN_INVALID;
+    if (flags & ZZAPP_FILE_EXCL)
+        return ZZRUN_OPEN_CREATE_EXCLUSIVE;
+    if (create)
+        return truncate ? ZZRUN_OPEN_CREATE_REPLACE : ZZRUN_OPEN_CREATE_KEEP;
+    if (truncate)
+        return ZZRUN_OPEN_TRUNCATE_EXISTING;
+    return write ? ZZRUN_OPEN_UPDATE_EXISTING : ZZRUN_OPEN_READ_EXISTING;
+}
+
 #endif /* ZZRUN_POLICY_H */

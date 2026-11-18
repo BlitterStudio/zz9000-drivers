@@ -557,6 +557,74 @@ static void test_list_reply_decoding(void)
     assert(strcmp(zzrun_terminal_reason_name(9u), "quarantined") == 0);
 }
 
+/* The flags word carries AAR values: READ 1, WRITE 2, CREATE 4, TRUNCATE 8,
+ * EXCL 16. Every valid combination has one plan; everything else, including
+ * unknown bits, is refused before AmigaDOS is touched. */
+static void test_open_flags_map_to_one_plan_each(void)
+{
+    static const struct {
+        uint32_t flags;
+        enum zzrun_open_plan plan;
+    } valid[] = {
+        {1u, ZZRUN_OPEN_READ_EXISTING},
+        {2u, ZZRUN_OPEN_UPDATE_EXISTING},
+        {3u, ZZRUN_OPEN_UPDATE_EXISTING},
+        {2u | 8u, ZZRUN_OPEN_TRUNCATE_EXISTING},
+        {3u | 8u, ZZRUN_OPEN_TRUNCATE_EXISTING},
+        {2u | 4u, ZZRUN_OPEN_CREATE_KEEP},
+        {3u | 4u, ZZRUN_OPEN_CREATE_KEEP},
+        {2u | 4u | 8u, ZZRUN_OPEN_CREATE_REPLACE},
+        {3u | 4u | 8u, ZZRUN_OPEN_CREATE_REPLACE},
+        {2u | 4u | 16u, ZZRUN_OPEN_CREATE_EXCLUSIVE},
+        {3u | 4u | 16u, ZZRUN_OPEN_CREATE_EXCLUSIVE},
+        {2u | 4u | 8u | 16u, ZZRUN_OPEN_CREATE_EXCLUSIVE},
+        {3u | 4u | 8u | 16u, ZZRUN_OPEN_CREATE_EXCLUSIVE},
+    };
+    uint32_t flags;
+    size_t i;
+
+    assert(ZZAPP_FILE_READ == 1u && ZZAPP_FILE_WRITE == 2u &&
+           ZZAPP_FILE_CREATE == 4u && ZZAPP_FILE_TRUNCATE == 8u &&
+           ZZAPP_FILE_EXCL == 16u);
+    for (flags = 0; flags < 256u; flags++) {
+        enum zzrun_open_plan expect = ZZRUN_OPEN_INVALID;
+
+        for (i = 0; i < sizeof(valid) / sizeof(valid[0]); i++)
+            if (valid[i].flags == flags)
+                expect = valid[i].plan;
+        assert(zzrun_open_plan_for_flags(flags) == expect);
+    }
+    assert(zzrun_open_plan_for_flags(0x80000000u | 3u) ==
+           ZZRUN_OPEN_INVALID);
+    assert(zzrun_open_plan_for_flags(0xffffffffu) == ZZRUN_OPEN_INVALID);
+}
+
+static void test_open_flag_refusals_are_the_invalid_combinations(void)
+{
+    /* Neither READ nor WRITE. */
+    assert(zzrun_open_plan_for_flags(0u) == ZZRUN_OPEN_INVALID);
+    assert(zzrun_open_plan_for_flags(ZZAPP_FILE_CREATE) ==
+           ZZRUN_OPEN_INVALID);
+    /* CREATE or TRUNCATE without WRITE. */
+    assert(zzrun_open_plan_for_flags(ZZAPP_FILE_READ | ZZAPP_FILE_CREATE) ==
+           ZZRUN_OPEN_INVALID);
+    assert(zzrun_open_plan_for_flags(ZZAPP_FILE_READ | ZZAPP_FILE_TRUNCATE) ==
+           ZZRUN_OPEN_INVALID);
+    /* EXCL without CREATE. */
+    assert(zzrun_open_plan_for_flags(ZZAPP_FILE_WRITE | ZZAPP_FILE_EXCL) ==
+           ZZRUN_OPEN_INVALID);
+    assert(zzrun_open_plan_for_flags(ZZAPP_FILE_READ | ZZAPP_FILE_WRITE |
+                                     ZZAPP_FILE_TRUNCATE |
+                                     ZZAPP_FILE_EXCL) == ZZRUN_OPEN_INVALID);
+    /* Unknown bit. */
+    assert(zzrun_open_plan_for_flags(ZZAPP_FILE_READ | 32u) ==
+           ZZRUN_OPEN_INVALID);
+    /* The old CREATE (create or replace) is CREATE|TRUNCATE now. */
+    assert(zzrun_open_plan_for_flags(ZZAPP_FILE_WRITE | ZZAPP_FILE_CREATE |
+                                     ZZAPP_FILE_TRUNCATE) ==
+           ZZRUN_OPEN_CREATE_REPLACE);
+}
+
 /* Kit 66: "zzrun status" tried to load a file called "status". */
 static void test_status_keyword_is_case_insensitive(void)
 {
@@ -1005,6 +1073,8 @@ int main(void)
     test_extended_query_reply_is_required_and_carries_every_cap();
     test_block_reason_names_match_protocol();
     test_list_reply_decoding();
+    test_open_flags_map_to_one_plan_each();
+    test_open_flag_refusals_are_the_invalid_combinations();
     test_status_keyword_is_case_insensitive();
     test_launcher_lease_is_advertised();
     test_lease_renewal_never_crosses_generations();

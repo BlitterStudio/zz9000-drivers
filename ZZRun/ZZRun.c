@@ -1186,23 +1186,124 @@ static int path_from_wire(const struct zzapp_file_wire *req, char *out, int *err
     return 0;
 }
 
-static int open_mode(int32_t flags, LONG *mode, int *err)
+/* Does the object exist? ERROR_OBJECT_IN_USE counts as existing: the handler
+ * refused the lock because someone holds the object. Any other lock failure
+ * is the caller's error. */
+static int open_target_exists(BPTR dir, const char *name, int absolute,
+                              int *exists, int *err)
 {
-    if (flags & ~(ZZAPP_FILE_READ | ZZAPP_FILE_WRITE | ZZAPP_FILE_CREATE)) {
+    int transport_ok;
+    BPTR locked = absolute ? lock_abs_async(name, &transport_ok) :
+                  lock_async(dir, name, ACCESS_READ, &transport_ok);
+    LONG io;
+
+    if (!transport_ok) {
+        *err = ZZ_EIO;
+        return 0;
+    }
+    if (locked) {
+        UnLock(locked);
+        *exists = 1;
+        return 1;
+    }
+    io = IoErr();
+    if (io == ERROR_OBJECT_NOT_FOUND) {
+        *exists = 0;
+        return 1;
+    }
+    if (io == ERROR_OBJECT_IN_USE) {
+        *exists = 1;
+        return 1;
+    }
+    *err = zz_from_io();
+    if (*err == ZZ_OK)
+        *err = ZZ_ENOENT;
+    return 0;
+}
+
+/* Open one file for the flags word's plan (zzrun_open_plan_for_flags).
+ * Returns 1 with *fh_out set, or 0 with *err set. Failing to get a handle
+ * with *err still ZZ_OK means the caller maps IoErr().
+ *
+ * AmigaDOS has no atomic exclusive create. EXCL is a Lock probe followed by
+ * MODE_NEWFILE, so it is exclusive against the other apps ZZRun serves (one
+ * serving loop handles every file request) but not against other Amiga
+ * programs that create the same name between the probe and the open. */
+static int open_with_plan(enum zzrun_open_plan plan, BPTR dir,
+                          const char *name, int absolute, BPTR *fh_out,
+                          int *err)
+{
+    BPTR parent = absolute ? 0 : dir;
+    BPTR fh = 0;
+    int transport_ok;
+    int exists = 0;
+
+    *fh_out = 0;
+    switch (plan) {
+    case ZZRUN_OPEN_READ_EXISTING:
+        fh = open_find_async(parent, name, MODE_OLDFILE, &transport_ok);
+        break;
+    case ZZRUN_OPEN_UPDATE_EXISTING:
+    case ZZRUN_OPEN_TRUNCATE_EXISTING:
+        if (!open_target_exists(parent, name, absolute, &exists, err))
+            return 0;
+        if (!exists) {
+            *err = ZZ_ENOENT;
+            return 0;
+        }
+        fh = open_find_async(parent, name, MODE_READWRITE, &transport_ok);
+        if (fh && plan == ZZRUN_OPEN_TRUNCATE_EXISTING) {
+            LONG size = file_packet_async(fh, ACTION_SET_FILE_SIZE, 0,
+                                          OFFSET_BEGINNING, 0, 0, &transport_ok);
+            if (!transport_ok) {
+                end_or_close(fh);
+                *err = ZZ_EIO;
+                return 0;
+            }
+            if (size < 0) {
+                LONG io = IoErr();
+
+                end_or_close(fh);
+                fh = 0;
+                if (io != ERROR_ACTION_NOT_KNOWN) {
+                    *err = io == ERROR_DISK_FULL ? ZZ_ENOSPC :
+                           io == ERROR_WRITE_PROTECTED ? ZZ_EACCES : ZZ_EIO;
+                    return 0;
+                }
+                /* No ACTION_SET_FILE_SIZE: the probe found the file, so
+                 * MODE_NEWFILE replaces it. */
+                fh = open_find_async(parent, name, MODE_NEWFILE,
+                                     &transport_ok);
+            }
+        }
+        break;
+    case ZZRUN_OPEN_CREATE_KEEP:
+        fh = open_find_async(parent, name, MODE_READWRITE, &transport_ok);
+        if (!fh && transport_ok && IoErr() == ERROR_OBJECT_NOT_FOUND)
+            fh = open_find_async(parent, name, MODE_NEWFILE, &transport_ok);
+        break;
+    case ZZRUN_OPEN_CREATE_REPLACE:
+        fh = open_find_async(parent, name, MODE_NEWFILE, &transport_ok);
+        break;
+    case ZZRUN_OPEN_CREATE_EXCLUSIVE:
+        if (!open_target_exists(parent, name, absolute, &exists, err))
+            return 0;
+        if (exists) {
+            *err = ZZ_EEXIST;
+            return 0;
+        }
+        fh = open_find_async(parent, name, MODE_NEWFILE, &transport_ok);
+        break;
+    default:
         *err = ZZ_EINVAL;
         return 0;
     }
-    if (!(flags & (ZZAPP_FILE_READ | ZZAPP_FILE_WRITE | ZZAPP_FILE_CREATE))) {
-        *err = ZZ_EINVAL;
+    if (!transport_ok) {
+        *err = ZZ_EIO;
         return 0;
     }
-    if (flags & ZZAPP_FILE_CREATE)
-        *mode = MODE_NEWFILE;
-    else if (flags & ZZAPP_FILE_WRITE)
-        *mode = MODE_READWRITE;
-    else
-        *mode = MODE_OLDFILE;
-    return 1;
+    *fh_out = fh;
+    return fh != 0;
 }
 
 static int file_request_is_current(uint32_t request_seq)
@@ -1323,7 +1424,7 @@ static void serve_open(const struct zzapp_file_wire *req)
     char leaf[108];
     BPTR dir = 0;
     BPTR fh = 0;
-    LONG mode = MODE_OLDFILE;
+    enum zzrun_open_plan plan;
     LONG examined;
     int err = ZZ_OK;
     int index;
@@ -1341,8 +1442,11 @@ static void serve_open(const struct zzapp_file_wire *req)
         err = ZZ_EBUSY;
         goto done;
     }
-    if (!open_mode(req->flags, &mode, &err))
+    plan = zzrun_open_plan_for_flags((uint32_t)req->flags);
+    if (plan == ZZRUN_OPEN_INVALID) {
+        err = ZZ_EINVAL;
         goto done;
+    }
     if (!path_from_wire(req, path, &err))
         goto done;
     if (path[0] == 0) {
@@ -1358,13 +1462,7 @@ static void serve_open(const struct zzapp_file_wire *req)
     }
     if (!generation_owned(file_generation))
         goto done;
-    if (absolute) {
-        fh = open_find_async(0, path, mode, &transport_ok);
-        if (!transport_ok) {
-            err = ZZ_EIO;
-            goto done;
-        }
-    } else {
+    if (!absolute) {
         dir = resolve_rel(path, leaf, sizeof(leaf), &err);
         if (!dir)
             goto done;
@@ -1376,18 +1474,15 @@ static void serve_open(const struct zzapp_file_wire *req)
                                    (req->flags & ZZAPP_FILE_CREATE) != 0,
                                    &err))
             goto done;
-        fh = open_find_async(dir, leaf, mode, &transport_ok);
-        if (!transport_ok) {
-            err = ZZ_EIO;
-            goto done;
-        }
     }
-    if (!fh) {
+    if (!open_with_plan(plan, dir, absolute ? path : leaf, absolute, &fh,
+                        &err) && err == ZZ_OK) {
         err = zz_from_io();
         if (err == ZZ_OK)
             err = ZZ_ENOENT;
-        goto done;
     }
+    if (!fh)
+        goto done;
     if (!file_request_is_current(req->seq))
         goto done;
     fib = AllocDosObject(DOS_FIB, NULL);
