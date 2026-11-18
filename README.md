@@ -25,7 +25,7 @@ shared-memory layout before SDK services are exposed.
 | [Poseidon USB](usb-poseidon/README.md) | `zzusbhw.device` for the external Poseidon 4.5 USB stack. |
 | [SD-card boot](sd-boot/README.md) | `zzsd.device` in `BOOT.bin`, which boots an HDF file from the FAT-formatted microSD card. |
 | [ZZTop](ZZTop/README.md) | The `ZZTop` control panel. |
-| [SDK runtime payloads](sdk/README.md) | `zz9k.library` 2.39, `mpega.library`, `zz9k-picture.datatype`, `zz9k-sound.datatype`, SDK tools, and ZZPlay. |
+| [SDK runtime payloads](sdk/README.md) | `zz9k.library` 2.40, `mpega.library`, `zz9k-picture.datatype`, `zz9k-sound.datatype`, SDK tools, and ZZPlay. |
 | [AmiSSL provider](amissl/README.md) | CPU-specific `amissl_v362.library` (AmiSSL 5.27) and `amissl_v41x.library` (AmiSSL 6.1) builds with supported ZZ9000 TLS crypto offload. |
 
 ## Install from a release

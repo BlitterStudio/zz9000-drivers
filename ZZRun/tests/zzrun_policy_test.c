@@ -10,6 +10,8 @@
 #define ZZAPP_SEL_SLOT 40u
 #define ZZAPP_SEL_GENERATION 44u
 #define ZZAPP_LOAD_MEM_LIMIT_MIB 0u
+#define ZZAPP_CAP_HOST_LIMIT (1u << 8)
+#define ZZAPP_LOAD_HOST_VISIBLE_MIB 4u
 #define ZZAPP_QUERY_SLOTS 16u
 #define ZZAPP_QUERY_FREE_SLOTS 20u
 #define ZZAPP_QUERY_COMMIT_FREE 24u
@@ -424,13 +426,93 @@ static void test_maxmem_requires_positive_decimal_mib(void)
     assert(!zzrun_parse_maxmem("4294967296", &mib));
 }
 
-static void test_explicit_maxmem_is_rejected_without_slots(void)
+static void test_hostmem_requires_positive_decimal_mib(void)
 {
-    assert(zzrun_maxmem_decision(0, 16u) == ZZRUN_MAXMEM_REJECT);
-    assert(zzrun_maxmem_decision(0, 1u) == ZZRUN_MAXMEM_REJECT);
-    assert(zzrun_maxmem_decision(1, 16u) == ZZRUN_MAXMEM_SEND);
-    assert(zzrun_maxmem_decision(0, 0u) == ZZRUN_MAXMEM_OMIT);
-    assert(zzrun_maxmem_decision(1, 0u) == ZZRUN_MAXMEM_OMIT);
+    uint32_t mib = 7u;
+
+    assert(zzrun_parse_hostmem("8", &mib) && mib == 8u);
+    assert(zzrun_parse_hostmem("62", &mib) && mib == 62u);
+    assert(zzrun_parse_hostmem("4095", &mib) && mib == 4095u);
+    mib = 7u;
+    assert(!zzrun_parse_hostmem("4096", &mib) && mib == 7u);
+    assert(!zzrun_parse_hostmem("4294967296", &mib));
+    assert(!zzrun_parse_hostmem("0", &mib));
+    assert(!zzrun_parse_hostmem("", &mib));
+    assert(!zzrun_parse_hostmem("-1", &mib));
+    assert(!zzrun_parse_hostmem("8MiB", &mib));
+    assert(!zzrun_parse_hostmem(" 8", &mib));
+    assert(!zzrun_parse_hostmem(NULL, &mib));
+    assert(!zzrun_parse_hostmem("8", NULL));
+}
+
+static void test_hostmem_is_rejected_without_the_host_limit_capability(void)
+{
+    const uint32_t slots = ZZAPP_CAP_SLOTS;
+    const uint32_t both = ZZAPP_CAP_SLOTS | ZZAPP_CAP_HOST_LIMIT;
+
+    assert(zzrun_hostmem_decision(0u, 8u) == ZZRUN_HOSTMEM_REJECT);
+    assert(zzrun_hostmem_decision(slots, 8u) == ZZRUN_HOSTMEM_REJECT);
+    assert(zzrun_hostmem_decision(ZZAPP_CAP_HOST_LIMIT, 8u) ==
+           ZZRUN_HOSTMEM_REJECT);
+    assert(zzrun_hostmem_decision(both, 8u) == ZZRUN_HOSTMEM_SEND);
+    assert(zzrun_hostmem_decision(both, 4095u) == ZZRUN_HOSTMEM_SEND);
+    assert(zzrun_hostmem_decision(0u, 0u) == ZZRUN_HOSTMEM_OMIT);
+    assert(zzrun_hostmem_decision(both, 0u) == ZZRUN_HOSTMEM_OMIT);
+}
+
+static void test_load_begin_payload_places_both_limits(void)
+{
+    uint8_t out[ZZRUN_LOAD_BEGIN_BYTES];
+
+    assert(ZZAPP_LOAD_HOST_VISIBLE_MIB == 4u);
+    memset(out, 0x5a, sizeof(out));
+    assert(zzrun_load_begin_payload(out, 1, 256u, 1, 32u) ==
+           ZZRUN_LOAD_BEGIN_BYTES);
+    assert(zzrun_be32(out + ZZAPP_LOAD_MEM_LIMIT_MIB) == 256u);
+    assert(zzrun_be32(out + ZZAPP_LOAD_HOST_VISIBLE_MIB) == 32u);
+
+    /* HOSTMEM alone leaves the memory cap at 0, meaning none. */
+    memset(out, 0x5a, sizeof(out));
+    assert(zzrun_load_begin_payload(out, 0, 0u, 1, 8u) ==
+           ZZRUN_LOAD_BEGIN_BYTES);
+    assert(zzrun_be32(out + ZZAPP_LOAD_MEM_LIMIT_MIB) == 0u);
+    assert(zzrun_be32(out + ZZAPP_LOAD_HOST_VISIBLE_MIB) == 8u);
+
+    /* MAXMEM alone keeps the four-byte request the runtime already saw. */
+    memset(out, 0x5a, sizeof(out));
+    assert(zzrun_load_begin_payload(out, 1, 64u, 0, 0u) == 4u);
+    assert(zzrun_be32(out + ZZAPP_LOAD_MEM_LIMIT_MIB) == 64u);
+
+    assert(zzrun_load_begin_payload(out, 0, 0u, 0, 0u) == 0u);
+}
+
+static void test_hostmem_no_memory_distinguishes_ceiling_from_other_causes(void)
+{
+    assert(zzrun_hostmem_failure(63u, 6) == ZZRUN_HOSTMEM_FAIL_TOO_LARGE);
+    assert(zzrun_hostmem_failure(4095u, 6) == ZZRUN_HOSTMEM_FAIL_TOO_LARGE);
+    /* At or below the ceiling NO_MEMORY may be the staging arena or the
+     * shared heap, so it is not blamed on the request alone. */
+    assert(zzrun_hostmem_failure(62u, 6) == ZZRUN_HOSTMEM_FAIL_NO_MEMORY);
+    assert(zzrun_hostmem_failure(1u, 6) == ZZRUN_HOSTMEM_FAIL_NO_MEMORY);
+    assert(zzrun_hostmem_failure(63u, 0) == ZZRUN_HOSTMEM_FAIL_NONE);
+    assert(zzrun_hostmem_failure(63u, 3) == ZZRUN_HOSTMEM_FAIL_NONE);
+    assert(zzrun_hostmem_failure(0u, 6) == ZZRUN_HOSTMEM_FAIL_NONE);
+}
+
+static void test_extended_query_reply_is_required_and_carries_every_cap(void)
+{
+    uint8_t reply[ZZAPP_QUERY_EXT_REPLY_BYTES];
+    struct zzrun_slots_query query;
+    const uint32_t caps = 0x1ffu;
+
+    memset(reply, 0, sizeof(reply));
+    zzrun_put_be32(reply + 12u, caps);
+    zzrun_put_be32(reply + ZZAPP_QUERY_SLOTS, 4u);
+    zzrun_put_be32(reply + ZZAPP_QUERY_FREE_SLOTS, 4u);
+    assert(zzrun_slots_query_decode(reply, sizeof(reply), &query));
+    assert(zzrun_be32(reply + 12u) & ZZAPP_CAP_HOST_LIMIT);
+    /* A legacy 16-byte reply has no slot counts: not a usable runtime. */
+    assert(!zzrun_slots_query_decode(reply, 16u, &query));
 }
 
 static void test_block_reason_names_match_protocol(void)
@@ -916,7 +998,11 @@ int main(void)
     test_low_memory_counter_resets_for_a_new_generation();
     test_legacy_request_shape_is_unchanged_without_slots();
     test_maxmem_requires_positive_decimal_mib();
-    test_explicit_maxmem_is_rejected_without_slots();
+    test_hostmem_requires_positive_decimal_mib();
+    test_hostmem_is_rejected_without_the_host_limit_capability();
+    test_load_begin_payload_places_both_limits();
+    test_hostmem_no_memory_distinguishes_ceiling_from_other_causes();
+    test_extended_query_reply_is_required_and_carries_every_cap();
     test_block_reason_names_match_protocol();
     test_list_reply_decoding();
     test_status_keyword_is_case_insensitive();

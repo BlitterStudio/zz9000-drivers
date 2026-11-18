@@ -193,21 +193,78 @@ static inline int zzrun_parse_maxmem(const char *text, uint32_t *mib_out)
     return 1;
 }
 
-/* An explicit MAXMEM is a cap the launcher must honour. Firmware without
- * slots cannot carry it on APP_LOAD_BEGIN, so that launch is rejected
- * before loading. A launch that does not request a cap keeps the
- * byte-identical legacy request: no cap field at all. */
-#define ZZRUN_MAXMEM_OMIT   0
-#define ZZRUN_MAXMEM_SEND   1
-#define ZZRUN_MAXMEM_REJECT 2
+/* HOSTMEM: per-app host-visible memory limit in MiB, carried by the
+ * extended LOAD_BEGIN at ZZAPP_LOAD_HOST_VISIBLE_MIB. The request field is
+ * valid for 0..4095; the firmware refuses a larger limit than its heap can
+ * hold with NO_MEMORY. A launch without HOSTMEM keeps the firmware default. */
+#define ZZRUN_HOSTMEM_MAX_MIB 4095u
+#define ZZRUN_HOSTMEM_OMIT    0
+#define ZZRUN_HOSTMEM_SEND    1
+#define ZZRUN_HOSTMEM_REJECT  2
+#define ZZRUN_LOAD_BEGIN_BYTES 8u
+#define ZZRUN_STATUS_NO_MEMORY 6u
 
-static inline int zzrun_maxmem_decision(int slots_supported, uint32_t maxmem_mib)
+static inline int zzrun_parse_hostmem(const char *text, uint32_t *mib_out)
 {
-    if (maxmem_mib == 0u)
-        return ZZRUN_MAXMEM_OMIT;
-    if (!slots_supported)
-        return ZZRUN_MAXMEM_REJECT;
-    return ZZRUN_MAXMEM_SEND;
+    uint32_t value;
+
+    if (!zzrun_parse_maxmem(text, &value) || value > ZZRUN_HOSTMEM_MAX_MIB ||
+        !mib_out)
+        return 0;
+    *mib_out = value;
+    return 1;
+}
+
+/* HOSTMEM needs the extended LOAD_BEGIN field, which only a runtime that
+ * advertises ZZAPP_CAP_HOST_LIMIT on slots understands. Older firmware would
+ * ignore the word and run the app with the default limit, so refuse instead. */
+static inline int zzrun_hostmem_decision(uint32_t caps, uint32_t hostmem_mib)
+{
+    if (hostmem_mib == 0u)
+        return ZZRUN_HOSTMEM_OMIT;
+    if (!(caps & ZZAPP_CAP_SLOTS) || !(caps & ZZAPP_CAP_HOST_LIMIT))
+        return ZZRUN_HOSTMEM_REJECT;
+    return ZZRUN_HOSTMEM_SEND;
+}
+
+/* Builds the LOAD_BEGIN payload; returns its length. A launch that sends no
+ * host-visible limit keeps the four-byte request, and none at all keeps the
+ * byte-identical legacy empty request. */
+static inline uint16_t zzrun_load_begin_payload(
+    uint8_t out[ZZRUN_LOAD_BEGIN_BYTES], int send_maxmem, uint32_t maxmem_mib,
+    int send_hostmem, uint32_t hostmem_mib)
+{
+    uint16_t len = 0;
+
+    if (send_maxmem || send_hostmem) {
+        memset(out, 0, ZZRUN_LOAD_BEGIN_BYTES);
+        zzrun_put_be32(out + ZZAPP_LOAD_MEM_LIMIT_MIB,
+                       send_maxmem ? maxmem_mib : 0u);
+        len = 4u;
+    }
+    if (send_hostmem) {
+        zzrun_put_be32(out + ZZAPP_LOAD_HOST_VISIBLE_MIB, hostmem_mib);
+        len = ZZRUN_LOAD_BEGIN_BYTES;
+    }
+    return len;
+}
+
+/* The firmware refuses a limit it cannot grant with NO_MEMORY at LOAD_BEGIN,
+ * but it returns the same status when the loader cannot allocate its private
+ * staging arena, and it has no query for the ceiling. Only a request above
+ * the per-app alias-window ceiling is certainly too large. */
+#define ZZRUN_HOSTMEM_CEILING_MIB 62u
+#define ZZRUN_HOSTMEM_FAIL_NONE      0
+#define ZZRUN_HOSTMEM_FAIL_TOO_LARGE 1
+#define ZZRUN_HOSTMEM_FAIL_NO_MEMORY 2
+
+static inline int zzrun_hostmem_failure(uint32_t hostmem_mib, int status)
+{
+    if (hostmem_mib == 0u || status != (int)ZZRUN_STATUS_NO_MEMORY)
+        return ZZRUN_HOSTMEM_FAIL_NONE;
+    return hostmem_mib > ZZRUN_HOSTMEM_CEILING_MIB
+               ? ZZRUN_HOSTMEM_FAIL_TOO_LARGE
+               : ZZRUN_HOSTMEM_FAIL_NO_MEMORY;
 }
 
 static inline int zzrun_list_reply_decode(const uint8_t *payload,

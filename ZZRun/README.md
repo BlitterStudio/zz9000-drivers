@@ -1,17 +1,17 @@
 # ZZRun
 
-`ZZRun` loads a trusted ARM app into the ZZ9000 app runtime. Full slot support
-needs a Zorro III board, app-runtime firmware that advertises the slots
-capability (ABI 0.3), and Picasso96 when the app asks for a display. Older
-app-runtime firmware uses the legacy single-slot path.
+`ZZRun` loads a trusted ARM app into the ZZ9000 app runtime. It needs a
+Zorro III board, app-runtime firmware that advertises the slots capability
+(ABI 0.3), and Picasso96 when the app asks for a display. On firmware without
+slots it prints `ZZRun requires app-runtime firmware with app slots.` and
+returns 20.
 
 ZZRun opens `zz9k.library` at version 0 for mailbox transport. It calls
 `ZZ9KCall`, `ZZ9KCallAsync`, `ZZ9KPoll`, and `ZZ9KCancelAsync`, so it needs
-library revision 2 or later. The current drivers release includes revision 39.
+library revision 2 or later. The current drivers release includes revision 40.
 
-The launcher is a Shell command and a Workbench tool. On a runtime that
-advertises slots, every instance claims its own app slot, so up to four apps
-can run at once. Older firmware keeps the original single-app slot 0 behaviour.
+The launcher is a Shell command and a Workbench tool. Every instance claims its
+own app slot, so up to four apps can run at once.
 When every slot is claimed, a new launch reports `window allocation failed
 (busy)` and returns 20.
 
@@ -21,13 +21,14 @@ Run `Stack 32768` in the launching Shell first. ZZRun requires at least a
 16 KiB process stack.
 
 ```text
-ZZRun <app.elf> [MAXMEM=<MiB>] [AUDIO=AHI] [args]
+ZZRun <app.elf> [MAXMEM=<MiB>] [HOSTMEM=<MiB>] [AUDIO=AHI] [args]
 ```
 
 Give the ELF first. The app's `argv[0]` is the ELF's file name and the
 remaining Shell tokens follow it, as C programs expect (up to 15 arguments).
-`AUDIO=AHI` and `MAXMEM=<MiB>` are recognized anywhere after the ELF, so they
-cannot be passed to the app as arguments with those exact forms.
+`AUDIO=AHI`, `MAXMEM=<MiB>`, and `HOSTMEM=<MiB>` are recognized anywhere after
+the ELF, so they cannot be passed to the app as arguments with those exact
+forms.
 
 ```text
 Stack 32768
@@ -35,11 +36,30 @@ ZZRun RAM:swquake.elf +timedemo demo1
 ```
 
 `MAXMEM=<MiB>` caps the card memory committed by this app. The value must be a
-positive decimal MiB count. Firmware without app slots cannot enforce the cap,
-so ZZRun refuses that launch before loading:
+positive decimal MiB count. For example:
 
 ```text
 ZZRun RAM:swquake.elf MAXMEM=256 +timedemo demo1
+```
+
+`HOSTMEM=<MiB>` sets how much host-visible card memory this app may allocate
+(the memory the Amiga can address through the board window). The value must be
+a positive decimal MiB count up to 4095; anything else prints the usage and
+returns 10. Without it the app gets the firmware default of 16 MiB. The limit
+is a cap, not a reservation: nothing is set aside at load, and an allocation
+can still fail below the cap while the card's shared heap is busy. 62 MiB is
+the per-app host-visible alias-window ceiling; the firmware grants at most the
+smaller of that and what the shared heap can hold, and refuses the rest at
+`APP_LOAD_BEGIN`. Above 62 MiB ZZRun prints `HOSTMEM too large` and returns 20.
+At or below it the firmware's answer is the same "no memory" status it gives
+when the loader cannot allocate its staging arena, so ZZRun prints `not enough
+card memory to load` with the requested value and returns 20. Firmware that
+does not advertise `ZZAPP_CAP_HOST_LIMIT` would ignore the limit, so ZZRun
+prints `ZZRun: HOSTMEM requires firmware with host-visible limits.` and returns
+20 before loading. `HOSTMEM` and `MAXMEM` can be combined.
+
+```text
+ZZRun RAM:swquake.elf HOSTMEM=32
 ```
 
 `ROOT` controls files requested by the app. A Shell launch defaults to the
@@ -65,12 +85,11 @@ failures return 20.
 ZZRun STATUS
 ```
 
-`STATUS` is case-insensitive. On a slots runtime, it prints one line for each
+`STATUS` is case-insensitive. It prints one line for each
 slot with its state, app name, generation, committed and capped MiB, CPU
 seconds, block reason, and terminal reason. The block reason is `none`, `file`,
 `console`, `event`, `sleep`, `vsync`, or `audio`. `event` means the app is
 waiting in `zz_msg_wait`; firmware before app API 0.4 never reports it.
-Older firmware prints its legacy slot 0 status.
 
 An interrupted load is shown as `state stopping ... reason quarantined`. Its
 app memory has been reclaimed, but the window stays reserved so a late DOS
@@ -98,7 +117,8 @@ reservation.
 | `ARGS` | Optional space-separated arguments. Quoting is not parsed. |
 | `JOYPORT0` | Enabled by the same values as `ABS`. Enables joystick port 0 as well as port 1. |
 | `AUDIO=AHI` | Route app PCM to AHI. The default remains the card audio fabric. |
-| `MAXMEM=<MiB>` | Positive decimal MiB cap for the app's `APP_LOAD_BEGIN` request. Refused when the firmware has no app slots. |
+| `MAXMEM=<MiB>` | Positive decimal MiB cap for the app's `APP_LOAD_BEGIN` request. |
+| `HOSTMEM=<MiB>` | Positive decimal MiB (1 to 4095) host-visible memory limit for the app's `APP_LOAD_BEGIN` request. Refused when the firmware lacks `ZZAPP_CAP_HOST_LIMIT`; firmware refuses more than its per-app ceiling of 62 MiB (`HOSTMEM too large`, return 20); a refusal at or below 62 MiB reports `not enough card memory to load`, return 20. |
 
 
 Dragging an ELF project onto the ZZRun icon takes precedence over `APP`.
@@ -109,17 +129,20 @@ ZZRun uses the existing `zz9k.library` mailbox. It does not add a doorbell or
 another shared-memory convention.
 
 1. It finds the board through `expansion.library`, opens `zz9k.library`, and
-   calls `APP_QUERY`. Zorro II has no app runtime: query is unsupported and
-   ZZRun stops before allocating a window. A slots-capable runtime receives the
-   extended query and allocation requests; older firmware receives the
-   byte-identical legacy requests for slot 0.
+   calls the extended `APP_QUERY`. Zorro II has no app runtime: query is
+   unsupported and ZZRun stops before allocating a window. The `caps` value on
+   the `runtime abi` line it prints is the extended reply's: `000001ff` when
+   the firmware offers every bit through `ZZAPP_CAP_HOST_LIMIT`, where the
+   legacy reply showed at most `0000003f`. Firmware without slots is refused.
 2. `APP_ALLOC_WINDOW` atomically claims a free slot and returns its ARM address,
    size, host offset, slot, and generation. ZZRun maps the rings at
    `board_base + host_offset`; it does not assume a board offset. The returned
    block is the fixed 592 KiB `ZZAPP_WINDOW_BYTES` layout in `zzapp_proto.h`.
-3. `APP_LOAD_BEGIN` reserves the app arena and, on a slots runtime, carries
-   the optional `MAXMEM` cap. An explicit cap on older firmware is refused
-   before this request. A launch without `MAXMEM` keeps the legacy request.
+3. `APP_LOAD_BEGIN` reserves the app arena and carries the optional `MAXMEM`
+   cap and, with `ZZAPP_CAP_HOST_LIMIT`, the optional `HOSTMEM` limit. ZZRun
+   refuses a `HOSTMEM` on firmware without that capability before it claims a
+   slot. A launch without either leaves both words zero, which means no
+   launcher cap and the 16 MiB host-visible default.
    ZZRun streams the ELF through `ZZAPP_STAGING_OFF` in chunks no larger
    than `ZZAPP_STAGING_BYTES`, posting `APP_LOAD_CHUNK` with the file offset,
    byte count, and that staging offset. ZZRun refreshes the claim heartbeat
@@ -280,4 +303,6 @@ cd ZZRun
 ```
 
 Set `ZZ9000_FIRMWARE` to a firmware checkout when it is not a sibling of this
-repository. The checkout must contain the app-runtime services header.
+repository. The checkout must contain the app-runtime services header, and that
+header must define `ZZAPP_CAP_HOST_LIMIT` and `ZZAPP_LOAD_HOST_VISIBLE_MIB`;
+a checkout from before the host-limit change does not compile.
