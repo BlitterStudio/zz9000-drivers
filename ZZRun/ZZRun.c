@@ -224,6 +224,7 @@ static void launcher_status(const char *msg);
 static int heartbeat_owned(uint32_t captured_generation);
 static int generation_owned(uint32_t captured_generation);
 static void request_stop(void);
+static int file_request_is_current(uint32_t request_seq);
 static int dos_packet_async(struct MsgPort *handler, LONG action, LONG arg1,
                             LONG arg2, LONG arg3, LONG arg4, LONG arg5,
                             uint32_t captured_generation, LONG *result_out,
@@ -1227,15 +1228,29 @@ static int path_from_wire(const struct zzapp_file_wire *req, char *out, int *err
 struct open_target {
     const char *name;
     BPTR dir;
+    uint32_t request_seq;
     struct dos_path_resolver resolver;
 };
 
 static void open_target_init(struct open_target *target, BPTR dir,
-                             const char *name)
+                             const char *name, uint32_t request_seq)
 {
     memset(target, 0, sizeof(*target));
     target->name = name;
     target->dir = dir;
+    target->request_seq = request_seq;
+}
+
+/* A step that creates, truncates or replaces a file runs only while its
+ * request is live: this launcher still owns the generation, the window
+ * still holds the request, and no stop was asked. A Ctrl-C that an earlier
+ * packet wait already consumed survives only in user_stop, which is how the
+ * cleanup wait just before a fallback open (end_or_close) can abandon the
+ * request without the fallback noticing. */
+static int open_step_allowed(uint32_t request_seq)
+{
+    return zzrun_open_step_allowed(file_request_is_current(request_seq),
+                                   ctrl_c_set(), user_stop);
 }
 
 static void open_target_release(struct open_target *target)
@@ -1257,10 +1272,16 @@ static int open_target_arm(struct open_target *target)
                                    target->name);
 }
 
+/* Every open that can create or replace a file (anything but MODE_OLDFILE)
+ * checks that the request is still live before its packet goes out. */
 static BPTR open_target_open(struct open_target *target, LONG mode,
                              int *transport_ok)
 {
     *transport_ok = 0;
+    if (mode != MODE_OLDFILE && !open_step_allowed(target->request_seq)) {
+        SetIoErr(ERROR_BREAK);
+        return 0;
+    }
     if (!open_target_arm(target))
         return 0;
     return open_resolved_async(&target->resolver, target->name, mode,
@@ -1324,8 +1345,8 @@ static int open_target_probe(struct open_target *target, int *exists,
  * serving loop handles every file request) but not against other Amiga
  * programs that create the same name between the probe and the open. */
 static int open_with_plan(enum zzrun_open_plan plan, BPTR dir,
-                          const char *name, int absolute, BPTR *fh_out,
-                          int *err)
+                          const char *name, int absolute,
+                          uint32_t request_seq, BPTR *fh_out, int *err)
 {
     struct open_target target;
     BPTR fh = 0;
@@ -1335,7 +1356,7 @@ static int open_with_plan(enum zzrun_open_plan plan, BPTR dir,
     int ok = 0;
 
     *fh_out = 0;
-    open_target_init(&target, absolute ? 0 : dir, name);
+    open_target_init(&target, absolute ? 0 : dir, name, request_seq);
     if (zzrun_plan_probes_target(plan, absolute) &&
         !open_target_probe(&target, &exists, err))
         goto out;
@@ -1351,8 +1372,15 @@ static int open_with_plan(enum zzrun_open_plan plan, BPTR dir,
         }
         fh = open_target_open(&target, MODE_READWRITE, &transport_ok);
         if (fh && plan == ZZRUN_OPEN_TRUNCATE_EXISTING) {
-            LONG size = file_packet_async(fh, ACTION_SET_FILE_SIZE, 0,
-                                          OFFSET_BEGINNING, 0, 0, &transport_ok);
+            LONG size;
+
+            if (!open_step_allowed(request_seq)) {
+                end_or_close(fh);
+                *err = ZZ_EIO;
+                goto out;
+            }
+            size = file_packet_async(fh, ACTION_SET_FILE_SIZE, 0,
+                                     OFFSET_BEGINNING, 0, 0, &transport_ok);
             if (!transport_ok) {
                 end_or_close(fh);
                 *err = ZZ_EIO;
@@ -1573,8 +1601,8 @@ static void serve_open(const struct zzapp_file_wire *req)
         if (!final_path_under_root(dir, leaf, plan, &err))
             goto done;
     }
-    if (!open_with_plan(plan, dir, absolute ? path : leaf, absolute, &fh,
-                        &err) && err == ZZ_OK) {
+    if (!open_with_plan(plan, dir, absolute ? path : leaf, absolute, req->seq,
+                        &fh, &err) && err == ZZ_OK) {
         err = zz_from_io();
         if (err == ZZ_OK)
             err = ZZ_ENOENT;
@@ -3535,6 +3563,8 @@ static int dos_packet_async(struct MsgPort *handler, LONG action, LONG arg1,
     ULONG mask;
     ULONG signals;
     int abandoned = 0;
+    int ctrl_c;
+    int owned;
 
     if (result_out)
         *result_out = -1;
@@ -3544,6 +3574,27 @@ static int dos_packet_async(struct MsgPort *handler, LONG action, LONG arg1,
         *abandoned_out = 0;
     if (!handler || !result_out)
         return 0;
+    /* A packet whose operation is already lost is not sent at all: the
+     * handler would act on it (create, truncate, write) before the result
+     * is discarded as abandoned. Releases always go out. */
+    ctrl_c = ctrl_c_set();
+    owned = captured_generation == 0 || generation_owned(captured_generation);
+    if (!zzrun_packet_may_send(action == ACTION_END ||
+                               action == ACTION_FREE_LOCK, owned, ctrl_c)) {
+        if (ctrl_c) {
+            SetSignal(0, SIGBREAKF_CTRL_C);
+            user_stop = 1;
+            if (zzrun_ctrl_c_must_request_stop(1))
+                request_stop();
+        }
+        if (!owned && ownership_lost)
+            *ownership_lost = 1;
+        *result_out = 0;
+        if (abandoned_out)
+            *abandoned_out = 1;
+        SetIoErr(ERROR_BREAK);
+        return 1;
+    }
     port = CreateMsgPort();
     packet = AllocMem(sizeof(*packet), MEMF_PUBLIC | MEMF_CLEAR);
     if (!port || !packet) {

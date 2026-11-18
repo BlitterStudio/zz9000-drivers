@@ -1034,6 +1034,32 @@ static void test_leaf_lock_failure_answers_by_plan(void)
     }
 }
 
+/* A packet from a lost generation or after Ctrl-C never reaches the handler,
+ * except releases, which give back what an earlier packet acquired. */
+static void test_lost_operation_packets_are_not_sent_but_releases_are(void)
+{
+    assert(zzrun_packet_may_send(0, 1, 0));
+    assert(!zzrun_packet_may_send(0, 0, 0));
+    assert(!zzrun_packet_may_send(0, 1, 1));
+    assert(!zzrun_packet_may_send(0, 0, 1));
+    assert(zzrun_packet_may_send(1, 0, 0));
+    assert(zzrun_packet_may_send(1, 1, 1));
+    assert(zzrun_packet_may_send(1, 0, 1));
+}
+
+/* The NEWFILE fallback after a handler without ACTION_SET_FILE_SIZE follows
+ * an ACTION_END wait that Ctrl-C or a generation change may have abandoned.
+ * Ownership, a Ctrl-C still pending, and a Ctrl-C an earlier wait already
+ * consumed (user_stop) each stop the destructive step. */
+static void test_destructive_open_steps_stop_when_the_request_is_cancelled(void)
+{
+    assert(zzrun_open_step_allowed(1, 0, 0));
+    assert(!zzrun_open_step_allowed(0, 0, 0));
+    assert(!zzrun_open_step_allowed(1, 1, 0));
+    assert(!zzrun_open_step_allowed(1, 0, 1));
+    assert(!zzrun_open_step_allowed(0, 1, 1));
+}
+
 struct fake_release {
     int delivered;
     int32_t result;
@@ -1248,6 +1274,8 @@ int main(void)
     test_probe_result_distinguishes_missing_in_use_and_errors();
     test_plans_that_act_on_an_existing_file_probe_the_target();
     test_leaf_lock_failure_answers_by_plan();
+    test_lost_operation_packets_are_not_sent_but_releases_are();
+    test_destructive_open_steps_stop_when_the_request_is_cancelled();
     test_bstr_encoding_matches_dos_packets();
     test_pending_packet_ctrl_c_still_requests_stop();
     test_load_break_consumed_by_packet_returns_warn();

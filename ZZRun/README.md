@@ -286,12 +286,22 @@ Valid combinations open as follows.
   `MODE_NEWFILE` if it is missing.
 - `WRITE|CREATE|TRUNCATE`: `MODE_NEWFILE`; create, or replace an existing file.
 - `WRITE|CREATE|EXCL`, with or without `TRUNCATE`: ZZRun probes with `Lock`. An
-  existing file is `EEXIST` (-11); otherwise `MODE_NEWFILE`.
+  existing file is `EEXIST` (-11), including one that another program holds
+  open exclusively (the handler refuses the lock with `ERROR_OBJECT_IN_USE`),
+  for relative and `ABS` paths alike; otherwise `MODE_NEWFILE`.
 
 `READ` may be added to any of the `WRITE` entries. AmigaDOS has no atomic exclusive
 create, so `EXCL` is exclusive against the other apps ZZRun serves, which share
 one serving loop, but not against other Amiga programs that create the same name
 between the probe and the open.
+
+With `ABS` on a multi-directory assign, the probe finds the directory that holds
+the file and the open, `SetFileSize` and `MODE_NEWFILE` fallback all go to that
+same directory, so an existing file is updated, truncated, kept or replaced
+where it is rather than shadowed by a new file in the first directory. Every
+step that can create, truncate or replace a file is skipped, and answers `EIO`,
+once the request is no longer current: the app's generation was replaced, a
+Ctrl-C or stop is pending, or an earlier wait for AmigaDOS was abandoned.
 
 Relative paths stay below `ROOT`. `..`, leading `/`, and empty path components
 that would leave the root are rejected. Paths containing `:` are rejected

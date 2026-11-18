@@ -680,6 +680,17 @@ static inline int zzrun_packet_result_usable(int completed, int abandoned)
     return completed && !abandoned;
 }
 
+/* A packet is sent only while its operation is live. A lost generation or a
+ * pending Ctrl-C means the result will be discarded, but the handler would
+ * still act on the packet first (create, truncate, write), so such a packet
+ * stays unsent. Releases (ACTION_END, ACTION_FREE_LOCK) always go out: they
+ * give back what an earlier packet acquired. */
+static inline int zzrun_packet_may_send(int release, int ownership_ok,
+                                        int ctrl_c_pending)
+{
+    return release || (ownership_ok && !ctrl_c_pending);
+}
+
 /* A resource slot must survive a release packet that was never delivered;
  * after delivery DOS owns no resource and its local handle may be freed even
  * when the handler reported an error. The callback sends ACTION_END or
@@ -1016,6 +1027,17 @@ static inline enum zzrun_leaf_action zzrun_leaf_lock_failure(
     default:
         return ZZRUN_LEAF_REFUSE;
     }
+}
+
+/* A step that creates, truncates or replaces a file runs only while the
+ * request is current (launcher still owns the generation, the window still
+ * holds the request) and no stop was asked. user_stop records a Ctrl-C that
+ * an earlier packet wait consumed, so a cancelled request stays cancelled
+ * for the steps that follow it. */
+static inline int zzrun_open_step_allowed(int request_current,
+                                          int ctrl_c_pending, int user_stop)
+{
+    return request_current && !zzrun_user_break(ctrl_c_pending, user_stop);
 }
 
 #endif /* ZZRUN_POLICY_H */
