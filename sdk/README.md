@@ -4,7 +4,7 @@ The drivers release includes selected end-user components built from the [`sdk/`
 
 | Payload | Installer destination | Purpose |
 | --- | --- | --- |
-| `zz9k.library` 2.39 | `LIBS:` | AmigaOS gateway for SDK firmware services and the app-runtime client API. |
+| `zz9k.library` 2.40 | `LIBS:` | AmigaOS gateway for SDK firmware services and the app-runtime client API. |
 | `mpega.library` | `LIBS:` | Replacement MPEGA library that decodes MP3 on the card. |
 | `zz9k-picture.datatype` | `SYS:Classes/DataTypes/` | Picture DataType that decodes JPEG, PNG, and WebP on the card. |
 | `zz9k-sound.datatype` | `SYS:Classes/DataTypes/` | Sound DataType that decodes MP3, FLAC, and Ogg Vorbis on the card and plays them through the system `sound.datatype`. |
@@ -18,17 +18,18 @@ The drivers release includes selected end-user components built from the [`sdk/`
 
 ## Build and package
 
-`sdk/build.sh` reads `SDK_REF` and uses `ZZ9000_SDK`, a sibling `zz9000-firmware/sdk` checkout, or a clone in `sdk/work/zz9000-firmware`. Unless `SDK_SKIP_BUILD=1`, it runs the SDK's `scripts/build-m68k-amigaos.sh` and `scripts/package-m68k-amigaos.sh --skip-build`, then copies the selected payloads to `sdk/out/` in installer layout. The current pin is `6004c07340a5f8dea063d3f830ed43120ba8099c`; the ZZRun CI job checks out the same commit.
+`sdk/build.sh` reads `SDK_REF` and uses `ZZ9000_SDK`, a sibling `zz9000-firmware/sdk` checkout, or a clone in `sdk/work/zz9000-firmware`. Unless `SDK_SKIP_BUILD=1`, it runs the SDK's `scripts/build-m68k-amigaos.sh` and `scripts/package-m68k-amigaos.sh --skip-build`, then copies the selected payloads to `sdk/out/` in installer layout. The current pin is `c1a0f6d4a2a306210f7f8f1ab6dba0e3b8b15228`; the ZZRun CI job checks out the same commit.
 
 To use a newer SDK revision, update `SDK_REF`, rebuild with `sdk/build.sh`, and follow the SDK's [`docs/zz9k-release-smoke.md`](https://github.com/BlitterStudio/zz9000-firmware/blob/master/sdk/docs/zz9k-release-smoke.md). Keep the SDK revision synchronized with driver code that consumes SDK headers or allocation flags.
 
 ## App runtime
 
-`zz9k.library` 2.39 provides the `ZZ9KApp*` client API for programs that load
+`zz9k.library` 2.40 provides the `ZZ9KApp*` client API for programs that load
 ARM apps. ZZRun uses the library's mailbox transport instead of that API.
 Slot addressing, `LIST`, `RELEASE`, load progress, and per-app memory caps
-need a Zorro III app runtime that advertises the slots capability (ABI 0.3).
-Without that capability, ZZRun retains the legacy slot 0 path. See the
+need a Zorro III app runtime that advertises the slots capability (ABI 0.3),
+and ZZRun refuses firmware without it. The `HOSTMEM` option also needs the
+host-limit capability (`ZZAPP_CAP_HOST_LIMIT`). See the
 [ZZRun manual](../ZZRun/README.md) for launcher behaviour.
 
 ## Zorro II support

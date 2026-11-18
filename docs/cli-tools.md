@@ -20,7 +20,7 @@ The SDK tools, when installed, are documented in `sdk.guide`.
 | `ZZNetReady` | Returns an AmigaDOS status for a boot script that waits for Ethernet negotiation. |
 | `ZZScanlines` | Changes the active scandoubler scanline mode and parity. |
 | `ZZGamma` | Sets the output gamma filter live, or prints the current gamma. |
-| `ZZRun` | Loads up to four trusted ARM ELFs through `zz9k.library`; requires Zorro III app-runtime firmware. The current drivers release supplies library revision 39. |
+| `ZZRun` | Loads up to four trusted ARM ELFs through `zz9k.library`; requires Zorro III app-runtime firmware with app slots. The current drivers release supplies library revision 40. |
 
 ## ZZFwUpdate: firmware updates
 
@@ -260,24 +260,23 @@ slider on ZZTop's Display page and press Save.
 ## ZZRun: ARM app launcher
 
 `ZZRun` needs a Zorro III board and app-runtime firmware that advertises the
-slots capability (ABI 0.3) for four-slot operation. Older app-runtime firmware
-uses the legacy single-slot path. Picasso96 is also required when an app
-requests a display. Run `Stack 32768` in the launching Shell; ZZRun rejects a
-process stack smaller than 16 KiB.
+slots capability (ABI 0.3); on firmware without slots it stops with return 20.
+Picasso96 is also required when an app requests a display. Run
+`Stack 32768` in the launching Shell; ZZRun rejects a process stack smaller
+than 16 KiB.
 
 ZZRun opens `zz9k.library` at version 0 for mailbox transport. It calls
 `ZZ9KCall`, `ZZ9KCallAsync`, `ZZ9KPoll`, and `ZZ9KCancelAsync`, so it needs
-library revision 2 or later. The current drivers release supplies revision 39.
+library revision 2 or later. The current drivers release supplies revision 40.
 
 | Form | Result |
 | --- | --- |
-| `ZZRun <app.elf> [MAXMEM=<MiB>] [AUDIO=AHI] [args]` | Loads and starts the ELF. `MAXMEM` is a positive decimal MiB cap. `AUDIO=AHI` sends app PCM through AHI. Both forms are recognized anywhere after the ELF and are removed from app arguments. |
-| `ZZRun STATUS` | Lists all slots when the runtime supports slots. `STATUS` is case-insensitive. |
+| `ZZRun <app.elf> [MAXMEM=<MiB>] [HOSTMEM=<MiB>] [AUDIO=AHI] [args]` | Loads and starts the ELF. `MAXMEM` is a positive decimal MiB cap. `HOSTMEM` is a positive decimal MiB limit (1 to 4095) on the host-visible card memory the app may allocate; the default is 16 MiB and the firmware grants at most 62 MiB. `AUDIO=AHI` sends app PCM through AHI. These forms are recognized anywhere after the ELF and are removed from app arguments. |
+| `ZZRun STATUS` | Lists all slots. `STATUS` is case-insensitive. |
 | `ZZRun RELEASE <slot>` | Releases a fully torn-down quarantined slot numbered 0 through 3. |
 
-The slots runtime runs up to four apps. A fifth launch reports `window
-allocation failed (busy)` and returns 20. Firmware without slots retains the
-legacy single-app slot 0 path; it rejects `MAXMEM` and `RELEASE`.
+The runtime runs up to four apps. A fifth launch reports `window
+allocation failed (busy)` and returns 20.
 
 `STATUS` prints each slot's state, app name, generation, committed and capped
 MiB, CPU seconds, block reason, and terminal reason. The block reason is

@@ -45,7 +45,7 @@ manuals always go in the program drawer.
 | Control panel | `Tools/ZZTop` | Installs in the program drawer. |
 | Command-line tools | `Tools/ZZScanlines`; `Tools/ZZGamma`; `Tools/ZZFwUpdate`; `Tools/ZZNetStats`; `Tools/ZZDiag`; `Tools/ZZNetReady`; `Tools/ZZRun` | Installs each command in `C:`. |
 | Native capture diagnostic | `Tools/ZZCapture` | Optional. Installs in `C:` when selected. |
-| Trusted app launcher | `Tools/ZZRun`; `Docs/ZZRun.guide` | Launches up to four trusted ARM apps on a Zorro III card with app-runtime firmware. The SDK runtime in this release includes `zz9k.library` 2.39. |
+| Trusted app launcher | `Tools/ZZRun`; `Docs/ZZRun.guide` | Launches up to four trusted ARM apps on a Zorro III card with app-runtime firmware that has app slots. The SDK runtime in this release includes `zz9k.library` 2.40. |
 
 When `ZZTop` or `ZZPlay` is installed, the final prompt defaults to adding the
 program drawer to `S:User-Startup`. It writes a replaceable `;BEGIN ZZ9000` /

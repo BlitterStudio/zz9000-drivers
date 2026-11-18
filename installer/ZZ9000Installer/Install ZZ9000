@@ -693,7 +693,7 @@
 
       (copyfiles
          (prompt "Install ZZRun into C:")
-         (help "Launches up to four trusted ARM ELFs through zz9k.library's mailbox transport on the Zorro III app runtime. This release includes zz9k.library 2.39. It restores the public screen when an app exits or faults. See Docs/ZZRun.guide for ROOT, Workbench ToolTypes, and file access.")
+         (help "Launches up to four trusted ARM ELFs through zz9k.library's mailbox transport on the Zorro III app runtime, which needs firmware with app slots. This release includes zz9k.library 2.40. It restores the public screen when an app exits or faults. See Docs/ZZRun.guide for ROOT, Workbench ToolTypes, and file access.")
          (source "Tools/ZZRun")
          (infos)
          (dest "C:"))
