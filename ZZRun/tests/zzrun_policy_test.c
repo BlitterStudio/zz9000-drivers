@@ -995,6 +995,45 @@ static void test_plans_that_act_on_an_existing_file_probe_the_target(void)
     assert(!zzrun_plan_probes_target(ZZRUN_OPEN_INVALID, 1));
 }
 
+/* A relative exclusive create whose target another program holds open: the
+ * handler refuses the lock with ERROR_OBJECT_IN_USE. The file exists, so the
+ * answer is EEXIST, not the EBUSY that any other plan reports. */
+static void test_leaf_lock_failure_answers_by_plan(void)
+{
+    const int32_t not_found = 205;
+    const int32_t in_use = 202;
+    const enum zzrun_open_plan creates[] = {
+        ZZRUN_OPEN_CREATE_KEEP, ZZRUN_OPEN_CREATE_REPLACE,
+        ZZRUN_OPEN_CREATE_EXCLUSIVE
+    };
+    const enum zzrun_open_plan existing[] = {
+        ZZRUN_OPEN_READ_EXISTING, ZZRUN_OPEN_UPDATE_EXISTING,
+        ZZRUN_OPEN_TRUNCATE_EXISTING
+    };
+    unsigned i;
+
+    assert(zzrun_leaf_lock_failure(ZZRUN_OPEN_CREATE_EXCLUSIVE, in_use,
+                                   not_found, in_use) == ZZRUN_LEAF_EXISTS);
+    assert(zzrun_leaf_lock_failure(ZZRUN_OPEN_CREATE_KEEP, in_use, not_found,
+                                   in_use) == ZZRUN_LEAF_REFUSE);
+    assert(zzrun_leaf_lock_failure(ZZRUN_OPEN_CREATE_REPLACE, in_use,
+                                   not_found, in_use) == ZZRUN_LEAF_REFUSE);
+    for (i = 0; i < sizeof(creates) / sizeof(creates[0]); i++) {
+        assert(zzrun_leaf_lock_failure(creates[i], not_found, not_found,
+                                       in_use) == ZZRUN_LEAF_PROCEED);
+        assert(zzrun_leaf_lock_failure(creates[i], 218, not_found, in_use) ==
+               ZZRUN_LEAF_REFUSE);
+        assert(zzrun_leaf_lock_failure(creates[i], 0, not_found, in_use) ==
+               ZZRUN_LEAF_REFUSE);
+    }
+    for (i = 0; i < sizeof(existing) / sizeof(existing[0]); i++) {
+        assert(zzrun_leaf_lock_failure(existing[i], not_found, not_found,
+                                       in_use) == ZZRUN_LEAF_REFUSE);
+        assert(zzrun_leaf_lock_failure(existing[i], in_use, not_found,
+                                       in_use) == ZZRUN_LEAF_REFUSE);
+    }
+}
+
 struct fake_release {
     int delivered;
     int32_t result;
@@ -1208,6 +1247,7 @@ int main(void)
     test_probe_candidate_is_reported_and_reused_for_the_open();
     test_probe_result_distinguishes_missing_in_use_and_errors();
     test_plans_that_act_on_an_existing_file_probe_the_target();
+    test_leaf_lock_failure_answers_by_plan();
     test_bstr_encoding_matches_dos_packets();
     test_pending_packet_ctrl_c_still_requests_stop();
     test_load_break_consumed_by_packet_returns_warn();

@@ -1163,8 +1163,8 @@ static int lock_target(BPTR dir, const char *leaf, BPTR *out, int *err)
     return 1;
 }
 
-static int final_path_under_root(BPTR dir, const char *leaf, int create,
-                                 int *err)
+static int final_path_under_root(BPTR dir, const char *leaf,
+                                 enum zzrun_open_plan plan, int *err)
 {
     int transport_ok;
     BPTR locked = lock_async(dir, leaf, ACCESS_READ, &transport_ok);
@@ -1174,8 +1174,16 @@ static int final_path_under_root(BPTR dir, const char *leaf, int create,
         return 0;
     }
     if (!locked) {
-        if (create && IoErr() == ERROR_OBJECT_NOT_FOUND)
+        switch (zzrun_leaf_lock_failure(plan, IoErr(), ERROR_OBJECT_NOT_FOUND,
+                                        ERROR_OBJECT_IN_USE)) {
+        case ZZRUN_LEAF_PROCEED:
             return 1;
+        case ZZRUN_LEAF_EXISTS:
+            *err = ZZ_EEXIST;
+            return 0;
+        default:
+            break;
+        }
         *err = zz_from_io();
         if (*err == ZZ_OK)
             *err = ZZ_ENOENT;
@@ -1562,9 +1570,7 @@ static void serve_open(const struct zzapp_file_wire *req)
             err = ZZ_EIO;
             goto done;
         }
-        if (!final_path_under_root(dir, leaf,
-                                   (req->flags & ZZAPP_FILE_CREATE) != 0,
-                                   &err))
+        if (!final_path_under_root(dir, leaf, plan, &err))
             goto done;
     }
     if (!open_with_plan(plan, dir, absolute ? path : leaf, absolute, &fh,

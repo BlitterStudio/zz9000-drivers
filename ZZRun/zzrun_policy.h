@@ -984,4 +984,38 @@ static inline int zzrun_plan_probes_target(enum zzrun_open_plan plan,
     }
 }
 
+/* What a failed Lock of a relative name's final component means for one
+ * plan. The lock also proves the leaf stays under the ROOT when it succeeds,
+ * so a refusal ends the open unless it already answers the plan's question:
+ * a missing leaf is what a create plan wants, and an exclusive create must
+ * report a leaf that exists but is held by another program (the handler
+ * refuses the lock with ERROR_OBJECT_IN_USE) as EEXIST, the same answer an
+ * absolute name gets from its probe. Nothing is opened on the EXISTS answer,
+ * so no open bypasses the ROOT check. */
+enum zzrun_leaf_action {
+    ZZRUN_LEAF_REFUSE = 0,
+    ZZRUN_LEAF_PROCEED,
+    ZZRUN_LEAF_EXISTS
+};
+
+static inline enum zzrun_leaf_action zzrun_leaf_lock_failure(
+    enum zzrun_open_plan plan, int32_t io_error, int32_t object_not_found,
+    int32_t object_in_use)
+{
+    int create = plan == ZZRUN_OPEN_CREATE_KEEP ||
+                 plan == ZZRUN_OPEN_CREATE_REPLACE ||
+                 plan == ZZRUN_OPEN_CREATE_EXCLUSIVE;
+
+    switch (zzrun_probe_result_for_lock(0, io_error, object_not_found,
+                                        object_in_use)) {
+    case ZZRUN_PROBE_MISSING:
+        return create ? ZZRUN_LEAF_PROCEED : ZZRUN_LEAF_REFUSE;
+    case ZZRUN_PROBE_EXISTS:
+        return plan == ZZRUN_OPEN_CREATE_EXCLUSIVE ? ZZRUN_LEAF_EXISTS :
+                                                     ZZRUN_LEAF_REFUSE;
+    default:
+        return ZZRUN_LEAF_REFUSE;
+    }
+}
+
 #endif /* ZZRUN_POLICY_H */
