@@ -128,6 +128,7 @@ static uint32_t flip_pending;
 static uint32_t flip_safe_pending;
 static uint32_t maxmem_mib;
 static uint32_t hostmem_mib;
+static uint32_t weight_value;
 static BPTR console_handle;
 static int console_failed;
 static int audio_ahi;
@@ -239,11 +240,11 @@ static int ctrl_c_set(void)
 
 static void usage(void)
 {
-    puts("ZZRun <app.elf> [MAXMEM=<MiB>] [HOSTMEM=<MiB>] [AUDIO=AHI] [args]\n"
+    puts("ZZRun <app.elf> [MAXMEM=<MiB>] [HOSTMEM=<MiB>] [WEIGHT=<1-256>] [AUDIO=AHI] [args]\n"
          "ZZRun STATUS\n"
          "ZZRun RELEASE <handle>\n"
          "Run Stack 32768 in this Shell first.\n"
-         "Workbench ToolTypes: APP, ROOT, ABS, MODE, ARGS, JOYPORT0, AUDIO, MAXMEM, HOSTMEM.\n"
+         "Workbench ToolTypes: APP, ROOT, ABS, MODE, ARGS, JOYPORT0, AUDIO, MAXMEM, HOSTMEM, WEIGHT.\n"
          "ROOT defaults to the current directory, or the icon directory.");
 }
 
@@ -449,7 +450,7 @@ static char *tool_value(struct DiskObject *icon, const char *name)
 static int read_tooltypes(struct DiskObject *icon, char *app_out, size_t app_n,
                           char *root_out, size_t root_n, ULONG *mode,
                           int *have_mode, uint32_t *maxmem,
-                          uint32_t *hostmem)
+                          uint32_t *hostmem, uint32_t *weight)
 {
     char *value;
     if (!icon || !icon->do_ToolTypes)
@@ -478,6 +479,9 @@ static int read_tooltypes(struct DiskObject *icon, char *app_out, size_t app_n,
     value = tool_value(icon, "HOSTMEM");
     if (value && !zzrun_parse_hostmem(value, hostmem))
         return 0;
+    value = tool_value(icon, "WEIGHT");
+    if (value && !zzrun_parse_weight(value, weight))
+        return 0;
     value = tool_value(icon, "ARGS");
     return !value || add_args_split(value);
 }
@@ -492,7 +496,8 @@ static int tool_is_ahi(const char *value)
 
 static int load_program_icon(char *app_out, size_t app_n, char *root_out,
                              size_t root_n, ULONG *mode, int *have_mode,
-                             uint32_t *maxmem, uint32_t *hostmem)
+                             uint32_t *maxmem, uint32_t *hostmem,
+                             uint32_t *weight)
 {
     struct DiskObject *icon;
     BPTR old = 0;
@@ -508,7 +513,7 @@ static int load_program_icon(char *app_out, size_t app_n, char *root_out,
     }
     if (icon) {
         int ok = read_tooltypes(icon, app_out, app_n, root_out, root_n, mode,
-                                have_mode, maxmem, hostmem);
+                                have_mode, maxmem, hostmem, weight);
         FreeDiskObject(icon);
         if (!ok) {
             if (have_old)
@@ -2665,9 +2670,9 @@ static int load_elf(BPTR fh, LONG size)
     int rc;
 
     /* The limits go to the control block; the card reads them at load begin. */
-    rc = aar_xport_set_limits(&xport, maxmem_mib, hostmem_mib, 0u);
+    rc = zzrun_write_limits(&xport, maxmem_mib, hostmem_mib, weight_value);
     if (rc != AAR_OK) {
-        printf("ZZRun: MAXMEM or HOSTMEM is out of range (%s)\n",
+        printf("ZZRun: MAXMEM, HOSTMEM or WEIGHT is out of range (%s)\n",
                aar_error_name(rc));
         return 0;
     }
@@ -3025,7 +3030,7 @@ int main(int argc, char **argv)
     if (!load_program_icon(app_from_icon, sizeof(app_from_icon),
                            root_text, sizeof(root_text),
                            &forced_mode, &have_mode, &maxmem_mib,
-                           &hostmem_mib)) {
+                           &hostmem_mib, &weight_value)) {
         usage();
         cleanup();
         return 10;
@@ -3084,6 +3089,17 @@ int main(int argc, char **argv)
                     }
                     audio_ahi = 1;
                     continue;
+                }
+                {
+                    int w = zzrun_weight_arg(argv[i], &weight_value);
+
+                    if (w == ZZRUN_ARG_BAD) {
+                        usage();
+                        cleanup();
+                        return 10;
+                    }
+                    if (w == ZZRUN_ARG_TAKEN)
+                        continue;
                 }
                 if (strncmp(argv[i], "HOSTMEM=", 8) == 0) {
                     if (!zzrun_parse_hostmem(argv[i] + 8, &hostmem_mib)) {

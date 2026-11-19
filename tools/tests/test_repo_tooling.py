@@ -179,6 +179,12 @@ class RepoToolingTests(unittest.TestCase):
         zzrun = self.read("ZZRun/ZZRun.c")
         self.assertNotIn("zz9000_hw.h", zzrun)
         self.assertIn("aar_xport_amiga_board_open", zzrun)
+        # WEIGHT is stripped from the app arguments and reaches the limits
+        # write; the parser and the write are covered by ZZRun/tests.
+        self.assertIn("zzrun_weight_arg(argv[i], &weight_value)", zzrun)
+        self.assertIn(
+            "zzrun_write_limits(&xport, maxmem_mib, hostmem_mib, weight_value)",
+            zzrun)
 
     def test_live_videocap_contract_has_one_shared_definition(self):
         header = self.read("include/zz9000_hw.h")

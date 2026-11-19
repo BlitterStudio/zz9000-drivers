@@ -20,6 +20,7 @@
 #define ZZAPP_PROTO_NO_WINDOW 1
 #endif
 #include "aar/transport.h"
+#include "aar_xport_zz9000.h"
 #include "zzapp_proto.h"
 
 #define ZZRUN_POLICY_GRACE_MS 500u
@@ -102,6 +103,63 @@ static inline int zzrun_parse_hostmem(const char *text, uint32_t *mib_out)
         return 0;
     *mib_out = value;
     return 1;
+}
+
+/* WEIGHT is the app's CPU share. The client writes it to AAR_CB_WEIGHT before
+ * the load; the card reads it at LOAD_BEGIN and keeps it for the claim. The
+ * field takes 1 up to the platform bound; a launch without WEIGHT writes 0,
+ * which the card reads as weight 1. The bound below repeats ZZAPP_WEIGHT_MAX
+ * of zzapp_proto.h, so ZZRun refuses before claiming what the card would
+ * refuse at LOAD_BEGIN. */
+#define ZZRUN_WEIGHT_MAX 256u
+
+#ifdef ZZAPP_WEIGHT_MAX
+_Static_assert(ZZRUN_WEIGHT_MAX == ZZAPP_WEIGHT_MAX,
+               "ZZRun WEIGHT bound differs from the platform bound");
+#endif
+
+static inline int zzrun_parse_weight(const char *text, uint32_t *weight_out)
+{
+    uint32_t value;
+
+    if (!zzrun_parse_maxmem(text, &value) || value > ZZRUN_WEIGHT_MAX ||
+        !weight_out)
+        return 0;
+    *weight_out = value;
+    return 1;
+}
+
+/* Result of looking at one command-line word for WEIGHT=<n>. */
+#define ZZRUN_ARG_OTHER 0 /* not WEIGHT=: the caller keeps looking */
+#define ZZRUN_ARG_TAKEN 1 /* WEIGHT=<n>: stored, not for the app */
+#define ZZRUN_ARG_BAD (-1) /* WEIGHT= with a value outside 1..256 */
+
+/* The key is matched without regard to case, like a ToolType name. */
+static inline int zzrun_weight_arg(const char *arg, uint32_t *weight_out)
+{
+    static const char key[] = "WEIGHT=";
+    size_t i;
+
+    if (!arg)
+        return ZZRUN_ARG_OTHER;
+    for (i = 0; i + 1 < sizeof(key); i++) {
+        char c = arg[i];
+
+        if (c >= 'a' && c <= 'z')
+            c = (char)(c - 'a' + 'A');
+        if (c != key[i])
+            return ZZRUN_ARG_OTHER;
+    }
+    return zzrun_parse_weight(arg + i, weight_out) ? ZZRUN_ARG_TAKEN
+                                                   : ZZRUN_ARG_BAD;
+}
+
+/* The limits go to the claim's control block before LOAD_BEGIN. A zero
+ * value keeps the platform default. */
+static inline int zzrun_write_limits(aar_xport *x, uint32_t maxmem_mib,
+                                     uint32_t hostmem_mib, uint32_t weight)
+{
+    return aar_xport_set_limits(x, maxmem_mib, hostmem_mib, weight);
 }
 
 /* A claim handle named on the command line: decimal, $hex or 0x hex, never

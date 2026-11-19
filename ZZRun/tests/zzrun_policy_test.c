@@ -269,6 +269,165 @@ static void test_hostmem_requires_positive_decimal_mib(void)
     assert(!zzrun_parse_hostmem("8", NULL));
 }
 
+/* The client transport module is not part of the host tests: this stands in
+ * for it and records what ZZRun hands over before LOAD_BEGIN. */
+static struct {
+    int calls;
+    aar_xport *x;
+    uint32_t private_mib;
+    uint32_t shared_mib;
+    uint32_t weight;
+    int rc;
+} limits_seen;
+
+int aar_xport_set_limits(aar_xport *x, uint32_t private_mib,
+                         uint32_t shared_mib, uint32_t weight)
+{
+    limits_seen.calls++;
+    limits_seen.x = x;
+    limits_seen.private_mib = private_mib;
+    limits_seen.shared_mib = shared_mib;
+    limits_seen.weight = weight;
+    return limits_seen.rc;
+}
+
+static void test_weight_is_one_to_the_platform_bound(void)
+{
+    uint32_t w = 7u;
+
+    assert(ZZRUN_WEIGHT_MAX == 256u);
+    assert(zzrun_parse_weight("1", &w) && w == 1u);
+    assert(zzrun_parse_weight("100", &w) && w == 100u);
+    assert(zzrun_parse_weight("256", &w) && w == 256u);
+    assert(zzrun_parse_weight("0256", &w) && w == 256u);
+    w = 7u;
+    assert(!zzrun_parse_weight("0", &w) && w == 7u);
+    assert(!zzrun_parse_weight("257", &w) && w == 7u);
+    assert(!zzrun_parse_weight("4294967296", &w));
+    assert(!zzrun_parse_weight("-1", &w));
+    assert(!zzrun_parse_weight("", &w));
+    assert(!zzrun_parse_weight("abc", &w));
+    assert(!zzrun_parse_weight("8x", &w));
+    assert(!zzrun_parse_weight("8 ", &w));
+    assert(!zzrun_parse_weight(" 8", &w));
+    assert(!zzrun_parse_weight("+8", &w));
+    assert(!zzrun_parse_weight(NULL, &w));
+    assert(!zzrun_parse_weight("8", NULL));
+    assert(w == 7u);
+}
+
+static void test_weight_argument_forms(void)
+{
+    uint32_t w = 0u;
+
+    assert(zzrun_weight_arg("WEIGHT=1", &w) == ZZRUN_ARG_TAKEN && w == 1u);
+    assert(zzrun_weight_arg("WEIGHT=256", &w) == ZZRUN_ARG_TAKEN && w == 256u);
+    assert(zzrun_weight_arg("weight=3", &w) == ZZRUN_ARG_TAKEN && w == 3u);
+    assert(zzrun_weight_arg("Weight=17", &w) == ZZRUN_ARG_TAKEN && w == 17u);
+    w = 5u;
+    assert(zzrun_weight_arg("WEIGHT=0", &w) == ZZRUN_ARG_BAD);
+    assert(zzrun_weight_arg("WEIGHT=257", &w) == ZZRUN_ARG_BAD);
+    assert(zzrun_weight_arg("WEIGHT=-1", &w) == ZZRUN_ARG_BAD);
+    assert(zzrun_weight_arg("WEIGHT=", &w) == ZZRUN_ARG_BAD);
+    assert(zzrun_weight_arg("WEIGHT=high", &w) == ZZRUN_ARG_BAD);
+    assert(zzrun_weight_arg("WEIGHT=8junk", &w) == ZZRUN_ARG_BAD);
+    assert(zzrun_weight_arg("WEIGHT=8=9", &w) == ZZRUN_ARG_BAD);
+    assert(w == 5u);
+    /* Other words belong to the app or to the other options. */
+    assert(zzrun_weight_arg("WEIGHT", &w) == ZZRUN_ARG_OTHER);
+    assert(zzrun_weight_arg("WEIGHT:8", &w) == ZZRUN_ARG_OTHER);
+    assert(zzrun_weight_arg("WEIGH=8", &w) == ZZRUN_ARG_OTHER);
+    assert(zzrun_weight_arg("-WEIGHT=8", &w) == ZZRUN_ARG_OTHER);
+    assert(zzrun_weight_arg("MAXMEM=8", &w) == ZZRUN_ARG_OTHER);
+    assert(zzrun_weight_arg("+timedemo", &w) == ZZRUN_ARG_OTHER);
+    assert(zzrun_weight_arg("", &w) == ZZRUN_ARG_OTHER);
+    assert(zzrun_weight_arg(NULL, &w) == ZZRUN_ARG_OTHER);
+    assert(w == 5u);
+}
+
+/* The scan ZZRun runs over the words after the ELF: WEIGHT is taken, the
+ * rest is kept for the app in order. Returns -1 for a bad WEIGHT. */
+static int scan_weight(int argc, char **argv, uint32_t *weight, char **kept,
+                       int *nkept)
+{
+    int i;
+
+    *nkept = 0;
+    for (i = 0; i < argc; i++) {
+        int r = zzrun_weight_arg(argv[i], weight);
+
+        if (r == ZZRUN_ARG_BAD)
+            return -1;
+        if (r == ZZRUN_ARG_TAKEN)
+            continue;
+        kept[(*nkept)++] = argv[i];
+    }
+    return 0;
+}
+
+static void test_weight_is_stripped_from_the_app_arguments(void)
+{
+    char *argv[] = {"+timedemo", "weight=12", "demo1", "MAXMEM=8"};
+    char *kept[4];
+    int nkept;
+    uint32_t w = 0u;
+
+    assert(scan_weight(4, argv, &w, kept, &nkept) == 0);
+    assert(w == 12u);
+    assert(nkept == 3);
+    assert(strcmp(kept[0], "+timedemo") == 0);
+    assert(strcmp(kept[1], "demo1") == 0);
+    assert(strcmp(kept[2], "MAXMEM=8") == 0);
+
+    /* Without WEIGHT nothing is stripped and the value stays 0. */
+    {
+        char *plain[] = {"+timedemo", "demo1"};
+
+        w = 0u;
+        assert(scan_weight(2, plain, &w, kept, &nkept) == 0);
+        assert(w == 0u && nkept == 2);
+    }
+
+    /* The last WEIGHT wins, like the other options. */
+    {
+        char *twice[] = {"WEIGHT=2", "WEIGHT=9"};
+
+        assert(scan_weight(2, twice, &w, kept, &nkept) == 0);
+        assert(w == 9u && nkept == 0);
+    }
+
+    /* A bad value ends the scan before anything is claimed. */
+    {
+        char *bad[] = {"+x", "WEIGHT=257", "y"};
+
+        assert(scan_weight(3, bad, &w, kept, &nkept) == -1);
+    }
+}
+
+static void test_limits_write_carries_the_weight(void)
+{
+    char marker;
+    aar_xport *x = (aar_xport *)&marker;
+
+    memset(&limits_seen, 0, sizeof(limits_seen));
+    assert(zzrun_write_limits(x, 0u, 0u, 0u) == AAR_OK);
+    assert(limits_seen.calls == 1 && limits_seen.x == x);
+    assert(limits_seen.private_mib == 0u && limits_seen.shared_mib == 0u);
+    assert(limits_seen.weight == 0u);
+
+    assert(zzrun_write_limits(x, 256u, 32u, 1u) == AAR_OK);
+    assert(limits_seen.calls == 2);
+    assert(limits_seen.private_mib == 256u && limits_seen.shared_mib == 32u);
+    assert(limits_seen.weight == 1u);
+
+    assert(zzrun_write_limits(x, 0u, 0u, ZZRUN_WEIGHT_MAX) == AAR_OK);
+    assert(limits_seen.weight == 256u);
+
+    limits_seen.rc = AAR_E_INVAL;
+    assert(zzrun_write_limits(x, 1u, 2u, 3u) == AAR_E_INVAL);
+    assert(limits_seen.weight == 3u);
+}
+
 static void test_handle_parse(void)
 {
     uint32_t handle = 7u;
@@ -1021,6 +1180,10 @@ int main(void)
     test_launcher_output_orders_queued_messages_before_app_output();
     test_maxmem_requires_positive_decimal_mib();
     test_hostmem_requires_positive_decimal_mib();
+    test_weight_is_one_to_the_platform_bound();
+    test_weight_argument_forms();
+    test_weight_is_stripped_from_the_app_arguments();
+    test_limits_write_carries_the_weight();
     test_handle_parse();
     test_refusal_text_names_each_reason();
     test_client_caps();

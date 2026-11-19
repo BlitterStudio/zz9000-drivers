@@ -20,14 +20,14 @@ Run `Stack 32768` in the launching Shell first. ZZRun requires at least a
 16 KiB process stack.
 
 ```text
-ZZRun <app.elf> [MAXMEM=<MiB>] [HOSTMEM=<MiB>] [AUDIO=AHI] [args]
+ZZRun <app.elf> [MAXMEM=<MiB>] [HOSTMEM=<MiB>] [WEIGHT=<1-256>] [AUDIO=AHI] [args]
 ```
 
 Give the ELF first. The app's `argv[0]` is the ELF's file name and the
 remaining Shell tokens follow it, as C programs expect (up to 15 arguments).
-`AUDIO=AHI`, `MAXMEM=<MiB>`, and `HOSTMEM=<MiB>` are recognized anywhere after
-the ELF, so they cannot be passed to the app as arguments with those exact
-forms.
+`AUDIO=AHI`, `MAXMEM=<MiB>`, `HOSTMEM=<MiB>`, and `WEIGHT=<n>` are recognized
+anywhere after the ELF, so they cannot be passed to the app as arguments with
+those exact forms.
 
 ```text
 Stack 32768
@@ -53,6 +53,20 @@ what it cannot grant. ZZRun then prints `load begin refused:` with the reason
 
 ```text
 ZZRun RAM:swquake.elf HOSTMEM=32
+```
+
+`WEIGHT=<n>` sets the app's share of the ARM CPU when several apps run at
+once. The card gives the CPU to the runnable app that has used the least time
+in proportion to its weight, so an app with `WEIGHT=2` gets about twice the run
+time of an app with `WEIGHT=1` while both want to run. An app that is blocked
+or sleeping does not save up credit. The value is a decimal number from 1 to
+256; anything else prints the usage and returns 10 before ZZRun claims
+anything. The key is matched without regard to case (`weight=2` works). Without
+it the app gets weight 1. The weight is written to the claim's control block
+with the memory limits and lasts until the claim ends.
+
+```text
+ZZRun RAM:swquake.elf WEIGHT=4
 ```
 
 `ROOT` controls files requested by the app. A Shell launch defaults to the
@@ -119,6 +133,7 @@ claim.
 | `AUDIO=AHI` | Route app PCM to AHI. The default remains the card audio fabric. |
 | `MAXMEM=<MiB>` | Positive decimal MiB cap, written to the claim's private memory limit. |
 | `HOSTMEM=<MiB>` | Positive decimal MiB (1 to 4095) shared memory limit, written to the claim's shared memory limit. |
+| `WEIGHT=<n>` | Decimal CPU share weight from 1 to 256, written to the claim's weight word. |
 
 Dragging an ELF project onto the ZZRun icon takes precedence over `APP`.
 
@@ -138,7 +153,7 @@ each buffer it wants ZZRun to use in the request that needs it.
    binds the submission queue (requests and logs from the app) and completion
    queue (ZZRun's replies and input events) from the control block's
    descriptors.
-3. ZZRun writes `MAXMEM` and `HOSTMEM` to the control block, then `LOAD_BEGIN`
+3. ZZRun writes `MAXMEM`, `HOSTMEM` and `WEIGHT` to the control block, then `LOAD_BEGIN`
    announces what ZZRun can serve (CLUT8 screens, pan acknowledgement,
    card-owned flips, the longer lease, AHI). The card allocates a load buffer;
    ZZRun reads the ELF into its 64 KiB staging area and posts `LOAD_CHUNK`
