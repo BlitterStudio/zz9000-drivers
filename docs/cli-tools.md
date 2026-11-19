@@ -272,7 +272,7 @@ The SDK runtime in this release supplies `zz9k.library` 2.41.
 
 | Form | Result |
 | --- | --- |
-| `ZZRun <app.elf> [MAXMEM=<MiB>] [HOSTMEM=<MiB>] [AUDIO=AHI] [args]` | Loads and starts the ELF. `MAXMEM` is a positive decimal MiB cap. `HOSTMEM` is a positive decimal MiB limit (1 to 4095) on the host-visible card memory the app may allocate; the default is 16 MiB and the firmware grants at most 62 MiB. `AUDIO=AHI` sends app PCM through AHI. These forms are recognized anywhere after the ELF and are removed from app arguments. |
+| `ZZRun <app.elf> [MAXMEM=<MiB>] [HOSTMEM=<MiB>] [WEIGHT=<1-256>] [AUDIO=AHI] [args]` | Loads and starts the ELF. `MAXMEM` is a positive decimal MiB cap. `HOSTMEM` is a positive decimal MiB limit (1 to 4095) on the host-visible card memory the app may allocate; the default is 16 MiB and the firmware grants at most 62 MiB. `WEIGHT` is the app's CPU share, a decimal number from 1 to 256 (default 1): when several apps run, the card gives each a share of the ARM CPU in proportion to its weight. A value outside 1 to 256 returns 10 before anything is claimed. `AUDIO=AHI` sends app PCM through AHI. These forms are recognized anywhere after the ELF and are removed from app arguments. |
 | `ZZRun STATUS` | Lists every claim the card holds. `STATUS` is case-insensitive. |
 | `ZZRun RELEASE <handle>` | Releases a claim whose app has ended or whose launcher lost it. The handle is the number `STATUS` prints, in hexadecimal written as `$` or `0x` followed by the digits, or in decimal. A claim whose app is running, loading or being claimed is refused. |
 
