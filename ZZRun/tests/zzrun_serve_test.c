@@ -1459,6 +1459,42 @@ static void test_log_records_become_lines(void)
                                           ZZRUN_LAUNCHER_STATUS_RESERVE_BYTES);
 }
 
+static void test_app_write_opens_the_console_before_queued_diagnostics(void)
+{
+    static const uint8_t diag[] = "diag";
+    static const uint8_t text[] = "hello";
+    struct zzrun_req r = mkreq(AAR_OP_CONSOLE_WRITE);
+    struct zzrun_done d;
+
+    /* Launcher bytes are queued when the app's first CONSOLE_WRITE arrives
+     * and go out first; the destination must be opened for the app anyway,
+     * or on a Workbench launch their write has nowhere to go. */
+    console_fixture();
+    zzrun_console_launcher_log(&serve.console, diag, 4u);
+    assert(fc.opens == 0);
+    r.buf = (uint8_t *)(uintptr_t)text;
+    r.buf_len = 5u;
+    assert(zzrun_serve_request(&serve, &r, &d) == ZZRUN_SERVE_DEFERRED);
+    assert(fc.opens >= 1);
+    assert(fc.writes == 1 && memcmp(fc.written, "diag\n", 5u) == 0);
+    write_finishes((int32_t)fc.last_write);
+    assert(fc.writes == 2 && memcmp(fc.written + 5u, "hello", 5u) == 0);
+    write_finishes((int32_t)fc.last_write);
+    assert(sunk_n == 1 && sunk[0].done.result == AAR_OK && fc.errors == 0);
+
+    /* The destination cannot be opened: the request fails and the output is
+     * a launcher error, as when the app's bytes go first. */
+    console_fixture();
+    fc.open_ok = 0;
+    zzrun_console_launcher_log(&serve.console, diag, 4u);
+    assert(zzrun_serve_request(&serve, &r, &d) == ZZRUN_SERVE_DEFERRED ||
+           sunk_n == 1);
+    zzrun_console_pump(&serve.console);
+    assert(fc.errors == 1);
+    assert(sunk_n == 1 && sunk[0].done.result == AAR_E_IO);
+    assert(fc.writes == 0);
+}
+
 static void test_console_read_waits_for_demand_and_returns_what_was_read(void)
 {
     uint8_t buf[512];
@@ -2153,6 +2189,7 @@ int main(void)
     test_launcher_text_goes_before_app_text();
     test_launcher_output_keeps_status_room_for_non_diagnostics();
     test_log_records_become_lines();
+    test_app_write_opens_the_console_before_queued_diagnostics();
     test_console_read_waits_for_demand_and_returns_what_was_read();
     test_console_read_end_of_input_is_sticky();
     test_display_open_validates_and_reports_what_was_made();

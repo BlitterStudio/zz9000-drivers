@@ -987,7 +987,10 @@ void zzrun_console_pump(struct zzrun_console *c)
             c->app_write.buf_len - c->app_write_done : 0u;
         int source = zzrun_output_next_source(c->launcher_used, app_left);
 
-        if (source == ZZRUN_OUTPUT_APP && !c->ops.open(c->ops.ctx)) {
+        /* An app write opens its destination even when queued launcher
+         * bytes are written first: they may be the first output there is, and
+         * on a Workbench launch only the app's console request opens CON:. */
+        if (app_left != 0u && !c->ops.open(c->ops.ctx)) {
             console_fail(c);
             app_write_finish(c, AAR_E_IO);
         } else if (source == ZZRUN_OUTPUT_LAUNCHER) {
