@@ -983,12 +983,12 @@ void zzrun_console_pump(struct zzrun_console *c)
     if (!c->ops.live(c->ops.ctx)) {
         /* The claim was lost: the requests' buffers are not ours any more.
          * Their completions go nowhere, and a DOS packet that is still out
-         * finds nothing waiting for it. */
+         * finds nothing waiting for it. The launcher's own output (the
+         * diagnostics that say so) is still written. */
         if (c->app_write_active)
             app_write_finish(c, AAR_E_IO);
         if (c->read_active)
             read_finish(c, AAR_E_IO, 0);
-        return;
     }
     if (c->failed && c->app_write_active)
         app_write_finish(c, AAR_E_IO);

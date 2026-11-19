@@ -1556,6 +1556,14 @@ static void test_console_buffers_are_left_alone_after_the_claim_is_lost(void)
     write_finishes((int32_t)fc.last_write);
     assert(fc.writes == 1);
     assert(sunk_n == 1 && sunk[0].done.result == AAR_E_IO);
+
+    /* The launcher still says the claim was lost: its queue drains, or the
+     * cleanup that waits for it never ends. */
+    zzrun_console_launcher_status(&serve.console, "claim lost");
+    zzrun_console_pump(&serve.console);
+    assert(fc.writes == 2 && fc.last_write == 11u);
+    write_finishes((int32_t)fc.last_write);
+    assert(!zzrun_console_output_pending(&serve.console));
 }
 
 static void test_console_read_waits_for_demand_and_returns_what_was_read(void)
