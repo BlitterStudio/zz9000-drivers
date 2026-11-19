@@ -114,11 +114,46 @@ static void test_finish_prompt_is_not_stdout(void)
 
 static void test_ahi_open_failure_exits_20(void)
 {
-    assert(zzrun_process_exit(0, 0, 0, 1) == 20);
-    assert(zzrun_process_exit(0, 0, 0, 0) == 0);
-    assert(zzrun_process_exit(7, 0, 0, 1) == 20);
-    assert(zzrun_process_exit(0, 1, 0, 0) == 20);
-    assert(zzrun_process_exit(0, 0, 1, 0) == 20);
+    assert(zzrun_process_exit(0, 0, 0, 1, 0) == 20);
+    assert(zzrun_process_exit(0, 0, 0, 0, 0) == 0);
+    assert(zzrun_process_exit(7, 0, 0, 1, 0) == 20);
+    assert(zzrun_process_exit(0, 1, 0, 0, 0) == 20);
+    assert(zzrun_process_exit(0, 0, 1, 0, 0) == 20);
+}
+
+static void test_corrupt_queue_exits_20(void)
+{
+    /* The app was stopped for the corrupt queue: not a user stop, whatever
+     * exit code or end reason it then reports. */
+    assert(zzrun_process_exit(0, 0, 0, 0, 1) == 20);
+    assert(zzrun_process_exit(7, 0, 0, 0, 1) == 20);
+    assert(zzrun_process_exit(zzrun_app_exit_code(AAR_END_FORCED, 0, 1), 0, 0, 0,
+                              1) == 20);
+}
+
+static void test_replies_are_never_dropped_for_want_of_room(void)
+{
+    uint32_t used = 0;
+    uint32_t taken = 0;
+    uint32_t deferred = 0;
+
+    /* The SQ holds more requests than the backlog; the CQ stays full. Every
+     * request taken adds at most one backlog entry; three deferred
+     * completions (console write and read, flip) may follow. */
+    while (zzrun_reply_may_take_request(used)) {
+        used++;
+        taken++;
+        assert(taken < 1000u);
+    }
+    assert(taken > 0u && taken < ZZRUN_REPLY_BACKLOG);
+    for (deferred = 0; deferred < 3u; deferred++)
+        used++;
+    assert(used <= ZZRUN_REPLY_BACKLOG);
+    assert(!zzrun_reply_may_take_request(ZZRUN_REPLY_BACKLOG));
+    assert(zzrun_reply_may_take_request(0));
+    /* Room returns as the backlog drains. */
+    assert(zzrun_reply_may_take_request(ZZRUN_REPLY_BACKLOG - ZZRUN_REPLY_RESERVE - 1u));
+    assert(!zzrun_reply_may_take_request(ZZRUN_REPLY_BACKLOG - ZZRUN_REPLY_RESERVE));
 }
 
 
@@ -975,6 +1010,8 @@ int main(void)
     test_console_read_gated_on_running();
     test_finish_prompt_is_not_stdout();
     test_ahi_open_failure_exits_20();
+    test_corrupt_queue_exits_20();
+    test_replies_are_never_dropped_for_want_of_room();
     test_empty_argument_is_allowed();
     test_async_console_write_advances_only_on_completion();
     test_terminal_output_drains_before_exit();

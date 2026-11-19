@@ -384,13 +384,30 @@ static inline int zzrun_finish_prompt(int pending, int interactive_read)
 
 /* README returns 20 for a launcher error even when the app exits 0.
  * An AHI open failure on the AUDIO=AHI route is a launcher error, as are
- * a display failure and a console that cannot be opened or written. */
+ * a display failure, a console that cannot be opened or written, and a
+ * request queue found corrupt (the app was stopped for it, which is not a
+ * stop the user asked for). */
 static inline int zzrun_process_exit(int app_exit, int display_failed,
-                                     int console_failed, int ahi_open_failed)
+                                     int console_failed, int ahi_open_failed,
+                                     int queue_corrupt)
 {
-    if (display_failed || console_failed || ahi_open_failed)
+    if (display_failed || console_failed || ahi_open_failed || queue_corrupt)
         return 20;
     return app_exit;
+}
+
+/* Completions that find the completion queue full wait in a backlog of
+ * ZZRUN_REPLY_BACKLOG entries. A request is taken from the submission queue
+ * only while ZZRUN_REPLY_RESERVE entries stay free for the completions of
+ * requests already taken and still outstanding (a console write, a console
+ * read and a display flip), so a completion is never dropped for want of room;
+ * the app's request then waits in the queue until the backlog drains. */
+#define ZZRUN_REPLY_BACKLOG 16u
+#define ZZRUN_REPLY_RESERVE 8u
+
+static inline int zzrun_reply_may_take_request(uint32_t backlog_used)
+{
+    return backlog_used + ZZRUN_REPLY_RESERVE < ZZRUN_REPLY_BACKLOG;
 }
 
 /* The process exit code for an app that ended with end_reason and exit_code

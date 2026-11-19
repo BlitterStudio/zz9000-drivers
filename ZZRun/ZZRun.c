@@ -2407,8 +2407,6 @@ static void end_or_close(BPTR fh)
 
 /* ---- Serving the app's requests ----------------------------------------- */
 
-#define ZZRUN_REPLY_BACKLOG 8u
-
 struct pending_reply {
     struct zzrun_req req;
     struct zzrun_done done;
@@ -2476,7 +2474,9 @@ static void service_requests(void)
     aar_xport_req r;
     int rc = 0;
 
-    while (served < 16u && (rc = aar_xport_service_next(&xport, &r)) == 1) {
+    reply_flush();
+    while (served < 16u && zzrun_reply_may_take_request(reply_backlog_n) &&
+           (rc = aar_xport_service_next(&xport, &r)) == 1) {
         struct zzrun_req q;
         struct zzrun_done d;
         unsigned i;
@@ -2885,7 +2885,8 @@ static int run_loop(void)
                          state_name(st.state));
     return zzrun_process_exit(
         zzrun_app_exit_code(st.end_reason, st.exit_code, stop_asked),
-        display_failed, console_output_failed, audio_open_failed);
+        display_failed, console_output_failed, audio_open_failed,
+        queue_corrupt);
 }
 
 static int open_root(const char *root_text)
