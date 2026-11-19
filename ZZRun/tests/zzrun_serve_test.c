@@ -1317,11 +1317,13 @@ static void test_console_write_completes_when_the_dos_write_does(void)
 
 static void test_console_write_edges(void)
 {
-    uint8_t text[8] = "abcdefgh";
+    static const uint8_t text_init[8] = { 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h' };
+    uint8_t text[8];
     struct zzrun_req r = mkreq(AAR_OP_CONSOLE_WRITE);
     struct zzrun_done d;
 
     console_fixture();
+    memcpy(text, text_init, sizeof(text));
     /* nothing to write completes at once */
     r.buf = text;
     r.buf_len = 0;
@@ -1381,11 +1383,13 @@ static void test_a_short_write_fails_the_output_after_its_partial_advance(void)
 
 static void test_launcher_text_goes_before_app_text(void)
 {
-    uint8_t text[4] = "app!";
+    static const uint8_t text_init[4] = { 'a', 'p', 'p', '!' };
+    uint8_t text[4];
     struct zzrun_req r = mkreq(AAR_OP_CONSOLE_WRITE);
     struct zzrun_done d;
 
     console_fixture();
+    memcpy(text, text_init, sizeof(text));
     zzrun_console_launcher_status(&serve.console, "hello");
     assert(zzrun_console_output_pending(&serve.console));
     zzrun_console_pump(&serve.console);
