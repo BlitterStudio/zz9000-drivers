@@ -1026,6 +1026,9 @@ void zzrun_console_pump(struct zzrun_console *c)
     if (c->read_active && !c->read_pending && !c->eof &&
         c->ops.read_allowed(c->ops.ctx)) {
         if (!c->ops.open(c->ops.ctx)) {
+            /* The console the app asked for cannot be opened: a launcher
+             * error, as for a write. */
+            console_fail(c);
             read_finish(c, AAR_E_IO, 0);
         } else if (c->ops.read_start(c->ops.ctx, c->read_max)) {
             c->read_pending = 1;

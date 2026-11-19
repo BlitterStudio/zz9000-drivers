@@ -1495,6 +1495,22 @@ static void test_app_write_opens_the_console_before_queued_diagnostics(void)
     assert(fc.writes == 0);
 }
 
+static void test_console_read_that_cannot_open_the_console_is_a_launcher_error(void)
+{
+    uint8_t buf[64];
+    struct zzrun_req r = mkreq(AAR_OP_CONSOLE_READ);
+    struct zzrun_done d;
+
+    console_fixture();
+    fc.open_ok = 0;
+    r.buf = buf;
+    r.buf_len = sizeof(buf);
+    if (zzrun_serve_request(&serve, &r, &d) == ZZRUN_SERVE_DEFERRED)
+        zzrun_console_pump(&serve.console);
+    assert(sunk_n == 1 && sunk[0].done.result == AAR_E_IO);
+    assert(fc.errors == 1 && fc.read_starts == 0);
+}
+
 static void test_console_read_waits_for_demand_and_returns_what_was_read(void)
 {
     uint8_t buf[512];
@@ -2190,6 +2206,7 @@ int main(void)
     test_launcher_output_keeps_status_room_for_non_diagnostics();
     test_log_records_become_lines();
     test_app_write_opens_the_console_before_queued_diagnostics();
+    test_console_read_that_cannot_open_the_console_is_a_launcher_error();
     test_console_read_waits_for_demand_and_returns_what_was_read();
     test_console_read_end_of_input_is_sticky();
     test_display_open_validates_and_reports_what_was_made();
