@@ -2,52 +2,16 @@
 #include <stdio.h>
 #include <string.h>
 
-#ifndef ZZAPP_CAP_SLOTS
-#define ZZAPP_CAP_SLOTS (1u << 5)
-#define ZZAPP_CAP_LOW_MEMORY (1u << 6)
-#define ZZAPP_SLOT_COUNT 4u
-#define ZZAPP_MAILBOX_PAYLOAD_BYTES 48u
-#define ZZAPP_SEL_SLOT 40u
-#define ZZAPP_SEL_GENERATION 44u
-#define ZZAPP_LOAD_MEM_LIMIT_MIB 0u
-#define ZZAPP_CAP_HOST_LIMIT (1u << 8)
-#define ZZAPP_LOAD_HOST_VISIBLE_MIB 4u
-#define ZZAPP_QUERY_SLOTS 16u
-#define ZZAPP_QUERY_FREE_SLOTS 20u
-#define ZZAPP_QUERY_COMMIT_FREE 24u
-#define ZZAPP_QUERY_COMMIT_TOTAL 28u
-#define ZZAPP_QUERY_EXT_REPLY_BYTES 32u
-#define ZZAPP_ALLOC_ARM_ADDRESS 0u
-#define ZZAPP_ALLOC_SIZE 4u
-#define ZZAPP_ALLOC_HOST_OFFSET 8u
-#define ZZAPP_ALLOC_REPLY_BYTES 12u
-#define ZZAPP_ALLOC_SLOT 12u
-#define ZZAPP_ALLOC_GENERATION 16u
-#define ZZAPP_ALLOC_EXT_REPLY_BYTES 20u
-#define ZZAPP_LIST_STATE 0u
-#define ZZAPP_LIST_GENERATION 4u
-#define ZZAPP_LIST_COMMITTED 8u
-#define ZZAPP_LIST_LIMIT 12u
-#define ZZAPP_LIST_CPU_MS 16u
-#define ZZAPP_LIST_SERVICE_MS 20u
-#define ZZAPP_LIST_REASONS 24u
-#define ZZAPP_LIST_NAME 28u
-#define ZZAPP_LIST_REPLY_BYTES 48u
-#define ZZAPP_F_LAUNCHER_HEARTBEAT (1u << 18)
-#endif
-
-/* AAR file open flags from zzapp_proto.h. */
-#ifndef ZZAPP_FILE_EXCL
-#define ZZAPP_FILE_READ 1u
-#define ZZAPP_FILE_WRITE 2u
-#define ZZAPP_FILE_CREATE 4u
-#define ZZAPP_FILE_TRUNCATE 8u
-#define ZZAPP_FILE_EXCL 16u
-#endif
-
 #include "zzrun_policy.h"
 
-static struct zzrun_exit_in exit_in(uint32_t state, uint32_t fault,
+/* The AAR file open flags, under the names the older tests use. */
+#define ZZAPP_FILE_READ AAR_FILE_READ
+#define ZZAPP_FILE_WRITE AAR_FILE_WRITE
+#define ZZAPP_FILE_CREATE AAR_FILE_CREATE
+#define ZZAPP_FILE_TRUNCATE AAR_FILE_TRUNCATE
+#define ZZAPP_FILE_EXCL AAR_FILE_EXCL
+
+static struct zzrun_exit_in exit_in(uint32_t state, uint32_t end_reason,
                                     uint32_t elapsed, int stop_asked,
                                     int user_stop, int pending, int failed)
 {
@@ -55,10 +19,8 @@ static struct zzrun_exit_in exit_in(uint32_t state, uint32_t fault,
 
     memset(&in, 0, sizeof(in));
     in.state = state;
-    in.fault = fault;
+    in.end_reason = end_reason;
     in.elapsed_ms = elapsed;
-    in.generation = 7u;
-    in.last_generation = 7u;
     in.entered = 1;
     in.stop_asked = stop_asked;
     in.user_stop = user_stop;
@@ -107,14 +69,14 @@ static void test_clean_exit_still_drains(void)
     struct zzrun_exit_in idle = exit_in(ZZRUN_ST_IDLE, 0u, 0u, 0, 0, 1, 0);
     struct zzrun_exit_in done = exit_in(ZZRUN_ST_IDLE, 0u, 0u, 0, 0, 0, 0);
     struct zzrun_exit_in watchdog =
-        exit_in(ZZRUN_ST_RUNNING, ZZRUN_FAULT_WATCHDOG_RESTART, 0u, 0, 0, 0, 0);
+        exit_in(ZZRUN_ST_RUNNING, AAR_END_RUNTIME_RESTART, 0u, 0, 0, 0, 0);
 
     assert(zzrun_run_should_exit(&idle) == 0);
     assert(zzrun_run_should_exit(&done) == 1);
     assert(zzrun_run_should_exit(&watchdog) == 1);
 }
 
-static void test_generation_change_ends_even_if_new_app_is_live(void)
+static void test_lost_claim_ends_the_run(void)
 {
     struct zzrun_exit_in running =
         exit_in(ZZRUN_ST_RUNNING, 0u, 0u, 0, 0, 1, 0);
@@ -123,67 +85,24 @@ static void test_generation_change_ends_even_if_new_app_is_live(void)
     struct zzrun_exit_in loading =
         exit_in(ZZRUN_ST_LOADING, 0u, 0u, 0, 0, 0, 0);
 
-    running.generation = 8u;
-    starting.generation = 8u;
-    loading.generation = 8u;
+    /* A live handle with a running app keeps the loop going. */
+    assert(zzrun_run_should_exit(&running) == 0);
+    running.lost = 1;
+    starting.lost = 1;
+    loading.lost = 1;
     assert(zzrun_run_should_exit(&running) == 1);
     assert(zzrun_run_should_exit(&starting) == 1);
     assert(zzrun_run_should_exit(&loading) == 1);
 }
 
-static void test_keyboard_read_gated_on_running(void)
+static void test_console_read_gated_on_running(void)
 {
-    assert(zzrun_keyboard_read_allowed(ZZRUN_ST_RUNNING, 1, 0, 4u, 4u, 1u, 0,
-                                       0) == 1);
-    assert(zzrun_keyboard_read_allowed(ZZRUN_ST_FAULTED, 1, 0, 4u, 4u, 1u, 0,
-                                       0) == 0);
-    assert(zzrun_keyboard_read_allowed(ZZRUN_ST_STOPPING, 1, 0, 4u, 4u, 1u, 0,
-                                       0) == 0);
-    assert(zzrun_keyboard_read_allowed(ZZRUN_ST_IDLE, 1, 0, 4u, 4u, 1u, 0, 0) ==
-           0);
-    assert(zzrun_keyboard_read_allowed(ZZRUN_ST_RUNNING, 1, 1, 4u, 4u, 1u, 0,
-                                       0) == 0);
-    assert(zzrun_keyboard_read_allowed(ZZRUN_ST_RUNNING, 0, 0, 4u, 4u, 1u, 0,
-                                       0) == 0);
-    assert(zzrun_keyboard_read_allowed(ZZRUN_ST_RUNNING, 1, 0, 8u, 4u, 1u, 0,
-                                       0) == 0);
-    assert(zzrun_keyboard_read_allowed(ZZRUN_ST_RUNNING, 1, 0, 4u, 4u, 0u, 0,
-                                       0) == 0);
-    assert(zzrun_keyboard_read_allowed(ZZRUN_ST_RUNNING, 1, 0, 4u, 4u, 1u, 1,
-                                       0) == 0);
-}
-
-static void test_noninteractive_read_is_not_want_gated(void)
-{
-    assert(zzrun_async_read_allowed(ZZRUN_ST_RUNNING, 1, 0, 0u, 0u, 16u, 0, 0) ==
-           1);
-    assert(zzrun_async_read_allowed(ZZRUN_ST_RUNNING, 1, 0, 16u, 0u, 16u, 0,
-                                    0) == 0);
-    assert(zzrun_async_read_allowed(ZZRUN_ST_FAULTED, 1, 0, 0u, 0u, 16u, 0, 0) ==
-           0);
-    assert(zzrun_async_read_allowed(ZZRUN_ST_RUNNING, 1, 1, 0u, 0u, 16u, 0, 0) ==
-           0);
-}
-
-static void test_audio_epoch_discards_before_accept(void)
-{
-    assert(zzrun_audio_epoch_replaced(0, 0u, 1u) == 0);
-    assert(zzrun_audio_epoch_replaced(1, 1u, 1u) == 0);
-    assert(zzrun_audio_epoch_replaced(1, 1u, 2u) == 1);
-    assert(zzrun_audio_epoch_replaced(1, 0xffffffffu, 0u) == 1);
-}
-
-static void test_stop_payload_carries_generation(void)
-{
-    uint8_t payload[ZZRUN_STOP_REQ_BYTES];
-
-    memset(payload, 0x5a, sizeof(payload));
-    zzrun_stop_payload(payload, 0x01020304u);
-    assert(payload[0] == 0x01);
-    assert(payload[1] == 0x02);
-    assert(payload[2] == 0x03);
-    assert(payload[3] == 0x04);
-    assert(ZZRUN_STOP_REQ_BYTES == 4u);
+    assert(zzrun_console_read_allowed(ZZRUN_ST_RUNNING, 0) == 1);
+    assert(zzrun_console_read_allowed(ZZRUN_ST_FAULTED, 0) == 0);
+    assert(zzrun_console_read_allowed(ZZRUN_ST_STOPPING, 0) == 0);
+    assert(zzrun_console_read_allowed(ZZRUN_ST_IDLE, 0) == 0);
+    assert(zzrun_console_read_allowed(ZZRUN_ST_STARTING, 0) == 0);
+    assert(zzrun_console_read_allowed(ZZRUN_ST_RUNNING, 1) == 0);
 }
 
 static void test_finish_prompt_is_not_stdout(void)
@@ -195,58 +114,48 @@ static void test_finish_prompt_is_not_stdout(void)
 
 static void test_ahi_open_failure_exits_20(void)
 {
-    assert(zzrun_process_exit(0, 0, 0, 1) == 20);
-    assert(zzrun_process_exit(0, 0, 0, 0) == 0);
-    assert(zzrun_process_exit(7, 0, 0, 1) == 20);
-    assert(zzrun_process_exit(0, 1, 0, 0) == 20);
-    assert(zzrun_process_exit(0, 0, 1, 0) == 20);
+    assert(zzrun_process_exit(0, 0, 0, 1, 0) == 20);
+    assert(zzrun_process_exit(0, 0, 0, 0, 0) == 0);
+    assert(zzrun_process_exit(7, 0, 0, 1, 0) == 20);
+    assert(zzrun_process_exit(0, 1, 0, 0, 0) == 20);
+    assert(zzrun_process_exit(0, 0, 1, 0, 0) == 20);
 }
 
-static void test_busy_load_begin_claims_nothing(void)
+static void test_corrupt_queue_exits_20(void)
 {
-    assert(zzrun_load_generation_to_claim(1, 1, 7u, 8u, 0, 0, 0u) == 0u);
-    assert(zzrun_load_generation_to_claim(1, 1, 7u, 8u, 0, 1, 8u) == 0u);
-    assert(zzrun_load_generation_to_claim(1, 0, 7u, 8u, 0, 0, 0u) == 8u);
-    assert(zzrun_load_generation_to_claim(1, 0, 7u, 9u, 0, 1, 8u) == 8u);
-    assert(zzrun_load_generation_to_claim(1, 0, 7u, 7u, 0, 0, 0u) == 0u);
-    assert(zzrun_load_generation_to_claim(1, 0, 7u, 8u, 1, 0, 0u) == 0u);
-    assert(zzrun_load_generation_to_claim(0, 0, 7u, 8u, 0, 0, 0u) == 0u);
+    /* The app was stopped for the corrupt queue: not a user stop, whatever
+     * exit code or end reason it then reports. */
+    assert(zzrun_process_exit(0, 0, 0, 0, 1) == 20);
+    assert(zzrun_process_exit(7, 0, 0, 0, 1) == 20);
+    assert(zzrun_process_exit(zzrun_app_exit_code(AAR_END_FORCED, 0, 1), 0, 0, 0,
+                              1) == 20);
 }
 
-static void test_busy_deferred_operations_retry_only_until_deadline(void)
+static void test_replies_are_never_dropped_for_want_of_room(void)
 {
-    const int busy = -4;
-    const int io_error = -1;
+    uint32_t used = 0;
+    uint32_t taken = 0;
+    uint32_t deferred = 0;
 
-    assert(zzrun_deferred_should_retry(busy, busy, 100u, 100u));
-    assert(zzrun_deferred_should_retry(busy, busy, 100u,
-                                       100u + ZZRUN_BUSY_RETRY_MS - 1u));
-    assert(!zzrun_deferred_should_retry(busy, busy, 100u,
-                                        100u + ZZRUN_BUSY_RETRY_MS));
-    assert(!zzrun_deferred_should_retry(io_error, busy, 100u, 101u));
+    /* The SQ holds more requests than the backlog; the CQ stays full. Every
+     * request taken adds at most one backlog entry; three deferred
+     * completions (console write and read, flip) may follow. */
+    while (zzrun_reply_may_take_request(used)) {
+        used++;
+        taken++;
+        assert(taken < 1000u);
+    }
+    assert(taken > 0u && taken < ZZRUN_REPLY_BACKLOG);
+    for (deferred = 0; deferred < 3u; deferred++)
+        used++;
+    assert(used <= ZZRUN_REPLY_BACKLOG);
+    assert(!zzrun_reply_may_take_request(ZZRUN_REPLY_BACKLOG));
+    assert(zzrun_reply_may_take_request(0));
+    /* Room returns as the backlog drains. */
+    assert(zzrun_reply_may_take_request(ZZRUN_REPLY_BACKLOG - ZZRUN_REPLY_RESERVE - 1u));
+    assert(!zzrun_reply_may_take_request(ZZRUN_REPLY_BACKLOG - ZZRUN_REPLY_RESERVE));
 }
 
-static void test_stale_file_request_cannot_publish_or_claim(void)
-{
-    assert(zzrun_file_request_is_current(8u, 3u, 8u, 3u));
-    assert(!zzrun_file_request_is_current(8u, 3u, 9u, 3u));
-    assert(!zzrun_file_request_is_current(8u, 3u, 8u, 4u));
-    assert(!zzrun_file_service_generation_owned(0u, 0u));
-}
-
-/* serve_files() captures the live generation once, then every open/read/seek/
- * close reply is fenced against that same value. */
-static void test_owning_file_service_accepts_open_read_seek_and_close(void)
-{
-    uint32_t generation = 0x31u;
-
-    assert(zzrun_file_service_generation_owned(generation, generation));
-    assert(zzrun_file_request_is_current(2u, generation, 2u, generation));
-    assert(zzrun_file_request_is_current(4u, generation, 4u, generation));
-    assert(zzrun_file_request_is_current(6u, generation, 6u, generation));
-    assert(zzrun_file_request_is_current(8u, generation, 8u, generation));
-    assert(!zzrun_file_service_generation_owned(generation, generation + 1u));
-}
 
 static void test_empty_argument_is_allowed(void)
 {
@@ -266,17 +175,6 @@ static void test_async_console_write_advances_only_on_completion(void)
     assert(zzrun_console_write_failed(64u, 0));
 }
 
-/* The just-completed write advanced the launcher-owned tail from 218 to
- * 234. A Zorro read still returning 218 must not re-send 218..250. */
-static void test_owned_cursor_ignores_stale_readback(void)
-{
-    struct zzrun_owned_cursor cursor = { 0 };
-
-    assert(zzrun_owned_cursor_adopt(&cursor, 7u, 0xfffffff0u) == 0xfffffff0u);
-    assert(zzrun_owned_cursor_advance(&cursor, 32u) == 16u);
-    assert(zzrun_owned_cursor_adopt(&cursor, 7u, 0xfffffff0u) == 16u);
-    assert(zzrun_owned_cursor_adopt(&cursor, 8u, 3u) == 3u);
-}
 
 static void test_terminal_output_drains_before_exit(void)
 {
@@ -339,89 +237,6 @@ static void put_be32(uint8_t *p, uint32_t value)
     p[3] = (uint8_t)value;
 }
 
-static uint32_t get_be32(const uint8_t *p)
-{
-    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
-           ((uint32_t)p[2] << 8) | p[3];
-}
-
-static void test_slot_claim_selects_every_following_request(void)
-{
-    uint8_t claim[ZZAPP_ALLOC_EXT_REPLY_BYTES] = { 0 };
-    uint8_t legacy[] = { 1u, 2u, 3u, 4u };
-    uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES];
-    struct zzrun_claim_reply parsed;
-
-    put_be32(claim + ZZAPP_ALLOC_ARM_ADDRESS, 0x01234567u);
-    put_be32(claim + ZZAPP_ALLOC_SIZE, 0x00094000u);
-    put_be32(claim + ZZAPP_ALLOC_HOST_OFFSET, 0x00100000u);
-    put_be32(claim + ZZAPP_ALLOC_SLOT, 2u);
-    put_be32(claim + ZZAPP_ALLOC_GENERATION, 0x10203040u);
-    assert(zzrun_claim_reply_decode(claim, sizeof(claim), 1, &parsed));
-    assert(parsed.slot == 2u);
-    assert(parsed.generation == 0x10203040u);
-    assert(zzrun_request_build(request, legacy, sizeof(legacy), 1, parsed.slot,
-                               parsed.generation) ==
-           ZZAPP_MAILBOX_PAYLOAD_BYTES);
-    assert(memcmp(request, legacy, sizeof(legacy)) == 0);
-    assert(get_be32(request + ZZAPP_SEL_SLOT) == 2u);
-    assert(get_be32(request + ZZAPP_SEL_GENERATION) == 0x10203040u);
-}
-
-static void test_slot_replacement_requires_a_changed_generation(void)
-{
-    assert(!zzrun_slot_replaced(1, 2u, 0x10203040u, 2u, 0x10203040u,
-                                ZZRUN_ST_IDLE));
-    assert(!zzrun_slot_replaced(1, 2u, 0x10203040u, 2u, 0x10203040u,
-                                ZZRUN_ST_FAULTED));
-    assert(zzrun_slot_replaced(1, 2u, 0x10203040u, 2u, 0x10203041u,
-                               ZZRUN_ST_IDLE));
-    assert(!zzrun_slot_replaced(1, 2u, 0x10203040u, 1u, 0x10203041u,
-                                ZZRUN_ST_RUNNING));
-    assert(zzrun_slot_replaced(0, 0u, 0x10203040u, 0u, 0x10203041u,
-                               ZZRUN_ST_RUNNING));
-}
-
-static void test_low_memory_counter_reports_changes_when_advertised(void)
-{
-    struct zzrun_low_memory_state state = { 0 };
-
-    assert(!zzrun_low_memory_changed(&state, 0u, 1u, 1u));
-    assert(!zzrun_low_memory_changed(&state, ZZAPP_CAP_LOW_MEMORY, 1u, 0u));
-    assert(zzrun_low_memory_changed(&state, ZZAPP_CAP_LOW_MEMORY, 1u, 1u));
-    assert(!zzrun_low_memory_changed(&state, ZZAPP_CAP_LOW_MEMORY, 1u, 1u));
-    assert(zzrun_low_memory_changed(&state, ZZAPP_CAP_LOW_MEMORY, 1u, 2u));
-}
-
-static void test_low_memory_counter_handles_wrap(void)
-{
-    struct zzrun_low_memory_state state = { 0 };
-
-    assert(zzrun_low_memory_changed(&state, ZZAPP_CAP_LOW_MEMORY, 1u,
-                                    UINT32_MAX));
-    assert(zzrun_low_memory_changed(&state, ZZAPP_CAP_LOW_MEMORY, 1u, 0u));
-}
-
-static void test_low_memory_counter_resets_for_a_new_generation(void)
-{
-    struct zzrun_low_memory_state state = { 0 };
-
-    assert(zzrun_low_memory_changed(&state, ZZAPP_CAP_LOW_MEMORY, 1u, 1u));
-    assert(!zzrun_low_memory_changed(&state, ZZAPP_CAP_LOW_MEMORY, 2u, 0u));
-    assert(zzrun_low_memory_changed(&state, ZZAPP_CAP_LOW_MEMORY, 2u, 1u));
-}
-
-static void test_legacy_request_shape_is_unchanged_without_slots(void)
-{
-    uint8_t legacy[] = { 0xaa, 0xbb, 0xcc, 0xdd };
-    uint8_t request[ZZAPP_MAILBOX_PAYLOAD_BYTES];
-
-    memset(request, 0x5a, sizeof(request));
-    assert(zzrun_request_build(request, legacy, sizeof(legacy), 0, 2u,
-                               0x10203040u) == sizeof(legacy));
-    assert(memcmp(request, legacy, sizeof(legacy)) == 0);
-    assert(request[sizeof(legacy)] == 0x5a);
-}
 
 static void test_maxmem_requires_positive_decimal_mib(void)
 {
@@ -454,74 +269,83 @@ static void test_hostmem_requires_positive_decimal_mib(void)
     assert(!zzrun_parse_hostmem("8", NULL));
 }
 
-static void test_hostmem_is_rejected_without_the_host_limit_capability(void)
+static void test_handle_parse(void)
 {
-    const uint32_t slots = ZZAPP_CAP_SLOTS;
-    const uint32_t both = ZZAPP_CAP_SLOTS | ZZAPP_CAP_HOST_LIMIT;
+    uint32_t handle = 7u;
 
-    assert(zzrun_hostmem_decision(0u, 8u) == ZZRUN_HOSTMEM_REJECT);
-    assert(zzrun_hostmem_decision(slots, 8u) == ZZRUN_HOSTMEM_REJECT);
-    assert(zzrun_hostmem_decision(ZZAPP_CAP_HOST_LIMIT, 8u) ==
-           ZZRUN_HOSTMEM_REJECT);
-    assert(zzrun_hostmem_decision(both, 8u) == ZZRUN_HOSTMEM_SEND);
-    assert(zzrun_hostmem_decision(both, 4095u) == ZZRUN_HOSTMEM_SEND);
-    assert(zzrun_hostmem_decision(0u, 0u) == ZZRUN_HOSTMEM_OMIT);
-    assert(zzrun_hostmem_decision(both, 0u) == ZZRUN_HOSTMEM_OMIT);
+    assert(zzrun_parse_handle("65539", &handle) && handle == 65539u);
+    assert(zzrun_parse_handle("$00020003", &handle) && handle == 0x20003u);
+    assert(zzrun_parse_handle("0x20003", &handle) && handle == 0x20003u);
+    assert(zzrun_parse_handle("0XfFfFffff", &handle) && handle == 0xffffffffu);
+    handle = 7u;
+    assert(!zzrun_parse_handle("0", &handle) && handle == 7u);
+    assert(!zzrun_parse_handle("", &handle));
+    assert(!zzrun_parse_handle("$", &handle));
+    assert(!zzrun_parse_handle("0x", &handle));
+    assert(!zzrun_parse_handle("12a", &handle));
+    assert(!zzrun_parse_handle("$12g", &handle));
+    assert(!zzrun_parse_handle("4294967296", &handle));
+    assert(!zzrun_parse_handle("$100000000", &handle));
+    assert(!zzrun_parse_handle("-1", &handle));
+    assert(!zzrun_parse_handle(NULL, &handle));
+    assert(!zzrun_parse_handle("1", NULL));
 }
 
-static void test_load_begin_payload_places_both_limits(void)
+static void test_refusal_text_names_each_reason(void)
 {
-    uint8_t out[ZZRUN_LOAD_BEGIN_BYTES];
-
-    assert(ZZAPP_LOAD_HOST_VISIBLE_MIB == 4u);
-    memset(out, 0x5a, sizeof(out));
-    assert(zzrun_load_begin_payload(out, 1, 256u, 1, 32u) ==
-           ZZRUN_LOAD_BEGIN_BYTES);
-    assert(zzrun_be32(out + ZZAPP_LOAD_MEM_LIMIT_MIB) == 256u);
-    assert(zzrun_be32(out + ZZAPP_LOAD_HOST_VISIBLE_MIB) == 32u);
-
-    /* HOSTMEM alone leaves the memory cap at 0, meaning none. */
-    memset(out, 0x5a, sizeof(out));
-    assert(zzrun_load_begin_payload(out, 0, 0u, 1, 8u) ==
-           ZZRUN_LOAD_BEGIN_BYTES);
-    assert(zzrun_be32(out + ZZAPP_LOAD_MEM_LIMIT_MIB) == 0u);
-    assert(zzrun_be32(out + ZZAPP_LOAD_HOST_VISIBLE_MIB) == 8u);
-
-    /* MAXMEM alone keeps the four-byte request the runtime already saw. */
-    memset(out, 0x5a, sizeof(out));
-    assert(zzrun_load_begin_payload(out, 1, 64u, 0, 0u) == 4u);
-    assert(zzrun_be32(out + ZZAPP_LOAD_MEM_LIMIT_MIB) == 64u);
-
-    assert(zzrun_load_begin_payload(out, 0, 0u, 0, 0u) == 0u);
+    assert(strstr(zzrun_refusal_text(AAR_REASON_MEMORY), "record"));
+    assert(strstr(zzrun_refusal_text(AAR_REASON_TABLES), "tables"));
+    assert(strstr(zzrun_refusal_text(AAR_REASON_HOSTHEAP), "shared"));
+    assert(strstr(zzrun_refusal_text(AAR_REASON_LIMIT), "HOSTMEM"));
+    assert(strcmp(zzrun_refusal_text(99u), "refused by the platform") == 0);
+    assert(strcmp(zzrun_refusal_text(AAR_REASON_NONE),
+                  "refused by the platform") == 0);
 }
 
-static void test_hostmem_no_memory_distinguishes_ceiling_from_other_causes(void)
+static void test_client_caps(void)
 {
-    assert(zzrun_hostmem_failure(63u, 6) == ZZRUN_HOSTMEM_FAIL_TOO_LARGE);
-    assert(zzrun_hostmem_failure(4095u, 6) == ZZRUN_HOSTMEM_FAIL_TOO_LARGE);
-    /* At or below the ceiling NO_MEMORY may be the staging arena or the
-     * shared heap, so it is not blamed on the request alone. */
-    assert(zzrun_hostmem_failure(62u, 6) == ZZRUN_HOSTMEM_FAIL_NO_MEMORY);
-    assert(zzrun_hostmem_failure(1u, 6) == ZZRUN_HOSTMEM_FAIL_NO_MEMORY);
-    assert(zzrun_hostmem_failure(63u, 0) == ZZRUN_HOSTMEM_FAIL_NONE);
-    assert(zzrun_hostmem_failure(63u, 3) == ZZRUN_HOSTMEM_FAIL_NONE);
-    assert(zzrun_hostmem_failure(0u, 6) == ZZRUN_HOSTMEM_FAIL_NONE);
+    const uint32_t base = ZZAPP_CLIENT_LEASE_EXTENDED | ZZAPP_CLIENT_CLUT8 |
+                          ZZAPP_CLIENT_SCANOUT_ACK | ZZAPP_CLIENT_LATEST;
+
+    assert(zzrun_client_caps(0) == base);
+    assert(zzrun_client_caps(1) == (base | ZZAPP_CLIENT_AUDIO_AHI));
+    assert((zzrun_client_caps(1) & ~ZZAPP_CLIENT_KNOWN) == 0u);
 }
 
-static void test_extended_query_reply_is_required_and_carries_every_cap(void)
+static void test_app_exit_code(void)
 {
-    uint8_t reply[ZZAPP_QUERY_EXT_REPLY_BYTES];
-    struct zzrun_slots_query query;
-    const uint32_t caps = 0x1ffu;
+    assert(zzrun_app_exit_code(AAR_END_EXIT, 0, 0) == 0);
+    assert(zzrun_app_exit_code(AAR_END_EXIT, 7, 0) == 7);
+    assert(zzrun_app_exit_code(AAR_END_EXIT, 255, 0) == 255);
+    assert(zzrun_app_exit_code(AAR_END_EXIT, 256, 0) == 20);
+    assert(zzrun_app_exit_code(AAR_END_EXIT, -1, 0) == 20);
+    assert(zzrun_app_exit_code(AAR_END_EXIT, -1, 1) == 0);
+    assert(zzrun_app_exit_code(AAR_END_USER_FAULT, 0, 0) == 20);
+    assert(zzrun_app_exit_code(AAR_END_STALL, 0, 0) == 20);
+    assert(zzrun_app_exit_code(AAR_END_STUCK_CALL, 0, 1) == 20);
+    assert(zzrun_app_exit_code(AAR_END_LEASE, 0, 0) == 20);
+    assert(zzrun_app_exit_code(AAR_END_PLATFORM_RESET, 0, 0) == 20);
+    assert(zzrun_app_exit_code(AAR_END_RUNTIME_RESTART, 0, 0) == 20);
+    assert(zzrun_app_exit_code(AAR_END_QUARANTINED, 0, 0) == 20);
+    /* A forced end is a launcher error unless the user asked for it. */
+    assert(zzrun_app_exit_code(AAR_END_FORCED, 0, 0) == 20);
+    assert(zzrun_app_exit_code(AAR_END_FORCED, 0, 1) == 0);
+    assert(zzrun_app_exit_code(AAR_END_FORCED, 3, 1) == 3);
+}
 
-    memset(reply, 0, sizeof(reply));
-    zzrun_put_be32(reply + 12u, caps);
-    zzrun_put_be32(reply + ZZAPP_QUERY_SLOTS, 4u);
-    zzrun_put_be32(reply + ZZAPP_QUERY_FREE_SLOTS, 4u);
-    assert(zzrun_slots_query_decode(reply, sizeof(reply), &query));
-    assert(zzrun_be32(reply + 12u) & ZZAPP_CAP_HOST_LIMIT);
-    /* A legacy 16-byte reply has no slot counts: not a usable runtime. */
-    assert(!zzrun_slots_query_decode(reply, 16u, &query));
+static void test_release_is_for_finished_claims(void)
+{
+    /* an app that ended, faulted, or whose claim the card quarantined */
+    assert(zzrun_release_allowed(ZZRUN_ST_IDLE, AAR_END_EXIT));
+    assert(zzrun_release_allowed(ZZRUN_ST_FAULTED, AAR_END_USER_FAULT));
+    assert(zzrun_release_allowed(ZZRUN_ST_STOPPING, AAR_END_QUARANTINED));
+    assert(zzrun_release_allowed(ZZRUN_ST_RUNNING, AAR_END_LEASE));
+    /* a claim somebody is using */
+    assert(!zzrun_release_allowed(ZZRUN_ST_RUNNING, AAR_END_NONE));
+    assert(!zzrun_release_allowed(ZZRUN_ST_CLAIMED, AAR_END_NONE));
+    assert(!zzrun_release_allowed(ZZRUN_ST_LOADING, AAR_END_NONE));
+    assert(!zzrun_release_allowed(ZZRUN_ST_STARTING, AAR_END_NONE));
+    assert(!zzrun_release_allowed(ZZRUN_ST_STOPPING, AAR_END_FORCED));
 }
 
 static void test_block_reason_names_match_protocol(void)
@@ -543,27 +367,36 @@ static void test_list_reply_decoding(void)
     struct zzrun_list_reply parsed;
 
     put_be32(reply + ZZAPP_LIST_STATE, ZZRUN_ST_RUNNING);
-    put_be32(reply + ZZAPP_LIST_GENERATION, 0x10203040u);
+    put_be32(reply + ZZAPP_LIST_HANDLE, 0x00020003u);
     put_be32(reply + ZZAPP_LIST_COMMITTED, 12u * 1024u * 1024u);
-    put_be32(reply + ZZAPP_LIST_LIMIT, 64u * 1024u * 1024u);
+    put_be32(reply + ZZAPP_LIST_INDEX, 3u);
     put_be32(reply + ZZAPP_LIST_CPU_MS, 2500u);
     put_be32(reply + ZZAPP_LIST_SERVICE_MS, 17u);
     reply[ZZAPP_LIST_REASONS] = 3u;
-    reply[ZZAPP_LIST_REASONS + 1u] = 2u;
+    reply[ZZAPP_LIST_REASONS + 1u] = AAR_END_FORCED;
+    reply[ZZAPP_LIST_REASONS + 3u] = ZZAPP_LIST_FLAG_OVERLOAD;
     memcpy(reply + ZZAPP_LIST_NAME, "quake", 6u);
     assert(zzrun_list_reply_decode(reply, sizeof(reply), &parsed));
     assert(parsed.state == ZZRUN_ST_RUNNING);
-    assert(parsed.generation == 0x10203040u);
+    assert(parsed.handle == 0x00020003u);
+    assert(parsed.index == 3u);
     assert(parsed.committed_bytes == 12u * 1024u * 1024u);
-    assert(parsed.limit_bytes == 64u * 1024u * 1024u);
     assert(parsed.cpu_ms == 2500u);
+    assert(parsed.service_ms == 17u);
     assert(parsed.block_reason == 3u);
-    assert(parsed.terminal_reason == 2u);
+    assert(parsed.end_reason == AAR_END_FORCED);
+    assert(parsed.flags == ZZAPP_LIST_FLAG_OVERLOAD);
     assert(strcmp(parsed.name, "quake") == 0);
     assert(strcmp(zzrun_block_reason_name(parsed.block_reason), "event") == 0);
-    assert(strcmp(zzrun_terminal_reason_name(parsed.terminal_reason),
-                  "forced stop") == 0);
-    assert(strcmp(zzrun_terminal_reason_name(9u), "quarantined") == 0);
+    assert(strcmp(zzrun_end_reason_name(parsed.end_reason), "forced stop") == 0);
+    assert(strcmp(zzrun_end_reason_name(AAR_END_QUARANTINED),
+                  "quarantined") == 0);
+    assert(!zzrun_list_reply_decode(reply, ZZAPP_LIST_REPLY_BYTES - 1u,
+                                    &parsed));
+    /* A list with no further claim names handle 0. */
+    memset(reply, 0, sizeof(reply));
+    assert(zzrun_list_reply_decode(reply, sizeof(reply), &parsed));
+    assert(parsed.handle == 0u);
 }
 
 /* The flags word carries AAR values: READ 1, WRITE 2, CREATE 4, TRUNCATE 8,
@@ -644,20 +477,6 @@ static void test_status_keyword_is_case_insensitive(void)
     assert(!zzrun_is_status_keyword("STATU"));
     assert(!zzrun_is_status_keyword(""));
 }
-static void test_launcher_lease_is_advertised(void)
-{
-    const uint32_t flags = 0x1234u;
-
-    assert(zzrun_launcher_lease_flags(flags) ==
-           (flags | ZZAPP_F_LAUNCHER_HEARTBEAT));
-}
-static void test_lease_renewal_never_crosses_generations(void)
-{
-    assert(zzrun_lease_renew_allowed(7u, 7u, 7u));
-    assert(!zzrun_lease_renew_allowed(7u, 8u, 8u));
-    assert(!zzrun_lease_renew_allowed(7u, 7u, 8u));
-    assert(!zzrun_lease_renew_allowed(0u, 0u, 0u));
-}
 static void test_dos_packet_transport_and_error_are_distinct(void)
 {
     assert(zzrun_dos_boolean_result(1, 1));
@@ -665,13 +484,6 @@ static void test_dos_packet_transport_and_error_are_distinct(void)
     assert(!zzrun_dos_boolean_result(0, 1));
     assert(zzrun_dos_error_code(1, 42, -1) == 42);
     assert(zzrun_dos_error_code(0, 42, -1) == -1);
-}
-static void test_legacy_claim_passes_the_pre_load_gate(void)
-{
-    assert(!zzrun_lease_gate_stops(0u, 0));
-    assert(!zzrun_lease_gate_stops(0u, 1));
-    assert(zzrun_lease_gate_stops(7u, 0));
-    assert(!zzrun_lease_gate_stops(7u, 1));
 }
 static void test_packet_wait_outlives_abandonment(void)
 {
@@ -700,6 +512,46 @@ static void test_bstr_encoding_matches_dos_packets(void)
     assert(strcmp(zzrun_dos_packet_path("relative/demo.elf"),
                   "relative/demo.elf") == 0);
     assert(zzrun_dos_packet_path(NULL) == NULL);
+}
+
+static void test_examine_packet_names_are_bcpl_strings(void)
+{
+    uint8_t fib_name[108];
+    char out[256];
+
+    /* A short name with no NUL and stale bytes after its counted end. */
+    memset(fib_name, 'x', sizeof(fib_name));
+    fib_name[0] = 7;
+    memcpy(fib_name + 1, "f00.bin", 7);
+    assert(zzrun_bstr_decode(fib_name, sizeof(fib_name), out, sizeof(out)) == 7u);
+    assert(strcmp(out, "f00.bin") == 0);
+    assert(zzrun_bstr_decode(fib_name, sizeof(fib_name), out, 4u) == 3u);
+    assert(strcmp(out, "f00") == 0);
+    /* One byte, with and without a trailing NUL outside the counted name. */
+    fib_name[0] = 1;
+    fib_name[1] = 'a';
+    fib_name[2] = 0;
+    assert(zzrun_bstr_decode(fib_name, sizeof(fib_name), out, sizeof(out)) == 1u);
+    assert(strcmp(out, "a") == 0);
+    fib_name[2] = 'x';
+    assert(zzrun_bstr_decode(fib_name, sizeof(fib_name), out, sizeof(out)) == 1u);
+    assert(strcmp(out, "a") == 0);
+    fib_name[0] = 0;
+    assert(zzrun_bstr_decode(fib_name, sizeof(fib_name), out, sizeof(out)) == 0u);
+    assert(out[0] == 0);
+    fib_name[0] = sizeof(fib_name) - 1u;
+    assert(zzrun_bstr_decode(fib_name, sizeof(fib_name), out, sizeof(out)) == 107u);
+    assert(memcmp(out, fib_name + 1, 107) == 0 && out[107] == 0);
+}
+
+static void test_claim_loss_does_not_look_like_a_clean_exit(void)
+{
+    assert(strcmp(zzrun_claim_loss_text(0, AAR_END_LEASE), "lease expired") == 0);
+    assert(strcmp(zzrun_claim_loss_text(0, AAR_END_QUARANTINED), "quarantined") == 0);
+    assert(strcmp(zzrun_claim_loss_text(1, AAR_END_NONE),
+                  "stale handle; final status unavailable") == 0);
+    assert(zzrun_claim_loss_text(0, AAR_END_EXIT) == NULL);
+    assert(zzrun_claim_loss_text(0, AAR_END_NONE) == NULL);
 }
 
 static void test_pending_packet_ctrl_c_still_requests_stop(void)
@@ -1149,125 +1001,37 @@ static void test_async_release_preserves_or_frees_resources_by_delivery(void)
     assert(release.sends == 1);
 }
 
-struct fake_writer {
-    uint32_t current_generation;
-    unsigned reads;
-};
-
-static uint32_t fake_read_generation(void *context)
-{
-    struct fake_writer *writer = context;
-
-    writer->reads++;
-    return writer->current_generation;
-}
-
-static void test_lost_generation_cannot_write_shared_window(void)
-{
-    struct fake_writer state;
-    struct zzrun_shared_writer writer;
-    uint8_t window[20];
-    uint8_t before[20];
-    static const uint8_t input[] = { 'c', 't', 'r', 'l', '-', 'c' };
-
-    memset(window, 0xa5, sizeof(window));
-    memcpy(before, window, sizeof(window));
-    memset(&state, 0, sizeof(state));
-    writer.context = &state;
-    writer.owned_generation = 9u;
-    writer.attached = 0;
-    writer.read_current_generation = fake_read_generation;
-    assert(!zzrun_shared_write_be32(&writer, window, 1u));
-    assert(state.reads == 0u);
-    assert(memcmp(window, before, sizeof(window)) == 0);
-
-    writer.attached = 1;
-    assert(!zzrun_shared_write_be32(&writer, window + 0, 1u)); /* stop */
-    assert(!zzrun_shared_write_be32(&writer, window + 4, 2u)); /* file */
-    assert(!zzrun_shared_write_bytes(&writer, window + 8, input, sizeof(input)));
-    assert(!zzrun_shared_write_be32(&writer, window + 16, 3u)); /* AHI */
-    assert(memcmp(window, before, sizeof(window)) == 0);
-    assert(state.reads == 4u);
-
-    state.current_generation = 9u;
-    assert(zzrun_shared_write_be32(&writer, window + 0, 0x12345678u));
-    assert(window[0] == 0x12u && window[1] == 0x34u &&
-           window[2] == 0x56u && window[3] == 0x78u);
-    assert(zzrun_shared_write_be32(&writer, window + 4, 2u)); /* event/log */
-    assert(zzrun_shared_write_bytes(&writer, window + 8, input, sizeof(input)));
-    assert(memcmp(window + 8, input, sizeof(input)) == 0);
-    assert(zzrun_shared_write_be32(&writer, window + 16, 3u)); /* display */
-
-    writer.owned_generation = 0u;
-    state.current_generation = 0u;
-    state.reads = 0u;
-    assert(!zzrun_shared_write_be32(&writer, window, 4u));
-    assert(state.reads == 0u);
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 int main(void)
 {
     test_output_failure_does_not_block_exit();
     test_ctrl_c_ends_even_if_output_remains();
     test_clean_exit_still_drains();
-    test_generation_change_ends_even_if_new_app_is_live();
-    test_keyboard_read_gated_on_running();
-    test_noninteractive_read_is_not_want_gated();
-    test_audio_epoch_discards_before_accept();
-    test_stop_payload_carries_generation();
+    test_lost_claim_ends_the_run();
+    test_console_read_gated_on_running();
     test_finish_prompt_is_not_stdout();
-    test_busy_load_begin_claims_nothing();
     test_ahi_open_failure_exits_20();
-    test_busy_deferred_operations_retry_only_until_deadline();
-    test_stale_file_request_cannot_publish_or_claim();
-    test_owning_file_service_accepts_open_read_seek_and_close();
+    test_corrupt_queue_exits_20();
+    test_replies_are_never_dropped_for_want_of_room();
     test_empty_argument_is_allowed();
     test_async_console_write_advances_only_on_completion();
-    test_owned_cursor_ignores_stale_readback();
     test_terminal_output_drains_before_exit();
     test_raw_ctrl_c_requests_stop();
     test_screen_buffer_safe_messages_are_all_reaped();
     test_launcher_output_reserves_status_room();
     test_launcher_output_orders_queued_messages_before_app_output();
-    test_slot_replacement_requires_a_changed_generation();
-    test_slot_claim_selects_every_following_request();
-    test_low_memory_counter_reports_changes_when_advertised();
-    test_low_memory_counter_handles_wrap();
-    test_low_memory_counter_resets_for_a_new_generation();
-    test_legacy_request_shape_is_unchanged_without_slots();
     test_maxmem_requires_positive_decimal_mib();
     test_hostmem_requires_positive_decimal_mib();
-    test_hostmem_is_rejected_without_the_host_limit_capability();
-    test_load_begin_payload_places_both_limits();
-    test_hostmem_no_memory_distinguishes_ceiling_from_other_causes();
-    test_extended_query_reply_is_required_and_carries_every_cap();
+    test_handle_parse();
+    test_refusal_text_names_each_reason();
+    test_client_caps();
+    test_app_exit_code();
+    test_release_is_for_finished_claims();
     test_block_reason_names_match_protocol();
     test_list_reply_decoding();
     test_open_flags_map_to_one_plan_each();
     test_open_flag_refusals_are_the_invalid_combinations();
     test_status_keyword_is_case_insensitive();
-    test_launcher_lease_is_advertised();
-    test_lease_renewal_never_crosses_generations();
     test_dos_packet_transport_and_error_are_distinct();
-    test_legacy_claim_passes_the_pre_load_gate();
     test_packet_wait_outlives_abandonment();
     test_dos_path_dispatch_uses_assign_locks_and_retries();
     test_probe_candidate_is_reported_and_reused_for_the_open();
@@ -1277,10 +1041,11 @@ int main(void)
     test_lost_operation_packets_are_not_sent_but_releases_are();
     test_destructive_open_steps_stop_when_the_request_is_cancelled();
     test_bstr_encoding_matches_dos_packets();
+    test_examine_packet_names_are_bcpl_strings();
+    test_claim_loss_does_not_look_like_a_clean_exit();
     test_pending_packet_ctrl_c_still_requests_stop();
     test_load_break_consumed_by_packet_returns_warn();
     test_async_release_preserves_or_frees_resources_by_delivery();
-    test_lost_generation_cannot_write_shared_window();
     puts("zzrun_policy_test: ok");
     return 0;
 }

@@ -20,7 +20,7 @@ The SDK tools, when installed, are documented in `sdk.guide`.
 | `ZZNetReady` | Returns an AmigaDOS status for a boot script that waits for Ethernet negotiation. |
 | `ZZScanlines` | Changes the active scandoubler scanline mode and parity. |
 | `ZZGamma` | Sets the output gamma filter live, or prints the current gamma. |
-| `ZZRun` | Loads up to four trusted ARM ELFs through `zz9k.library`; requires Zorro III app-runtime firmware with app slots. The current drivers release supplies library revision 40. |
+| `ZZRun` | Loads trusted ARM ELFs over the AAR queue transport, one claim per app; requires matching Zorro III app-runtime firmware, `zz9k.library` revision 36 or later (the SDK runtime in this release ships 2.41), and `mmu.library` 41 or later. |
 
 ## ZZFwUpdate: firmware updates
 
@@ -259,29 +259,31 @@ slider on ZZTop's Display page and press Save.
 
 ## ZZRun: ARM app launcher
 
-`ZZRun` needs a Zorro III board and app-runtime firmware that advertises the
-slots capability (ABI 0.3); on firmware without slots it stops with return 20.
+`ZZRun` needs a Zorro III board and matching app-runtime firmware that speaks
+the AAR queue transport (app ABI 0.5); without it ZZRun stops with return 20.
 Picasso96 is also required when an app requests a display. Run
 `Stack 32768` in the launching Shell; ZZRun rejects a process stack smaller
 than 16 KiB.
 
-ZZRun opens `zz9k.library` at version 0 for mailbox transport. It calls
-`ZZ9KCall`, `ZZ9KCallAsync`, `ZZ9KPoll`, and `ZZ9KCancelAsync`, so it needs
-library revision 2 or later. The current drivers release supplies revision 40.
+ZZRun links the SDK's client transport module. It opens `zz9k.library`
+(revision 36 or later, only to reach the board's mailbox) and needs
+`mmu.library` 41 or later to map the card's shared buffers cache-inhibited.
+The SDK runtime in this release supplies `zz9k.library` 2.41.
 
 | Form | Result |
 | --- | --- |
 | `ZZRun <app.elf> [MAXMEM=<MiB>] [HOSTMEM=<MiB>] [AUDIO=AHI] [args]` | Loads and starts the ELF. `MAXMEM` is a positive decimal MiB cap. `HOSTMEM` is a positive decimal MiB limit (1 to 4095) on the host-visible card memory the app may allocate; the default is 16 MiB and the firmware grants at most 62 MiB. `AUDIO=AHI` sends app PCM through AHI. These forms are recognized anywhere after the ELF and are removed from app arguments. |
-| `ZZRun STATUS` | Lists all slots. `STATUS` is case-insensitive. |
-| `ZZRun RELEASE <slot>` | Releases a fully torn-down quarantined slot numbered 0 through 3. |
+| `ZZRun STATUS` | Lists every claim the card holds. `STATUS` is case-insensitive. |
+| `ZZRun RELEASE <handle>` | Releases a claim whose app has ended or whose launcher lost it. The handle is the number `STATUS` prints, in hexadecimal written as `$` or `0x` followed by the digits, or in decimal. A claim whose app is running, loading or being claimed is refused. |
 
-The runtime runs up to four apps. A fifth launch reports `window
-allocation failed (busy)` and returns 20.
+Every launch claims its own app, so there is no fixed limit on running apps;
+the card's resources are the limit. When the card cannot admit another app, ZZRun
+reports `claim refused:` with the reason and returns 20.
 
-`STATUS` prints each slot's state, app name, generation, committed and capped
-MiB, CPU seconds, block reason, and terminal reason. The block reason is
+`STATUS` prints one line per claim: its handle, state, app name, committed MiB,
+CPU seconds, block reason, and end reason. The block reason is
 `none`, `file`, `console`, `event`, `sleep`, `vsync`, or `audio`. `event`
-means the app is waiting in `zz_msg_wait` (app API 0.4 firmware).
+means the app is waiting for a message.
 
 Ctrl-C requests app stop. Ctrl-D, Ctrl-E, and Ctrl-F enqueue break events 4, 5,
 and 6. Normal app exit returns the app exit code. Invalid launcher arguments
