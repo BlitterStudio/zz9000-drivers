@@ -20,12 +20,12 @@ shared-memory layout before SDK services are exposed.
 | [Networking](#networking-and-diagnostics) | `ZZ9000Net.device`, the optional Roadshow `ZZ9000Net` template, `ZZNetReady`, and `ZZNetStats`. |
 | [Board and command-line tools](docs/cli-tools.md) | `ZZDiag`, `ZZFwUpdate`, `ZZScanlines`, `ZZGamma`, `ZZRun`, and their command-line reference. |
 | [ZZCapture](ZZCapture/README.md) | Native-video timing observation and experimental A4000/C28 capture diagnostics. |
-| [ZZRun](ZZRun/README.md) | Shell and Workbench launcher for up to four trusted ARM apps on the Zorro III app runtime. |
+| [ZZRun](ZZRun/README.md) | Shell and Workbench launcher for trusted ARM apps on the Zorro III app runtime; each app has its own claim. |
 | [ZZ9000AX audio](ahi/README.md) | `zz9000ax.audio`, its AudioMode, and `mhizz9000.library` for PCM playback, recording, and hardware MP3 decoding. |
 | [Poseidon USB](usb-poseidon/README.md) | `zzusbhw.device` for the external Poseidon 4.5 USB stack. |
 | [SD-card boot](sd-boot/README.md) | `zzsd.device` in `BOOT.bin`, which boots an HDF file from the FAT-formatted microSD card. |
 | [ZZTop](ZZTop/README.md) | The `ZZTop` control panel. |
-| [SDK runtime payloads](sdk/README.md) | `zz9k.library` 2.40, `mpega.library`, `zz9k-picture.datatype`, `zz9k-sound.datatype`, SDK tools, and ZZPlay. |
+| [SDK runtime payloads](sdk/README.md) | SDK-built `zz9k.library` 2.41, `mpega.library`, `zz9k-picture.datatype`, `zz9k-sound.datatype`, SDK tools, and ZZPlay. |
 | [AmiSSL provider](amissl/README.md) | CPU-specific `amissl_v362.library` (AmiSSL 5.27) and `amissl_v41x.library` (AmiSSL 6.1) builds with supported ZZ9000 TLS crypto offload. |
 
 ## Install from a release
