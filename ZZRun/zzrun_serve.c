@@ -980,6 +980,16 @@ static uint32_t launcher_contiguous(const struct zzrun_console *c)
 
 void zzrun_console_pump(struct zzrun_console *c)
 {
+    if (!c->ops.live(c->ops.ctx)) {
+        /* The claim was lost: the requests' buffers are not ours any more.
+         * Their completions go nowhere, and a DOS packet that is still out
+         * finds nothing waiting for it. */
+        if (c->app_write_active)
+            app_write_finish(c, AAR_E_IO);
+        if (c->read_active)
+            read_finish(c, AAR_E_IO, 0);
+        return;
+    }
     if (c->failed && c->app_write_active)
         app_write_finish(c, AAR_E_IO);
     if (!c->failed && !c->write_pending) {
@@ -1131,6 +1141,10 @@ void zzrun_console_read_done(struct zzrun_console *c, int32_t got,
 
     if (!c->read_active) {
         c->read_pending = 0;
+        return;
+    }
+    if (!c->ops.live(c->ops.ctx)) {
+        read_finish(c, AAR_E_IO, 0);
         return;
     }
     if (got <= 0) {

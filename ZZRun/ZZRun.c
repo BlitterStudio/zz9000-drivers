@@ -2535,9 +2535,15 @@ static void con_op_output_error(void *ctx)
     console_output_error();
 }
 
+static int con_op_live(void *ctx)
+{
+    (void)ctx;
+    return claim_live();
+}
+
 static const struct zzrun_console_ops console_ops = {
     NULL, con_op_open, con_op_write_start, con_op_read_start,
-    con_op_read_allowed, con_op_output_error
+    con_op_read_allowed, con_op_live, con_op_output_error
 };
 
 static void display_op_open(void *ctx, const struct zzrun_req *req,

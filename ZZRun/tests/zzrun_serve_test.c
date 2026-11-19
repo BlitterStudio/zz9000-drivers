@@ -1191,6 +1191,7 @@ struct fcon {
     int write_ok;
     int read_ok;
     int allowed;
+    int live;
     int errors;
     int opens;
     int read_starts;
@@ -1236,6 +1237,12 @@ static int c_read_allowed(void *ctx)
     return fc.allowed;
 }
 
+static int c_live(void *ctx)
+{
+    (void)ctx;
+    return fc.live;
+}
+
 static void c_output_error(void *ctx)
 {
     (void)ctx;
@@ -1247,12 +1254,13 @@ static void console_fixture(void)
     struct zzrun_console_ops ops;
 
     memset(&fc, 0, sizeof(fc));
-    fc.open_ok = fc.write_ok = fc.read_ok = fc.allowed = 1;
+    fc.open_ok = fc.write_ok = fc.read_ok = fc.allowed = fc.live = 1;
     memset(&ops, 0, sizeof(ops));
     ops.open = c_open;
     ops.write_start = c_write_start;
     ops.read_start = c_read_start;
     ops.read_allowed = c_read_allowed;
+    ops.live = c_live;
     ops.output_error = c_output_error;
     zzrun_serve_init(&serve, &sink);
     zzrun_console_init(&serve.console, &ops, &serve.sink);
@@ -1509,6 +1517,45 @@ static void test_console_read_that_cannot_open_the_console_is_a_launcher_error(v
         zzrun_console_pump(&serve.console);
     assert(sunk_n == 1 && sunk[0].done.result == AAR_E_IO);
     assert(fc.errors == 1 && fc.read_starts == 0);
+}
+
+static void test_console_buffers_are_left_alone_after_the_claim_is_lost(void)
+{
+    uint8_t buf[64];
+    static const uint8_t typed[] = "typed\n";
+    struct zzrun_req r = mkreq(AAR_OP_CONSOLE_READ);
+    struct zzrun_req w = mkreq(AAR_OP_CONSOLE_WRITE);
+    struct zzrun_done d;
+
+    /* A DOS read is out when the claim is revoked. Its bytes arrive later:
+     * they must not be copied into the request's buffer, which is card
+     * memory that another claim may own by then. */
+    console_fixture();
+    memset(buf, 0xee, sizeof(buf));
+    r.buf = buf;
+    r.buf_len = sizeof(buf);
+    assert(zzrun_serve_request(&serve, &r, &d) == ZZRUN_SERVE_DEFERRED);
+    assert(fc.read_starts == 1);
+    fc.live = 0;
+    zzrun_console_read_done(&serve.console, 6, typed);
+    assert(buf[0] == 0xee && buf[5] == 0xee);
+    assert(sunk_n == 1 && sunk[0].done.result == AAR_E_IO);
+
+    /* A write that was waiting for the next chunk is not started: its
+     * buffer is gone too. */
+    console_fixture();
+    w.buf_len = 3000u;                 /* more than one packet */
+    {
+        static uint8_t big[3000];
+
+        w.buf = big;
+        assert(zzrun_serve_request(&serve, &w, &d) == ZZRUN_SERVE_DEFERRED);
+    }
+    assert(fc.writes == 1);
+    fc.live = 0;
+    write_finishes((int32_t)fc.last_write);
+    assert(fc.writes == 1);
+    assert(sunk_n == 1 && sunk[0].done.result == AAR_E_IO);
 }
 
 static void test_console_read_waits_for_demand_and_returns_what_was_read(void)
@@ -2207,6 +2254,7 @@ int main(void)
     test_log_records_become_lines();
     test_app_write_opens_the_console_before_queued_diagnostics();
     test_console_read_that_cannot_open_the_console_is_a_launcher_error();
+    test_console_buffers_are_left_alone_after_the_claim_is_lost();
     test_console_read_waits_for_demand_and_returns_what_was_read();
     test_console_read_end_of_input_is_sticky();
     test_display_open_validates_and_reports_what_was_made();

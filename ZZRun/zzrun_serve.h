@@ -201,6 +201,10 @@ struct zzrun_console_ops {
     int (*read_start)(void *ctx, uint32_t max);
     /* The app is RUNNING and no stop was asked. */
     int (*read_allowed)(void *ctx);
+    /* The claim is still served. A request's buffer is card memory that goes
+     * back to the card when the claim is lost, so nothing is written to or
+     * read from it afterwards. */
+    int (*live)(void *ctx);
     /* Output cannot be written: stop the app and say so once. */
     void (*output_error)(void *ctx);
 };
