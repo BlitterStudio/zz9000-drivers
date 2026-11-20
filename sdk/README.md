@@ -25,14 +25,14 @@ To use a newer SDK revision, update `SDK_REF`, rebuild with `sdk/build.sh`, and 
 ## App runtime
 
 Apps for the ARM cores are loaded and served over the AAR queue transport.
-`zz9k.library` no longer carries a `ZZ9KApp*` client API; ZZRun links the
-client transport module of the SDK (`sdk/amiga/src/aar_xport_zz9000.[ch]` in
-the firmware repository), which claims an app, loads and starts it, serves its
-requests, and uses the library only to reach the board's mailbox (revision 36
-or later). It also needs `mmu.library` 41 or later to map the card's shared
-buffers cache-inhibited. The ZZRun build stages the module, `zzapp_proto.h`
-and the `aar/` headers from the firmware checkout at `SDK_REF`; the `aar/`
-headers are the commit that firmware pins in `sdk/AAR_REF`. See the
+`zz9k.library` no longer carries a `ZZ9KApp*` client API; ZZRun calls the
+AAR client library `aar.library` instead (built by the firmware SDK and
+installed with ZZRun), which claims an app, loads and starts it, serves its
+requests and keeps its lease alive. `aar.library` uses `zz9k.library` only to
+reach the board's mailbox (revision 36 or later). It also needs `mmu.library`
+41 or later to map the card's shared buffers cache-inhibited. The ZZRun build
+stages the `aar.library` client headers and the `aar/` headers from the aar
+checkout that the firmware at `SDK_REF` pins in `sdk/AAR_REF`. See the
 [ZZRun manual](../ZZRun/README.md) for launcher behaviour.
 
 ## Zorro II support

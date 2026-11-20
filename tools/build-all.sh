@@ -34,8 +34,8 @@ ahi/driver/build.sh
 "$amiga_docker" ZZDiag ./build.sh
 "$amiga_docker" ZZNetReady ./build.sh
 "$amiga_docker" ZZCapture ./build.sh
-# ZZRun/build.sh stages the zz9k headers, zzapp_proto.h, the aar/ headers and
-# the client transport module on the host, then
+# ZZRun/build.sh stages the aar.library client headers and the aar/ headers
+# from the aar checkout on the host, then
 # re-execs itself through amiga-docker.sh — run it on the host like CI does.
 # amiga-docker.sh mounts only this repo and does not forward ZZ9000_FIRMWARE
 # or ZZ9000_SDK, so the host leg never runs if this is invoked in Docker.

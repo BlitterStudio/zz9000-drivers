@@ -1457,7 +1457,17 @@ static void ahi_submit(unsigned slot, uint32_t bytes)
     SendIO((struct IORequest *)request);
 }
 
-static uint32_t audio_available(void);
+/* The frames AARAudioRead could hand over now: a read with no buffer and no
+ * frames returns the readable count and does not count an underrun. */
+static uint32_t audio_available(void)
+{
+    ULONG got = 0;
+
+    if (!claim_live() ||
+        claim_note(AARAudioRead(aar_handle, NULL, 0, &got)) != AAR_OK)
+        return 0u;
+    return got;
+}
 
 static int ahi_idle(void)
 {
@@ -2625,47 +2635,17 @@ static const struct zzrun_display_ops display_ops = {
     display_op_wait_tof, display_op_load_rgb32, display_op_close
 };
 
-/* The audio ring the app writes. The library reads it for AARAudioRead and
- * attaches and detaches it itself when it sees the AUDIO_OPEN and
- * AUDIO_CLOSE completions. ZZRun maps the ring as well, to look at the two
- * index words: AARAudioRead has no "frames available" answer, and a read
- * that finds less than asked counts an underrun in the ring header, which
- * ZZRun must only provoke when the ring really ran dry. */
-static struct AARSharedMap audio_map;
-static int audio_mapped;
-static uint32_t audio_ring_frames;
-
-/* The ring's index words are little-endian and the app accesses each with
- * one 32-bit access, so the 68k reads each as one aligned long too. */
-static uint32_t ring_le32(const volatile uint8_t *p)
-{
-    uint32_t v = *(const volatile uint32_t *)(const volatile void *)p;
-
-    return (v << 24) | ((v & 0x0000ff00u) << 8) | ((v >> 8) & 0x0000ff00u) |
-           (v >> 24);
-}
-
-static uint32_t audio_available(void)
-{
-    const volatile uint8_t *ring = (const volatile uint8_t *)audio_map.base;
-    uint32_t n;
-
-    if (!audio_mapped)
-        return 0u;
-    n = ring_le32(ring + AAR_AUDIO_RING_WRITE_FRAME) -
-        ring_le32(ring + AAR_AUDIO_RING_READ_FRAME);
-    return n > audio_ring_frames ? 0u : n;
-}
-
+/* The audio ring the app writes: the library attaches it when ZZRun completes
+ * the AUDIO_OPEN request with AAR_OK and detaches it at AUDIO_CLOSE, so ZZRun
+ * only opens and closes AHI here. */
 static int audio_op_open(void *ctx, uint32_t rate, uint32_t channels,
                          uint32_t token, uint32_t bytes, uint32_t frames)
 {
     (void)ctx;
-    memset(&audio_map, 0, sizeof(audio_map));
-    audio_map.size = sizeof(audio_map);
-    if (!ahi_open(rate, channels) ||
-        claim_note(AARSharedMap(aar_handle, token, bytes, 0, &audio_map)) !=
-            AAR_OK) {
+    (void)token;
+    (void)bytes;
+    (void)frames;
+    if (!ahi_open(rate, channels)) {
         ahi_close();
         /* An AHI open failure on the AUDIO=AHI route ends the run with an
          * error, as before. */
@@ -2674,18 +2654,12 @@ static int audio_op_open(void *ctx, uint32_t rate, uint32_t channels,
         request_stop();
         return 0;
     }
-    audio_ring_frames = frames;
-    audio_mapped = 1;
     return 1;
 }
 
 static void audio_op_close(void *ctx)
 {
     (void)ctx;
-    if (audio_mapped) {
-        audio_mapped = 0;
-        (void)AARSharedUnmap(aar_handle, &audio_map);
-    }
     ahi_close();
 }
 

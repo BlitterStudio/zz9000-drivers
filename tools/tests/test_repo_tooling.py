@@ -644,6 +644,7 @@ class RepoToolingTests(unittest.TestCase):
             "ZZCapture",
             "ZZRun",
             "zz9k.library",
+            "aar.library",
             "mpega.library",
             "zz9k-picture.datatype",
             "amissl_v362.library",
@@ -799,6 +800,31 @@ class RepoToolingTests(unittest.TestCase):
 
         self.assertIn('(source "Tools/ZZRun")', installer)
         self.assertIn("Docs/ZZRun.guide", installer)
+
+    def test_aar_library_travels_from_the_sdk_build_to_the_installer(self):
+        """ZZRun needs aar.library. It is built by the firmware SDK package
+        like zz9k.library, collected by sdk/build.sh, installed into the
+        release drawer, checked by the release gate and offered by the
+        installer."""
+        ci = self.read(".github/workflows/ci.yml")
+        package = self.read("tools/package-local.sh")
+        sdk_build = self.read("sdk/build.sh")
+        gate = self.read("tools/check-release.sh")
+        installer = self.read("installer/ZZ9000Installer/Install ZZ9000")
+
+        self.assertIn('cp "$pkg/Libs/aar.library"', sdk_build)
+        self.assertIn("sdk/out/Libs/aar.library", package)
+        self.assertIn('"$inst/Libs/aar.library"', package)
+        self.assertIn("check_file sdk/out/Libs/aar.library", gate)
+        self.assertIn("artifacts/sdk-payloads/Libs/aar.library", ci)
+        self.assertIn('"$INST/Libs/aar.library"', ci)
+        self.assertIn('(source "Libs/aar.library")', installer)
+
+    def test_build_notes_do_not_name_the_old_zzrun_module(self):
+        for rel in ("tools/build-all.sh", "sdk/README.md"):
+            text = self.read(rel)
+            self.assertNotIn("aar_xport", text, rel)
+            self.assertNotIn("zzapp_proto", text, rel)
 
     def test_audio_stack_uses_shared_ax_header(self):
         header = self.read("include/zz9000_ax.h")

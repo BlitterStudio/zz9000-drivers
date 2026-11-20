@@ -584,6 +584,7 @@ jobs:
 
           # SDK runtime payloads + accelerated amissl.library
           install -Dm644 artifacts/sdk-payloads/Libs/zz9k.library      "$INST/Libs/zz9k.library"
+          install -Dm644 artifacts/sdk-payloads/Libs/aar.library       "$INST/Libs/aar.library"
           install -Dm644 artifacts/sdk-payloads/Libs/mpega.library     "$INST/Libs/mpega.library"
           install -Dm644 "artifacts/sdk-payloads/Classes/DataTypes/zz9k-picture.datatype" \
                                                                        "$INST/Classes/DataTypes/zz9k-picture.datatype"

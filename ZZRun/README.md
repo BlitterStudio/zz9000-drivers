@@ -274,9 +274,10 @@ and detaches it at `AUDIO_CLOSE`. ZZRun reads the PCM with `AARAudioRead`,
 which converts the ring's interleaved S16LE samples (rate and channel count in
 its header) into AHI's S16BE bounce buffers without resampling or downmixing,
 one buffer of at most 1/50 s per pass. If AHI cannot be opened, ZZRun stops
-the app and returns 20. ZZRun maps the ring as well, to look at its fill level
-before it asks for samples, so a short read, which counts an underrun in the
-ring header, happens only when AHI finished a buffer and found the ring empty.
+the app and returns 20. Before each read ZZRun asks the library how many frames
+are readable (`AARAudioRead` with no buffer), which counts nothing, so an
+underrun in the ring header is counted only when AHI finished a buffer and
+found the ring empty.
 
 Known limitation: running an app with stdout redirected to `NIL:` (`>NIL:`)
 made swquake's file seeks fail on the card with every ZZRun build tested,
