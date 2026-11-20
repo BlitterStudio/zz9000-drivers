@@ -1,11 +1,12 @@
 #!/bin/sh
 set -eu
 
-# Host leg stages the zz9k client headers, the ZZ9000 private wire
-# (zzapp_proto.h), the AAR transport headers (aar/*.h) and the client
-# transport module (aar_xport_zz9000.[ch]), then re-execs in the compiler
-# image. The container only sees this repo, so the second stage must not stage
-# again.
+# Host leg stages the aar.library client headers (libraries/aar.h,
+# libraries/aar_zz9000.h, proto/aar.h, inline/aar.h, clib/aar_protos.h and
+# pragmas/aar_pragmas.h) and the AAR contract headers (aar/*.h) from the aar
+# checkout, then re-execs in the compiler image. The container only sees this
+# repo, so the second stage must not stage again. ZZRun calls aar.library
+# through its vectors: it links no transport code and no ZZ9000 private wire.
 staged=0
 if [ "${1:-}" = "--staged" ]; then
     staged=1
@@ -14,22 +15,21 @@ fi
 
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH='' cd -- "$script_dir/.." && pwd)
-proto_rel=ZZ9000_proto.sdk/ZZ9000OS/src/zzapp_proto.h
-module_rel=sdk/amiga/src
-stage_dir=$script_dir/zz9k-headers
+stage_dir=$script_dir/aar-headers
+firmware=
+aar=
 
 find_firmware() {
-    # Same checkout tools/stage-zz9k-headers.sh just used: explicit
-    # ZZ9000_FIRMWARE, else ZZ9000_SDK's parent, else the sibling
-    # zz9000-firmware, else the clone that staging left in sdk/work.
+    # Explicit ZZ9000_FIRMWARE, else ZZ9000_SDK's parent, else the sibling
+    # zz9000-firmware, else the clone in sdk/work.
     firmware=${ZZ9000_FIRMWARE:-}
     if [ -z "$firmware" ] && [ -n "${ZZ9000_SDK:-}" ]; then
         firmware=$(CDPATH='' cd -- "$ZZ9000_SDK/.." && pwd)
     fi
-    if [ -z "$firmware" ] && [ -d "$repo_root/../zz9000-firmware/sdk/include/zz9k" ]; then
+    if [ -z "$firmware" ] && [ -d "$repo_root/../zz9000-firmware/sdk" ]; then
         firmware=$(CDPATH='' cd -- "$repo_root/../zz9000-firmware" && pwd)
     fi
-    if [ -z "$firmware" ] && [ -d "$repo_root/sdk/work/zz9000-firmware/sdk/include/zz9k" ]; then
+    if [ -z "$firmware" ] && [ -d "$repo_root/sdk/work/zz9000-firmware/sdk" ]; then
         firmware=$(CDPATH='' cd -- "$repo_root/sdk/work/zz9000-firmware" && pwd)
     fi
 }
@@ -39,7 +39,8 @@ find_aar() {
     # else the firmware's own sdk/aar (sdk/scripts/fetch-aar.sh), else a
     # sibling aar checkout.
     aar=${AAR_DIR:-}
-    if [ -z "$aar" ] && [ -f "$firmware/sdk/aar/include/aar/transport.h" ]; then
+    if [ -z "$aar" ] && [ -n "$firmware" ] &&
+       [ -f "$firmware/sdk/aar/include/aar/transport.h" ]; then
         aar=$firmware/sdk/aar
     fi
     if [ -z "$aar" ] && [ -f "$repo_root/../aar/include/aar/transport.h" ]; then
@@ -47,46 +48,40 @@ find_aar() {
     fi
 }
 
-stage_transport() {
+stage_headers() {
     find_firmware
-    src=${firmware:+$firmware/$proto_rel}
-    if [ -z "$firmware" ] || [ ! -s "$src" ]; then
-        echo "ERROR: stage zzapp_proto.h from the firmware checkout with" >&2
-        echo "       ZZ9000_FIRMWARE=/path/to/zz9000-firmware" >&2
-        exit 1
-    fi
-    for f in aar_xport_zz9000.h aar_xport_zz9000.c; do
-        if [ ! -s "$firmware/$module_rel/$f" ]; then
-            echo "ERROR: $f is missing from $firmware/$module_rel;" >&2
-            echo "       the firmware checkout is older than the transport swap" >&2
-            exit 1
-        fi
-    done
     find_aar
     if [ -z "$aar" ] || [ ! -f "$aar/include/aar/transport.h" ]; then
         echo "ERROR: aar/transport.h not found: run sdk/scripts/fetch-aar.sh in the" >&2
         echo "       firmware checkout, or set AAR_DIR=/path/to/aar" >&2
         exit 1
     fi
-    cp "$src" "$stage_dir/zzapp_proto.h"
-    cp "$firmware/$module_rel/aar_xport_zz9000.h" "$stage_dir/"
-    cp "$firmware/$module_rel/aar_xport_zz9000.c" "$stage_dir/"
-    mkdir -p "$stage_dir/aar"
+    for f in libraries/aar.h libraries/aar_zz9000.h proto/aar.h inline/aar.h \
+             clib/aar_protos.h pragmas/aar_pragmas.h; do
+        if [ ! -s "$aar/client/include/$f" ]; then
+            echo "ERROR: $f is missing from $aar/client/include;" >&2
+            echo "       the aar checkout is older than aar.library" >&2
+            exit 1
+        fi
+    done
+    rm -rf "$stage_dir"
+    mkdir -p "$stage_dir/aar" "$stage_dir/libraries" "$stage_dir/proto" \
+             "$stage_dir/inline" "$stage_dir/clib" "$stage_dir/pragmas"
     cp "$aar"/include/aar/*.h "$stage_dir/aar/"
+    cp "$aar/client/include/libraries/aar.h" \
+       "$aar/client/include/libraries/aar_zz9000.h" "$stage_dir/libraries/"
+    cp "$aar/client/include/proto/aar.h" "$stage_dir/proto/"
+    cp "$aar/client/include/inline/aar.h" "$stage_dir/inline/"
+    cp "$aar/client/include/clib/aar_protos.h" "$stage_dir/clib/"
+    cp "$aar/client/include/pragmas/aar_pragmas.h" "$stage_dir/pragmas/"
 }
 
 if [ "$staged" -eq 0 ]; then
-    # An explicit firmware checkout also supplies the SDK headers, unless
-    # ZZ9000_SDK overrides them.
-    if [ -z "${ZZ9000_SDK:-}" ] && [ -n "${ZZ9000_FIRMWARE:-}" ]; then
-        ZZ9000_SDK=$ZZ9000_FIRMWARE/sdk
-        export ZZ9000_SDK
-    fi
-    "$repo_root/tools/stage-zz9k-headers.sh" "$stage_dir" "$repo_root"
-    stage_transport
+    stage_headers
 fi
 
-for f in zzapp_proto.h aar_xport_zz9000.h aar_xport_zz9000.c aar/transport.h; do
+for f in aar/transport.h aar/app.h libraries/aar.h libraries/aar_zz9000.h \
+         proto/aar.h inline/aar.h clib/aar_protos.h pragmas/aar_pragmas.h; do
     if [ ! -f "$stage_dir/$f" ]; then
         echo "ERROR: $f was not staged" >&2
         exit 1
@@ -98,8 +93,8 @@ if ! command -v m68k-amigaos-gcc >/dev/null 2>&1; then
 fi
 
 cd "$script_dir"
-m68k-amigaos-gcc ZZRun.c zz9k-headers/aar_xport_zz9000.c \
+m68k-amigaos-gcc ZZRun.c \
     -m68030 -O2 -std=gnu11 -o ZZRun \
     -Wall -Wextra -Wno-unused-parameter \
-    -I../include -Izz9k-headers \
+    -Iaar-headers \
     -lamiga -noixemul

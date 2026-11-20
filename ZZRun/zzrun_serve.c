@@ -1322,7 +1322,7 @@ void zzrun_display_flip_request(struct zzrun_display *d,
 
         d->ops.pan(d->ops.ctx, next);
         d->showing = next;
-        done->flags = ZZAPP_FLIPF_SUBMITTED;
+        done->flags = AAR_CFLAG_FLIP_SUBMITTED;
         display_flip_outs(d, done);
         return;
     }

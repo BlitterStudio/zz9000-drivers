@@ -337,11 +337,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      # ZZRun builds against the firmware's client transport module
-      # (sdk/amiga/src/aar_xport_zz9000.[ch]), the ZZ9000 private wire
-      # (zzapp_proto.h) and the AAR headers the firmware pins in
-      # sdk/AAR_REF. This commit must carry all three: the claim, the queue
-      # pair, the service requests and the lease are the module's.
+      # ZZRun calls aar.library through its vectors, so it builds against
+      # the aar.library client headers (client/include of the aar checkout)
+      # and the AAR contract headers (include/aar). Both come from the aar
+      # commit the firmware pins in sdk/AAR_REF, which fetch-aar.sh checks
+      # out below; the ref pinned here must carry an sdk/AAR_REF at or after
+      # the aar commit that added the client headers. ZZRun links no
+      # transport module and does not read the ZZ9000 private wire.
       - uses: actions/checkout@v6
         with:
           repository: BlitterStudio/zz9000-firmware

@@ -1831,7 +1831,7 @@ static void test_pan_flips_rotate_the_pages_and_rely_on_the_card_vblank(void)
     assert(serve_one(&r, &d) == AAR_OK);
     /* pan to page 1: it is the front, page 2 is the next to draw into */
     assert(fd_.pans == 1 && fd_.last_page == 1u && fd_.tofs == 0);
-    assert(d.flags == ZZAPP_FLIPF_SUBMITTED);
+    assert(d.flags == AAR_CFLAG_FLIP_SUBMITTED);
     assert(d.out[AAR_R_DISPLAY_FLIP_FRONT] == base + page);
     assert(d.out[AAR_R_DISPLAY_FLIP_BACK] == base + 2u * page);
     assert(d.out[AAR_R_DISPLAY_FLIP_PITCH] == 1280u);

@@ -1,10 +1,11 @@
 /*
  * What ZZRun does for an app's service requests: files, console, display,
- * audio, and the events it posts. Each handler takes one request as the
- * transport module hands it over (struct zzrun_req) and produces its
- * completion (struct zzrun_done). Nothing here includes AmigaOS headers: the
- * DOS, Intuition, P96 and AHI calls sit behind the small operation tables
- * below, so a host test can run the handlers against a fake request stream.
+ * audio, and the events it posts. Each handler takes one request, which
+ * ZZRun converts from aar.library's AARServiceReq (struct zzrun_req), and
+ * produces its completion (struct zzrun_done). Nothing here includes
+ * AmigaOS headers: the DOS, Intuition, P96 and AHI calls sit behind the
+ * small operation tables below, so a host test can run the handlers
+ * against a fake request stream.
  *
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -20,7 +21,7 @@
 
 /* ---- Requests and completions ------------------------------------------ */
 
-/* A request as the module returns it, with its payload buffer already mapped
+/* A request as aar.library returns it, with its payload buffer already mapped
  * into this process. buf is the mapped address of (buf_token, buf_off) and is
  * NULL when the request names no payload. */
 struct zzrun_req {
@@ -380,14 +381,14 @@ uint32_t zzrun_audio_chunk_frames(uint32_t available_frames, uint32_t rate,
 
 struct zzrun_events_ops {
     void *ctx;
-    /* aar_xport_post_event: AAR_OK when the event is posted or merged into
+    /* AARPostEvent: AAR_OK when the event is posted or merged into
      * a pending mouse event, AAR_E_BUSY when the completion queue is full
-     * and the event was dropped (the module counts the drop), another
+     * and the event was dropped (the library counts the drop), another
      * AAR_E_* when the claim is gone. */
     int (*post)(void *ctx, const aar_event *ev);
 };
 
-/* The module coalesces mouse motion and keeps event order. What ZZRun adds is
+/* The library coalesces mouse motion and keeps event order. What ZZRun adds is
  * the one event that must never be lost: a stop that found the queue full is
  * posted again on every pass until it is delivered. */
 struct zzrun_events {

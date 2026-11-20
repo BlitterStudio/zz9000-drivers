@@ -26,7 +26,7 @@
 #include <proto/timer.h>
 #include <proto/icon.h>
 #include <proto/Picasso96.h>
-#include "aar_xport_zz9000.h"
+#include <proto/aar.h>
 #include "zzrun_policy.h"
 #include "zzrun_policy.c"
 #include "zzrun_serve.h"
@@ -55,7 +55,6 @@ static const char version[] __attribute__((used)) =
     "$VER: ZZRun " ZZRUN_VERSION " (06.11.2026)\r\n";
 
 #define ZZRUN_MIN_STACK     16384UL
-#define ZZRUN_IMAGE_LIMIT   ZZAPP_IMAGE_MAX_BYTES
 #define ZZRUN_GRACE_MS      500u
 #define ZZRUN_POLL_US       1000UL
 _Static_assert(ZZRUN_POLICY_GRACE_MS == ZZRUN_GRACE_MS, "grace");
@@ -90,12 +89,13 @@ _Static_assert(ZZRUN_IOERR_BREAK == ERROR_BREAK, "dos error");
 #define ZZRUN_AHI_BUFFER_COUNT 2u
 #define ZZRUN_AHI_BUFFER_BYTES 8192u
 
-static aar_xport_board xboard;
-static aar_xport xport;
-static int board_open;
+struct Library *AARBase;
+static AARHandle *aar_handle;
+static AARInfo platform_info;
+static const aar_client_ext_zz9000 *zz_ext;
 static int claim_open;
-static uint32_t board_base;
-static uint32_t board_size;
+static int claim_lost;
+static char elf_full[512];
 static int abs_paths;
 static int stop_asked;
 static int user_stop;
@@ -109,7 +109,7 @@ static int have_pan;
 static int pan_count;
 static char pub_name[128];
 static char elf_path[256];
-static char arg_store[ZZAPP_ARGV_MAX][ZZAPP_ARGV_STR_MAX];
+static char arg_store[ZZRUN_ARGV_MAX][ZZRUN_ARGV_STR_MAX];
 static int app_argc;
 static BPTR root_lock;
 static struct Screen *screen;
@@ -167,8 +167,7 @@ static int examine_next_async(BPTR lock, struct FileInfoBlock *fib,
 static BPTR lock_async(BPTR dir, const char *name, LONG access,
                        int *transport_ok);
 static BPTR lock_abs_async(const char *name, int *transport_ok);
-static BPTR open_find_async(BPTR dir, const char *name, LONG mode,
-                            int *transport_ok);
+
 
 /* One walk over the candidates of a DOS name: GetDeviceProc candidates, or
  * one fixed handler and directory lock (a relative parent, or a candidate
@@ -208,21 +207,63 @@ static int stack_ok(void)
     return 1;
 }
 
+/* True while the claim is ours: it was opened and no call has reported it
+ * revoked. A flag, no card access: every library call below reports
+ * AAR_E_STALE through claim_note(). */
 static int claim_live(void)
 {
-    return aar_xport_live(&xport);
+    return aar_handle != NULL && !claim_lost;
 }
 
-/* Renews the lease: one store of the control block's counter, which the card
- * only compares with the value it saw last. False once the claim is gone. */
-static int lease_ok(void)
+static LONG claim_note(LONG rc)
 {
-    return aar_xport_lease_renew(&xport) == AAR_OK;
+    if (rc == AAR_E_STALE)
+        claim_lost = 1;
+    return rc;
 }
 
-static uint32_t cb_word(uint32_t off)
+/* Is the claim still ours? A status read of the smallest size: the state
+ * word and the handle's generation. The library renews the lease itself
+ * (from a vertical-blank interrupt), so this is not a renewal. */
+static int claim_check(void)
 {
-    return xport.cb ? aar_get_be32(xport.cb + off) : 0u;
+    AARStatusInfo st;
+
+    if (!claim_live())
+        return 0;
+    memset(&st, 0, sizeof(st));
+    st.size = offsetof(AARStatusInfo, generation);
+    return claim_note(AARStatus(aar_handle, &st)) == AAR_OK;
+}
+
+/* The state and the end reason: size 16 reads three control block words. */
+static LONG claim_state(uint32_t *state, uint32_t *end_reason)
+{
+    AARStatusInfo st;
+    LONG rc;
+
+    if (!claim_live())
+        return AAR_E_STALE;
+    memset(&st, 0, sizeof(st));
+    st.size = offsetof(AARStatusInfo, exit_code);
+    rc = claim_note(AARStatus(aar_handle, &st));
+    if (rc == AAR_OK) {
+        *state = st.state;
+        *end_reason = st.end_reason;
+    }
+    return rc;
+}
+
+/* The AAR_REASON_* of the last refused load or start. */
+static ULONG claim_reason(void)
+{
+    AARStatusInfo st;
+
+    memset(&st, 0, sizeof(st));
+    st.size = sizeof(st);
+    if (claim_live() && claim_note(AARStatus(aar_handle, &st)) == AAR_OK)
+        return st.reason;
+    return AAR_REASON_NONE;
 }
 
 static uint32_t now_ms(void)
@@ -265,24 +306,6 @@ static void tell(const char *msg)
     }
 }
 
-static const char *aar_error_name(int status)
-{
-    switch (status) {
-    case AAR_OK: return "ok";
-    case AAR_E_IO: return "io error";
-    case AAR_E_INVAL: return "bad request";
-    case AAR_E_NOMEM: return "no memory";
-    case AAR_E_BUSY: return "busy";
-    case AAR_E_NOENT: return "not found";
-    case AAR_E_ACCES: return "refused";
-    case AAR_E_NOSYS: return "not implemented";
-    case AAR_E_TIMEDOUT: return "timeout";
-    case AAR_E_NORESOURCE: return "no resources";
-    case AAR_E_STALE: return "claim revoked";
-    default: return "error";
-    }
-}
-
 static const char *fault_name(uint32_t code)
 {
     return zzrun_fault_class_name(code);
@@ -299,11 +322,14 @@ static int print_status(void)
     unsigned shown = 0;
 
     for (;;) {
-        aar_xport_list_info item;
-        int rc = aar_xport_list(&xboard, cursor, &item);
+        AARZZ9000List item;
+        LONG rc;
 
+        memset(&item, 0, sizeof(item));
+        item.size = sizeof(item);
+        rc = zz_ext->list(cursor, &item);
         if (rc < 0) {
-            printf("ZZRun: APP_LIST failed (%s)\n", aar_error_name(rc));
+            printf("ZZRun: APP_LIST failed (%s)\n", zzrun_error_name((int)rc));
             return 20;
         }
         if (rc == 0 || item.handle == 0 || shown >= 4096u)
@@ -311,12 +337,13 @@ static int print_status(void)
         printf("claim %08lx state %s name %s committed %lu MiB cpu %lu s "
                "block %s reason %s\n",
                (unsigned long)item.handle, state_name(item.state),
-               item.name[0] ? item.name : "-",
+               item.name[0] ? (const char *)item.name : "-",
                (unsigned long)(item.committed / ZZRUN_MIB_BYTES),
                (unsigned long)(item.cpu_ms / 1000u),
                zzrun_block_reason_name(item.block_reason),
                zzrun_end_reason_name(item.end_reason));
         shown++;
+        /* index is the card's slot index: the next cursor is one past it. */
         cursor = item.index + 1u;
     }
     if (!shown)
@@ -332,11 +359,14 @@ static int release_claim(uint32_t handle)
     unsigned guard;
 
     for (guard = 0; guard < 4096u; guard++) {
-        aar_xport_list_info item;
-        int rc = aar_xport_list(&xboard, cursor, &item);
+        AARZZ9000List item;
+        LONG rc;
 
+        memset(&item, 0, sizeof(item));
+        item.size = sizeof(item);
+        rc = zz_ext->list(cursor, &item);
         if (rc < 0) {
-            printf("ZZRun: APP_LIST failed (%s)\n", aar_error_name(rc));
+            printf("ZZRun: APP_LIST failed (%s)\n", zzrun_error_name((int)rc));
             return 20;
         }
         if (rc == 0 || item.handle == 0)
@@ -347,10 +377,10 @@ static int release_claim(uint32_t handle)
                        (unsigned long)handle, state_name(item.state));
                 return 20;
             }
-            rc = aar_xport_release_handle(&xboard, handle);
+            rc = zz_ext->release_handle(handle);
             if (rc != AAR_OK) {
                 printf("ZZRun: release of claim %08lx failed (%s)\n",
-                       (unsigned long)handle, aar_error_name(rc));
+                       (unsigned long)handle, zzrun_error_name((int)rc));
                 return 20;
             }
             printf("ZZRun: released claim %08lx\n", (unsigned long)handle);
@@ -401,7 +431,7 @@ static int add_arg(const char *text)
         return 1;
     n = strlen(text);
     if (!zzrun_arg_length_allowed((uint32_t)n) ||
-        app_argc >= (int)ZZAPP_ARGV_MAX - 1) {
+        app_argc >= (int)ZZRUN_ARGV_MAX - 1) {
         tell("Too many arguments, or an argument is longer than 127 bytes.");
         return 0;
     }
@@ -531,7 +561,7 @@ static int load_program_icon(char *app_out, size_t app_n, char *root_out,
  * zzrun_serve.c decides what each request means (open plans, ROOT
  * confinement, descriptors); these functions are the AmigaDOS calls under it.
  * Every DOS call is an asynchronous packet (dos_packet_async), so a slow
- * handler never stops the lease or the main loop's Ctrl-C. */
+ * handler never stops the main loop's Ctrl-C. */
 
 struct dos_list {
     BPTR lock;
@@ -899,16 +929,18 @@ static void push_event(uint16_t type, uint16_t code, int16_t dx, int16_t dy,
 static void stop_owned(void)
 {
     if (claim_live())
-        (void)aar_xport_stop(&xport);
+        (void)claim_note(AARStop(aar_handle));
 }
 
+/* A stop: the stop event first, which ZZRun keeps asking for until the
+ * queue takes it, then AARStop (the stop request word, the stop event and
+ * the platform's stop). */
 static void request_stop(void)
 {
     if (stop_asked)
         return;
     stop_asked = 1;
     stop_ms = now_ms();
-    aar_xport_request_stop(&xport);
     if (!stop_event_sent) {
         push_event(AAR_EV_STOP, 0, 0, 0, 0);
         stop_event_sent = 1;
@@ -972,7 +1004,7 @@ static void drain_window(struct Window *win)
             int16_t dx = (int16_t)mx;
             int16_t dy = (int16_t)my;
 
-            /* The module sums consecutive motion into one pending event. */
+            /* The library sums consecutive motion into one pending event. */
             if (dx || dy)
                 push_event(AAR_EV_MOUSE, 0, dx, dy, mouse_buttons);
         }
@@ -1090,7 +1122,7 @@ static void console_output_error(void)
  * Input stays asynchronous for every handle. A keyboard read uses the
  * console's normal line mode, so the Shell keeps echo, line editing and
  * Ctrl-C/D/E/F. A pipe or file uses the same ACTION_READ: a blocking Read
- * would stop the lease, display and audio while the writer stays open.
+ * would stop the main loop, display and audio while the writer stays open.
  * A pending read returns a line on Return and 0 bytes on Ctrl-\. It starts
  * only for an outstanding CONSOLE_READ request, while the app is RUNNING;
  * the request is the app's demand for input. Synchronous DOS calls keep
@@ -1425,6 +1457,8 @@ static void ahi_submit(unsigned slot, uint32_t bytes)
     SendIO((struct IORequest *)request);
 }
 
+static uint32_t audio_available(void);
+
 static int ahi_idle(void)
 {
     unsigned i;
@@ -1437,34 +1471,35 @@ static int ahi_idle(void)
 }
 
 /* Moves PCM from the app's audio ring to AHI: one buffer of at most 1/50 s
- * per pass, the way the earlier launcher did. The module reads the ring
- * directly (little-endian words swapped, samples in CPU order). */
+ * per pass, the way the earlier launcher did. AARAudioRead copies the
+ * ring's little-endian words into samples in CPU order. */
 static void service_ahi_audio(void)
 {
-    uint32_t available, frames, got = 0, bytes;
+    uint32_t available, frames;
+    ULONG got = 0;
+    uint32_t bytes;
     int completed;
     int slot;
 
     if (!serve.audio.open || !ahi_request[0])
         return;
     completed = ahi_reap();
-    available = aar_xport_audio_available(&xport);
+    available = audio_available();
     frames = zzrun_audio_chunk_frames(available, ahi_rate, ahi_channels,
                                       ZZRUN_AHI_BUFFER_BYTES);
     if (frames == 0u) {
         /* An underrun: a buffer just finished and AHI has nothing queued.
          * A read that finds less than asked counts it in the ring header. */
         if (completed && available == 0u && ahi_idle())
-            (void)aar_xport_audio_read(&xport,
-                                       (int16_t *)(void *)ahi_buffer[0], 1u,
-                                       &got);
+            (void)claim_note(AARAudioRead(aar_handle, ahi_buffer[0], 1u,
+                                          &got));
         return;
     }
     slot = ahi_free_slot();
     if (slot < 0)
         return;
-    if (aar_xport_audio_read(&xport, (int16_t *)(void *)ahi_buffer[slot],
-                             frames, &got) != AAR_OK || got == 0u)
+    if (claim_note(AARAudioRead(aar_handle, ahi_buffer[slot], frames,
+                                &got)) != AAR_OK || got == 0u)
         return;
     bytes = got * ahi_channels * 2u;
     ahi_submit((unsigned)slot, bytes);
@@ -1476,31 +1511,33 @@ static void service_console(void)
     zzrun_console_pump(&serve.console);
 }
 
-/* Tokens are board offsets: the address of a P96 bitmap less the board base.
- * The card adds ADDR_ADJ and checks the range; this checks the same range so
- * that a bitmap outside the card's framebuffer is refused here. */
+/* Tokens are board offsets: AARSharedToken turns the address of a P96 bitmap
+ * into the token the card understands and refuses an address outside the
+ * card's shared aperture. ZZRun also checks the framebuffer window the card
+ * accepts for a scanout, so a bitmap outside it is refused here. */
 #define ZZRUN_TOKEN_MIN 0x00010000UL
 #define ZZRUN_TOKEN_END 0x06010000UL
 
 static int bitmap_token(struct BitMap *bm, ULONG *token, ULONG *pitch)
 {
     APTR mem;
-    ULONG addr, bytes;
+    ULONG bytes, rows;
     if (!bm)
         return 0;
     mem = (APTR)p96GetBitMapAttr(bm, P96BMA_MEMORY);
     if (!mem)
         mem = bm->Planes[0];
-    addr = (ULONG)mem;
-    if (addr < board_base || (board_size && addr - board_base >= board_size))
-        return 0;
-    *token = addr - board_base;
-    if (*token < ZZRUN_TOKEN_MIN || *token >= ZZRUN_TOKEN_END)
-        return 0;
     bytes = (ULONG)p96GetBitMapAttr(bm, P96BMA_BYTESPERROW);
     if (!bytes)
         bytes = bm->BytesPerRow;
     if (!bytes)
+        return 0;
+    rows = bm->Rows ? (ULONG)bm->Rows : 1UL;
+    if (!claim_live() ||
+        claim_note(AARSharedToken(aar_handle, mem, bytes * rows, token)) !=
+            AAR_OK)
+        return 0;
+    if (*token < ZZRUN_TOKEN_MIN || *token >= ZZRUN_TOKEN_END)
         return 0;
     *pitch = bytes;
     return 1;
@@ -1627,7 +1664,7 @@ static int open_screen(uint32_t w, uint32_t h, uint32_t format,
     mode = mode_for(w, h, format, forced_mode);
     if (mode == (ULONG)INVALID_ID)
         return 0;
-    if (!lease_ok())
+    if (!claim_check())
         return 0;
     screen = open_p96_screen(mode, w, h, depth, rgb);
     if (!screen)
@@ -1778,9 +1815,10 @@ static void open_display(const struct zzrun_req *req, struct zzrun_done *done)
 
 /*
  * A DOS packet may block on slow media. ZZRun waits on a reply port it owns
- * together with its lease timer and Ctrl-C, renewing the lease while the
- * claim is live. Only the reply ends the wait: packet and buffers stay alive
- * until then, even after Ctrl-C or a lost claim.
+ * together with its poll timer and Ctrl-C, asking the library on each tick
+ * whether the claim is still live (the library renews the lease itself).
+ * Only the reply ends the wait: packet and buffers stay alive until then,
+ * even after Ctrl-C or a lost claim.
  */
 static int dos_packet_async(struct MsgPort *handler, LONG action, LONG arg1,
                             LONG arg2, LONG arg3, LONG arg4, LONG arg5,
@@ -1861,7 +1899,7 @@ static int dos_packet_async(struct MsgPort *handler, LONG action, LONG arg1,
         }
         if (timer_port && (signals & (1UL << timer_port->mp_SigBit))) {
             timer_reap();
-            if (zzrun_packet_abandoned(0, lease_ok()) && check_live) {
+            if (zzrun_packet_abandoned(0, claim_check()) && check_live) {
                 abandoned = 1;
                 if (ownership_lost)
                     *ownership_lost = 1;
@@ -1947,25 +1985,6 @@ static int examine_next_async(BPTR lock, struct FileInfoBlock *fib,
         return 0;
     *transport_ok = 1;
     return zzrun_dos_boolean_result(1, result);
-}
-
-static LONG load_read_async(BPTR fh, uint8_t *buffer, LONG bytes,
-                            int *ownership_lost)
-{
-    struct FileHandle *handle = (struct FileHandle *)BADDR(fh);
-    LONG result;
-    int abandoned;
-
-    if (ownership_lost)
-        *ownership_lost = 0;
-    if (!handle || !handle->fh_Type || !ownership_lost)
-        return -1;
-    if (!dos_packet_async(handle->fh_Type, ACTION_READ, handle->fh_Arg1,
-                          (LONG)buffer, bytes, 0, 0, 1,
-                          &result, ownership_lost, &abandoned) ||
-        !zzrun_packet_result_usable(1, abandoned))
-        return -1;
-    return result;
 }
 
 /* DOS packet names must remain in public, longword-aligned storage until the
@@ -2320,11 +2339,12 @@ static BPTR open_resolved_async(struct dos_path_resolver *resolver,
     return request.fh;
 }
 
-static BPTR open_find_async(BPTR dir, const char *name, LONG mode,
-                            int *transport_ok)
+/* Finds the ELF: a lock on the file, searched from dir (a lock) or through
+ * every GetDeviceProc candidate of a volume or assign name. */
+static BPTR lock_find_async(BPTR dir, const char *name, int *transport_ok)
 {
     struct dos_path_resolver resolver;
-    BPTR fh;
+    BPTR lock;
     LONG io;
 
     if (transport_ok)
@@ -2333,11 +2353,11 @@ static BPTR open_find_async(BPTR dir, const char *name, LONG mode,
         return 0;
     if (!dos_path_resolver_start(&resolver, dir, name))
         return 0;
-    fh = open_resolved_async(&resolver, name, mode, transport_ok);
+    lock = lock_resolved_async(&resolver, name, NULL, transport_ok);
     io = IoErr();
     release_dos_path_resolver(&resolver);
     SetIoErr(io);
-    return fh;
+    return lock;
 }
 
 struct file_handle_release {
@@ -2422,17 +2442,18 @@ static unsigned reply_backlog_n;
 
 static int post_reply(const struct zzrun_req *q, const struct zzrun_done *d)
 {
-    aar_xport_req r;
+    AARServiceReq r;
     unsigned i;
 
     memset(&r, 0, sizeof(r));
+    r.size = sizeof(r);
     r.op = q->op;
     r.id = q->id;
     r.result = d->result;
     r.reply_flags = d->flags;
     for (i = 0; i < AAR_ENTRY_OUTS; i++)
         r.out[i] = d->out[i];
-    return aar_xport_service_reply(&xport, &r);
+    return (int)claim_note(AARServiceReply(aar_handle, &r));
 }
 
 /* Completions that found the CQ full wait here until the app has drained it. */
@@ -2476,27 +2497,33 @@ static void sink_complete(void *ctx, const struct zzrun_req *req,
 static void service_requests(void)
 {
     unsigned served = 0;
-    aar_xport_req r;
-    int rc = 0;
+    AARServiceReq r;
+    LONG rc = AAR_OK;
 
     reply_flush();
-    while (served < 16u && zzrun_reply_may_take_request(reply_backlog_n) &&
-           (rc = aar_xport_service_next(&xport, &r)) == 1) {
+    for (;;) {
         struct zzrun_req q;
         struct zzrun_done d;
         unsigned i;
 
+        if (served >= 16u || !zzrun_reply_may_take_request(reply_backlog_n))
+            break;
+        memset(&r, 0, sizeof(r));
+        r.size = sizeof(r);
+        rc = claim_note(AARServiceNext(aar_handle, &r));
+        if (rc != AAR_OK)
+            break;
         served++;
         memset(&q, 0, sizeof(q));
-        q.op = r.op;
-        q.flags = r.flags;
+        q.op = (uint16_t)r.op;
+        q.flags = (uint16_t)r.flags;
         q.id = r.id;
         for (i = 0; i < AAR_ENTRY_ARGS; i++)
             q.arg[i] = r.arg[i];
         q.buf_token = r.buf;
         q.buf_off = r.buf_off;
         q.buf_len = r.buf_len;
-        q.buf = (uint8_t *)(uintptr_t)r.ptr;
+        q.buf = (uint8_t *)r.ptr;
         memset(&d, 0, sizeof(d));
         if (zzrun_serve_request(&serve, &q, &d) == ZZRUN_SERVE_DONE)
             reply_request(&q, &d);
@@ -2598,12 +2625,47 @@ static const struct zzrun_display_ops display_ops = {
     display_op_wait_tof, display_op_load_rgb32, display_op_close
 };
 
+/* The audio ring the app writes. The library reads it for AARAudioRead and
+ * attaches and detaches it itself when it sees the AUDIO_OPEN and
+ * AUDIO_CLOSE completions. ZZRun maps the ring as well, to look at the two
+ * index words: AARAudioRead has no "frames available" answer, and a read
+ * that finds less than asked counts an underrun in the ring header, which
+ * ZZRun must only provoke when the ring really ran dry. */
+static struct AARSharedMap audio_map;
+static int audio_mapped;
+static uint32_t audio_ring_frames;
+
+/* The ring's index words are little-endian and the app accesses each with
+ * one 32-bit access, so the 68k reads each as one aligned long too. */
+static uint32_t ring_le32(const volatile uint8_t *p)
+{
+    uint32_t v = *(const volatile uint32_t *)(const volatile void *)p;
+
+    return (v << 24) | ((v & 0x0000ff00u) << 8) | ((v >> 8) & 0x0000ff00u) |
+           (v >> 24);
+}
+
+static uint32_t audio_available(void)
+{
+    const volatile uint8_t *ring = (const volatile uint8_t *)audio_map.base;
+    uint32_t n;
+
+    if (!audio_mapped)
+        return 0u;
+    n = ring_le32(ring + AAR_AUDIO_RING_WRITE_FRAME) -
+        ring_le32(ring + AAR_AUDIO_RING_READ_FRAME);
+    return n > audio_ring_frames ? 0u : n;
+}
+
 static int audio_op_open(void *ctx, uint32_t rate, uint32_t channels,
                          uint32_t token, uint32_t bytes, uint32_t frames)
 {
     (void)ctx;
+    memset(&audio_map, 0, sizeof(audio_map));
+    audio_map.size = sizeof(audio_map);
     if (!ahi_open(rate, channels) ||
-        aar_xport_audio_attach(&xport, token, bytes, frames) != AAR_OK) {
+        claim_note(AARSharedMap(aar_handle, token, bytes, 0, &audio_map)) !=
+            AAR_OK) {
         ahi_close();
         /* An AHI open failure on the AUDIO=AHI route ends the run with an
          * error, as before. */
@@ -2612,13 +2674,18 @@ static int audio_op_open(void *ctx, uint32_t rate, uint32_t channels,
         request_stop();
         return 0;
     }
+    audio_ring_frames = frames;
+    audio_mapped = 1;
     return 1;
 }
 
 static void audio_op_close(void *ctx)
 {
     (void)ctx;
-    aar_xport_audio_detach(&xport);
+    if (audio_mapped) {
+        audio_mapped = 0;
+        (void)AARSharedUnmap(aar_handle, &audio_map);
+    }
     ahi_close();
 }
 
@@ -2629,12 +2696,12 @@ static const struct zzrun_audio_ops audio_ops = {
 static int events_op_post(void *ctx, const aar_event *ev)
 {
     (void)ctx;
-    return aar_xport_post_event(&xport, ev);
+    return (int)claim_note(AARPostEvent(aar_handle, ev));
 }
 
 static const struct zzrun_events_ops events_ops = { NULL, events_op_post };
 
-static void log_sink(void *user, const void *data, uint32_t len)
+static void log_sink(APTR user, const void *data, ULONG len)
 {
     (void)user;
     zzrun_console_launcher_log(&serve.console, (const uint8_t *)data, len);
@@ -2649,95 +2716,28 @@ static void serve_setup(void)
     zzrun_display_init(&serve.display, &display_ops, &serve.sink);
     zzrun_audio_init(&serve.audio, &audio_ops);
     zzrun_events_init(&events, &events_ops);
-    aar_xport_set_log_sink(&xport, log_sink, NULL);
-}
-
-static void load_refused(const char *what, int rc)
-{
-    if (rc == AAR_E_NORESOURCE)
-        printf("ZZRun: %s refused: %s\n", what,
-               zzrun_refusal_text(aar_xport_reason(&xport)));
-    else
-        printf("ZZRun: %s failed (%s)\n", what, aar_error_name(rc));
-}
-
-static int load_elf(BPTR fh, LONG size)
-{
-    volatile uint8_t *staging = NULL;
-    uint32_t chunk_max = 0;
-    LONG offset = 0;
-    int ownership_lost;
-    int rc;
-
-    /* The limits go to the control block; the card reads them at load begin. */
-    rc = zzrun_write_limits(&xport, maxmem_mib, hostmem_mib, weight_value);
-    if (rc != AAR_OK) {
-        printf("ZZRun: MAXMEM, HOSTMEM or WEIGHT is out of range (%s)\n",
-               aar_error_name(rc));
-        return 0;
-    }
-    rc = aar_xport_load_begin(&xport, zzrun_client_caps(audio_ahi), &staging,
-                              &chunk_max);
-    if (rc != AAR_OK) {
-        load_refused("load begin", rc);
-        stop_owned();
-        return 0;
-    }
-    while (offset < size) {
-        LONG chunk = size - offset;
-        LONG n;
-
-        if (chunk > (LONG)chunk_max)
-            chunk = (LONG)chunk_max;
-        if (zzrun_user_break(ctrl_c_set(), user_stop)) {
-            puts("ZZRun: stopped during load");
-            stop_owned();
-            return 0;
-        }
-        ownership_lost = 0;
-        /* The DOS handler reads straight into the load buffer's staging
-         * area, which the card does not touch before LOAD_CHUNK. */
-        n = load_read_async(fh, (uint8_t *)(uintptr_t)staging, chunk,
-                            &ownership_lost);
-        if (ownership_lost)
-            return 0;
-        if (n != chunk) {
-            puts("ZZRun: short read while loading the ELF");
-            stop_owned();
-            return 0;
-        }
-        rc = aar_xport_load_chunk(&xport, (uint32_t)offset, (uint32_t)n);
-        if (rc != AAR_OK) {
-            printf("ZZRun: chunk at %ld failed (%s)\n", (long)offset,
-                   aar_error_name(rc));
-            stop_owned();
-            return 0;
-        }
-        offset += n;
-    }
-    rc = aar_xport_load_end(&xport);
-    if (rc != AAR_OK) {
-        load_refused("ELF", rc);
-        stop_owned();
-        return 0;
-    }
-    return 1;
+    if (zz_ext->set_log_sink)
+        (void)zz_ext->set_log_sink(aar_handle, log_sink, NULL);
 }
 
 /* argv[0] is the app's file name, as C programs expect; the Shell or ARGS
  * tokens follow it. */
 static int start_app(void)
 {
-    const char *argv_list[ZZAPP_ARGV_MAX];
+    const char *argv_list[ZZRUN_ARGV_MAX];
+    char line[160];
     int i;
-    int rc;
+    LONG rc;
 
     argv_list[0] = (const char *)FilePart((STRPTR)elf_path);
     for (i = 0; i < app_argc; i++)
         argv_list[i + 1] = arg_store[i];
-    rc = aar_xport_start(&xport, argv_list, (uint32_t)app_argc + 1u);
+    rc = claim_note(AARStart(aar_handle, argv_list, (ULONG)app_argc + 1u));
     if (rc != AAR_OK) {
-        printf("ZZRun: start failed (%s)\n", aar_error_name(rc));
+        zzrun_failure_line(line, sizeof(line), "start", rc,
+                           rc == AAR_E_NORESOURCE ? claim_reason() :
+                                                    AAR_REASON_NONE);
+        puts(line);
         return 0;
     }
     return 1;
@@ -2745,7 +2745,7 @@ static int start_app(void)
 
 static void report_fault(uint32_t code, int32_t exit_code, uint32_t pc,
                          uint32_t sp, uint32_t lr, uint32_t far, uint32_t fsr,
-                         uint32_t cpsr, uint32_t handle)
+                         uint32_t cpsr, uint32_t generation)
 {
     char line[160];
 
@@ -2755,8 +2755,8 @@ static void report_fault(uint32_t code, int32_t exit_code, uint32_t pc,
     launcher_statusf("  far=%08lx fsr=%08lx cpsr=%08lx\n",
                      (unsigned long)far, (unsigned long)fsr,
                      (unsigned long)cpsr);
-    launcher_statusf("  exit=%ld handle=%08lx\n", (long)exit_code,
-                     (unsigned long)handle);
+    launcher_statusf("  exit=%ld generation=%08lx\n", (long)exit_code,
+                     (unsigned long)generation);
     if (_WBenchMsg && IntuitionBase) {
         struct EasyStruct es;
 
@@ -2799,7 +2799,7 @@ static int run_loop(void)
     int entered = 1;
     int saw_fault = 0;
     int ownership_lost = 0;
-    aar_xport_status st;
+    AARStatusInfo st;
     uint32_t state, end_reason;
 
     timer_arm();
@@ -2817,9 +2817,9 @@ static int run_loop(void)
         signals = Wait(mask);
         if (timer_port && (signals & (1UL << timer_port->mp_SigBit)))
             timer_reap();
-        /* The lease is renewed here, every pass (1 ms): a claim whose
-         * handle went stale is not served any more. */
-        if (!lease_ok()) {
+        /* The library renews the lease from its own interrupt. A claim
+         * whose handle went stale is not served any more. */
+        if (!claim_live()) {
             ownership_lost = 1;
             break;
         }
@@ -2839,19 +2839,19 @@ static int run_loop(void)
         drain_window(input_win);
         poll_joysticks();
         zzrun_events_flush(&events);
-        (void)aar_xport_flush_events(&xport);
+        /* The library flushes a pending coalesced mouse event itself. */
         service_requests();
         service_console();
         service_display();
         service_ahi_audio();
         reply_flush();
-        /* The claim may have been revoked while a request was served. */
-        if (!claim_live()) {
+        /* The claim may have been revoked while a request was served. One
+         * small status read gives the state and the end reason; any failure
+         * of it means the claim is gone. */
+        if (claim_state(&state, &end_reason) != AAR_OK) {
             ownership_lost = 1;
             break;
         }
-        state = cb_word(AAR_CB_STATE);
-        end_reason = cb_word(AAR_CB_END_REASON);
         app_state = state;
         if (state == ZZRUN_ST_FAULTED)
             saw_fault = 1;
@@ -2879,15 +2879,16 @@ static int run_loop(void)
                          zzrun_claim_loss_text(1, AAR_END_NONE));
         return 20;
     }
-    if (aar_xport_status_get(&xport, &st) != AAR_OK) {
+    memset(&st, 0, sizeof(st));
+    st.size = sizeof(st);
+    if (claim_note(AARStatus(aar_handle, &st)) != AAR_OK) {
         launcher_status("ZZRun: the app's final status could not be read.");
         return 20;
     }
     if (st.fault_class || saw_fault)
-        report_fault(st.fault_class, st.exit_code, (uint32_t)st.fault_pc,
-                     (uint32_t)st.fault_sp, (uint32_t)st.fault_lr,
-                     (uint32_t)st.fault_addr, st.fault_syndrome,
-                     st.fault_pstate, st.handle);
+        report_fault(st.fault_class, st.exit_code, st.fault_pc.lo,
+                     st.fault_sp.lo, st.fault_lr.lo, st.fault_addr.lo,
+                     st.fault_syndrome, st.fault_pstate, st.generation);
     else if (zzrun_claim_loss_text(0, st.end_reason))
         launcher_statusf("ZZRun: claim lost (%s).\n",
                          zzrun_claim_loss_text(0, st.end_reason));
@@ -2927,9 +2928,13 @@ static int open_root(const char *root_text)
 static void cleanup(void)
 {
     timer_reap();
-    if (claim_open && !stop_asked && claim_live() &&
-        cb_word(AAR_CB_STATE) != AAR_STATE_IDLE)
-        stop_owned();
+    if (claim_open && !stop_asked && claim_live()) {
+        uint32_t leaving, leaving_end;
+
+        if (claim_state(&leaving, &leaving_end) == AAR_OK &&
+            leaving != AAR_STATE_IDLE)
+            stop_owned();
+    }
     ahi_close();
     /* A pending console read cannot be cancelled. Close the app screen
      * before that wait so the prompt is not hidden behind it. */
@@ -2945,15 +2950,17 @@ static void cleanup(void)
         UnLock(root_lock);
         root_lock = 0;
     }
-    /* The card returns the control block, the queues and every service
-     * buffer at the release, so nothing above may touch them afterwards. */
+    /* The library returns the control block, the queues, every service
+     * buffer and every map at the close, so nothing above may touch them
+     * afterwards. */
     if (claim_open) {
-        (void)aar_xport_release(&xport);
+        (void)AARClose(aar_handle);
+        aar_handle = NULL;
         claim_open = 0;
     }
-    if (board_open) {
-        aar_xport_amiga_board_close(&xboard);
-        board_open = 0;
+    if (AARBase) {
+        CloseLibrary(AARBase);
+        AARBase = NULL;
     }
     if (timer_io) {
         if (timer_io->tr_node.io_Device)
@@ -2990,10 +2997,49 @@ static void cleanup(void)
     }
 }
 
-/* The lease gate: a claim whose lease cannot be renewed is already gone. */
-static int lease_gate_stops(void)
+/* The claim gate before each load step: a claim the platform has already
+ * revoked is not worth another step. The library renews the lease, so this
+ * only asks whether the claim is still ours. */
+static int claim_gone(void)
 {
-    return !lease_ok();
+    return !claim_check();
+}
+
+/* The library's options, before the load (the old limits write and client
+ * capabilities of LOAD_BEGIN). */
+static int apply_options(void)
+{
+    struct TagItem tags[ZZRUN_TAG_MAX];
+    char line[160];
+    LONG rc;
+
+    (void)zzrun_build_tags(tags, maxmem_mib, hostmem_mib, weight_value,
+                           audio_ahi);
+    rc = claim_note(AARSetTagList(aar_handle, tags));
+    if (rc == AAR_OK)
+        return 1;
+    zzrun_tags_failure_line(line, sizeof(line), rc);
+    puts(line);
+    return 0;
+}
+
+/* The path AARLoadFile opens: the file ZZRun found, named in full. ZZRun
+ * searches the assign or the current directory itself (every directory of a
+ * multi-directory assign), so the library gets one name that Open() takes. */
+static int resolve_elf_path(BPTR lock, char *out, size_t size)
+{
+    return NameFromLock(lock, (STRPTR)out, (LONG)size) != 0;
+}
+
+static void load_failed(LONG rc)
+{
+    char line[200];
+
+    zzrun_load_failure_line(line, sizeof(line), rc,
+                            rc == AAR_E_NORESOURCE ? claim_reason() :
+                                                     AAR_REASON_NONE,
+                            ctrl_c_set(), platform_info.max_image_bytes);
+    puts(line);
 }
 
 int main(int argc, char **argv)
@@ -3002,11 +3048,10 @@ int main(int argc, char **argv)
     char root_text[256];
     ULONG forced_mode = 0;
     int have_mode = 0;
-    aar_xport_query_info query;
-    uint32_t reason = 0;
-    int status;
-    BPTR fh = 0;
-    LONG size;
+    ULONG reason = 0;
+    LONG status;
+    enum zzrun_query_verdict verdict;
+    BPTR lock = 0;
     int rc = 20;
     int show_status = 0;
     uint32_t release_handle = 0;
@@ -3128,31 +3173,43 @@ int main(int argc, char **argv)
         cleanup();
         return 20;
     }
-    status = aar_xport_amiga_board_open(&xboard);
-    if (status != AAR_OK) {
-        tell("ZZ9000 board, zz9k.library 36 or mmu.library 41 not found.");
+    AARBase = OpenLibrary((CONST_STRPTR)AAR_LIB_NAME, AAR_LIB_VERSION);
+    if (!AARBase) {
+        tell("aar.library not found. Install Libs:aar.library from the "
+             "ZZ9000 package.");
         cleanup();
         return 20;
     }
-    board_open = 1;
-    board_base = aar_xport_amiga_board_base(&xboard);
-    board_size = aar_xport_amiga_board_size(&xboard);
+    memset(&platform_info, 0, sizeof(platform_info));
+    platform_info.size = sizeof(platform_info);
+    status = AARQuery(&platform_info);
+    if (status != AAR_OK) {
+        char line[160];
+
+        zzrun_query_failure_line(line, sizeof(line), status);
+        tell(line);
+        cleanup();
+        return 20;
+    }
     if (!show_status && !release_handle)
-        printf("ZZRun %s\nboard %08lx\n", ZZRUN_VERSION,
-               (unsigned long)board_base);
-    status = aar_xport_query(&xboard, &query);
-    if (status != AAR_OK) {
-        printf("ZZRun: APP_QUERY failed (%s). Zorro III app firmware is required.\n",
-               aar_error_name(status));
+        printf("ZZRun %s\n", ZZRUN_VERSION);
+    if (!show_status)
+        printf("runtime api %lu.%lu caps %08lx\n",
+               (unsigned long)platform_info.api_major,
+               (unsigned long)platform_info.api_minor,
+               (unsigned long)platform_info.platform[AAR_ZZ9000_INFO_CAPS]);
+    verdict = zzrun_query_check(&platform_info);
+    if (verdict != ZZRUN_QUERY_OK) {
+        tell(zzrun_query_verdict_text(verdict));
         cleanup();
         return 20;
     }
-    if (!show_status)
-        printf("runtime abi %lu.%lu state %s caps %08lx\n",
-               (unsigned long)query.abi_major, (unsigned long)query.abi_minor,
-               state_name(query.state), (unsigned long)query.caps);
-    if (!(query.caps & ZZAPP_CAP_Z3) || query.abi_major != 0) {
-        tell("ZZRun requires a Zorro III board and app-runtime firmware.");
+    zz_ext = (const aar_client_ext_zz9000 *)AARExt(AAR_PLATFORM_ZZ9000,
+                                                   AAR_EXT_ZZ9000_CLIENT);
+    if (!AAR_CLIENT_EXT_ZZ9000_COVERS(zz_ext, set_log_sink) ||
+        !AAR_CLIENT_EXT_ZZ9000_COVERS(zz_ext, list) ||
+        !AAR_CLIENT_EXT_ZZ9000_COVERS(zz_ext, release_handle)) {
+        tell("aar.library has no ZZ9000 client extension.");
         cleanup();
         return 20;
     }
@@ -3166,12 +3223,13 @@ int main(int argc, char **argv)
         cleanup();
         return rc;
     }
-    status = aar_xport_open(&xport, &xboard, &reason);
+    status = AAROpen(&aar_handle, NULL, &reason);
     if (status != AAR_OK) {
-        if (status == AAR_E_NORESOURCE)
-            printf("ZZRun: claim refused: %s\n", zzrun_refusal_text(reason));
-        else
-            printf("ZZRun: claim failed (%s)\n", aar_error_name(status));
+        char line[200];
+
+        aar_handle = NULL;
+        zzrun_claim_failure_line(line, sizeof(line), status, reason);
+        puts(line);
         cleanup();
         return 20;
     }
@@ -3189,7 +3247,12 @@ int main(int argc, char **argv)
     }
     TimerBase = timer_io->tr_node.io_Device;
     serve_setup();
-    if (lease_gate_stops()) {
+    /* The options go to the library before the load. */
+    if (!apply_options()) {
+        cleanup();
+        return zzrun_load_failure_exit(ctrl_c_set(), user_stop);
+    }
+    if (claim_gone()) {
         cleanup();
         return 20;
     }
@@ -3201,68 +3264,32 @@ int main(int argc, char **argv)
             base_dir = CurrentDir(0);
             CurrentDir(base_dir);
         }
-        fh = open_find_async(base_dir, elf_path, MODE_OLDFILE, &transport_ok);
-        if (!transport_ok || !fh) {
+        lock = lock_find_async(base_dir, elf_path, &transport_ok);
+        if (!transport_ok || !lock) {
             printf("ZZRun: cannot open %s\n", elf_path);
             cleanup();
             return zzrun_load_failure_exit(ctrl_c_set(), user_stop);
         }
     }
-    if (lease_gate_stops()) {
-        end_or_close(fh);
+    if (!resolve_elf_path(lock, elf_full, sizeof(elf_full))) {
+        printf("ZZRun: cannot resolve the path of %s\n", elf_path);
+        UnLock(lock);
         cleanup();
         return 20;
     }
-    {
-        int transport_ok = 0;
-        LONG end_seek = file_packet_async(fh, ACTION_SEEK, 0, OFFSET_END,
-                                          0, 0, &transport_ok);
-
-        if (!transport_ok || end_seek < 0) {
-            printf("ZZRun: cannot read %s (io error %ld)\n", elf_path,
-                   (long)IoErr());
-            end_or_close(fh);
-            cleanup();
-            return zzrun_load_failure_exit(ctrl_c_set(), user_stop);
-        }
-    }
-    if (lease_gate_stops()) {
-        end_or_close(fh);
+    UnLock(lock);
+    lock = 0;
+    if (claim_gone()) {
         cleanup();
         return 20;
     }
-    {
-        int transport_ok = 0;
-
-        size = file_packet_async(fh, ACTION_SEEK, 0, OFFSET_BEGINNING, 0, 0,
-                                 &transport_ok);
-        if (!transport_ok || size < 0) {
-            printf("ZZRun: cannot read %s\n", elf_path);
-            end_or_close(fh);
-            cleanup();
-            return zzrun_load_failure_exit(ctrl_c_set(), user_stop);
-        }
-    }
-    if (lease_gate_stops()) {
-        end_or_close(fh);
-        cleanup();
-        return 20;
-    }
-    if (size <= 0 || (ULONG)size > ZZRUN_IMAGE_LIMIT) {
-        printf("ZZRun: %s is empty or larger than the 16 MiB image limit\n",
-               elf_path);
-        end_or_close(fh);
-        cleanup();
-        return 20;
-    }
-    printf("loading %s (%ld bytes)\n", elf_path, (long)size);
-    if (!load_elf(fh, size)) {
-        end_or_close(fh);
+    printf("loading %s\n", elf_full);
+    status = claim_note(AARLoadFile(aar_handle, elf_full));
+    if (status != AAR_OK) {
+        load_failed(status);
         cleanup();
         return zzrun_load_failure_exit(ctrl_c_set(), user_stop);
     }
-    end_or_close(fh);
-    fh = 0;
     if (!start_app()) {
         stop_owned();
         cleanup();
