@@ -229,15 +229,6 @@ static void test_launcher_output_orders_queued_messages_before_app_output(void)
     assert(zzrun_output_next_source(12u, 12u) == ZZRUN_OUTPUT_LAUNCHER);
 }
 
-static void put_be32(uint8_t *p, uint32_t value)
-{
-    p[0] = (uint8_t)(value >> 24);
-    p[1] = (uint8_t)(value >> 16);
-    p[2] = (uint8_t)(value >> 8);
-    p[3] = (uint8_t)value;
-}
-
-
 static void test_maxmem_requires_positive_decimal_mib(void)
 {
     uint32_t mib = 0;
@@ -269,26 +260,95 @@ static void test_hostmem_requires_positive_decimal_mib(void)
     assert(!zzrun_parse_hostmem("8", NULL));
 }
 
-/* The client transport module is not part of the host tests: this stands in
- * for it and records what ZZRun hands over before LOAD_BEGIN. */
-static struct {
-    int calls;
-    aar_xport *x;
-    uint32_t private_mib;
-    uint32_t shared_mib;
-    uint32_t weight;
-    int rc;
-} limits_seen;
-
-int aar_xport_set_limits(aar_xport *x, uint32_t private_mib,
-                         uint32_t shared_mib, uint32_t weight)
+static AARInfo zz9000_info(void)
 {
-    limits_seen.calls++;
-    limits_seen.x = x;
-    limits_seen.private_mib = private_mib;
-    limits_seen.shared_mib = shared_mib;
-    limits_seen.weight = weight;
-    return limits_seen.rc;
+    AARInfo info;
+
+    memset(&info, 0, sizeof(info));
+    info.size = sizeof(info);
+    info.api_major = AAR_API_MAJOR;
+    info.platform_id = AAR_PLATFORM_ZZ9000;
+    info.platform[AAR_ZZ9000_INFO_CAPS] = AAR_ZZ9000_CAP_Z3;
+    info.max_args = 16u;
+    info.max_arg_bytes = 128u;
+    info.max_image_bytes = 16u * ZZRUN_MIB_BYTES;
+    info.weight_max = 256u;
+    return info;
+}
+
+/* A fake of the library's AARSetTagList: it follows the rules of
+ * docs/aar-client-api.md (the whole list is checked before anything is
+ * applied; an unknown id is AAR_E_INVAL; a range error is AAR_E_INVAL; the
+ * options are refused with AAR_E_BUSY once the load has begun). The real
+ * library is not part of the host tests. */
+struct fake_library {
+    AARInfo info;
+    int load_begun;
+    ULONG private_mib;
+    ULONG shared_mib;
+    ULONG weight;
+    ULONG client_caps;
+    ULONG audio_route;
+    int lease_extended;
+};
+
+static void fake_library_init(struct fake_library *lib)
+{
+    memset(lib, 0, sizeof(*lib));
+    lib->info = zz9000_info();
+    lib->lease_extended = 1;
+    lib->audio_route = AAR_AUDIO_ROUTE_PLATFORM;
+}
+
+static LONG fake_set_tag_list(struct fake_library *lib,
+                              const struct TagItem *tags)
+{
+    const struct TagItem *t;
+    struct fake_library next = *lib;
+
+    if (lib->load_begun)
+        return AAR_E_BUSY;
+    for (t = tags; t->ti_Tag != TAG_DONE; t++) {
+        if (t->ti_Tag == TAG_IGNORE)
+            continue;
+        switch (t->ti_Tag) {
+        case AAR_TAG_PRIVATE_MIB:
+            if (t->ti_Data > 4095u)
+                return AAR_E_INVAL;
+            next.private_mib = t->ti_Data;
+            break;
+        case AAR_TAG_SHARED_MIB:
+            if (t->ti_Data > 4095u)
+                return AAR_E_INVAL;
+            next.shared_mib = t->ti_Data;
+            break;
+        case AAR_TAG_WEIGHT:
+            if (lib->info.weight_max == 0u)
+                return AAR_E_NOSYS;
+            if (t->ti_Data > lib->info.weight_max)
+                return AAR_E_INVAL;
+            next.weight = t->ti_Data;
+            break;
+        case AAR_TAG_LEASE_EXTENDED:
+            next.lease_extended = t->ti_Data != 0u;
+            break;
+        case AAR_TAG_AUDIO_ROUTE:
+            if (t->ti_Data != AAR_AUDIO_ROUTE_PLATFORM &&
+                t->ti_Data != AAR_AUDIO_ROUTE_AHI)
+                return AAR_E_INVAL;
+            next.audio_route = t->ti_Data;
+            break;
+        case AAR_TAG_CLIENT_CAPS:
+            if (t->ti_Data & ~AAR_CCAP_KNOWN)
+                return AAR_E_INVAL;
+            next.client_caps = t->ti_Data;
+            break;
+        default:
+            return AAR_E_INVAL;
+        }
+    }
+    *lib = next;
+    return AAR_OK;
 }
 
 static void test_weight_is_one_to_the_platform_bound(void)
@@ -404,28 +464,157 @@ static void test_weight_is_stripped_from_the_app_arguments(void)
     }
 }
 
-static void test_limits_write_carries_the_weight(void)
+static unsigned tag_count(const struct TagItem *tags)
 {
-    char marker;
-    aar_xport *x = (aar_xport *)&marker;
+    unsigned n = 0;
 
-    memset(&limits_seen, 0, sizeof(limits_seen));
-    assert(zzrun_write_limits(x, 0u, 0u, 0u) == AAR_OK);
-    assert(limits_seen.calls == 1 && limits_seen.x == x);
-    assert(limits_seen.private_mib == 0u && limits_seen.shared_mib == 0u);
-    assert(limits_seen.weight == 0u);
+    while (tags[n].ti_Tag != TAG_DONE)
+        n++;
+    return n;
+}
 
-    assert(zzrun_write_limits(x, 256u, 32u, 1u) == AAR_OK);
-    assert(limits_seen.calls == 2);
-    assert(limits_seen.private_mib == 256u && limits_seen.shared_mib == 32u);
-    assert(limits_seen.weight == 1u);
+static ULONG tag_value(const struct TagItem *tags, ULONG id, int *found)
+{
+    unsigned i;
 
-    assert(zzrun_write_limits(x, 0u, 0u, ZZRUN_WEIGHT_MAX) == AAR_OK);
-    assert(limits_seen.weight == 256u);
+    *found = 0;
+    for (i = 0; tags[i].ti_Tag != TAG_DONE; i++) {
+        if (tags[i].ti_Tag == id) {
+            *found = 1;
+            return tags[i].ti_Data;
+        }
+    }
+    return 0;
+}
 
-    limits_seen.rc = AAR_E_INVAL;
-    assert(zzrun_write_limits(x, 1u, 2u, 3u) == AAR_E_INVAL);
-    assert(limits_seen.weight == 3u);
+static void test_tag_list_carries_only_the_set_limits(void)
+{
+    struct TagItem tags[ZZRUN_TAG_MAX];
+    int found;
+    unsigned n;
+
+    /* A launch with no limits and no AUDIO: the serving capabilities and
+     * the extended lease only. A zero limit keeps the platform default
+     * and is left out. */
+    n = zzrun_build_tags(tags, 0u, 0u, 0u, 0);
+    assert(n == 2u && tag_count(tags) == 2u);
+    assert(tag_value(tags, AAR_TAG_CLIENT_CAPS, &found) ==
+               zzrun_client_ccaps() && found);
+    assert(tag_value(tags, AAR_TAG_LEASE_EXTENDED, &found) == 1u && found);
+    tag_value(tags, AAR_TAG_PRIVATE_MIB, &found);
+    assert(!found);
+    tag_value(tags, AAR_TAG_SHARED_MIB, &found);
+    assert(!found);
+    tag_value(tags, AAR_TAG_WEIGHT, &found);
+    assert(!found);
+    tag_value(tags, AAR_TAG_AUDIO_ROUTE, &found);
+    assert(!found);
+
+    /* MAXMEM, HOSTMEM and WEIGHT each have their own tag. */
+    n = zzrun_build_tags(tags, 256u, 32u, 1u, 0);
+    assert(n == 5u && tag_count(tags) == 5u);
+    assert(tag_value(tags, AAR_TAG_PRIVATE_MIB, &found) == 256u && found);
+    assert(tag_value(tags, AAR_TAG_SHARED_MIB, &found) == 32u && found);
+    assert(tag_value(tags, AAR_TAG_WEIGHT, &found) == 1u && found);
+
+    /* Only the ones that are set. */
+    n = zzrun_build_tags(tags, 0u, 0u, ZZRUN_WEIGHT_MAX, 0);
+    assert(n == 3u);
+    assert(tag_value(tags, AAR_TAG_WEIGHT, &found) == 256u && found);
+    tag_value(tags, AAR_TAG_PRIVATE_MIB, &found);
+    assert(!found);
+
+    /* AUDIO=AHI names the AHI route. */
+    n = zzrun_build_tags(tags, 0u, 0u, 0u, 1);
+    assert(n == 3u);
+    assert(tag_value(tags, AAR_TAG_AUDIO_ROUTE, &found) ==
+               AAR_AUDIO_ROUTE_AHI && found);
+
+    /* Everything at once fits the array and ends with TAG_DONE. */
+    n = zzrun_build_tags(tags, 1u, 2u, 3u, 1);
+    assert(n == 6u && n < ZZRUN_TAG_MAX);
+    assert(tags[n].ti_Tag == TAG_DONE);
+}
+
+static void test_tag_list_follows_the_library_rules(void)
+{
+    struct TagItem tags[ZZRUN_TAG_MAX];
+    struct fake_library lib;
+    unsigned i;
+
+    /* No tag ZZRun builds is a launcher-policy tag or an id outside the
+     * ones the library defines: ROOT, ABS, the console and the screen
+     * mode stay in ZZRun. */
+    (void)zzrun_build_tags(tags, 1u, 2u, 3u, 1);
+    for (i = 0; tags[i].ti_Tag != TAG_DONE; i++) {
+        assert(tags[i].ti_Tag > AAR_TAG_BASE);
+        assert(tags[i].ti_Tag <= AAR_TAG_BASE + 6u);
+    }
+
+    fake_library_init(&lib);
+    (void)zzrun_build_tags(tags, 256u, 32u, 4u, 1);
+    assert(fake_set_tag_list(&lib, tags) == AAR_OK);
+    assert(lib.private_mib == 256u && lib.shared_mib == 32u);
+    assert(lib.weight == 4u);
+    assert(lib.client_caps == zzrun_client_ccaps());
+    assert(lib.lease_extended);
+    assert(lib.audio_route == AAR_AUDIO_ROUTE_AHI);
+
+    /* The platform route is the default and ZZRun leaves it alone. */
+    fake_library_init(&lib);
+    (void)zzrun_build_tags(tags, 0u, 0u, 0u, 0);
+    assert(fake_set_tag_list(&lib, tags) == AAR_OK);
+    assert(lib.audio_route == AAR_AUDIO_ROUTE_PLATFORM);
+    assert(lib.private_mib == 0u && lib.shared_mib == 0u && lib.weight == 0u);
+
+    /* The largest values ZZRun accepts on the command line are accepted. */
+    fake_library_init(&lib);
+    (void)zzrun_build_tags(tags, 4095u, ZZRUN_HOSTMEM_MAX_MIB,
+                           ZZRUN_WEIGHT_MAX, 0);
+    assert(fake_set_tag_list(&lib, tags) == AAR_OK);
+    assert(lib.shared_mib == 4095u && lib.weight == 256u);
+}
+
+static void test_tag_list_is_refused_the_way_the_library_would(void)
+{
+    struct TagItem tags[ZZRUN_TAG_MAX];
+    struct fake_library lib;
+    char line[256];
+    LONG rc;
+
+    /* A value past the platform bound: the library refuses the whole
+     * list and changes nothing. */
+    fake_library_init(&lib);
+    (void)zzrun_build_tags(tags, 64u, 0u, ZZRUN_WEIGHT_MAX + 1u, 0);
+    rc = fake_set_tag_list(&lib, tags);
+    assert(rc == AAR_E_INVAL);
+    assert(lib.private_mib == 0u && lib.weight == 0u && lib.client_caps == 0u);
+    zzrun_tags_failure_line(line, sizeof(line), rc);
+    assert(strstr(line, "out of range"));
+
+    (void)zzrun_build_tags(tags, 0u, 4096u, 0u, 0);
+    assert(fake_set_tag_list(&lib, tags) == AAR_E_INVAL);
+
+    /* A platform with no weighting refuses WEIGHT. */
+    fake_library_init(&lib);
+    lib.info.weight_max = 0u;
+    (void)zzrun_build_tags(tags, 0u, 0u, 2u, 0);
+    rc = fake_set_tag_list(&lib, tags);
+    assert(rc == AAR_E_NOSYS);
+    zzrun_tags_failure_line(line, sizeof(line), rc);
+    assert(strstr(line, "does not take WEIGHT"));
+    /* The same platform takes a launch that sets no weight. */
+    (void)zzrun_build_tags(tags, 0u, 0u, 0u, 0);
+    assert(fake_set_tag_list(&lib, tags) == AAR_OK);
+
+    /* After the load began the options come too late. */
+    fake_library_init(&lib);
+    lib.load_begun = 1;
+    rc = fake_set_tag_list(&lib, tags);
+    assert(rc == AAR_E_BUSY);
+    zzrun_tags_failure_line(line, sizeof(line), rc);
+    assert(strcmp(line, "ZZRun: options failed (busy)") == 0);
+    assert(lib.client_caps == 0u);
 }
 
 static void test_handle_parse(void)
@@ -461,14 +650,14 @@ static void test_refusal_text_names_each_reason(void)
                   "refused by the platform") == 0);
 }
 
-static void test_client_caps(void)
+static void test_client_ccaps(void)
 {
-    const uint32_t base = ZZAPP_CLIENT_LEASE_EXTENDED | ZZAPP_CLIENT_CLUT8 |
-                          ZZAPP_CLIENT_SCANOUT_ACK | ZZAPP_CLIENT_LATEST;
-
-    assert(zzrun_client_caps(0) == base);
-    assert(zzrun_client_caps(1) == (base | ZZAPP_CLIENT_AUDIO_AHI));
-    assert((zzrun_client_caps(1) & ~ZZAPP_CLIENT_KNOWN) == 0u);
+    /* ZZRun serves CLUT8 screens, acknowledges pan flips and accepts
+     * platform-owned flips; the lease is the library's, not a cap. */
+    assert(zzrun_client_ccaps() == (AAR_CCAP_DISPLAY_CLUT8 |
+                                    AAR_CCAP_DISPLAY_PAN_ACK |
+                                    AAR_CCAP_DISPLAY_LATEST));
+    assert((zzrun_client_ccaps() & ~AAR_CCAP_KNOWN) == 0u);
 }
 
 static void test_app_exit_code(void)
@@ -520,42 +709,171 @@ static void test_block_reason_names_match_protocol(void)
     assert(strcmp(zzrun_block_reason_name(255u), "unknown") == 0);
 }
 
-static void test_list_reply_decoding(void)
+static void test_end_reason_names(void)
 {
-    uint8_t reply[ZZAPP_LIST_REPLY_BYTES] = { 0 };
-    struct zzrun_list_reply parsed;
-
-    put_be32(reply + ZZAPP_LIST_STATE, ZZRUN_ST_RUNNING);
-    put_be32(reply + ZZAPP_LIST_HANDLE, 0x00020003u);
-    put_be32(reply + ZZAPP_LIST_COMMITTED, 12u * 1024u * 1024u);
-    put_be32(reply + ZZAPP_LIST_INDEX, 3u);
-    put_be32(reply + ZZAPP_LIST_CPU_MS, 2500u);
-    put_be32(reply + ZZAPP_LIST_SERVICE_MS, 17u);
-    reply[ZZAPP_LIST_REASONS] = 3u;
-    reply[ZZAPP_LIST_REASONS + 1u] = AAR_END_FORCED;
-    reply[ZZAPP_LIST_REASONS + 3u] = ZZAPP_LIST_FLAG_OVERLOAD;
-    memcpy(reply + ZZAPP_LIST_NAME, "quake", 6u);
-    assert(zzrun_list_reply_decode(reply, sizeof(reply), &parsed));
-    assert(parsed.state == ZZRUN_ST_RUNNING);
-    assert(parsed.handle == 0x00020003u);
-    assert(parsed.index == 3u);
-    assert(parsed.committed_bytes == 12u * 1024u * 1024u);
-    assert(parsed.cpu_ms == 2500u);
-    assert(parsed.service_ms == 17u);
-    assert(parsed.block_reason == 3u);
-    assert(parsed.end_reason == AAR_END_FORCED);
-    assert(parsed.flags == ZZAPP_LIST_FLAG_OVERLOAD);
-    assert(strcmp(parsed.name, "quake") == 0);
-    assert(strcmp(zzrun_block_reason_name(parsed.block_reason), "event") == 0);
-    assert(strcmp(zzrun_end_reason_name(parsed.end_reason), "forced stop") == 0);
+    assert(strcmp(zzrun_end_reason_name(AAR_END_FORCED), "forced stop") == 0);
     assert(strcmp(zzrun_end_reason_name(AAR_END_QUARANTINED),
                   "quarantined") == 0);
-    assert(!zzrun_list_reply_decode(reply, ZZAPP_LIST_REPLY_BYTES - 1u,
-                                    &parsed));
-    /* A list with no further claim names handle 0. */
-    memset(reply, 0, sizeof(reply));
-    assert(zzrun_list_reply_decode(reply, sizeof(reply), &parsed));
-    assert(parsed.handle == 0u);
+    assert(strcmp(zzrun_end_reason_name(AAR_END_LEASE), "lease loss") == 0);
+}
+
+/* ---- Refusal and failure lines -------------------------------------------
+ * What ZZRun prints for each answer the library can give. */
+
+static void test_open_failure_lines(void)
+{
+    char line[256];
+
+    zzrun_claim_failure_line(line, sizeof(line), AAR_E_NORESOURCE,
+                             AAR_REASON_TABLES);
+    assert(strcmp(line, "ZZRun: claim refused: no address-space translation "
+                        "tables left") == 0);
+    zzrun_claim_failure_line(line, sizeof(line), AAR_E_NORESOURCE,
+                             AAR_REASON_MEMORY);
+    assert(strstr(line, "claim refused:") && strstr(line, "record"));
+    zzrun_claim_failure_line(line, sizeof(line), AAR_E_NORESOURCE,
+                             AAR_REASON_HOSTHEAP);
+    assert(strstr(line, "shared card memory"));
+    zzrun_claim_failure_line(line, sizeof(line), AAR_E_NORESOURCE,
+                             AAR_REASON_LIMIT);
+    assert(strstr(line, "HOSTMEM"));
+    /* A refusal without a known reason still says it was a refusal. */
+    zzrun_claim_failure_line(line, sizeof(line), AAR_E_NORESOURCE,
+                             AAR_REASON_NONE);
+    assert(strcmp(line, "ZZRun: claim refused: refused by the platform") == 0);
+    /* The reason is only read for a refusal. */
+    zzrun_claim_failure_line(line, sizeof(line), AAR_E_NOMEM,
+                             AAR_REASON_TABLES);
+    assert(strcmp(line, "ZZRun: claim failed (no memory)") == 0);
+    /* No platform, or no mmu.library: both come back as NOSYS. */
+    zzrun_claim_failure_line(line, sizeof(line), AAR_E_NOSYS,
+                             AAR_REASON_NONE);
+    assert(strstr(line, "claim failed") && strstr(line, "mmu.library 41"));
+    zzrun_claim_failure_line(line, sizeof(line), AAR_E_IO, AAR_REASON_NONE);
+    assert(strcmp(line, "ZZRun: claim failed (io error)") == 0);
+}
+
+static void test_tags_failure_lines(void)
+{
+    char line[256];
+
+    zzrun_tags_failure_line(line, sizeof(line), AAR_E_INVAL);
+    assert(strstr(line, "MAXMEM, HOSTMEM or WEIGHT is out of range"));
+    zzrun_tags_failure_line(line, sizeof(line), AAR_E_NOSYS);
+    assert(strstr(line, "does not take WEIGHT"));
+    zzrun_tags_failure_line(line, sizeof(line), AAR_E_BUSY);
+    assert(strcmp(line, "ZZRun: options failed (busy)") == 0);
+    zzrun_tags_failure_line(line, sizeof(line), AAR_E_STALE);
+    assert(strcmp(line, "ZZRun: options failed (claim revoked)") == 0);
+}
+
+static void test_load_failure_lines(void)
+{
+    char line[256];
+
+    /* Ctrl-C comes back as AAR_E_IO with the break signal left set. */
+    zzrun_load_failure_line(line, sizeof(line), AAR_E_IO, AAR_REASON_NONE, 1,
+                            16u * ZZRUN_MIB_BYTES);
+    assert(strcmp(line, "ZZRun: stopped during load") == 0);
+    /* The same code without a break is a failed read. */
+    zzrun_load_failure_line(line, sizeof(line), AAR_E_IO, AAR_REASON_NONE, 0,
+                            16u * ZZRUN_MIB_BYTES);
+    assert(strcmp(line, "ZZRun: load failed (io error)") == 0);
+    zzrun_load_failure_line(line, sizeof(line), AAR_E_NOENT, AAR_REASON_NONE,
+                            0, 16u * ZZRUN_MIB_BYTES);
+    assert(strstr(line, "cannot open the ELF"));
+    /* An empty or oversized image, or one the loader refuses. The limit
+     * comes from AARInfo, not from a constant of ZZRun. */
+    zzrun_load_failure_line(line, sizeof(line), AAR_E_INVAL, AAR_REASON_NONE,
+                            0, 16u * ZZRUN_MIB_BYTES);
+    assert(strstr(line, "larger than the 16 MiB image limit"));
+    zzrun_load_failure_line(line, sizeof(line), AAR_E_INVAL, AAR_REASON_NONE,
+                            0, 32u * ZZRUN_MIB_BYTES);
+    assert(strstr(line, "larger than the 32 MiB image limit"));
+    /* A refusal for lack of a resource names it, from the status. */
+    zzrun_load_failure_line(line, sizeof(line), AAR_E_NORESOURCE,
+                            AAR_REASON_LIMIT, 0, 16u * ZZRUN_MIB_BYTES);
+    assert(strstr(line, "load refused:") && strstr(line, "HOSTMEM"));
+    zzrun_load_failure_line(line, sizeof(line), AAR_E_PROFILE,
+                            AAR_REASON_NONE, 0, 16u * ZZRUN_MIB_BYTES);
+    assert(strcmp(line, "ZZRun: load failed (profile not supported)") == 0);
+    zzrun_load_failure_line(line, sizeof(line), AAR_E_NOGROUP,
+                            AAR_REASON_NONE, 0, 16u * ZZRUN_MIB_BYTES);
+    assert(strstr(line, "service group not available"));
+}
+
+static void test_start_and_generic_failure_lines(void)
+{
+    char line[256];
+
+    zzrun_failure_line(line, sizeof(line), "start", AAR_E_INVAL,
+                       AAR_REASON_NONE);
+    assert(strcmp(line, "ZZRun: start failed (bad request)") == 0);
+    zzrun_failure_line(line, sizeof(line), "start", AAR_E_NORESOURCE,
+                       AAR_REASON_MEMORY);
+    assert(strstr(line, "start refused:") && strstr(line, "record"));
+    /* A short buffer truncates and stays a string. */
+    zzrun_failure_line(line, 8u, "start", AAR_E_INVAL, AAR_REASON_NONE);
+    assert(strlen(line) == 7u);
+}
+
+static void test_query_verdicts(void)
+{
+    AARInfo info = zz9000_info();
+
+    assert(zzrun_query_check(&info) == ZZRUN_QUERY_OK);
+    assert(zzrun_query_verdict_text(ZZRUN_QUERY_OK)[0] == '\0');
+    /* Not a Zorro III board. */
+    info.platform[AAR_ZZ9000_INFO_CAPS] = AAR_ZZ9000_CAP_DISPLAY;
+    assert(zzrun_query_check(&info) == ZZRUN_QUERY_NO_Z3);
+    assert(strstr(zzrun_query_verdict_text(ZZRUN_QUERY_NO_Z3), "Zorro III"));
+    /* Another platform's words do not mean ZZ9000 caps. */
+    info = zz9000_info();
+    info.platform_id = AAR_PLATFORM_ZZ9000 + 1u;
+    assert(zzrun_query_check(&info) == ZZRUN_QUERY_NOT_ZZ9000);
+    /* The API major ZZRun was built for. */
+    info = zz9000_info();
+    info.api_major = AAR_API_MAJOR + 1u;
+    assert(zzrun_query_check(&info) == ZZRUN_QUERY_API);
+    assert(strstr(zzrun_query_verdict_text(ZZRUN_QUERY_API),
+                  "app-runtime firmware"));
+    /* ZZRun passes up to 16 strings of 127 bytes: the platform must take
+     * them (this replaces the old ZZAPP_ARGV_* constants). */
+    info = zz9000_info();
+    info.max_args = ZZRUN_ARGV_MAX - 1u;
+    assert(zzrun_query_check(&info) == ZZRUN_QUERY_ARGS);
+    assert(!zzrun_args_fit(&info));
+    assert(strstr(zzrun_query_verdict_text(ZZRUN_QUERY_ARGS), "arguments"));
+    info = zz9000_info();
+    info.max_arg_bytes = ZZRUN_ARGV_STR_MAX - 1u;
+    assert(zzrun_query_check(&info) == ZZRUN_QUERY_ARGS);
+    info = zz9000_info();
+    info.max_args = 32u;
+    info.max_arg_bytes = 256u;
+    assert(zzrun_query_check(&info) == ZZRUN_QUERY_OK);
+    /* The longest string zzrun_arg_length_allowed() lets through, plus its
+     * NUL, is what max_arg_bytes counts. */
+    assert(zzrun_arg_length_allowed(ZZRUN_ARGV_STR_MAX - 1u));
+    assert(!zzrun_arg_length_allowed(ZZRUN_ARGV_STR_MAX));
+}
+
+static void test_query_failure_lines(void)
+{
+    char line[256];
+
+    zzrun_query_failure_line(line, sizeof(line), AAR_E_NOSYS);
+    assert(strstr(line, "zz9k.library 36") && strstr(line, "not found"));
+    zzrun_query_failure_line(line, sizeof(line), AAR_E_IO);
+    assert(strstr(line, "AARQuery failed (io error)"));
+}
+
+static void test_error_names(void)
+{
+    assert(strcmp(zzrun_error_name(AAR_OK), "ok") == 0);
+    assert(strcmp(zzrun_error_name(AAR_E_STALE), "claim revoked") == 0);
+    assert(strcmp(zzrun_error_name(AAR_E_OWNER),
+                  "handle belongs to another task") == 0);
+    assert(strcmp(zzrun_error_name(-99), "error") == 0);
 }
 
 /* The flags word carries AAR values: READ 1, WRITE 2, CREATE 4, TRUNCATE 8,
@@ -1183,14 +1501,23 @@ int main(void)
     test_weight_is_one_to_the_platform_bound();
     test_weight_argument_forms();
     test_weight_is_stripped_from_the_app_arguments();
-    test_limits_write_carries_the_weight();
+    test_tag_list_carries_only_the_set_limits();
+    test_tag_list_follows_the_library_rules();
+    test_tag_list_is_refused_the_way_the_library_would();
     test_handle_parse();
     test_refusal_text_names_each_reason();
-    test_client_caps();
+    test_client_ccaps();
     test_app_exit_code();
     test_release_is_for_finished_claims();
     test_block_reason_names_match_protocol();
-    test_list_reply_decoding();
+    test_end_reason_names();
+    test_open_failure_lines();
+    test_tags_failure_lines();
+    test_load_failure_lines();
+    test_start_and_generic_failure_lines();
+    test_query_verdicts();
+    test_query_failure_lines();
+    test_error_names();
     test_open_flags_map_to_one_plan_each();
     test_open_flag_refusals_are_the_invalid_combinations();
     test_status_keyword_is_case_insensitive();

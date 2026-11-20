@@ -20,7 +20,7 @@ The SDK tools, when installed, are documented in `sdk.guide`.
 | `ZZNetReady` | Returns an AmigaDOS status for a boot script that waits for Ethernet negotiation. |
 | `ZZScanlines` | Changes the active scandoubler scanline mode and parity. |
 | `ZZGamma` | Sets the output gamma filter live, or prints the current gamma. |
-| `ZZRun` | Loads trusted ARM ELFs over the AAR queue transport, one claim per app; requires matching Zorro III app-runtime firmware, `zz9k.library` revision 36 or later (the SDK runtime in this release ships 2.41), and `mmu.library` 41 or later. |
+| `ZZRun` | Loads trusted ARM ELFs through `aar.library`, one claim per app; requires `aar.library`, matching Zorro III app-runtime firmware, `zz9k.library` revision 36 or later (the SDK runtime in this release ships 2.41), and `mmu.library` 41 or later. |
 
 ## ZZFwUpdate: firmware updates
 
@@ -265,10 +265,13 @@ Picasso96 is also required when an app requests a display. Run
 `Stack 32768` in the launching Shell; ZZRun rejects a process stack smaller
 than 16 KiB.
 
-ZZRun links the SDK's client transport module. It opens `zz9k.library`
-(revision 36 or later, only to reach the board's mailbox) and needs
-`mmu.library` 41 or later to map the card's shared buffers cache-inhibited.
-The SDK runtime in this release supplies `zz9k.library` 2.41.
+ZZRun calls the app runtime through `aar.library`, which the installer puts
+in `LIBS:` with ZZRun; without the library it stops with return 20. The
+library opens `zz9k.library` (revision 36 or later, only to reach the board's
+mailbox) and needs `mmu.library` 41 or later to map the card's shared buffers
+cache-inhibited. It keeps the claim's lease alive, so a requester or a slow
+disk in ZZRun does not cost the app its claim. The SDK runtime in this release
+supplies `zz9k.library` 2.41.
 
 | Form | Result |
 | --- | --- |

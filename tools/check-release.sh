@@ -63,6 +63,7 @@ if [ "$quick" -eq 0 ]; then
 
     # SDK runtime payloads (sdk/build.sh).
     check_file sdk/out/Libs/zz9k.library
+    check_file sdk/out/Libs/aar.library
     check_file sdk/out/Libs/mpega.library
     check_file sdk/out/Classes/DataTypes/zz9k-picture.datatype
     check_file sdk/out/Classes/DataTypes/zz9k-sound.datatype

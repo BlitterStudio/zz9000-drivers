@@ -74,6 +74,7 @@ fi
 
 # SDK runtime payloads (built by sdk/build.sh from the pinned zz9000-sdk ref).
 install -Dm644 sdk/out/Libs/zz9k.library        "$inst/Libs/zz9k.library"
+install -Dm644 sdk/out/Libs/aar.library         "$inst/Libs/aar.library"
 install -Dm644 sdk/out/Libs/mpega.library       "$inst/Libs/mpega.library"
 install -Dm644 sdk/out/Classes/DataTypes/zz9k-picture.datatype \
                                                 "$inst/Classes/DataTypes/zz9k-picture.datatype"

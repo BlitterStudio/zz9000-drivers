@@ -691,9 +691,40 @@
          (source "Tools/ZZNetReady")
          (dest "C:"))
 
+      ; ZZRun calls the app runtime through aar.library, which in turn
+      ; reaches the card through zz9k.library. Offered when the release
+      ; drawer carries it, like zz9k.library above; the version prompt only
+      ; appears when one is already installed.
+      (if (exists "Libs/aar.library")
+          (
+             (set #newver   (getversion "Libs/aar.library"))
+             (set #newmajor (/ #newver 65536))
+             (set #newminor (- #newver (* #newmajor 65536)))
+
+             (if (exists "LIBS:aar.library")
+                 (
+                    (set #oldver   (getversion "LIBS:aar.library"))
+                    (set #oldmajor (/ #oldver 65536))
+                    (set #oldminor (- #oldver (* #oldmajor 65536)))
+
+                    (if (askbool (prompt "Replace existing aar.library?\n\nInstalled version: " #oldmajor "." #oldminor "\nNew version: " #newmajor "." #newminor "\n\nProceed with overwrite?")
+                                 (help "The AAR client library: ZZRun and other launchers use it to load, run and serve ARM apps on the ZZ9000."))
+                        (copyfiles
+                           (prompt "Install aar.library into LIBS:")
+                           (help "The AAR client library: ZZRun and other launchers use it to load, run and serve ARM apps on the ZZ9000. It needs zz9k.library 36 or later and mmu.library 41 or later.")
+                           (source "Libs/aar.library")
+                           (dest "LIBS:")))
+                 )
+                 (copyfiles
+                    (prompt "Install aar.library into LIBS:")
+                    (help "The AAR client library: ZZRun and other launchers use it to load, run and serve ARM apps on the ZZ9000. It needs zz9k.library 36 or later and mmu.library 41 or later.")
+                    (source "Libs/aar.library")
+                    (dest "LIBS:")))
+          ))
+
       (copyfiles
          (prompt "Install ZZRun into C:")
-         (help "Launches up to four trusted ARM ELFs through zz9k.library's mailbox transport on the Zorro III app runtime, which needs firmware with app slots. This release includes zz9k.library 2.40. It restores the public screen when an app exits or faults. See Docs/ZZRun.guide for ROOT, Workbench ToolTypes, and file access.")
+         (help "Launches trusted ARM ELFs through aar.library on the Zorro III app runtime, which needs firmware with app slots. It needs aar.library, which this release includes. It restores the public screen when an app exits or faults. See Docs/ZZRun.guide for ROOT, Workbench ToolTypes, and file access.")
          (source "Tools/ZZRun")
          (infos)
          (dest "C:"))

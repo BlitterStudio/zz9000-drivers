@@ -174,16 +174,19 @@ class RepoToolingTests(unittest.TestCase):
         ):
             self.assertIn('#include "zz9000_hw.h"', self.read(relpath))
 
-        # ZZRun finds the board through the client transport module, which
-        # opens it, so it no longer carries the register header.
+        # ZZRun reaches the card through aar.library, which opens the board
+        # itself, so it carries neither the register header nor a transport
+        # module.
         zzrun = self.read("ZZRun/ZZRun.c")
         self.assertNotIn("zz9000_hw.h", zzrun)
-        self.assertIn("aar_xport_amiga_board_open", zzrun)
-        # WEIGHT is stripped from the app arguments and reaches the limits
-        # write; the parser and the write are covered by ZZRun/tests.
+        self.assertIn("OpenLibrary((CONST_STRPTR)AAR_LIB_NAME, AAR_LIB_VERSION)",
+                      zzrun)
+        self.assertIn("AARQuery(&platform_info)", zzrun)
+        # WEIGHT is stripped from the app arguments and reaches the library
+        # as a tag; the parser and the tag list are covered by ZZRun/tests.
         self.assertIn("zzrun_weight_arg(argv[i], &weight_value)", zzrun)
         self.assertIn(
-            "zzrun_write_limits(&xport, maxmem_mib, hostmem_mib, weight_value)",
+            "zzrun_build_tags(tags, maxmem_mib, hostmem_mib, weight_value,",
             zzrun)
 
     def test_live_videocap_contract_has_one_shared_definition(self):
@@ -641,6 +644,7 @@ class RepoToolingTests(unittest.TestCase):
             "ZZCapture",
             "ZZRun",
             "zz9k.library",
+            "aar.library",
             "mpega.library",
             "zz9k-picture.datatype",
             "amissl_v362.library",
@@ -796,6 +800,31 @@ class RepoToolingTests(unittest.TestCase):
 
         self.assertIn('(source "Tools/ZZRun")', installer)
         self.assertIn("Docs/ZZRun.guide", installer)
+
+    def test_aar_library_travels_from_the_sdk_build_to_the_installer(self):
+        """ZZRun needs aar.library. It is built by the firmware SDK package
+        like zz9k.library, collected by sdk/build.sh, installed into the
+        release drawer, checked by the release gate and offered by the
+        installer."""
+        ci = self.read(".github/workflows/ci.yml")
+        package = self.read("tools/package-local.sh")
+        sdk_build = self.read("sdk/build.sh")
+        gate = self.read("tools/check-release.sh")
+        installer = self.read("installer/ZZ9000Installer/Install ZZ9000")
+
+        self.assertIn('cp "$pkg/Libs/aar.library"', sdk_build)
+        self.assertIn("sdk/out/Libs/aar.library", package)
+        self.assertIn('"$inst/Libs/aar.library"', package)
+        self.assertIn("check_file sdk/out/Libs/aar.library", gate)
+        self.assertIn("artifacts/sdk-payloads/Libs/aar.library", ci)
+        self.assertIn('"$INST/Libs/aar.library"', ci)
+        self.assertIn('(source "Libs/aar.library")', installer)
+
+    def test_build_notes_do_not_name_the_old_zzrun_module(self):
+        for rel in ("tools/build-all.sh", "sdk/README.md"):
+            text = self.read(rel)
+            self.assertNotIn("aar_xport", text, rel)
+            self.assertNotIn("zzapp_proto", text, rel)
 
     def test_audio_stack_uses_shared_ax_header(self):
         header = self.read("include/zz9000_ax.h")
@@ -1562,36 +1591,37 @@ class RepoToolingTests(unittest.TestCase):
         path.write_text(text, encoding="utf-8", newline="\n")
         path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
-    def _fake_firmware_sdk(self, firmware):
-        for rel in (
-            "sdk/include/zz9k/zz9k.h",
-            "sdk/host/include/zz9k/zz9k.h",
-            "sdk/amiga/include/zz9k/zz9k.h",
-            "sdk/amiga/include/proto/zz9k.h",
-            "sdk/amiga/include/clib/zz9k_protos.h",
-            "sdk/amiga/include/inline/zz9k.h",
-            "sdk/amiga/include/pragmas/zz9k_pragmas.h",
-            "sdk/amiga/src/aar_xport_zz9000.h",
-            "sdk/amiga/src/aar_xport_zz9000.c",
-            "sdk/aar/include/aar/app.h",
-            "sdk/aar/include/aar/transport.h",
-        ):
-            path = firmware / rel
+    AAR_CLIENT_HEADERS = (
+        "libraries/aar.h",
+        "libraries/aar_zz9000.h",
+        "proto/aar.h",
+        "inline/aar.h",
+        "clib/aar_protos.h",
+        "pragmas/aar_pragmas.h",
+    )
+
+    def _fake_aar_checkout(self, aar, tag="fixture"):
+        """The files of an aar checkout that ZZRun/build.sh stages: the
+        AAR contract headers and the aar.library client headers."""
+        for rel in ("include/aar/app.h", "include/aar/transport.h"):
+            path = aar / rel
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("/* fixture */\n", encoding="utf-8")
+            path.write_text("/* %s */\n" % tag, encoding="utf-8")
+        for rel in self.AAR_CLIENT_HEADERS:
+            path = aar / "client" / "include" / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("/* %s %s */\n" % (tag, rel), encoding="utf-8")
+
+    def _fake_firmware_sdk(self, firmware, tag="fw-aar"):
+        """A firmware checkout with the aar checkout it pins in sdk/aar."""
+        self._fake_aar_checkout(firmware / "sdk" / "aar", tag)
 
     def _zzrun_build_tree(self, base):
         repo = base / "drivers"
         (repo / "ZZRun").mkdir(parents=True)
-        (repo / "tools").mkdir()
         shutil.copy(ROOT / "ZZRun" / "build.sh", repo / "ZZRun" / "build.sh")
-        shutil.copy(
-            ROOT / "tools" / "stage-zz9k-headers.sh",
-            repo / "tools" / "stage-zz9k-headers.sh",
-        )
-        for path in (repo / "ZZRun" / "build.sh",
-                     repo / "tools" / "stage-zz9k-headers.sh"):
-            path.chmod(path.stat().st_mode | 0o755)
+        path = repo / "ZZRun" / "build.sh"
+        path.chmod(path.stat().st_mode | 0o755)
         return repo
 
     def _run_zzrun_build(self, repo, env):
@@ -1606,57 +1636,58 @@ class RepoToolingTests(unittest.TestCase):
             timeout=60,
         )
 
-    def test_zzrun_build_stages_proto_from_firmware_sibling(self):
-        """Unset ZZ9000_FIRMWARE must use the sibling checkout that
-        stage-zz9k-headers.sh already accepts, not zz9000-app-runtime.
-        """
+    def _zzrun_build_env(self, base):
+        env = os.environ.copy()
+        for key in ("ZZ9000_FIRMWARE", "ZZ9000_SDK", "AAR_DIR"):
+            env.pop(key, None)
+        env["PATH"] = str(base / "bin") + os.pathsep + env.get("PATH", "")
+        return env
+
+    def test_zzrun_build_stages_aar_headers_from_firmware_sibling(self):
+        """Unset ZZ9000_FIRMWARE must use the sibling firmware checkout and
+        the aar checkout it pins in sdk/aar."""
         with tempfile.TemporaryDirectory() as tmp:
             base = pathlib.Path(tmp)
             repo = self._zzrun_build_tree(base)
             sibling = base / "zz9000-firmware"
-            self._fake_firmware_sdk(sibling)
-            proto = sibling / "ZZ9000_proto.sdk" / "ZZ9000OS" / "src" / "zzapp_proto.h"
-            proto.parent.mkdir(parents=True, exist_ok=True)
-            proto.write_text("/* sibling-proto */\n", encoding="utf-8")
+            self._fake_firmware_sdk(sibling, "sibling-aar")
             self._write_exec(
                 base / "bin" / "m68k-amigaos-gcc",
                 "#!/bin/sh\nexit 0\n",
             )
-            env = os.environ.copy()
-            env.pop("ZZ9000_FIRMWARE", None)
-            env.pop("ZZ9000_SDK", None)
-            env["PATH"] = str(base / "bin") + os.pathsep + env.get("PATH", "")
-            result = self._run_zzrun_build(repo, env)
-            staged = repo / "ZZRun" / "zz9k-headers" / "zzapp_proto.h"
+            result = self._run_zzrun_build(repo, self._zzrun_build_env(base))
             self.assertEqual(0, result.returncode, result.stdout)
+            headers = repo / "ZZRun" / "aar-headers"
             self.assertEqual(
-                "/* sibling-proto */\n",
-                staged.read_text(encoding="utf-8"),
+                "/* sibling-aar libraries/aar.h */\n",
+                (headers / "libraries" / "aar.h").read_text(encoding="utf-8"),
             )
+            for rel in self.AAR_CLIENT_HEADERS:
+                self.assertTrue((headers / rel).is_file(), rel)
+            self.assertTrue((headers / "aar" / "transport.h").is_file())
+            self.assertTrue((headers / "aar" / "app.h").is_file())
 
     def test_zzrun_build_compiles_from_its_directory(self):
         """A host m68k-amigaos-gcc must see the same directory the Docker
         wrapper uses. make ZZRun invokes the script from the repo root.
+        ZZRun is one source file against the staged headers: it links no
+        transport module.
         """
         with tempfile.TemporaryDirectory() as tmp:
             base = pathlib.Path(tmp)
             repo = self._zzrun_build_tree(base)
             firmware = base / "firmware"
             self._fake_firmware_sdk(firmware)
-            proto = firmware / "ZZ9000_proto.sdk" / "ZZ9000OS" / "src" / "zzapp_proto.h"
-            proto.parent.mkdir(parents=True, exist_ok=True)
-            proto.write_text("/* explicit-proto */\n", encoding="utf-8")
             self._write_exec(
                 base / "bin" / "m68k-amigaos-gcc",
                 "#!/bin/sh\nprintf '%s\\n' \"$PWD\" > \"$ZZRUN_GCC_CWD\"\n"
                 "printf '%s\\n' \"$*\" > \"$ZZRUN_GCC_ARGS\"\nexit 0\n",
             )
-            env = os.environ.copy()
+            env = self._zzrun_build_env(base)
             env["ZZ9000_FIRMWARE"] = str(firmware)
             env["ZZ9000_SDK"] = str(firmware / "sdk")
             env["ZZRUN_GCC_CWD"] = str(base / "cwd")
             env["ZZRUN_GCC_ARGS"] = str(base / "args")
-            env["PATH"] = str(base / "bin") + os.pathsep + env.get("PATH", "")
             result = self._run_zzrun_build(repo, env)
             self.assertEqual(0, result.returncode, result.stdout)
             cwd = (base / "cwd").read_text(encoding="utf-8").strip()
@@ -1666,117 +1697,137 @@ class RepoToolingTests(unittest.TestCase):
                 cwd,
             )
             self.assertIn("ZZRun.c", args)
-            self.assertIn("aar_xport_zz9000.c", args)
+            self.assertIn("-Iaar-headers", args)
             self.assertIn("-o ZZRun", args)
+            self.assertNotIn("aar_xport", args)
+            self.assertNotIn("zz9k-headers", args)
 
-    def test_zzrun_build_stages_sdk_from_explicit_firmware(self):
-        """ZZ9000_FIRMWARE alone must supply the SDK headers too; staging
-        must not fall back to cloning the firmware.
-        """
+    def test_zzrun_build_uses_explicit_firmware_without_cloning(self):
+        """ZZ9000_FIRMWARE alone must supply the aar checkout (its sdk/aar);
+        staging must not fall back to cloning anything."""
         with tempfile.TemporaryDirectory() as tmp:
             base = pathlib.Path(tmp)
             repo = self._zzrun_build_tree(base)
             firmware = base / "elsewhere" / "fw"
-            self._fake_firmware_sdk(firmware)
-            proto = firmware / "ZZ9000_proto.sdk" / "ZZ9000OS" / "src" / "zzapp_proto.h"
-            proto.parent.mkdir(parents=True, exist_ok=True)
-            proto.write_text("/* explicit-proto */\n", encoding="utf-8")
+            self._fake_firmware_sdk(firmware, "explicit-aar")
             self._write_exec(base / "bin" / "m68k-amigaos-gcc", "#!/bin/sh\nexit 0\n")
             self._write_exec(
                 base / "bin" / "git",
                 "#!/bin/sh\necho \"unexpected git $*\" >&2\nexit 1\n",
             )
-            env = os.environ.copy()
+            env = self._zzrun_build_env(base)
             env["ZZ9000_FIRMWARE"] = str(firmware)
-            env.pop("ZZ9000_SDK", None)
-            env["PATH"] = str(base / "bin") + os.pathsep + env.get("PATH", "")
             result = self._run_zzrun_build(repo, env)
             self.assertEqual(0, result.returncode, result.stdout)
             self.assertNotIn("unexpected git", result.stdout)
-            staged = repo / "ZZRun" / "zz9k-headers" / "zzapp_proto.h"
-            self.assertEqual("/* explicit-proto */\n", staged.read_text(encoding="utf-8"))
+            staged = repo / "ZZRun" / "aar-headers" / "libraries" / "aar.h"
+            self.assertEqual(
+                "/* explicit-aar libraries/aar.h */\n",
+                staged.read_text(encoding="utf-8"),
+            )
 
-    def test_zzrun_build_stages_the_transport_module_and_aar_headers(self):
-        """ZZRun links the firmware's client transport module and includes
-        aar/transport.h: both are staged next to zzapp_proto.h, and the
-        module source is part of the compile.
-        """
+            # ZZ9000_SDK alone names the same firmware through its parent.
+            env.pop("ZZ9000_FIRMWARE")
+            env["ZZ9000_SDK"] = str(firmware / "sdk")
+            shutil.rmtree(repo / "ZZRun" / "aar-headers")
+            result = self._run_zzrun_build(repo, env)
+            self.assertEqual(0, result.returncode, result.stdout)
+            self.assertTrue(staged.is_file())
+
+    def test_zzrun_build_stages_client_headers_and_no_private_wire(self):
+        """ZZRun calls aar.library through the vectors: the aar.library client
+        headers and the AAR contract headers are staged, AAR_DIR overrides the
+        firmware's own aar checkout, and neither zzapp_proto.h nor the old
+        transport module comes along."""
         with tempfile.TemporaryDirectory() as tmp:
             base = pathlib.Path(tmp)
             repo = self._zzrun_build_tree(base)
             firmware = base / "fw"
             self._fake_firmware_sdk(firmware)
-            (firmware / "sdk/amiga/src/aar_xport_zz9000.c").write_text(
-                "/* module-source */\n", encoding="utf-8"
-            )
             (firmware / "sdk/aar/include/aar/transport.h").write_text(
                 "/* fw-aar-transport */\n", encoding="utf-8"
             )
             proto = firmware / "ZZ9000_proto.sdk" / "ZZ9000OS" / "src" / "zzapp_proto.h"
             proto.parent.mkdir(parents=True, exist_ok=True)
             proto.write_text("/* proto */\n", encoding="utf-8")
-            self._write_exec(
-                base / "bin" / "m68k-amigaos-gcc",
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$ZZRUN_GCC_ARGS\"\nexit 0\n",
-            )
-            env = os.environ.copy()
+            self._write_exec(base / "bin" / "m68k-amigaos-gcc", "#!/bin/sh\nexit 0\n")
+            env = self._zzrun_build_env(base)
             env["ZZ9000_FIRMWARE"] = str(firmware)
-            env.pop("ZZ9000_SDK", None)
-            env.pop("AAR_DIR", None)
-            env["ZZRUN_GCC_ARGS"] = str(base / "args")
-            env["PATH"] = str(base / "bin") + os.pathsep + env.get("PATH", "")
             result = self._run_zzrun_build(repo, env)
             self.assertEqual(0, result.returncode, result.stdout)
-            headers = repo / "ZZRun" / "zz9k-headers"
-            self.assertEqual(
-                "/* module-source */\n",
-                (headers / "aar_xport_zz9000.c").read_text(encoding="utf-8"),
-            )
-            self.assertTrue((headers / "aar_xport_zz9000.h").is_file())
+            headers = repo / "ZZRun" / "aar-headers"
             # The firmware's own aar checkout is the default.
             self.assertEqual(
                 "/* fw-aar-transport */\n",
                 (headers / "aar" / "transport.h").read_text(encoding="utf-8"),
             )
-            args = (base / "args").read_text(encoding="utf-8")
-            self.assertIn("zz9k-headers/aar_xport_zz9000.c", args)
+            for rel in self.AAR_CLIENT_HEADERS:
+                self.assertTrue((headers / rel).is_file(), rel)
+            self.assertFalse((headers / "zzapp_proto.h").exists())
+            self.assertFalse((headers / "aar_xport_zz9000.h").exists())
+            self.assertFalse((headers / "aar_xport_zz9000.c").exists())
 
-            # AAR_DIR overrides it.
+            # AAR_DIR overrides it, and a restage leaves nothing stale.
             other = base / "other-aar"
-            (other / "include" / "aar").mkdir(parents=True)
-            (other / "include" / "aar" / "transport.h").write_text(
-                "/* other-aar-transport */\n", encoding="utf-8"
-            )
+            self._fake_aar_checkout(other, "other-aar")
+            (headers / "stale.h").write_text("/* stale */\n", encoding="utf-8")
             env["AAR_DIR"] = str(other)
             result = self._run_zzrun_build(repo, env)
             self.assertEqual(0, result.returncode, result.stdout)
             self.assertEqual(
-                "/* other-aar-transport */\n",
+                "/* other-aar */\n",
                 (headers / "aar" / "transport.h").read_text(encoding="utf-8"),
             )
+            self.assertEqual(
+                "/* other-aar libraries/aar_zz9000.h */\n",
+                (headers / "libraries" / "aar_zz9000.h").read_text(encoding="utf-8"),
+            )
+            self.assertFalse((headers / "stale.h").exists())
 
-    def test_zzrun_build_refuses_firmware_without_the_transport_module(self):
-        """A firmware checkout older than the transport swap has no
-        aar_xport_zz9000.[ch]; the build says so instead of failing in the
-        compiler.
-        """
+    def test_zzrun_build_refuses_aar_without_the_client_library(self):
+        """An aar checkout older than aar.library has the AAR contract
+        headers but not the client headers; the build says so instead of
+        failing in the compiler."""
         with tempfile.TemporaryDirectory() as tmp:
             base = pathlib.Path(tmp)
             repo = self._zzrun_build_tree(base)
             firmware = base / "old-fw"
             self._fake_firmware_sdk(firmware)
-            (firmware / "sdk/amiga/src/aar_xport_zz9000.c").unlink()
-            proto = firmware / "ZZ9000_proto.sdk" / "ZZ9000OS" / "src" / "zzapp_proto.h"
-            proto.parent.mkdir(parents=True, exist_ok=True)
-            proto.write_text("/* proto */\n", encoding="utf-8")
+            (firmware / "sdk/aar/client/include/libraries/aar.h").unlink()
             self._write_exec(base / "bin" / "m68k-amigaos-gcc", "#!/bin/sh\nexit 0\n")
-            env = os.environ.copy()
+            env = self._zzrun_build_env(base)
             env["ZZ9000_FIRMWARE"] = str(firmware)
-            env.pop("ZZ9000_SDK", None)
-            env["PATH"] = str(base / "bin") + os.pathsep + env.get("PATH", "")
             result = self._run_zzrun_build(repo, env)
             self.assertNotEqual(0, result.returncode, result.stdout)
-            self.assertIn("aar_xport_zz9000.c is missing", result.stdout)
+            self.assertIn("libraries/aar.h is missing", result.stdout)
+
+    def test_zzrun_build_refuses_a_missing_aar_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = pathlib.Path(tmp)
+            repo = self._zzrun_build_tree(base)
+            firmware = base / "bare-fw"
+            (firmware / "sdk").mkdir(parents=True)
+            self._write_exec(base / "bin" / "m68k-amigaos-gcc", "#!/bin/sh\nexit 0\n")
+            env = self._zzrun_build_env(base)
+            env["ZZ9000_FIRMWARE"] = str(firmware)
+            result = self._run_zzrun_build(repo, env)
+            self.assertNotEqual(0, result.returncode, result.stdout)
+            self.assertIn("aar/transport.h not found", result.stdout)
+
+    def test_zzrun_sources_use_the_library_not_the_private_wire(self):
+        """ZZRun reaches the card only through aar.library. None of its
+        sources includes the ZZ9000 private wire or the old client module."""
+        for rel in (
+            "ZZRun/ZZRun.c",
+            "ZZRun/zzrun_policy.h",
+            "ZZRun/zzrun_policy.c",
+            "ZZRun/zzrun_serve.h",
+            "ZZRun/zzrun_serve.c",
+        ):
+            text = self.read(rel)
+            self.assertNotIn("zzapp_proto", text, rel)
+            self.assertNotIn("aar_xport", text, rel)
+            self.assertNotIn("ZZAPP_", text, rel)
 
 
 if __name__ == "__main__":

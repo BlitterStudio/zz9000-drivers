@@ -27,7 +27,7 @@ sd-boot/boot-rom/boot.bin
 ZZDiag/ZZDiag
 ZZCapture/ZZCapture
 ZZRun/ZZRun
-ZZRun/zz9k-headers/
+ZZRun/aar-headers/
 ZZRun/work/
 net/ZZ9000Net.device.68000
 net/ZZ9000Net.device.map
