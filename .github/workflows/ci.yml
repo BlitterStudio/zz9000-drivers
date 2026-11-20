@@ -347,7 +347,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: BlitterStudio/zz9000-firmware
-          ref: d242b4f4549d681f91ede2b887fc24ca31957530
+          ref: 80d63e9235c7cd7532782682e7c1c416473079f9
           path: zz9000-firmware
       - name: Fetch the AAR headers pinned by the firmware
         run: sh zz9000-firmware/sdk/scripts/fetch-aar.sh
