@@ -6,7 +6,7 @@
 # ZZ9000 command-line tools
 
 The standard installer places `ZZFwUpdate`, `ZZNetStats`, `ZZDiag`,
-`ZZNetReady`, `ZZScanlines`, `ZZGamma`, and `ZZRun` in `C:`. They update
+`ZZNetReady`, `ZZScanlines`, `ZZGamma`, and `aar-run` in `C:`. They update
 files on the card, inspect the network and board, gate network startup, set
 scanlines and output gamma, and start trusted ARM apps.
 `ZZCapture` is an optional diagnostic with its own `ZZCapture.guide`.
@@ -20,7 +20,7 @@ The SDK tools, when installed, are documented in `sdk.guide`.
 | `ZZNetReady` | Returns an AmigaDOS status for a boot script that waits for Ethernet negotiation. |
 | `ZZScanlines` | Changes the active scandoubler scanline mode and parity. |
 | `ZZGamma` | Sets the output gamma filter live, or prints the current gamma. |
-| `ZZRun` | Loads trusted ARM ELFs through `aar.library`, one claim per app; requires `aar.library`, matching Zorro III app-runtime firmware, `zz9k.library` revision 36 or later (the SDK runtime in this release ships 2.41), and `mmu.library` 41 or later. |
+| `aar-run` | Loads trusted ARM ELFs through `aar.library`, one claim per app, and serves their files, console, display, audio and input. Built in the aar repository and shipped with the SDK runtime. |
 
 ## ZZFwUpdate: firmware updates
 
@@ -257,44 +257,21 @@ explanation and exits with `WARN` (5).
 cycle, write `gamma = 1.80` to `ZZ9000.CFG`, or set it with the **Gamma**
 slider on ZZTop's Display page and press Save.
 
-## ZZRun: ARM app launcher
+## aar-run: ARM app launcher
 
-`ZZRun` needs a Zorro III board and matching app-runtime firmware that speaks
-the AAR queue transport (app ABI 0.5); without it ZZRun stops with return 20.
-Picasso96 is also required when an app requests a display. Run
-`Stack 32768` in the launching Shell; ZZRun rejects a process stack smaller
-than 16 KiB.
+`aar-run` is the reference launcher of the AAR standard. The
+[aar repository](https://github.com/BlitterStudio/aar) builds it, the firmware
+SDK packages it with its icon and manual, and the installer puts the command in
+`C:` and `aar.library` in `LIBS:`.
 
-ZZRun calls the app runtime through `aar.library`, which the installer puts
-in `LIBS:` with ZZRun; without the library it stops with return 20. The
-library opens `zz9k.library` (revision 36 or later, only to reach the board's
-mailbox) and needs `mmu.library` 41 or later to map the card's shared buffers
-cache-inhibited. It keeps the claim's lease alive, so a requester or a slow
-disk in ZZRun does not cost the app its claim. The SDK runtime in this release
-supplies `zz9k.library` 2.41.
+On the ZZ9000 it needs a Zorro III board with app-runtime firmware,
+`zz9k.library` revision 36 or later (the SDK runtime in this release ships
+2.41), and `mmu.library` 41 or later. Without `aar.library`, or with no
+platform behind it, `aar-run` stops with return 20.
 
-| Form | Result |
-| --- | --- |
-| `ZZRun <app.elf> [MAXMEM=<MiB>] [HOSTMEM=<MiB>] [WEIGHT=<1-256>] [AUDIO=AHI] [args]` | Loads and starts the ELF. `MAXMEM` is a positive decimal MiB cap. `HOSTMEM` is a positive decimal MiB limit (1 to 4095) on the host-visible card memory the app may allocate; the default is 16 MiB and the firmware grants at most 62 MiB. `WEIGHT` is the app's CPU share, a decimal number from 1 to 256 (default 1): when several apps run, the card gives each a share of the ARM CPU in proportion to its weight. A value outside 1 to 256 returns 10 before anything is claimed. `AUDIO=AHI` sends app PCM through AHI. These forms are recognized anywhere after the ELF and are removed from app arguments. |
-| `ZZRun STATUS` | Lists every claim the card holds. `STATUS` is case-insensitive. |
-| `ZZRun RELEASE <handle>` | Releases a claim whose app has ended or whose launcher lost it. The handle is the number `STATUS` prints, in hexadecimal written as `$` or `0x` followed by the digits, or in decimal. A claim whose app is running, loading or being claimed is refused. |
-
-Every launch claims its own app, so there is no fixed limit on running apps;
-the card's resources are the limit. When the card cannot admit another app, ZZRun
-reports `claim refused:` with the reason and returns 20.
-
-`STATUS` prints one line per claim: its handle, state, app name, committed MiB,
-CPU seconds, block reason, and end reason. The block reason is
-`none`, `file`, `console`, `event`, `sleep`, `vsync`, or `audio`. `event`
-means the app is waiting for a message.
-
-Ctrl-C requests app stop. Ctrl-D, Ctrl-E, and Ctrl-F enqueue break events 4, 5,
-and 6. Normal app exit returns the app exit code. Invalid launcher arguments
-return 10, and launcher errors return 20. Ctrl-C while ZZRun opens or loads
-the ELF stops the load and returns 5, including when a DOS packet wait such as
-a file read or closing the ELF consumed the break. Other load failures return
-20.
-
-Workbench ToolTypes, file access below `ROOT`, assigns, console redirection,
-display, audio, cleanup, and the known `>NIL:` limitation are described in the
-ZZRun manual (`ZZRun.guide`, source [ZZRun/README.md](../ZZRun/README.md)).
+The command forms (`MAXMEM`, `HOSTMEM`, `WEIGHT`, `AUDIO`, `STATUS`,
+`RELEASE`), Workbench ToolTypes, file access below `ROOT`, console, display,
+audio, break handling and return codes are described in the aar-run manual:
+`aar-run.guide` in the manuals drawer, source
+[client/run/README.md](https://github.com/BlitterStudio/aar/blob/main/client/run/README.md)
+in the aar repository.

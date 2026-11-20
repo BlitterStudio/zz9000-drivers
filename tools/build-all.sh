@@ -34,15 +34,10 @@ ahi/driver/build.sh
 "$amiga_docker" ZZDiag ./build.sh
 "$amiga_docker" ZZNetReady ./build.sh
 "$amiga_docker" ZZCapture ./build.sh
-# ZZRun/build.sh stages the aar.library client headers and the aar/ headers
-# from the aar checkout on the host, then
-# re-execs itself through amiga-docker.sh — run it on the host like CI does.
-# amiga-docker.sh mounts only this repo and does not forward ZZ9000_FIRMWARE
-# or ZZ9000_SDK, so the host leg never runs if this is invoked in Docker.
-ZZRun/build.sh
 
 # Runs its own Docker invocation (the SDK's build scripts wrap the same
-# image) — called directly, not through amiga-docker.sh.
+# image), so it is called directly, not through amiga-docker.sh. This is also
+# the build of aar-run, which the firmware SDK compiles and packages.
 sdk/build.sh
 
 # amissl/build.sh is intentionally NOT part of build-all: it is a full

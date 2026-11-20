@@ -1,6 +1,7 @@
 #!/bin/sh
 # Build the zz9000-sdk user-facing payloads (zz9k.library, aar.library, the accelerated
-# mpega.library, the picture and sound datatypes + descriptors, and end-user CLI tools)
+# mpega.library, the picture and sound datatypes + descriptors, the end-user CLI tools
+# and the aar-run launcher)
 # by driving the SDK's own Docker build, then collect them into sdk/out/ in
 # installer layout.
 #
@@ -81,6 +82,14 @@ cp "$pkg/C/ZZPlay.info" "$out/C/"
 # only these two are end-user material and belong in the installer.
 cp "$pkg/Docs/ZZPlay.guide"         "$out/Docs/"
 cp "$pkg/Docs/ZZPlay-project.info" "$out/Docs/"
+# aar-run is the reference AAR launcher, built from the aar checkout that the
+# SDK pins (sdk/AAR_REF) and packaged by the SDK like ZZPlay: a Shell command
+# the installer puts in C:, with its Workbench icon and manual. The static
+# libaarserve.a and its header stay in the SDK package's Developer/ drawer;
+# they are for programs that embed the serving loop, not for the installer.
+cp "$pkg/C/aar-run"                "$out/C/"
+cp "$pkg/C/aar-run.info"           "$out/C/"
+cp "$pkg/Docs/aar-run.guide"       "$out/Docs/"
 
 echo ">> SDK payloads collected:"
 find "$out" -type f | sort

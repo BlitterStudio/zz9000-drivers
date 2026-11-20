@@ -691,7 +691,7 @@
          (source "Tools/ZZNetReady")
          (dest "C:"))
 
-      ; ZZRun calls the app runtime through aar.library, which in turn
+      ; aar-run calls the app runtime through aar.library, which in turn
       ; reaches the card through zz9k.library. Offered when the release
       ; drawer carries it, like zz9k.library above; the version prompt only
       ; appears when one is already installed.
@@ -708,31 +708,33 @@
                     (set #oldminor (- #oldver (* #oldmajor 65536)))
 
                     (if (askbool (prompt "Replace existing aar.library?\n\nInstalled version: " #oldmajor "." #oldminor "\nNew version: " #newmajor "." #newminor "\n\nProceed with overwrite?")
-                                 (help "The AAR client library: ZZRun and other launchers use it to load, run and serve ARM apps on the ZZ9000."))
+                                 (help "The AAR client library: aar-run and other launchers use it to load, run and serve ARM apps on the ZZ9000."))
                         (copyfiles
                            (prompt "Install aar.library into LIBS:")
-                           (help "The AAR client library: ZZRun and other launchers use it to load, run and serve ARM apps on the ZZ9000. It needs zz9k.library 36 or later and mmu.library 41 or later.")
+                           (help "The AAR client library: aar-run and other launchers use it to load, run and serve ARM apps on the ZZ9000. It needs zz9k.library 36 or later and mmu.library 41 or later.")
                            (source "Libs/aar.library")
                            (dest "LIBS:")))
                  )
                  (copyfiles
                     (prompt "Install aar.library into LIBS:")
-                    (help "The AAR client library: ZZRun and other launchers use it to load, run and serve ARM apps on the ZZ9000. It needs zz9k.library 36 or later and mmu.library 41 or later.")
+                    (help "The AAR client library: aar-run and other launchers use it to load, run and serve ARM apps on the ZZ9000. It needs zz9k.library 36 or later and mmu.library 41 or later.")
                     (source "Libs/aar.library")
                     (dest "LIBS:")))
           ))
 
+      ; aar-run is the AAR reference launcher. The firmware SDK builds it
+      ; and packages it with its icon and manual, like ZZPlay.
       (copyfiles
-         (prompt "Install ZZRun into C:")
-         (help "Launches trusted ARM ELFs through aar.library on the Zorro III app runtime, which needs firmware with app slots. It needs aar.library, which this release includes. It restores the public screen when an app exits or faults. See Docs/ZZRun.guide for ROOT, Workbench ToolTypes, and file access.")
-         (source "Tools/ZZRun")
+         (prompt "Install aar-run into C:")
+         (help "Launches trusted ARM ELFs through aar.library on the Zorro III app runtime, which needs firmware with app slots. It needs aar.library, which this release includes. It restores the public screen when an app exits or faults. See Docs/aar-run.guide for ROOT, Workbench ToolTypes, and file access.")
+         (source "Tools/aar-run")
          (infos)
          (dest "C:"))
 
       (makedir #docs-dest (infos))
       (copyfiles
-         (prompt "ZZRun.guide (trusted app launcher)")
-         (source "Docs/ZZRun.guide")
+         (prompt "aar-run.guide (trusted app launcher)")
+         (source "Docs/aar-run.guide")
          (infos)
          (dest #docs-dest))
 

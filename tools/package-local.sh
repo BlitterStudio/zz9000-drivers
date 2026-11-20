@@ -36,7 +36,7 @@ else
     exit 1
 fi
 md2guide=$sdk_src/scripts/md2guide.py
-SIBLINGS="--sibling ahi.guide --sibling usb-poseidon.guide --sibling ZZCapture.guide --sibling ZZRun.guide --sibling sdk.guide --sibling amissl.guide --sibling ZZPlay.guide --sibling ZZTop.guide --sibling tools.guide"
+SIBLINGS="--sibling ahi.guide --sibling usb-poseidon.guide --sibling ZZCapture.guide --sibling aar-run.guide --sibling sdk.guide --sibling amissl.guide --sibling ZZPlay.guide --sibling ZZTop.guide --sibling tools.guide"
 make_guide() {
     # shellcheck disable=SC2086
     "$PY" "$md2guide" --name "$2" $SIBLINGS "$repo_root/$1" "$inst/Docs/$2.guide"
@@ -58,12 +58,10 @@ install -Dm755 net/ZZNetStats/ZZNetStats        "$inst/Tools/ZZNetStats"
 install -Dm755 ZZDiag/ZZDiag                    "$inst/Tools/ZZDiag"
 install -Dm755 ZZNetReady/ZZNetReady              "$inst/Tools/ZZNetReady"
 install -Dm755 ZZCapture/ZZCapture              "$inst/Tools/ZZCapture"
-install -Dm755 ZZRun/ZZRun                          "$inst/Tools/ZZRun"
 make_guide ahi/README.md ahi
 make_guide usb-poseidon/README.md usb-poseidon
 make_guide ZZCapture/README.md ZZCapture
 make_guide ZZTop/README.md ZZTop
-make_guide ZZRun/README.md ZZRun
 make_guide docs/cli-tools.md tools
 # Diagnostic-only MHI build (feeder-vs-pump hardware isolation); staged
 # under Docs, deliberately never installed as the production library.
@@ -94,6 +92,12 @@ make_guide sdk/README.md sdk
 # the project icon out of Docs/.
 install -Dm644 sdk/out/Docs/ZZPlay.guide        "$inst/Docs/ZZPlay.guide"
 install -Dm644 sdk/out/Docs/ZZPlay-project.info "$inst/Docs/ZZPlay-project.info"
+# aar-run comes from the SDK package too: the launcher is built in the aar
+# repository. It ships with its icon and its manual (already an AmiGuide
+# database), and the installer puts the command in C:.
+install -Dm755 sdk/out/C/aar-run                "$inst/Tools/aar-run"
+install -Dm644 sdk/out/C/aar-run.info           "$inst/Tools/aar-run.info"
+install -Dm644 sdk/out/Docs/aar-run.guide       "$inst/Docs/aar-run.guide"
 
 # Accelerated AmiSSL core libraries, per CPU (optional: built by
 # amissl/build.sh, slow). amissl_v362 serves AmiSSL 5 applications,
