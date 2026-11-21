@@ -726,7 +726,7 @@
       ; and packages it with its icon and manual, like ZZPlay.
       (copyfiles
          (prompt "Install aar-run into C:")
-         (help "Launches trusted ARM ELFs through aar.library on the Zorro III app runtime, which needs firmware with app slots. It needs aar.library, which this release includes. It restores the public screen when an app exits or faults. See Docs/aar-run.guide for ROOT, Workbench ToolTypes, and file access.")
+         (help "Runs trusted ARM apps on the ZZ9000 through aar.library, which this release includes; the board must be in a Zorro III slot. It restores the public screen when an app exits or faults. See Docs/aar-run.guide for ROOT, Workbench ToolTypes, and file access.")
          (source "Tools/aar-run")
          (infos)
          (dest "C:"))
