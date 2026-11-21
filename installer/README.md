@@ -22,7 +22,11 @@ choices described below.
    Answer No, or let it skip, when another RTG system, such as PrismRTG,
    supplies its own ZZ9000 driver.
 4. Choose the Zorro II-safe profile unless the machine has a Zorro III
-   ZZ9000. The Zorro III profile enables the 1920x1080x32 screen mode.
+   ZZ9000. The Zorro III profile enables the 1920x1080x32 screen mode. Novice
+   mode does not ask: it installs the Zorro II-safe profile, except when this
+   installer placed the current `Devs:Picasso96Settings` before (recorded in
+   `ENVARC:ZZ9000.P96Settings`). Then it keeps that file. Run as Intermediate
+   or Expert user to switch profiles.
 5. Answer the optional USB, SDK, AmiSSL, ZZCapture, and command-path prompts
    as needed.
 
