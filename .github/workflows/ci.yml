@@ -82,14 +82,11 @@ jobs:
           path: zz9000-firmware
           fetch-depth: 1
           ref: ${{ steps.firmware-ref.outputs.ref }}
-      - name: Fetch the AAR headers pinned by the firmware
-        run: sh zz9000-firmware/sdk/scripts/fetch-aar.sh
       - name: Run host-side tests and repository checks
         env:
           ZZ9K_FIRMWARE_DIR: ${{ github.workspace }}/zz9000-firmware
         run: |
           make rtg-tests
-          make zzrun-tests
           make -C common/tests test
           make -C usb-poseidon/tests test
           make -C net/tests test
@@ -331,36 +328,6 @@ jobs:
           path: ZZCapture/ZZCapture
           if-no-files-found: error
 
-
-  zzrun:
-    name: ZZRun
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      # ZZRun calls aar.library through its vectors, so it builds against
-      # the aar.library client headers (client/include of the aar checkout)
-      # and the AAR contract headers (include/aar). Both come from the aar
-      # commit the firmware pins in sdk/AAR_REF, which fetch-aar.sh checks
-      # out below; the ref pinned here must carry an sdk/AAR_REF at or after
-      # the aar commit that added the client headers. ZZRun links no
-      # transport module and does not read the ZZ9000 private wire.
-      - uses: actions/checkout@v6
-        with:
-          repository: BlitterStudio/zz9000-firmware
-          ref: 80d63e9235c7cd7532782682e7c1c416473079f9
-          path: zz9000-firmware
-      - name: Fetch the AAR headers pinned by the firmware
-        run: sh zz9000-firmware/sdk/scripts/fetch-aar.sh
-      - name: Build ZZRun
-        env:
-          ZZ9000_FIRMWARE: ${{ github.workspace }}/zz9000-firmware
-          ZZ9000_SDK: ${{ github.workspace }}/zz9000-firmware/sdk
-        run: make ZZRun
-      - uses: actions/upload-artifact@v7
-        with:
-          name: ZZRun
-          path: ZZRun/ZZRun
-          if-no-files-found: error
   mhi:
     name: mhi — mhizz9000.library
     runs-on: ubuntu-latest
@@ -422,7 +389,7 @@ jobs:
 
   m68k-smoke:
     name: m68k startup smoke (vamos)
-    needs: [zztop, zzscanlines, zzgamma, zzfwupdate, ZZNetStats, ZZDiag, ZZNetReady, zzcapture, zzrun, ahi]
+    needs: [zztop, zzscanlines, zzgamma, zzfwupdate, ZZNetStats, ZZDiag, ZZNetReady, zzcapture, ahi, sdk]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -430,6 +397,12 @@ jobs:
         with:
           path: artifacts
           pattern: ZZ*
+      # aar-run is built and packaged by the firmware SDK, so it comes from
+      # the SDK payloads, not from a job of its own.
+      - uses: actions/download-artifact@v8
+        with:
+          name: sdk-payloads
+          path: artifacts/sdk-payloads
       # Start every command-line tool once under vamos. Without a ZZ9000
       # they stop early; a CPU fault or vamos crash before that fails the
       # job (an unopened library base, a broken stack swap).
@@ -438,10 +411,11 @@ jobs:
           mkdir -p smoke
           for f in ZZTop/ZZTop ZZScanlines/ZZScanlines ZZGamma/ZZGamma \
                    ZZFwUpdate/ZZFwUpdate ZZNetStats/ZZNetStats ZZDiag/ZZDiag \
-                   ZZNetReady/ZZNetReady ZZCapture/ZZCapture ZZRun/ZZRun \
+                   ZZNetReady/ZZNetReady ZZCapture/ZZCapture \
                    ZZAXDuplexTest/ZZAXDuplexTest; do
             cp "artifacts/$f" smoke/
           done
+          cp artifacts/sdk-payloads/C/aar-run smoke/
           tools/amiga-docker.sh . sh -c \
             'tools/smoke-m68k-vamos.sh smoke/*'
 
@@ -511,7 +485,7 @@ jobs:
 
   release:
     name: Package installer
-    needs: [host-checks, rtg, zztop, zzscanlines, zzgamma, zzfwupdate, usb-poseidon, sd-boot, net, ZZNetStats, ZZDiag, ZZNetReady, zzcapture, zzrun, mhi, ahi, m68k-smoke, sdk, amissl]
+    needs: [host-checks, rtg, zztop, zzscanlines, zzgamma, zzfwupdate, usb-poseidon, sd-boot, net, ZZNetStats, ZZDiag, ZZNetReady, zzcapture, mhi, ahi, m68k-smoke, sdk, amissl]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -560,13 +534,12 @@ jobs:
           install -Dm755 artifacts/ZZDiag/ZZDiag                       "$INST/Tools/ZZDiag"
           install -Dm755 artifacts/ZZNetReady/ZZNetReady               "$INST/Tools/ZZNetReady"
           install -Dm755 artifacts/ZZCapture/ZZCapture                 "$INST/Tools/ZZCapture"
-          install -Dm755 artifacts/ZZRun/ZZRun                         "$INST/Tools/ZZRun"
           # Amiga-side manuals ship as AmiGuide databases generated from
           # the canonical Markdown sources — raw .md has no Amiga reader.
           # Sibling names must cover the full drawer doc set so
           # cross-document links resolve inside the drawer.
           MD2GUIDE="fw-src/sdk/scripts/md2guide.py"
-          SIBLINGS="--sibling ahi.guide --sibling usb-poseidon.guide --sibling ZZCapture.guide --sibling ZZRun.guide --sibling sdk.guide --sibling amissl.guide --sibling ZZPlay.guide --sibling ZZTop.guide --sibling tools.guide"
+          SIBLINGS="--sibling ahi.guide --sibling usb-poseidon.guide --sibling ZZCapture.guide --sibling aar-run.guide --sibling sdk.guide --sibling amissl.guide --sibling ZZPlay.guide --sibling ZZTop.guide --sibling tools.guide"
           make_guide() {
             # shellcheck disable=SC2086
             python3 "$MD2GUIDE" --name "$2" $SIBLINGS "$1" "$INST/Docs/$2.guide"
@@ -574,7 +547,6 @@ jobs:
           make_guide ahi/README.md ahi
           make_guide usb-poseidon/README.md usb-poseidon
           make_guide ZZCapture/README.md ZZCapture
-          make_guide ZZRun/README.md ZZRun
           make_guide ZZTop/README.md ZZTop
           make_guide docs/cli-tools.md tools
           # Diagnostic-only MHI build; staged under Docs, never installed
@@ -606,6 +578,13 @@ jobs:
           # both have to be here, not just in the SDK's own package.
           install -Dm644 artifacts/sdk-payloads/Docs/ZZPlay.guide      "$INST/Docs/ZZPlay.guide"
           install -Dm644 artifacts/sdk-payloads/Docs/ZZPlay-project.info "$INST/Docs/ZZPlay-project.info"
+          # aar-run is the reference AAR launcher, built and packaged by the
+          # firmware SDK like ZZPlay. Its manual is already an AmiGuide
+          # database and its icon travels with it; the installer puts the
+          # command in C:.
+          install -Dm755 artifacts/sdk-payloads/C/aar-run      "$INST/Tools/aar-run"
+          install -Dm644 artifacts/sdk-payloads/C/aar-run.info "$INST/Tools/aar-run.info"
+          install -Dm644 artifacts/sdk-payloads/Docs/aar-run.guide "$INST/Docs/aar-run.guide"
           # Accelerated AmiSSL core libraries, per CPU (Libs/AmiSSL/<cpu>/) —
           # laid out like AmiSSL's own release so the installer installs the
           # CPU-matched build. amissl_v362 serves AmiSSL 5 applications,

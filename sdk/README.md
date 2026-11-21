@@ -5,6 +5,7 @@ The drivers release includes selected end-user components built from the [`sdk/`
 | Payload | Installer destination | Purpose |
 | --- | --- | --- |
 | `zz9k.library` | `LIBS:` | AmigaOS gateway for SDK firmware services and the board's mailbox. |
+| `aar.library` | `LIBS:` | AAR client library: claims, loads, starts and stops apps on the ARM cores and keeps their leases alive. |
 | `mpega.library` | `LIBS:` | Replacement MPEGA library that decodes MP3 on the card. |
 | `zz9k-picture.datatype` | `SYS:Classes/DataTypes/` | Picture DataType that decodes JPEG, PNG, and WebP on the card. |
 | `zz9k-sound.datatype` | `SYS:Classes/DataTypes/` | Sound DataType that decodes MP3, FLAC, and Ogg Vorbis on the card and plays them through the system `sound.datatype`. |
@@ -14,26 +15,28 @@ The drivers release includes selected end-user components built from the [`sdk/`
 | `zz9k-mp3` | `C:` | Low-level MP3 decode and transport diagnostic. |
 | `zz9k-cryptobench` | `C:` | Crypto-offload benchmark. |
 | `zz9k-archive` | `C:` | Archive listing, test, and extraction tool, including LHA/LZH paths where firmware supports them. |
+| `aar-run` and `aar-run.info` | `C:` | Reference launcher for trusted ARM apps: it serves an app's files, console, display, audio and input. Its manual installs as `aar-run.guide`. |
 | `ZZPlay` and `ZZPlay.info` | `SYS:Utilities/ZZ9000/` by default | Workbench media player for MPEG-1/2, WebM and animated WebP video and MP3, FLAC and Ogg Vorbis audio, with an ARexx port for scripts. The installer lets you select the parent drawer. |
 
 ## Build and package
 
-`sdk/build.sh` reads `SDK_REF` and uses `ZZ9000_SDK`, a sibling `zz9000-firmware/sdk` checkout, or a clone in `sdk/work/zz9000-firmware`. Unless `SDK_SKIP_BUILD=1`, it runs the SDK's `scripts/build-m68k-amigaos.sh` and `scripts/package-m68k-amigaos.sh --skip-build`, then copies the selected payloads to `sdk/out/` in installer layout. The current pin is `d242b4f4549d681f91ede2b887fc24ca31957530`; the ZZRun CI job checks out the same commit.
+`sdk/build.sh` reads `SDK_REF` and uses `ZZ9000_SDK`, a sibling `zz9000-firmware/sdk` checkout, or a clone in `sdk/work/zz9000-firmware`. Unless `SDK_SKIP_BUILD=1`, it runs the SDK's `scripts/build-m68k-amigaos.sh` and `scripts/package-m68k-amigaos.sh --skip-build`, then copies the selected payloads to `sdk/out/` in installer layout. `SDK_REF` holds the pinned firmware commit. The SDK package also carries `libaarserve.a` and its header for programs that embed the serving loop; `sdk/build.sh` does not collect them, because the installer does not ship them.
 
 To use a newer SDK revision, update `SDK_REF`, rebuild with `sdk/build.sh`, and follow the SDK's [`docs/zz9k-release-smoke.md`](https://github.com/BlitterStudio/zz9000-firmware/blob/master/sdk/docs/zz9k-release-smoke.md). Keep the SDK revision synchronized with driver code that consumes SDK headers or allocation flags.
 
 ## App runtime
 
 Apps for the ARM cores are loaded and served over the AAR queue transport.
-`zz9k.library` no longer carries a `ZZ9KApp*` client API; ZZRun calls the
-AAR client library `aar.library` instead (built by the firmware SDK and
-installed with ZZRun), which claims an app, loads and starts it, serves its
-requests and keeps its lease alive. `aar.library` uses `zz9k.library` only to
-reach the board's mailbox (revision 36 or later). It also needs `mmu.library`
-41 or later to map the card's shared buffers cache-inhibited. The ZZRun build
-stages the `aar.library` client headers and the `aar/` headers from the aar
-checkout that the firmware at `SDK_REF` pins in `sdk/AAR_REF`. See the
-[ZZRun manual](../ZZRun/README.md) for launcher behaviour.
+`zz9k.library` no longer carries a `ZZ9KApp*` client API. The launcher
+`aar-run` calls the AAR client library `aar.library` instead. The firmware SDK
+builds and packages both, from the aar repository, and the installer puts
+`aar.library` in `LIBS:` and `aar-run` in `C:`. The library claims an app,
+loads and starts it and keeps its lease alive; `aar-run` serves its requests.
+`aar.library` uses `zz9k.library` only to reach the board's mailbox (revision
+36 or later). It also needs `mmu.library` 41 or later to map the card's shared
+buffers cache-inhibited. See the
+[aar-run manual](https://github.com/BlitterStudio/aar/blob/main/client/run/README.md),
+installed as `aar-run.guide`, for launcher behaviour.
 
 ## Zorro II support
 
