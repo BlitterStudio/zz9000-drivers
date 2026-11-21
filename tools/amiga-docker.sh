@@ -23,7 +23,7 @@ esac
 # GCC 16 (amigadev/crosstools), pinned by digest because the tag follows
 # release candidates. This is the only pin: CI builds through this wrapper,
 # and tools/m68k-toolchain-pin.sh moves it.
-image=${AMIGA_IMAGE:-amigadev/crosstools:m68k-amigaos@sha256:98c6671ce9bfec0355e9336e02cbef2a39bad8c5ddd71c43720acacdb697b9a0}
+image=${AMIGA_IMAGE:-amigadev/crosstools:m68k-amigaos@sha256:9391792c327c1058f04cb0a0e5e67bbf5504e9b696f486f6fbfb214bf6ca2d64}
 engine=${CONTAINER_ENGINE:-}
 
 if [ -z "$engine" ]; then
