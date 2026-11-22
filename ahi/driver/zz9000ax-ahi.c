@@ -60,9 +60,9 @@
 #define XSTR(s) STR(s)
 
 #define DEVICE_NAME "zz9000ax.audio"
-#define DEVICE_DATE "(29.09.2026)"
+#define DEVICE_DATE "(22.11.2026)"
 #define DEVICE_VERSION 4
-#define DEVICE_REVISION 32
+#define DEVICE_REVISION 33
 #define DEVICE_ID_STRING "ZZ9000AX " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
 #define DEVICE_PRIORITY 0
 
@@ -630,17 +630,18 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
   zz9k_audio_ring_publish(session);
 }
 
-/* Keep the mix clock anchored to an absolute 50-Hz deadline. Re-arming a
- * relative 20-ms request after each delivery accumulates dispatch latency;
- * production then falls below the compositor's fixed 50-Hz consumption rate.
- * A late deadline becomes an immediate request, preserving every elapsed AHI
- * period without running the steady-state clock fast. */
-static void fabric_timer_post(struct z9ax *ahi_data)
+/* Keep a mix clock anchored to an absolute deadline. Re-arming a
+ * relative request after each delivery accumulates dispatch latency;
+ * production then falls below the consumer's fixed rate. A late deadline
+ * becomes an immediate request, preserving every elapsed period without
+ * running the steady-state clock fast. The lease worker paces 20 ms periods;
+ * the voice worker polls at a few milliseconds. */
+static void timer_post_micro(struct z9ax *ahi_data, uint32_t micro)
 {
   struct timeval now;
   struct timeval delay;
 
-  ahi_data->lease_timer_deadline.tv_micro += 20000;
+  ahi_data->lease_timer_deadline.tv_micro += micro;
   if (ahi_data->lease_timer_deadline.tv_micro >= 1000000) {
     ahi_data->lease_timer_deadline.tv_secs++;
     ahi_data->lease_timer_deadline.tv_micro -= 1000000;
@@ -666,6 +667,11 @@ static void fabric_timer_post(struct z9ax *ahi_data)
   ahi_data->lease_timer_req->tr_node.io_Command = TR_ADDREQUEST;
   ahi_data->lease_timer_req->tr_time = delay;
   SendIO((struct IORequest *)ahi_data->lease_timer_req);
+}
+
+static void fabric_timer_post(struct z9ax *ahi_data)
+{
+  timer_post_micro(ahi_data, 20000U);
 }
 
 void WorkerProcess() {
@@ -927,20 +933,23 @@ static void install_irq_server_locked(struct z9ax* ahi_data) {
 #ifdef REAL_HARDWARE
   if (ahi_data->flags & ZZ_AX_DEVF_INT2MODE) {
     AddIntServer(INTB_PORTS, irq);
-    if (ahi_data->fabric_mode)
+    if (ahi_data->fabric_mode || ahi_data->voice)
       AddIntServer(INTB_PORTS, fabric);
   } else {
     AddIntServer(INTB_EXTER, irq);
-    if (ahi_data->fabric_mode)
+    if (ahi_data->fabric_mode || ahi_data->voice)
       AddIntServer(INTB_EXTER, fabric);
   }
 #else
   AddIntServer(INTB_VERTB, irq); // for debugging
-  if (ahi_data->fabric_mode)
+  if (ahi_data->fabric_mode || ahi_data->voice)
     AddIntServer(INTB_VERTB, fabric);
 #endif
   ahi_data->irq_installed = 1;
-  ahi_data->fabric_token_installed = ahi_data->fabric_mode;
+  /* The fabric token marks an owner that MHI may run beside: a lease, or a
+   * voice session, which the fabric mixes the same way. */
+  ahi_data->fabric_token_installed =
+      (uint8_t)((ahi_data->fabric_mode || ahi_data->voice) ? 1 : 0);
 }
 
 static uint16_t active_hw_interrupts(const struct z9ax* ahi_data) {
@@ -1366,12 +1375,1135 @@ static void fabric_lease_release(struct z9ax *ahi_data)
   Permit();
 }
 
+/* ---- Hardware-mixing modes (voice engine) ----
+ *
+ * AudioModes $CAFE0002 (nearest sample) and $CAFE0003 (linear interpolation)
+ * carry the private tags AHIDB_ZZVoice and AHIDB_ZZVoiceLinear, whose data
+ * is the mode id. ahi.device hands a mode's tag list to AllocAudio and
+ * GetAttr, so the driver reads the mode from it. In these modes AllocAudio
+ * returns no AHISF_* flag: ahi.device mixes nothing and forwards every
+ * AHI_SetSound, AHI_SetFreq and AHI_SetVol to the driver. Each AHI channel
+ * becomes a voice of the card's voice engine through voice_model.c.
+ *
+ * One worker process owns the model, the command ring and the session. The
+ * AHI calls append to the model's FIFO from any context, under Disable().
+ * Start and Stop hand the worker a command and wait for its answer.
+ * LoadSound copies into the card bank through the session's staging buffer.
+ * Nothing falls back to software mixing: when the engine cannot be used,
+ * AllocAudio fails and the debug channel says why.
+ */
+
+/* AHIDB_UserBase is in the AHI developer includes, not in every NDK. */
+#ifndef AHIDB_UserBase
+#define AHIDB_UserBase (AHI_TagBase + 500)
+#endif
+#define AHIDB_ZZVoice       (AHIDB_UserBase + 0)
+#define AHIDB_ZZVoiceLinear (AHIDB_UserBase + 1)
+
+#define Z9AX_VOICE_ID_NEAREST 0xCAFE0002UL
+#define Z9AX_VOICE_ID_LINEAR  0xCAFE0003UL
+
+#define Z9AX_VOICE_REASON_LIBRARY   1U
+#define Z9AX_VOICE_REASON_REVISION  2U
+#define Z9AX_VOICE_REASON_ZORRO2    3U
+#define Z9AX_VOICE_REASON_NO_ENGINE 4U
+#define Z9AX_VOICE_REASON_OPEN      5U
+#define Z9AX_VOICE_REASON_MEMORY    6U
+#define Z9AX_VOICE_REASON_VIEW      7U
+
+/* The sample bank on the card. ENV:ZZ9K_AHI_BANK (KiB) overrides the
+ * request; the card may grant less (see voice_open_session). */
+#define Z9AX_VOICE_BANK_DEFAULT (16U * 1024U * 1024U)
+#define Z9AX_VOICE_BANK_MIN     (1U * 1024U * 1024U)
+/* Zorro III host buffers: a 1024-record ring and a 64 KiB staging buffer
+ * make a multi-megabyte sample set load in few round trips. Zorro II asks
+ * for the library defaults, which fit the 16 KiB host window. */
+#define Z9AX_VOICE_RING_BYTES \
+  (ZZ9K_VOICE_RING_HEADER_BYTES + 1024U * ZZ9K_VOICE_RECORD_BYTES)
+#define Z9AX_VOICE_STAGING_BYTES (64U * 1024U)
+/* The worker wakes this often: the heartbeat, the command ring and the
+ * tick scheduler all run from it. */
+#define Z9AX_VOICE_POLL_MICRO 4000U
+#define Z9AX_VOICE_TICKS_PER_POLL 4U
+/* The engine renders in 20 ms periods of 960 frames. */
+#define Z9AX_VOICE_PERIOD_FRAMES (ZZ9K_VOICE_OUTPUT_RATE / 50U)
+
+/* The session calls go through these names so voice_worker_test.c can
+ * replace them with a fake session (it defines ZZ_AX_VOICE_TEST). */
+#ifdef ZZ_AX_VOICE_TEST
+int zz_ax_voice_open(const ZZ9KVoiceOpenDesc *desc, ZZ9KVoiceSession *session);
+int zz_ax_voice_close(ZZ9KVoiceSession *session);
+int zz_ax_voice_reset(ZZ9KVoiceSession *session);
+uint32_t zz_ax_voice_write(ZZ9KVoiceSession *session,
+                           const ZZ9KVoiceRecord *records, uint32_t count);
+int zz_ax_voice_get_status(ZZ9KVoiceSession *session, ZZ9KVoiceStatus *status);
+#else
+#define zz_ax_voice_open       ZZ9KVoiceOpen
+#define zz_ax_voice_close      ZZ9KVoiceClose
+#define zz_ax_voice_reset      ZZ9KVoiceReset
+#define zz_ax_voice_write      ZZ9KVoiceWrite
+#define zz_ax_voice_get_status ZZ9KVoiceGetStatus
+#endif
+static void voice_timer_end(struct z9ax *ahi_data);
+
+/* The mode the tag list names: Z9AX_VOICE_NEAREST, Z9AX_VOICE_LINEAR, or
+ * Z9AX_VOICE_NONE for a software mode (or no tag list). */
+static uint8_t voice_mode_of(const struct TagItem *tags)
+{
+  const struct TagItem *tag;
+  uint32_t id = 0U;
+  uint8_t mode = Z9AX_VOICE_NONE;
+
+  for (tag = tags; tag != NULL && tag->ti_Tag != TAG_DONE; tag++) {
+    if (tag->ti_Tag == AHIDB_ZZVoice || tag->ti_Tag == AHIDB_ZZVoiceLinear) {
+      id = tag->ti_Data;
+      mode = (uint8_t)(tag->ti_Tag == AHIDB_ZZVoice ? Z9AX_VOICE_NEAREST
+                                                    : Z9AX_VOICE_LINEAR);
+    }
+  }
+  if ((mode == Z9AX_VOICE_NEAREST && id != Z9AX_VOICE_ID_NEAREST) ||
+      (mode == Z9AX_VOICE_LINEAR && id != Z9AX_VOICE_ID_LINEAR)) {
+    mode = Z9AX_VOICE_NONE;
+  }
+  return mode;
+}
+
+static const char *voice_reason_text(uint8_t reason)
+{
+  switch (reason) {
+    case Z9AX_VOICE_REASON_LIBRARY:
+      return "zz9k.library is not available";
+    case Z9AX_VOICE_REASON_REVISION:
+      return "zz9k.library is older than revision 42";
+    case Z9AX_VOICE_REASON_ZORRO2:
+      return "the firmware does not advertise the voice engine on Zorro II";
+    case Z9AX_VOICE_REASON_NO_ENGINE:
+      return "the firmware does not advertise the voice engine";
+    case Z9AX_VOICE_REASON_OPEN:
+      return "the voice engine refused the session (engine busy or card reset)";
+    case Z9AX_VOICE_REASON_MEMORY:
+      return "the card has no memory for the sample bank";
+    case Z9AX_VOICE_REASON_VIEW:
+      return "the voice engine refused the sample views";
+    default:
+      return "unknown";
+  }
+}
+
+/* One line per refusal on the debug channel, with what the user can do. */
+static void voice_refused(uint8_t reason, uint32_t status)
+{
+  KPrintF((CONST_STRPTR)"ZZ9000AX: hardware mixing refused: %s",
+          (CONST_STRPTR)voice_reason_text(reason));
+  if (status != 0U)
+    KPrintF((CONST_STRPTR)" (status %ld)", (long)status);
+  KPrintF((CONST_STRPTR)". The hardware mixing modes need matched firmware"
+          " and zz9k.library 42 or newer."
+          " Streaming clients (Play16, ZZPlay AHI output, datatypes)"
+          " use a 16 bit Stereo mode.\n");
+}
+
+/* Flags of the audio service, or 0 when the query fails. */
+static uint32_t voice_service_flags(void)
+{
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  ZZ9KQueryServicePayload *query;
+  ZZ9KServiceInfoPayload info;
+
+  zz9k_request_init(&request, ZZ9K_OP_QUERY_SERVICE);
+  request.entry.payload_len = sizeof(*query);
+  query = (ZZ9KQueryServicePayload *)request.entry.payload.inline_data;
+  zz9k_put_be32(query->service_id, ZZ9K_SERVICE_AUDIO);
+  if (ZZ9KCall(&request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS) !=
+      ZZ9K_STATUS_OK)
+    return 0U;
+  memcpy(&info, reply.payload.inline_data, sizeof(info));
+  return zz9k_get_be32(info.flags);
+}
+
+/* Whether the firmware and zz9k.library can run the engine. Sets *stereo_ok
+ * when the firmware advertises stereo voice samples. Returns a
+ * Z9AX_VOICE_REASON_* or 0. Needs ZZ9KBase; blocks on the mailbox. */
+static uint8_t voice_probe(struct z9ax_voice *v)
+{
+  uint32_t flags;
+
+  if (ZZ9KBase->lib_Revision < ZZ9K_LIBRARY_MIN_REVISION_AUDIO_VOICE)
+    return Z9AX_VOICE_REASON_REVISION;
+  flags = voice_service_flags();
+  if ((flags & ZZ9K_SERVICE_FLAG_AUDIO_VOICE) == 0U)
+    return Z9AX_VOICE_REASON_NO_ENGINE;
+  v->stereo_ok = (flags & ZZ9K_SERVICE_FLAG_AUDIO_VOICE_STEREO) != 0U;
+  return 0U;
+}
+
+/* ENV:name as a decimal number, or def when it is absent or not a number. */
+static uint32_t voice_env_number(const char *name, uint32_t def)
+{
+  char text[16];
+  LONG length;
+  LONG i;
+  uint32_t value = 0U;
+
+  length = GetVar((CONST_STRPTR)name, text, (LONG)sizeof(text),
+                  GVF_GLOBAL_ONLY);
+  if (length <= 0)
+    return def;
+  for (i = 0; i < length; i++) {
+    if (text[i] < '0' || text[i] > '9' || value > 0x19999999U)
+      return def;
+    value = value * 10U + (uint32_t)(text[i] - '0');
+  }
+  return value;
+}
+
+/* Model hooks. PlayerFunc and SoundFunc are the client's hooks, called on
+ * the worker. */
+static void voice_hook_player(void *user)
+{
+  struct z9ax *ahi_data = (struct z9ax *)user;
+  struct AHIAudioCtrlDrv *audio = ahi_data->audioctrl;
+
+  if (audio->ahiac_PlayerFunc)
+    CallHookPkt(audio->ahiac_PlayerFunc, audio, NULL);
+}
+
+static void voice_hook_sound(void *user, uint16_t channel)
+{
+  struct z9ax *ahi_data = (struct z9ax *)user;
+  struct AHIAudioCtrlDrv *audio = ahi_data->audioctrl;
+  struct AHISoundMessage message;
+
+  message.ahism_Channel = channel;
+  if (audio->ahiac_SoundFunc)
+    CallHookPkt(audio->ahiac_SoundFunc, audio, &message);
+}
+
+static void voice_hook_lock(void *user)
+{
+  (void)user;
+  Disable();
+}
+
+static void voice_hook_unlock(void *user)
+{
+  (void)user;
+  Enable();
+}
+
+/* AHIsub_Disable protects client data from the hooks: nothing is taken
+ * from the FIFO while it is nested, so an AHI_PlayA sequence stays whole. */
+static int voice_hook_blocked(void *user)
+{
+  return ((struct z9ax *)user)->disable_cnt != 0U;
+}
+
+static uint32_t voice_hook_player_freq(void *user)
+{
+  return ((struct z9ax *)user)->audioctrl->ahiac_PlayerFreq;
+}
+
+static void voice_timer_post(struct z9ax *ahi_data)
+{
+  timer_post_micro(ahi_data, Z9AX_VOICE_POLL_MICRO);
+}
+
+/* The worker's pacing timer (timer.device, UNIT_MICROHZ), on the request
+ * and port the lease worker would use. Brings them up and posts the first
+ * request. Returns 0 when timer.device is not available. */
+static int voice_timer_setup(struct z9ax *ahi_data)
+{
+  ahi_data->lease_timer_port = CreateMsgPort();
+  if (ahi_data->lease_timer_port) {
+    ahi_data->lease_timer_req = (struct timerequest *)CreateIORequest(
+        (APTR)ahi_data->lease_timer_port, sizeof(struct timerequest));
+  }
+  if (ahi_data->lease_timer_req &&
+      OpenDevice((STRPTR)"timer.device", UNIT_MICROHZ,
+                 (struct IORequest *)ahi_data->lease_timer_req, 0) == 0) {
+    ahi_data->lease_timer_signal =
+        (int8_t)ahi_data->lease_timer_port->mp_SigBit;
+    TimerBase = ahi_data->lease_timer_req->tr_node.io_Device;
+    GetSysTime(&ahi_data->lease_timer_deadline);
+    voice_timer_post(ahi_data);
+    return 1;
+  }
+  voice_timer_end(ahi_data);
+  return 0;
+}
+
+/* Defines engine sample `view` over the whole bank (DEFINE only), so that
+ * a sound is a view plus a byte offset. Needs the session open; blocks on
+ * the mailbox. */
+static int voice_define_view(struct z9ax_voice *v, uint32_t view)
+{
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  int status;
+
+  status = zz9k_request_audio_voice_upload(
+      &request, v->session.grant.session, ZZ9K_VOICE_UPLOAD_FLAG_DEFINE, 0U,
+      0U, 0U, view, 0U, v->session.grant.bank_bytes, view);
+  if (status != ZZ9K_STATUS_OK)
+    return status;
+  memset(&reply, 0, sizeof(reply));
+  return ZZ9KCall(&request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+}
+
+/* Opens the voice session and starts the model. Returns 1, or 0 with
+ * v->reason and v->open_status set. A NO_MEMORY answer halves the bank down
+ * to its floor, then drops the large host buffers for the defaults. */
+static int voice_open_session(struct z9ax *ahi_data)
+{
+  struct z9ax_voice *v = ahi_data->voice;
+  ZZ9KVoiceOpenDesc desc;
+  VmConfig cfg;
+  uint32_t bank = v->bank_request;
+  uint32_t ring_bytes = v->zorro == 2U ? 0U : Z9AX_VOICE_RING_BYTES;
+  uint32_t staging_bytes = v->zorro == 2U ? 0U : Z9AX_VOICE_STAGING_BYTES;
+  uint32_t attempts;
+  uint32_t view;
+  int status = ZZ9K_STATUS_OK;
+
+  for (attempts = 0U; attempts < 16U; attempts++) {
+    memset(&desc, 0, sizeof(desc));
+    desc.voices = v->channels;
+    desc.bank_bytes = bank;
+    desc.lead_frames = v->lead_request;
+    desc.flags = v->linear ? ZZ9K_VOICE_OPEN_FLAG_LINEAR : 0U;
+    desc.ring_bytes = ring_bytes;
+    desc.staging_bytes = staging_bytes;
+    status = zz_ax_voice_open(&desc, &v->session);
+    if (status != ZZ9K_STATUS_NO_MEMORY)
+      break;
+    if (bank > Z9AX_VOICE_BANK_MIN) {
+      bank >>= 1;
+      if (bank < Z9AX_VOICE_BANK_MIN)
+        bank = Z9AX_VOICE_BANK_MIN;
+    } else if (ring_bytes != 0U || staging_bytes != 0U) {
+      bank = v->bank_request;
+      ring_bytes = 0U;
+      staging_bytes = 0U;
+    } else {
+      break;
+    }
+  }
+  v->open_status = (uint32_t)status;
+  if (status != ZZ9K_STATUS_OK) {
+    v->reason = (uint8_t)(status == ZZ9K_STATUS_NO_MEMORY
+                              ? Z9AX_VOICE_REASON_MEMORY
+                              : Z9AX_VOICE_REASON_OPEN);
+    return 0;
+  }
+  v->session_open = 1U;
+  if (v->session.grant.voices < v->channels ||
+      v->session.grant.bank_bytes < 4U) {
+    v->reason = Z9AX_VOICE_REASON_OPEN;
+    v->open_status = ZZ9K_STATUS_INTERNAL_ERROR;
+    goto fail;
+  }
+  v->lead = v->session.grant.lead_frames;
+  for (view = 0U; view < VM_VIEWS; view++) {
+    if ((view == VM_VIEW_S8S || view == VM_VIEW_S16S) && !v->stereo_ok)
+      continue;
+    status = voice_define_view(v, view);
+    if (status != ZZ9K_STATUS_OK) {
+      v->reason = Z9AX_VOICE_REASON_VIEW;
+      v->open_status = (uint32_t)status;
+      goto fail;
+    }
+  }
+  memset(&cfg, 0, sizeof(cfg));
+  cfg.channels = v->channels;
+  cfg.sounds = v->sounds;
+  cfg.bank_bytes = v->session.grant.bank_bytes & ~3U;
+  cfg.stereo_views = v->stereo_ok;
+  cfg.hooks.player = voice_hook_player;
+  cfg.hooks.sound = voice_hook_sound;
+  cfg.hooks.lock = voice_hook_lock;
+  cfg.hooks.unlock = voice_hook_unlock;
+  cfg.hooks.blocked = voice_hook_blocked;
+  cfg.hooks.player_freq = voice_hook_player_freq;
+  cfg.hooks.user = ahi_data;
+  vm_init(&v->model, &cfg);
+  return 1;
+
+fail:
+  zz_ax_voice_close(&v->session);
+  v->session_open = 0U;
+  return 0;
+}
+
+/* Stops the pacing timer and frees its request and port. */
+static void voice_timer_end(struct z9ax *ahi_data)
+{
+  if (ahi_data->lease_timer_req) {
+    if (ahi_data->lease_timer_req->tr_node.io_Device) {
+      AbortIO((struct IORequest *)ahi_data->lease_timer_req);
+      WaitIO((struct IORequest *)ahi_data->lease_timer_req);
+      CloseDevice((struct IORequest *)ahi_data->lease_timer_req);
+      TimerBase = NULL;
+    }
+    DeleteIORequest((struct IORequest *)ahi_data->lease_timer_req);
+    ahi_data->lease_timer_req = NULL;
+  }
+  if (ahi_data->lease_timer_port) {
+    DeleteMsgPort(ahi_data->lease_timer_port);
+    ahi_data->lease_timer_port = NULL;
+  }
+  ahi_data->lease_timer_signal = -1;
+}
+
+/* Reads the status block: the heartbeat, the clock and the counters. A
+ * status that reads closed means the card ended the session (lost heartbeat
+ * or reset); playback stops and says so. Returns 0 on a failed read. */
+static int voice_read_status(struct z9ax *ahi_data)
+{
+  struct z9ax_voice *v = ahi_data->voice;
+  ZZ9KVoiceStatus status;
+
+  if (zz_ax_voice_get_status(&v->session, &status) != ZZ9K_STATUS_OK) {
+    v->status_failures++;
+    return 0;
+  }
+  v->status = status;
+  if (status.state == ZZ9K_VOICE_STATE_CLOSED && !v->session_lost) {
+    v->session_lost = 1U;
+    v->playing = 0U;
+    KPrintF((CONST_STRPTR)"ZZ9000AX: the card closed the voice session"
+            " (reset or lost heartbeat); sound stops.\n");
+  }
+  return 1;
+}
+
+/* Hands the model's records to the ring. Only the worker calls this. What
+ * the ring could not take stays for the next pass. */
+static void voice_write_records(struct z9ax *ahi_data)
+{
+  struct z9ax_voice *v = ahi_data->voice;
+  const ZZ9KVoiceRecord *records;
+  uint32_t count;
+  uint32_t written;
+
+  for (;;) {
+    records = vm_records(&v->model, &count);
+    if (count == 0U)
+      return;
+    written = zz_ax_voice_write(&v->session, records, count);
+    if (written < count)
+      v->ring_full++;
+    if (written == 0U)
+      return;
+    vm_records_taken(&v->model, written);
+  }
+}
+
+/* AHI_UnloadSound only sets a bit: it may not call the mailbox, because it
+ * must not break a Forbid(). The worker frees the sounds here; a sound a
+ * voice is playing stops at the model time and its bank range waits for the
+ * engine horizon (voice_model.c). */
+static void voice_run_unloads(struct z9ax *ahi_data)
+{
+  struct z9ax_voice *v = ahi_data->voice;
+  uint32_t word;
+
+  for (word = 0U; word < VM_MAX_SOUNDS / 32U; word++) {
+    uint32_t mask;
+
+    Forbid();
+    mask = v->unload_pending[word];
+    v->unload_pending[word] = 0U;
+    Permit();
+    while (mask != 0U) {
+      uint32_t bit = 0U;
+
+      while ((mask & (1UL << bit)) == 0U)
+        bit++;
+      mask &= ~(1UL << bit);
+      Forbid();
+      vm_sound_remove(&v->model, word * 32U + bit);
+      Permit();
+    }
+  }
+}
+
+/* AHIET_CHANNELINFO: the offset of every channel at the model time, which
+ * is up to one lead ahead of the sound, as PlayerFunc is. */
+static void voice_channel_info(struct z9ax *ahi_data)
+{
+  struct z9ax_voice *v = ahi_data->voice;
+  struct AHIEffChannelInfo *info;
+  struct Hook *hook;
+
+  Forbid();
+  info = v->channelinfo;
+  Permit();
+  if (!info || info->ahieci_Channels != v->channels)
+    return;
+  hook = info->ahieci_Func;
+  if (!hook)
+    return;
+  vm_channel_offsets(&v->model, info->ahieci_Offset, v->channels);
+  CallHookPkt(hook, ahi_data->audioctrl, info);
+}
+
+/* Where a new timeline starts: the granted lead ahead of the playing frame,
+ * and never closer to the engine horizon than one period, so the first
+ * records cannot be late when the firmware advances between the status
+ * read and the write. The first record of the timeline, the MASTER gain,
+ * starts the engine clock when the session is new. */
+static uint32_t voice_anchor(const struct z9ax_voice *v)
+{
+  uint32_t stamp = v->status.playing_frame + v->lead;
+
+  if ((int32_t)(stamp - v->status.horizon) < (int32_t)Z9AX_VOICE_PERIOD_FRAMES)
+    stamp = v->status.horizon + Z9AX_VOICE_PERIOD_FRAMES;
+  return stamp;
+}
+
+/* Start and Stop, as the worker runs them. RESET drops every queued record
+ * before the model is moved, so nothing stamped for the old timeline plays. */
+static void voice_handle_cmd(struct z9ax *ahi_data)
+{
+  struct z9ax_voice *v = ahi_data->voice;
+  uint32_t cmd = v->cmd;
+  uint32_t result = AHIE_OK;
+
+  if (cmd == Z9AX_VOICE_CMD_NONE)
+    return;
+  v->cmd = Z9AX_VOICE_CMD_NONE;
+  if (!v->session_open || v->session_lost || !voice_read_status(ahi_data) ||
+      v->status.state == ZZ9K_VOICE_STATE_CLOSED) {
+    result = AHIE_UNKNOWN;
+  } else if (cmd == Z9AX_VOICE_CMD_START) {
+    zz_ax_voice_reset(&v->session);
+    vm_stop(&v->model);
+    vm_start(&v->model, voice_anchor(v));
+    if (v->start_frame == 0U)
+      v->start_frame = v->model.now;
+    v->playing = 1U;
+    voice_write_records(ahi_data);
+  } else {
+    zz_ax_voice_reset(&v->session);
+    vm_stop(&v->model);
+    v->playing = 0U;
+  }
+  v->cmd_result = result;
+  if (v->cmd_task && v->cmd_signal != -1)
+    Signal(v->cmd_task, 1UL << v->cmd_signal);
+}
+
+/* One worker pass: the command, the heartbeat and the clock, the bank, then
+ * as many ticks as are due. */
+static void voice_service(struct z9ax *ahi_data)
+{
+  struct z9ax_voice *v = ahi_data->voice;
+  uint32_t budget;
+
+  voice_handle_cmd(ahi_data);
+  if (!v->session_open)
+    return;
+  if (!voice_read_status(ahi_data))
+    return;
+  Forbid();
+  vm_bank_poll(&v->model, v->status.horizon);
+  Permit();
+  voice_run_unloads(ahi_data);
+  if (!v->playing || v->session_lost)
+    return;
+  /* A worker that could not run for longer than the lead is behind the
+   * sound and its records would be late. Anchor the model to the card again
+   * instead of replaying a backlog. */
+  if ((int32_t)(v->status.playing_frame - v->model.now) > 0) {
+    zz_ax_voice_reset(&v->session);
+    vm_stop(&v->model);
+    vm_start(&v->model, voice_anchor(v));
+    v->resyncs++;
+  }
+  /* While the client holds AHIsub_Disable its hooks wait, as the software
+   * modes' interrupt does: no PlayerFunc, no SoundFunc and no channel info.
+   * The status read above keeps the session alive, and records already
+   * made still go out. */
+  if (ahi_data->disable_cnt == 0U)
+    vm_run_async(&v->model);
+  for (budget = Z9AX_VOICE_TICKS_PER_POLL; budget != 0U; budget--) {
+    if (ahi_data->disable_cnt != 0U)
+      break;
+    /* The ring is slow: let it drain before the record buffer fills. */
+    if (v->model.out_n > VM_OUT_RECORDS / 2U)
+      break;
+    if (!vm_tick_due(&v->model, v->status.playing_frame, 2U * v->lead))
+      break;
+    vm_tick(&v->model);
+  }
+  voice_write_records(ahi_data);
+  if (ahi_data->disable_cnt == 0U)
+    voice_channel_info(ahi_data);
+}
+
+static char *voice_text_number(char *p, uint32_t value)
+{
+  char digits[10];
+  uint32_t n = 0U;
+
+  do {
+    digits[n++] = (char)('0' + (int)(value % 10U));
+    value /= 10U;
+  } while (value != 0U);
+  while (n != 0U)
+    *p++ = digits[--n];
+  return p;
+}
+
+static char *voice_text_field(char *p, const char *name, uint32_t value)
+{
+  while (*name != '\0')
+    *p++ = *name++;
+  *p++ = '=';
+  p = voice_text_number(p, value);
+  *p++ = ' ';
+  return p;
+}
+
+/* ENV:ZZ9K_AHI_VOICE_STATS holds the engine counters and the model's own
+ * for the session that closed. The voice session is exclusive, so no second
+ * tool can read the counters while a client runs. */
+static void voice_write_stats(struct z9ax *ahi_data)
+{
+  struct z9ax_voice *v = ahi_data->voice;
+  char text[256];
+  char *p = text;
+
+  p = voice_text_field(p, "late", v->status.late);
+  p = voice_text_field(p, "rejected", v->status.rejected);
+  p = voice_text_field(p, "underruns", v->status.underruns);
+  p = voice_text_field(p, "dropped", v->status.dropped);
+  p = voice_text_field(p, "ringfull", v->ring_full);
+  p = voice_text_field(p, "ticks", v->model.ticks);
+  p = voice_text_field(p, "frames", v->model.now - v->start_frame);
+  p = voice_text_field(p, "resyncs", v->resyncs);
+  p = voice_text_field(p, "fifodrops", v->model.fifo_drops);
+  p = voice_text_field(p, "recorddrops", v->model.out_drops);
+  p = voice_text_field(p, "overload", v->model.overload);
+  p[-1] = '\0';
+  SetVar((CONST_STRPTR)"ZZ9K_AHI_VOICE_STATS", (STRPTR)text, -1L,
+         GVF_GLOBAL_ONLY);
+  KPrintF((CONST_STRPTR)"ZZ9000AX: voice session closed: %s\n",
+          (CONST_STRPTR)text);
+}
+
+/* The worker's first step: its signal, the timer, the session and the
+ * model. Returns 1 when the worker can run; on 0 v->reason says why (0 for
+ * a local failure) and nothing is left allocated. */
+static int voice_worker_init(struct z9ax *ahi_data)
+{
+  struct z9ax_voice *v = ahi_data->voice;
+
+  ahi_data->enable_signal = AllocSignal(-1);
+  if (ahi_data->enable_signal == -1)
+    return 0;
+  v->lead_request = voice_env_number("ZZ9K_AHI_LEAD", 0U);
+  v->bank_request =
+      voice_env_number("ZZ9K_AHI_BANK", Z9AX_VOICE_BANK_DEFAULT >> 10) << 10;
+  if (v->bank_request > ZZ9K_VOICE_BANK_MAX_BYTES)
+    v->bank_request = ZZ9K_VOICE_BANK_MAX_BYTES;
+  if (!voice_timer_setup(ahi_data))
+    return 0;
+  if (!voice_open_session(ahi_data))
+    return 0;
+  return 1;
+}
+
+/* The worker's last step: with the session live the counters go to
+ * ENV:ZZ9K_AHI_VOICE_STATS and the session closes; then the timer. */
+static void voice_worker_end(struct z9ax *ahi_data, int live)
+{
+  struct z9ax_voice *v = ahi_data->voice;
+
+  if (live && v->session_open) {
+    if (zz_ax_voice_get_status(&v->session, &v->status) != ZZ9K_STATUS_OK)
+      v->status_failures++;
+    voice_write_stats(ahi_data);
+    zz_ax_voice_close(&v->session);
+    v->session_open = 0U;
+  }
+  voice_timer_end(ahi_data);
+}
+
+static void VoiceWorkerProcess(void)
+{
+  struct Process *proc = (struct Process *)FindTask(NULL);
+  struct z9ax *ahi_data = proc->pr_Task.tc_UserData;
+  uint32_t timer_sig;
+  uint32_t signals;
+  int ready;
+
+  ready = voice_worker_init(ahi_data);
+  if (!ready) {
+    voice_worker_end(ahi_data, 0);
+    FreeSignal(ahi_data->enable_signal);
+    ahi_data->enable_signal = -1;
+    /* Publish the failure before the handshake, like the software worker. */
+    ahi_data->worker_process = NULL;
+  }
+  timer_sig = ready ? (1UL << ahi_data->lease_timer_signal) : 0UL;
+  Signal(ahi_data->t_mainproc, 1UL << ahi_data->mainproc_signal);
+  if (!ready)
+    return;
+
+  for (;;) {
+    signals = Wait(SIGBREAKF_CTRL_C | (1UL << ahi_data->enable_signal) |
+                   timer_sig);
+    if (signals & SIGBREAKF_CTRL_C)
+      break;
+    if (signals & timer_sig) {
+      while (GetMsg(ahi_data->lease_timer_port))
+        ;
+      voice_timer_post(ahi_data);
+    }
+    voice_service(ahi_data);
+  }
+
+  voice_worker_end(ahi_data, 1);
+  Forbid();
+  FreeSignal(ahi_data->enable_signal);
+  ahi_data->enable_signal = -1;
+  Permit();
+  ahi_data->worker_process = NULL;
+  Signal(ahi_data->t_mainproc, 1UL << ahi_data->mainproc_signal);
+}
+
+/* Hands the worker a Start or a Stop and waits for its answer. AHI calls
+ * this from task context. Returns AHIE_UNKNOWN when there is no worker to
+ * answer (or the caller is the worker itself). */
+static uint32_t voice_command(struct z9ax *ahi_data, uint32_t cmd)
+{
+  struct z9ax_voice *v = ahi_data->voice;
+  struct Task *me = FindTask(NULL);
+  int8_t signal;
+  uint32_t result;
+
+  if (!ahi_data->worker_process ||
+      (struct Task *)ahi_data->worker_process == me)
+    return AHIE_UNKNOWN;
+  signal = AllocSignal(-1);
+  if (signal == -1)
+    return AHIE_UNKNOWN;
+  Forbid();
+  v->cmd_task = me;
+  v->cmd_signal = signal;
+  v->cmd_result = AHIE_UNKNOWN;
+  v->cmd = cmd;
+  Signal((struct Task *)ahi_data->worker_process,
+         1UL << ahi_data->enable_signal);
+  Permit();
+  Wait(1UL << signal);
+  result = v->cmd_result;
+  FreeSignal(signal);
+  return result;
+}
+
+/* Ends the worker and waits for it. Called while the ownership nodes still
+ * name this driver, so MHI does not claim the card in between. */
+static void voice_wait_worker(struct z9ax *ahi_data)
+{
+  if (ahi_data->worker_process) {
+    Signal((struct Task *)ahi_data->worker_process, SIGBREAKF_CTRL_C);
+    if (ahi_data->mainproc_signal != -1)
+      Wait(1UL << ahi_data->mainproc_signal);
+    ahi_data->worker_process = NULL;
+  }
+}
+
+/* AllocAudio for a hardware-mixing mode. Returns 0 on success: no AHISF_*
+ * flag, so ahi.device mixes nothing and times nothing, and ahiac_MixFreq
+ * is the engine rate. Every refusal prints its reason and leaves the
+ * owner, the library base and the card as they were. The voice session
+ * opens before the ownership claim and is closed again when the claim
+ * fails, so a refused allocation never disturbs the active owner. */
+static uint32_t voice_alloc_audio(uint8_t mode,
+                                  struct AHIAudioCtrlDrv *AudioCtrl)
+{
+  uint32_t hw_addr = Z9AXBase->hw_addr;
+  struct z9ax *ahi_data;
+  struct z9ax_voice *v;
+  uint8_t mhi_mode;
+  uint8_t taken;
+
+  if (AudioCtrl->ahiac_Channels == 0U ||
+      AudioCtrl->ahiac_Channels > ZZ9K_VOICE_MAX_VOICES) {
+    KPrintF((CONST_STRPTR)"ZZ9000AX: hardware mixing refused: %lu channels,"
+            " the voice engine has 32. Use a 16 bit Stereo mode or fewer"
+            " channels.\n",
+            (unsigned long)AudioCtrl->ahiac_Channels);
+    return AHISF_ERROR;
+  }
+  if (Z9AXBase->zorro_version == 2U) {
+    voice_refused(Z9AX_VOICE_REASON_ZORRO2, 0U);
+    return AHISF_ERROR;
+  }
+  Forbid();
+  taken = (Z9AXBase->owner || Z9AXBase->allocating) ? 1U : 0U;
+  Permit();
+  if (taken)
+    return AHISF_ERROR;
+  if ((read_reg(hw_addr, ZZ_REG_AUDIO_CONFIG) & 1U) == 0U) {
+    KPrintF((CONST_STRPTR)"ZZ9000AX: hardware mixing refused: ZZ9000AX audio"
+            " not detected.\n");
+    return AHISF_ERROR;
+  }
+
+  ahi_data = AllocVec(sizeof(struct z9ax), MEMF_PUBLIC | MEMF_FAST | MEMF_CLEAR);
+  v = ahi_data ? (struct z9ax_voice *)AllocVec(sizeof(struct z9ax_voice),
+                                               MEMF_PUBLIC | MEMF_CLEAR)
+               : NULL;
+  if (!ahi_data || !v) {
+    if (v)
+      FreeVec(v);
+    if (ahi_data)
+      FreeVec(ahi_data);
+    KPrintF((CONST_STRPTR)"ZZ9000AX: hardware mixing refused: no memory for"
+            " the driver data.\n");
+    return AHISF_ERROR;
+  }
+  ahi_data->play_stop = 1;
+  ahi_data->record_stop = 1;
+  ahi_data->flags = Z9AXBase->flags;
+  ahi_data->hw_addr = hw_addr;
+  ahi_data->audioctrl = AudioCtrl;
+  ahi_data->ahi_base = AHIsubBase;
+  ahi_data->worker_signal = -1;
+  ahi_data->enable_signal = -1;
+  ahi_data->mainproc_signal = -1;
+  ahi_data->lease_timer_signal = -1;
+  ahi_data->zorro_version = Z9AXBase->zorro_version;
+  ahi_data->t_mainproc = FindTask(NULL);
+  ahi_data->voice_mode = mode;
+  ahi_data->voice = v;
+  v->linear = (uint8_t)(mode == Z9AX_VOICE_LINEAR);
+  v->zorro = Z9AXBase->zorro_version;
+  v->channels = AudioCtrl->ahiac_Channels;
+  v->sounds = AudioCtrl->ahiac_Sounds;
+  v->cmd = Z9AX_VOICE_CMD_NONE;
+  v->cmd_signal = -1;
+
+  /* Serialize before touching the driver-global zz9k.library base. */
+  Forbid();
+  if (Z9AXBase->owner || Z9AXBase->allocating) {
+    Permit();
+    FreeVec(v);
+    FreeVec(ahi_data);
+    return AHISF_ERROR;
+  }
+  Z9AXBase->allocating = ahi_data;
+  Permit();
+  AudioCtrl->ahiac_DriverData = ahi_data;
+
+  ahi_data->mainproc_signal = AllocSignal(-1);
+  if (ahi_data->mainproc_signal == -1) {
+    KPrintF((CONST_STRPTR)"ZZ9000AX: AllocSignal failed\n");
+    goto fail;
+  }
+
+  ZZ9KBase = OpenLibrary((STRPTR)"zz9k.library", 0);
+  v->reason = ZZ9KBase ? voice_probe(v) : Z9AX_VOICE_REASON_LIBRARY;
+  if (v->reason != 0U)
+    goto fail;
+
+  Forbid();
+  ahi_data->worker_process = CreateNewProcTags(
+      NP_Entry, (uint32_t)&VoiceWorkerProcess, NP_Name,
+      (uint32_t)device_name, NP_Priority, WORKER_PRIORITY, TAG_DONE);
+  if (ahi_data->worker_process)
+    ahi_data->worker_process->pr_Task.tc_UserData = ahi_data;
+  Permit();
+  if (!ahi_data->worker_process) {
+    KPrintF((CONST_STRPTR)"ZZ9000AX: CreateNewProcTags failed\n");
+    goto fail;
+  }
+
+  /* The worker signals once it opened the session, or cleared itself. */
+  Wait(1UL << ahi_data->mainproc_signal);
+  if (!ahi_data->worker_process)
+    goto fail;
+
+  /* The ownership claim of the software path: only a fabric-qualified MHI
+   * may coexist, because the voice slot is mixed by the fabric. The
+   * interrupt nodes join the shared chain, so they are filled in first. */
+  prepare_irq_struct(ahi_data);
+  Forbid();
+  mhi_mode = mhi_mode_locked();
+  if (Z9AXBase->owner || Z9AXBase->allocating != ahi_data ||
+      (mhi_mode != Z9AX_MHI_MODE_NONE && mhi_mode != Z9AX_MHI_MODE_FABRIC)) {
+    if (Z9AXBase->allocating == ahi_data)
+      Z9AXBase->allocating = NULL;
+    Permit();
+    KPrintF((CONST_STRPTR)"ZZ9000AX: hardware mixing refused: audio hardware"
+            " already owned.\n");
+    goto fail;
+  }
+  Z9AXBase->owner = ahi_data;
+  Z9AXBase->allocating = NULL;
+  install_irq_server_locked(ahi_data);
+  Permit();
+
+  AudioCtrl->ahiac_MixFreq = ZZ9K_VOICE_OUTPUT_RATE;
+  KPrintF((CONST_STRPTR)"ZZ9000AX: hardware mixing: %lu channels, %s"
+          " interpolation, bank %lu bytes, lead %lu frames, ring %lu"
+          " records%s.\n",
+          (unsigned long)v->channels, v->linear ? "linear" : "nearest",
+          (unsigned long)v->session.grant.bank_bytes, (unsigned long)v->lead,
+          (unsigned long)v->session.grant.ring_records,
+          v->stereo_ok ? ", stereo samples" : "");
+  return 0;
+
+fail:
+  voice_wait_worker(ahi_data);
+  Forbid();
+  if (Z9AXBase->allocating == ahi_data)
+    Z9AXBase->allocating = NULL;
+  Permit();
+  if (v->reason != 0U)
+    voice_refused(v->reason, v->open_status);
+  else
+    KPrintF((CONST_STRPTR)"ZZ9000AX: hardware mixing refused: the voice worker"
+            " could not start.\n");
+  if (ZZ9KBase) {
+    CloseLibrary(ZZ9KBase);
+    ZZ9KBase = NULL;
+  }
+  if (ahi_data->mainproc_signal != -1) {
+    FreeSignal(ahi_data->mainproc_signal);
+    ahi_data->mainproc_signal = -1;
+  }
+  FreeVec(v);
+  FreeVec(ahi_data);
+  AudioCtrl->ahiac_DriverData = NULL;
+  return AHISF_ERROR;
+}
+
+/* FreeAudio for a hardware-mixing mode: the worker writes the counters and
+ * closes the session, then the library base and the ownership nodes go. */
+static void voice_free_audio(struct AHIAudioCtrlDrv *AudioCtrl)
+{
+  struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
+
+  /* Keeps the interrupt server inert while the worker shuts down. */
+  ahi_data->play_stop = 1;
+  ahi_data->record_stop = 1;
+  voice_wait_worker(ahi_data);
+  if (ZZ9KBase) {
+    CloseLibrary(ZZ9KBase);
+    ZZ9KBase = NULL;
+  }
+  destroy_interrupt(ahi_data);
+  if (ahi_data->mainproc_signal != -1) {
+    FreeSignal(ahi_data->mainproc_signal);
+    ahi_data->mainproc_signal = -1;
+  }
+  FreeVec(ahi_data->voice);
+  ahi_data->voice = NULL;
+  FreeVec(ahi_data);
+  AudioCtrl->ahiac_DriverData = NULL;
+}
+
+/* Queues one AHI call for the worker. Safe from any context, including
+ * interrupts and the client's hooks. */
+static void voice_push(struct z9ax *ahi_data, const VmCall *call)
+{
+  Disable();
+  vm_fifo_push(&ahi_data->voice->model, call);
+  Enable();
+}
+
+/* COPY-only uploads through the staging buffer, in whole-longword chunks. */
+static int voice_copy(struct z9ax_voice *v, uint32_t bank_offset,
+                      const uint8_t *data, uint32_t length)
+{
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  uint32_t chunk_max = v->session.staging_bytes & ~3U;
+  int status = ZZ9K_STATUS_OK;
+
+  while (length != 0U && status == ZZ9K_STATUS_OK) {
+    uint32_t chunk = length < chunk_max ? length : chunk_max;
+
+    memcpy((void *)(uintptr_t)v->session.staging, data, chunk);
+    zz9k_audio_ring_cache_flush(v->session.staging, chunk);
+    status = zz9k_request_audio_voice_upload(
+        &request, v->session.grant.session, ZZ9K_VOICE_UPLOAD_FLAG_COPY, 0U,
+        bank_offset, chunk, 0U, 0U, 0U, 0U);
+    if (status == ZZ9K_STATUS_OK) {
+      memset(&reply, 0, sizeof(reply));
+      status = ZZ9KCall(&request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+    }
+    data += chunk;
+    bank_offset += chunk;
+    length -= chunk;
+  }
+  return status;
+}
+
+static void voice_unload_sound(struct z9ax *ahi_data, uint16_t sound)
+{
+  struct z9ax_voice *v = ahi_data->voice;
+
+  if (sound >= VM_MAX_SOUNDS)
+    return;
+  Forbid();
+  if (v->model.sounds[sound].used == VM_SOUND_LOADED)
+    v->unload_pending[sound >> 5] |= 1UL << (sound & 31U);
+  Permit();
+}
+
+/* AHI_LoadSound: an AHIST_SAMPLE is copied into the card bank once, through
+ * the staging buffer, and defined over its range. The client's memory must
+ * stay unchanged until AHI_UnloadSound, as for any driver that uploads.
+ * AHIST_DYNAMICSAMPLE is refused: the engine plays from its own bank and a
+ * snapshot would silently play stale data. */
+static uint32_t voice_load_sound(struct z9ax *ahi_data, uint16_t sound,
+                                 uint32_t type,
+                                 const struct AHISampleInfo *info)
+{
+  /* AHISampleInfo as the AHI developer <devices/ahi.h> has it: the NDK copy
+   * ends after the address. */
+  const struct {
+    ULONG ahisi_Type;
+    APTR ahisi_Address;
+    ULONG ahisi_Length;
+  } *sample = (const void *)info;
+  struct z9ax_voice *v = ahi_data->voice;
+  uint32_t view;
+  uint32_t bytes;
+  uint32_t bank_offset = 0U;
+  uint32_t status;
+  uint8_t taken;
+  uint8_t defined;
+
+  if (type != AHIST_SAMPLE) {
+    KPrintF((CONST_STRPTR)"ZZ9000AX: hardware mixing plays AHIST_SAMPLE"
+            " sounds only; AHIST_DYNAMICSAMPLE (Play16, ZZPlay AHI output)"
+            " needs a 16 bit Stereo mode.\n");
+    return AHIE_BADSOUNDTYPE;
+  }
+  switch (sample->ahisi_Type) {
+    case AHIST_M8S:
+      view = VM_VIEW_S8;
+      break;
+    case AHIST_M16S:
+      view = VM_VIEW_S16;
+      break;
+    case AHIST_S8S:
+      view = VM_VIEW_S8S;
+      break;
+    case AHIST_S16S:
+      view = VM_VIEW_S16S;
+      break;
+    default:
+      return AHIE_BADSAMPLETYPE;
+  }
+  if ((view == VM_VIEW_S8S || view == VM_VIEW_S16S) && !v->stereo_ok) {
+    KPrintF((CONST_STRPTR)"ZZ9000AX: hardware mixing: stereo samples need"
+            " firmware that advertises the stereo voice flag.\n");
+    return AHIE_BADSAMPLETYPE;
+  }
+  if (sound >= v->sounds || sound >= VM_MAX_SOUNDS)
+    return AHIE_BADSOUNDTYPE;
+  if (sample->ahisi_Address == NULL || sample->ahisi_Length == 0U)
+    return AHIE_BADSAMPLETYPE;
+  if (((uint64_t)sample->ahisi_Length <<
+       zz9k_voice_format_frame_shift(view)) >
+      (uint64_t)v->session.grant.bank_bytes) {
+    KPrintF((CONST_STRPTR)"ZZ9000AX: hardware mixing: sound %ld does not fit"
+            " the %lu byte sample bank.\n",
+            (long)sound, (unsigned long)v->session.grant.bank_bytes);
+    return AHIE_NOMEM;
+  }
+  bytes = sample->ahisi_Length << zz9k_voice_format_frame_shift(view);
+  /* A sound that is still loaded is replaced, as ahi.device replaces its
+   * own entry; a voice that plays it stops first. */
+  voice_unload_sound(ahi_data, sound);
+  voice_run_unloads(ahi_data);
+  Forbid();
+  vm_bank_poll(&v->model, v->status.horizon);
+  if (vm_sound_held(&v->model, sound)) {
+    Permit();
+    KPrintF((CONST_STRPTR)"ZZ9000AX: hardware mixing: sound %ld was unloaded"
+            " and its bank range is still in use by the card.\n",
+            (long)sound);
+    return AHIE_NOMEM;
+  }
+  taken = vm_bank_alloc(&v->model, bytes, &bank_offset) == 0 ? 1U : 0U;
+  Permit();
+  if (!taken) {
+    KPrintF((CONST_STRPTR)"ZZ9000AX: hardware mixing: the sample bank is"
+            " full (%lu bytes free); ENV:ZZ9K_AHI_BANK (KiB) raises the"
+            " request.\n",
+            (unsigned long)vm_bank_free_bytes(&v->model));
+    return AHIE_NOMEM;
+  }
+  status = (uint32_t)voice_copy(v, bank_offset,
+                                (const uint8_t *)sample->ahisi_Address, bytes);
+  if (status != ZZ9K_STATUS_OK) {
+    Forbid();
+    vm_bank_release(&v->model, bank_offset, bytes);
+    Permit();
+    KPrintF((CONST_STRPTR)"ZZ9000AX: hardware mixing: sample upload failed"
+            " (status %ld).\n",
+            (long)status);
+    return AHIE_UNKNOWN;
+  }
+  Forbid();
+  defined = vm_sound_define(&v->model, sound, sample->ahisi_Type, bank_offset,
+                            sample->ahisi_Length) == 0 ? 1U : 0U;
+  if (!defined)
+    vm_bank_release(&v->model, bank_offset, bytes);
+  Permit();
+  return defined ? AHIE_OK : AHIE_BADSAMPLETYPE;
+}
+
+/* AHI_SetEffect: the two effects a hardware-mixing driver can give. Any
+ * other effect is AHIE_UNKNOWN, as the Paula driver answers in its DMA
+ * mode; a cancel of an effect that was never set is AHIE_OK. */
+static uint32_t voice_set_effect(struct z9ax *ahi_data, uint8_t *effect)
+{
+  struct z9ax_voice *v = ahi_data->voice;
+  uint32_t kind = *(uint32_t *)effect;
+  VmCall call;
+
+  if (kind == AHIET_MASTERVOLUME || kind == (AHIET_MASTERVOLUME | AHIET_CANCEL)) {
+    memset(&call, 0, sizeof(call));
+    call.kind = VM_CALL_MASTER;
+    call.a = kind == AHIET_MASTERVOLUME
+                 ? (uint32_t)((struct AHIEffMasterVolume *)effect)->ahiemv_Volume
+                 : 0x10000U;
+    voice_push(ahi_data, &call);
+    return AHIE_OK;
+  }
+  if (kind == AHIET_CHANNELINFO || kind == (AHIET_CHANNELINFO | AHIET_CANCEL)) {
+    Forbid();
+    v->channelinfo =
+        kind == AHIET_CHANNELINFO ? (struct AHIEffChannelInfo *)effect : NULL;
+    Permit();
+    return AHIE_OK;
+  }
+  return AHIE_UNKNOWN;
+}
+
 static uint32_t __attribute__((used)) intAHIsub_AllocAudio(struct TagItem *tagList asm("a1"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
   // TW: Just take the values from where init() has already stored them.
   uint32_t hw_addr = Z9AXBase->hw_addr;
   int zorro = Z9AXBase->zorro_version;
   if(!hw_addr) return AHISF_ERROR; // TW: Only AHISF_xxx return codes are allowed here.
   if(!zorro) return AHISF_ERROR; // TW: Only AHISF_xxx return codes are allowed here.
+  /* A hardware-mixing mode takes its own path: no mixing, no timing. */
+  {
+    uint8_t vmode = voice_mode_of(tagList);
+
+    if (vmode != Z9AX_VOICE_NONE)
+      return voice_alloc_audio(vmode, AudioCtrl);
+  }
 
   /* Fast rejection for the normal second-open case. The reservation below
    * closes the blocking control-plane TOCTOU window; this check avoids doing
@@ -1722,6 +2854,10 @@ fail:
 
 static void __attribute__((used)) intAHIsub_FreeAudio(struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
   if (!AudioCtrl->ahiac_DriverData) return;
+  if (((struct z9ax *)AudioCtrl->ahiac_DriverData)->voice) {
+    voice_free_audio(AudioCtrl);
+    return;
+  }
 
   struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
   uint32_t release_attempt;
@@ -1802,6 +2938,11 @@ static void __attribute__((used)) intAHIsub_Stop(uint32_t Flags asm("d0"), struc
   BOOL stop_play;
 
   if (!ahi_data) return;
+  if (ahi_data->voice) {
+    if (Flags & AHISF_PLAY)
+      voice_command(ahi_data, Z9AX_VOICE_CMD_STOP);
+    return;
+  }
 
   stop_play = (Flags & AHISF_PLAY) != 0;
   if (Flags & (AHISF_PLAY | AHISF_RECORD)) {
@@ -1841,6 +2982,9 @@ static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), 
   int acquire_needed = 0;
   uint32_t result = AHIE_OK;
   if (!ahi_data) return AHIE_OK;
+  if (ahi_data->voice)
+    return (flags & AHISF_PLAY) ?
+        voice_command(ahi_data, Z9AX_VOICE_CMD_START) : AHIE_OK;
 
   if ((flags & AHISF_PLAY) && ahi_data->fabric_mode) {
     Forbid();
@@ -1962,7 +3106,12 @@ static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), 
 static int32_t __attribute__((used)) intAHIsub_GetAttr(uint32_t attr_ asm("d0"), int32_t arg_ asm("d1"), int32_t def_ asm("d2"), struct TagItem *tagList asm("a1"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2")) {
   uint32_t attr = attr_;
   int32_t arg = arg_, def = def_;
-  BOOL can_record = Z9AXBase && recording_supported(Z9AXBase->hw_addr);
+  /* A hardware-mixing mode runs at the engine rate, offers the engine's
+   * voices as channels and does not record. Its tag list is the only thing
+   * GetAttr can rely on before AllocAudio. */
+  BOOL voice = voice_mode_of(tagList) != Z9AX_VOICE_NONE;
+  BOOL can_record =
+      !voice && Z9AXBase && recording_supported(Z9AXBase->hw_addr);
 
   // TW: We can't rely on AudioCtrl->ahiac_DriverData being valid during this function call!
 
@@ -1971,12 +3120,16 @@ static int32_t __attribute__((used)) intAHIsub_GetAttr(uint32_t attr_ asm("d0"),
     case AHIDB_Bits:
       return 16;
     case AHIDB_Frequencies:
-      return ZZ_NUM_FREQS;
+      return voice ? 1 : ZZ_NUM_FREQS;
     case AHIDB_Frequency:
+      if (voice)
+        return arg == 0 ? (int32_t)ZZ9K_VOICE_OUTPUT_RATE : def;
       if (arg < 0 || arg >= ZZ_NUM_FREQS)
         return def;
       return freqs[arg];
     case AHIDB_Index:
+      if (voice)
+        return 0;
       for (int i = 0; i < ZZ_NUM_FREQS; i++) {
         if (freqs[i] >= arg)
           return i;
@@ -2000,12 +3153,15 @@ static int32_t __attribute__((used)) intAHIsub_GetAttr(uint32_t attr_ asm("d0"),
       // Ceiling of the AHI Prefs channel selector; see
       // ZZ_AX_AHI_MAX_CHANNELS for why this is a CPU budget, not a
       // hardware channel count (the card always gets one stereo stream).
-      return ZZ_AX_AHI_MAX_CHANNELS;
+      // In a hardware-mixing mode every AHI channel is a voice of the card.
+      return voice ? (int32_t)ZZ9K_VOICE_MAX_VOICES : ZZ_AX_AHI_MAX_CHANNELS;
     case AHIDB_MaxPlaySamples:
       // AHI contract: this is sample frames, NOT bytes. At the highest mix
       // rate we advertise (48 kHz) the driver sets ahiac_BuffSamples to
       // MixFreq/50 = 960 frames, which is exactly BOUNCE_MAX_FRAMES.
-      return BOUNCE_MAX_FRAMES;
+      // In a hardware-mixing mode there is no mixing buffer: its ceiling
+      // is the sample bank.
+      return voice ? (int32_t)ZZ9K_VOICE_BANK_MAX_BYTES : BOUNCE_MAX_FRAMES;
     case AHIDB_MaxRecordSamples:
       return can_record ? BOUNCE_MAX_FRAMES : 0;
     case AHIDB_MinMonitorVolume:
@@ -2063,16 +3219,28 @@ static int32_t __attribute__((used)) intAHIsub_HardwareControl(uint32_t attr asm
 
 static uint32_t __attribute__((used)) intAHIsub_SetEffect(uint8_t *effect asm("a0"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2"))
 {
-  return AHIS_UNKNOWN;
+  struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
+
+  if (!ahi_data || !ahi_data->voice)
+    return AHIS_UNKNOWN;
+  return voice_set_effect(ahi_data, effect);
 }
 
 static uint32_t __attribute__((used)) intAHIsub_LoadSound(uint16_t sound asm("d0"), uint32_t type asm("d1"), struct AHISampleInfo *info asm("a0"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2"))
 {
-  return AHIS_UNKNOWN;
+  struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
+
+  if (!ahi_data || !ahi_data->voice)
+    return AHIS_UNKNOWN;
+  return voice_load_sound(ahi_data, sound, type, info);
 }
 
 static uint32_t __attribute__((used)) intAHIsub_UnloadSound(uint16_t sound asm("d0"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2"))
 {
+  struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
+
+  if (ahi_data && ahi_data->voice)
+    voice_unload_sound(ahi_data, sound);
   return AHIS_UNKNOWN;
 }
 
@@ -2099,16 +3267,53 @@ static void __attribute__((used)) intAHIsub_Update(uint32_t flags asm("d0"), str
 
 static uint32_t __attribute__((used)) intAHIsub_SetVol(uint16_t channel asm("d0"), uint32_t volume asm("d1"), uint32_t pan asm("d2"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2"), uint32_t flags asm("d3"))
 {
+  struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
+  VmCall call;
+
+  if (!ahi_data || !ahi_data->voice)
+    return AHIS_UNKNOWN;
+  memset(&call, 0, sizeof(call));
+  call.kind = VM_CALL_VOL;
+  call.imm = (uint8_t)((flags & AHISF_IMM) != 0U);
+  call.channel = channel;
+  call.a = volume;
+  call.b = (int32_t)pan;
+  voice_push(ahi_data, &call);
   return AHIS_UNKNOWN;
 }
 
 static uint32_t __attribute__((used)) intAHIsub_SetFreq(uint16_t channel asm("d0"), uint32_t freq asm("d1"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2"), uint32_t flags asm("d2"))
 {
+  struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
+  VmCall call;
+
+  if (!ahi_data || !ahi_data->voice)
+    return AHIS_UNKNOWN;
+  memset(&call, 0, sizeof(call));
+  call.kind = VM_CALL_FREQ;
+  call.imm = (uint8_t)((flags & AHISF_IMM) != 0U);
+  call.channel = channel;
+  /* AHI_MIXFREQ is the mode's rate, which is the engine rate here. */
+  call.a = freq == AHI_MIXFREQ ? ZZ9K_VOICE_OUTPUT_RATE : freq;
+  voice_push(ahi_data, &call);
   return AHIS_UNKNOWN;
 }
 
 static uint32_t __attribute__((used)) intAHIsub_SetSound(uint16_t channel asm("d0"), uint16_t sound asm("d1"), uint32_t offset asm("d2"), int32_t length asm("d3"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2"), uint32_t flags asm("d4"))
 {
+  struct z9ax *ahi_data = AudioCtrl->ahiac_DriverData;
+  VmCall call;
+
+  if (!ahi_data || !ahi_data->voice)
+    return AHIS_UNKNOWN;
+  memset(&call, 0, sizeof(call));
+  call.kind = VM_CALL_SOUND;
+  call.imm = (uint8_t)((flags & AHISF_IMM) != 0U);
+  call.channel = channel;
+  call.sound = sound;
+  call.a = offset;
+  call.b = length;
+  voice_push(ahi_data, &call);
   return AHIS_UNKNOWN;
 }
 

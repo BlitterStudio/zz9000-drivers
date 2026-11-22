@@ -18,8 +18,10 @@ ZZGamma/ZZGamma
 ZZTop/ZZTop
 ahi/axtest/axtest
 ahi/duplextest/ZZAXDuplexTest
+ahi/voicetest/ZZAXVoiceTest
 ahi/driver/ZZ9000AX
 ahi/driver/timer_pair_test
+ahi/driver/voice_worker_test
 rtg/tests/build/
 sd-boot/zzsd-device.h
 sd-boot/boot-rom/boot.bin
@@ -32,6 +34,8 @@ rtg/ZZ9000.card.map
 rtg/ZZ9000-debug.card.map
 mhi/mhizz9000.library.map
 ahi/driver/zz9000ax.audio.map
+ahi/driver/voice-test-stage/
+ahi/driver/voice-test-build/
 net/ZZNetStats/ZZNetStats
 *.datatype
 sdk/work/

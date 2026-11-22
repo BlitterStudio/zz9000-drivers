@@ -52,6 +52,14 @@ if [ -n "$sdk_src" ] && [ -d "$sdk_src/include/zz9k" ]; then
   if [ -f "$sdk_src/amiga/include/pragmas/zz9k_pragmas.h" ]; then
     cp "$sdk_src/amiga/include/pragmas/zz9k_pragmas.h" "$stage_dir/pragmas/"
   fi
+  # The voice engine core, for the host model tests that run the driver's
+  # records through the real engine (tools/ahi-voice-tests.sh). The firmware
+  # keeps it beside the SDK subtree, not inside it.
+  engine_src="$sdk_src/../ZZ9000_proto.sdk/ZZ9000OS/src"
+  if [ -f "$engine_src/audio_voice.c" ] && [ -f "$engine_src/audio_voice.h" ]; then
+    mkdir -p "$stage_dir/engine"
+    cp "$engine_src/audio_voice.c" "$engine_src/audio_voice.h" "$stage_dir/engine/"
+  fi
 fi
 
 if [ ! -d "$stage_dir/zz9k" ]; then

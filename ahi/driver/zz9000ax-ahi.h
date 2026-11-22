@@ -1,5 +1,10 @@
 #include <devices/timer.h>
 #include <zz9k/abi.h>
+#include <zz9k/voice.h>
+
+#include "voice_model.h"
+
+struct z9ax_voice;
 
 // Driver data
 struct z9ax {
@@ -61,6 +66,52 @@ struct z9ax {
   struct timerequest *lease_timer_req;
   struct timeval lease_timer_deadline;
   int8_t lease_timer_signal;
+  /* Hardware-mixing mode (Z9AX_VOICE_*); voice is NULL otherwise. */
+  uint8_t voice_mode;
+  struct z9ax_voice *voice;
+};
+
+/* Hardware-mixing modes ($CAFE0002 and $CAFE0003). ahi.device does no mixing
+ * there: the driver maps every AHI channel to a voice of the card's voice
+ * engine (see docs/ahi-voice-mixing-spec.md). Everything below is owned by
+ * the voice worker process, except the call FIFO inside the model and the
+ * fields marked for other tasks. */
+#define Z9AX_VOICE_NONE    0U
+#define Z9AX_VOICE_NEAREST 1U
+#define Z9AX_VOICE_LINEAR  2U
+
+#define Z9AX_VOICE_CMD_NONE  0U
+#define Z9AX_VOICE_CMD_START 1U
+#define Z9AX_VOICE_CMD_STOP  2U
+
+struct z9ax_voice {
+  ZZ9KVoiceSession session;
+  ZZ9KVoiceStatus status;      /* last status read */
+  uint8_t session_open;
+  uint8_t session_lost;        /* the card closed the session */
+  uint8_t playing;
+  uint8_t linear;
+  uint8_t stereo_ok;           /* firmware advertises S8S/S16S voice samples */
+  uint8_t zorro;
+  uint8_t reason;              /* Z9AX_VOICE_REASON_* when the open failed */
+  uint8_t pad;
+  uint32_t open_status;        /* ZZ9K_STATUS_* of the failed step */
+  uint32_t channels;
+  uint32_t sounds;             /* AHIA_Sounds */
+  uint32_t lead;               /* granted lead, engine frames */
+  uint32_t lead_request;
+  uint32_t bank_request;
+  uint32_t start_frame;        /* engine frame of the first Start */
+  uint32_t resyncs;            /* the model fell behind and was re-anchored */
+  volatile uint32_t cmd;       /* set by Start and Stop for the worker */
+  volatile uint32_t cmd_result;
+  struct Task *cmd_task;
+  int8_t cmd_signal;
+  uint32_t unload_pending[VM_MAX_SOUNDS / 32U]; /* UnloadSound, any task */
+  struct AHIEffChannelInfo *channelinfo;        /* SetEffect, any task */
+  uint32_t ring_full;          /* writes that took fewer records than asked */
+  uint32_t status_failures;
+  VmModel model;
 };
 
 // TW: Driver base includes hardware address and zorro version besides library base.

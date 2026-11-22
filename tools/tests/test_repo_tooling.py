@@ -31,6 +31,7 @@ GENERATED_ARTIFACT_PATHS = (
     "ZZCapture/ZZCapture",
     "ahi/axtest/axtest",
     "ahi/duplextest/ZZAXDuplexTest",
+    "ahi/voicetest/ZZAXVoiceTest",
 )
 
 
@@ -587,6 +588,7 @@ class RepoToolingTests(unittest.TestCase):
         self.assertNotIn("tools/amiga-docker.sh ahi/driver ", ci)
         self.assertIn("ZZTop/build-gcc.sh", ci)
         self.assertIn("tools/amiga-docker.sh ahi/duplextest ./build.sh", ci)
+        self.assertIn("tools/amiga-docker.sh ahi/voicetest ./build.sh", ci)
 
     def test_release_script_mentions_every_packaged_artifact(self):
         script = self.read("tools/check-release.sh")
@@ -628,6 +630,7 @@ class RepoToolingTests(unittest.TestCase):
             "ZZDiag/build.sh",
             "ZZCapture/build.sh",
             "ahi/duplextest/build.sh",
+            "ahi/voicetest/build.sh",
             "sdk/build.sh",
             "amissl/build.sh",
         )
