@@ -44,8 +44,16 @@ The driver advertises these AHI properties:
 
 `AHISF_MIXING` means `ahi.device` performs linear interpolation and 32-bit
 accumulation on the Amiga CPU. The card receives the final stereo stream, so
-channel count is a CPU limit rather than a transport limit. A 20 ms period is
-mixed at the selected rate.
+channel count is a CPU limit rather than a transport limit. The software modes
+`$CAFE0000` and `$CAFE0001` call `PlayerFunc` at `ahiac_PlayerFreq` (16.16 Hz),
+reading it after each call so tempo changes apply to the next mixed interval.
+Fractional frames carry between ticks. Transport remains in 20 ms periods:
+ticks can subdivide a period or span several periods, with each `MixerFunc`
+call bounded by the playback buffer limit. There is no lower player-frequency
+limit; the upper limit is one tick per source frame (the mix rate in Hz).
+Clients must keep `AHIA_PlayerFreq` within their promised
+`AHIA_MinPlayerFreq` and `AHIA_MaxPlayerFreq`. A zero frequency uses 50 Hz;
+values above the source-frame limit are capped to it.
 
 Use only the channels the machine can mix in time. The driver source recommends
 2–4 channels at 44.1 or 48 kHz on a 68030 and advertises up to 8 for
@@ -148,8 +156,11 @@ and rejects the allocation. AHI itself remains exclusive on both paths: one
 
 The legacy and fabric paths both pair every executed `PreTimer` with
 `PostTimer`, including a CPU-limiter skip. The timer-pair fixture checks
-recovery of complete, ordered PCM after an overload skip on both paths and
-checks timer pairing without PCM delivery for oversized legacy periods.
+recovery of complete, ordered PCM after an overload skip on both paths,
+timer pairing without PCM delivery for oversized legacy periods, and player
+cadence, fractional frame carry and ring wrap for changing player frequencies.
+There is one timer pair per transport wake even when it contains several
+mixer chunks. Skips still advance the player ticks.
 
 ## Firmware audio settings
 
@@ -240,6 +251,7 @@ for that pair predates the limiter.
 | 4.29 | Raised `AHIDB_MaxChannels` from 1 to 8. |
 | 4.32 | Current driver identity and capability-gated recording/fabric implementation. |
 | 4.33 | Added the hardware-mixing AudioModes (`$CAFE0002`, `$CAFE0003`): the card mixes up to 32 channels through its voice engine. Not yet qualified on hardware. |
+| Unreleased | Software modes follow live `ahiac_PlayerFreq`, including tempo changes and fractional-frame intervals, on both legacy and fabric playback. The timer-pair fixture covers 60 to 25 Hz and 59.5 Hz over ten seconds; hardware listening remains pending. |
 
 ## References
 

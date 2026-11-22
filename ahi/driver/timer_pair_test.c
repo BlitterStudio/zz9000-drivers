@@ -2,7 +2,16 @@
 /* Target-side regression: compile the real driver with controlled scheduling,
  * direct hook dispatch and coherent RAM instead of hardware. Hooks model
  * AHI 4.180's timer state; real fabric/legacy paths must resume ordered PCM.
- * Run on AmigaOS or with vamos --cpu=68020 --stack-size=64.
+ * Run on AmigaOS or with vamos --cpu=68020 -m 8000 --stack-size=64. In the
+ * amigadev/crosstools:m68k-amigaos image, from ahi/driver after build.sh
+ * staged zz9k-headers (the driver links the voice model, so it is part of
+ * the build):
+ *   m68k-amigaos-gcc timer_pair_test.c voice_model.c asmfuncs.s -O1 -m68020 \
+ *       -I../../include -Izz9k-headers -Wl,--allow-multiple-definition \
+ *       -o timer_pair_test -ldebug
+ *   vamos --cpu=68020 -m 8000 --stack-size=64 timer_pair_test
+ * (--allow-multiple-definition lets the driver's SysBase coexist with the
+ * startup file's.)
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,11 +48,10 @@ static ULONG test_call_hook(struct Hook *hook, APTR object, APTR message);
 #include "zz9000ax-ahi.c"
 #undef _start
 
-/* Unused resident initialization must not auto-open hardware libraries. */
-struct ExpansionBase *ExpansionBase = NULL;
-struct IntuitionBase *IntuitionBase = NULL;
-
 #define TEST_ROUNDS 3U
+#define TEST_RATE 48000UL
+#define TEST_PERIOD_FRAMES (TEST_RATE / 50UL)
+#define TEST_MAX_TICKS 700U
 #define TEST_PERIOD 14158UL
 #define TEST_ENTRY 1000000UL
 
@@ -62,6 +70,12 @@ static struct {
   ULONG now, entry, exit;
   ULONG players, mixes, pres, posts, rounds;
   ULONG bytes_after_skip;
+  /* PlayerFreq cases: per-tick positions on the frame timeline, frames
+   * handed to the mixer, run length and a mid-run tempo change. */
+  ULONG rounds_limit, switch_round, pf_after;
+  ULONG frames_mixed, max_mix_frames, player_pos[TEST_MAX_TICKS];
+  ULONG players_at_switch, frames_at_switch;
+  int ramp;
   BYTE next_signal;
   int failures;
 } fixture;
@@ -106,15 +120,26 @@ static ULONG published_bytes(void)
   return fixture.driver.buf_offset;
 }
 
+static void begin_round(void)
+{
+  fixture.rounds++;
+  fixture.now = TEST_ENTRY + fixture.rounds * TEST_PERIOD;
+  if (fixture.rounds == fixture.switch_round) {
+    fixture.players_at_switch = fixture.players;
+    fixture.frames_at_switch = fixture.frames_mixed;
+    fixture.audio.ahiac_PlayerFreq = fixture.pf_after;
+    intAHIsub_Update(0, &fixture.audio);
+  }
+}
+
 static ULONG test_wait(ULONG signals)
 {
   (void)signals;
   if (fixture.rounds == 1U)
     fixture.bytes_after_skip = published_bytes();
-  if (fixture.rounds == TEST_ROUNDS)
+  if (fixture.rounds == fixture.rounds_limit)
     return SIGBREAKF_CTRL_C;
-  fixture.rounds++;
-  fixture.now = TEST_ENTRY + fixture.rounds * TEST_PERIOD;
+  begin_round();
   return 1UL << fixture.driver.enable_signal;
 }
 
@@ -125,27 +150,42 @@ static ULONG test_player(struct Hook *hook asm("a0"),
   (void)hook;
   (void)message;
   check(audio == &fixture.audio, "player receives its audio control");
+  /* Position of this call on the mixed-frame timeline (no skips in the
+   * cases that compare positions). */
+  if (fixture.players < TEST_MAX_TICKS)
+    fixture.player_pos[fixture.players] = fixture.frames_mixed;
   fixture.players++;
   return 0;
 }
 
+/* Models ahi.device's Mix(): it clears the driver's whole mixing buffer
+ * (ahiac_BuffSizeNow, one full 20 ms period) at the pointer it is given and
+ * then writes ahiac_BuffSamples frames from its start. */
 static ULONG test_mixer(struct Hook *hook asm("a0"),
                          struct AHIAudioCtrlDrv *audio asm("a2"),
                          APTR buffer asm("a1"))
 {
   UWORD *samples = buffer;
-  ULONG frame;
+  ULONG frame, id;
   (void)hook;
   check(audio == &fixture.audio, "mixer receives its audio control");
+  check(buffer == (APTR)fixture.bounce,
+        "mixer gets the start of the full-size bounce buffer");
   fixture.mixes++;
-  if (audio->ahiac_BuffSamples > BOUNCE_MAX_FRAMES) {
-    check(0, "oversized period never reaches the mixer");
+  if (audio->ahiac_BuffSamples > BOUNCE_MAX_FRAMES ||
+      audio->ahiac_BuffSamples == 0U) {
+    check(0, "mixer is only called for 1..960 frames");
     return 0;
   }
+  memset(buffer, 0, sizeof(fixture.bounce));
+  if (audio->ahiac_BuffSamples > fixture.max_mix_frames)
+    fixture.max_mix_frames = audio->ahiac_BuffSamples;
   for (frame = 0; frame < audio->ahiac_BuffSamples; frame++) {
-    samples[2U * frame] = 0x1234U;
-    samples[2U * frame + 1U] = 0xa1b2U;
+    id = fixture.frames_mixed + frame;
+    samples[2U * frame] = fixture.ramp ? (UWORD)(id >> 16) : 0x1234U;
+    samples[2U * frame + 1U] = fixture.ramp ? (UWORD)id : 0xa1b2U;
   }
+  fixture.frames_mixed += audio->ahiac_BuffSamples;
   return 0;
 }
 
@@ -178,6 +218,7 @@ static void prepare(int fabric, int overload)
   memset(&fixture, 0, sizeof(fixture));
   fixture.entry = TEST_ENTRY;
   fixture.exit = TEST_ENTRY + (overload ? 13500UL : 100UL);
+  fixture.rounds_limit = TEST_ROUNDS;
   fixture.player.h_Entry = (ULONG (*)())test_player;
   fixture.mixer.h_Entry = (ULONG (*)())test_mixer;
   fixture.audio.ahiac_PlayerFunc = &fixture.player;
@@ -185,6 +226,9 @@ static void prepare(int fabric, int overload)
   fixture.audio.ahiac_PreTimer = test_pre_timer;
   fixture.audio.ahiac_PostTimer = test_post_timer;
   fixture.audio.ahiac_MixFreq = 48000UL;
+  fixture.audio.ahiac_PlayerFreq = 50UL << 16;
+  fixture.audio.ahiac_MinPlayerFreq = 25UL << 16;
+  fixture.audio.ahiac_MaxPlayerFreq = 60UL << 16;
   fixture.audio.ahiac_BuffSamples = BOUNCE_MAX_FRAMES;
   fixture.driver.audioctrl = &fixture.audio;
   fixture.driver.audio_buf_addr = (ULONG)fixture.bounce;
@@ -274,6 +318,111 @@ static int oversize_case(void)
   return fixture.failures;
 }
 
+static int playerfreq_skip_case(int fabric)
+{
+  prepare(fabric, 1);
+  fixture.audio.ahiac_PlayerFreq = 60UL << 16;
+  if (fabric) {
+    while (fixture.rounds < fixture.rounds_limit) {
+      begin_round();
+      fabric_lease_pump(&fixture.driver, &fixture.audio);
+    }
+  } else {
+    WorkerProcess();
+    Permit();
+  }
+  check(fixture.players == 4U,
+        "60 Hz player clock advances through the skipped transport period");
+  check(fixture.pres == TEST_ROUNDS && fixture.posts == TEST_ROUNDS,
+        "split periods and skip preserve one timer pair per wake");
+  check(fixture.frames_mixed == (TEST_ROUNDS - 1U) * TEST_PERIOD_FRAMES &&
+        published_bytes() == (TEST_ROUNDS - 1U) * ZZ_AX_BYTES_PER_PERIOD,
+        "split mixing resumes complete transport periods after a skip");
+  if (!fixture.failures)
+    printf("PASS: %s 60 Hz skip preserves player cadence and timing\n",
+           fabric ? "fabric" : "legacy");
+  return fixture.failures;
+}
+
+static int playerfreq_case(int fabric, int fractional)
+{
+  ULONG tick, expected, period, frame, offset, id;
+  const UBYTE *pcm;
+  prepare(fabric, 0);
+  fixture.ramp = 1;
+  fixture.rounds_limit = fractional ? 500U : 100U;
+  fixture.audio.ahiac_PlayerFreq =
+      fractional ? (59UL << 16) + 32768UL : 60UL << 16;
+  if (!fractional) {
+    fixture.switch_round = 51U;
+    fixture.pf_after = 25UL << 16;
+  }
+  if (fabric) {
+    while (fixture.rounds < fixture.rounds_limit) {
+      begin_round();
+      zz9k_audio_ring_firmware_publish(&fixture.firmware, 1U,
+          fixture.driver.lease_session.write_cursor,
+          ZZ9K_AUDIO_RING_STATUS_OK);
+      fabric_lease_pump(&fixture.driver, &fixture.audio);
+    }
+  } else {
+    WorkerProcess();
+    Permit();
+  }
+  expected = fractional ? 595UL : 85UL;
+  check(fixture.players == expected, "PlayerFreq determines tick count");
+  check(fixture.frames_mixed == fixture.rounds_limit * TEST_PERIOD_FRAMES,
+        "exactly one second of source frames mixed per 50 transport periods");
+  check(fixture.pres == fixture.rounds_limit &&
+        fixture.posts == fixture.rounds_limit,
+        "one timer pair per transport wake, not per back-to-back mix chunk");
+  if (!fractional) {
+    check(fixture.players_at_switch == 60U &&
+          fixture.frames_at_switch == TEST_RATE,
+          "60 ticks and 48000 frames in first second");
+    check(fixture.players - fixture.players_at_switch == 25U &&
+          fixture.frames_mixed - fixture.frames_at_switch == TEST_RATE,
+          "Update switches to 25 ticks and 48000 frames in next second");
+  }
+  for (tick = 0; tick < expected && tick < fixture.players; tick++) {
+    ULONG position = fractional ? tick * 96000UL / 119UL :
+        tick < 60U ? tick * 800UL :
+        TEST_RATE + (tick - 60U) * 1920UL;
+    if (fixture.player_pos[tick] != position) {
+      check(0, "PlayerFunc boundaries carry fractional frames without drift");
+      break;
+    }
+  }
+  /* Inspect the last eight complete ring slots after wrap. AHI Mix clears
+   * its whole output buffer each chunk, so this also detects mixing into
+   * interior pointers or losing a prefix/suffix at a tick boundary. */
+  pcm = (const UBYTE *)fixture.ring;
+  for (period = fixture.rounds_limit - ZZ_AX_AUDIO_PERIODS;
+       period < fixture.rounds_limit; period++) {
+    offset = (period % ZZ_AX_AUDIO_PERIODS) * ZZ_AX_BYTES_PER_PERIOD;
+    for (frame = 0; frame < TEST_PERIOD_FRAMES; frame++, offset += 4U) {
+      if (fabric)
+        id = ((ULONG)pcm[offset + 1U] << 24) |
+             ((ULONG)pcm[offset] << 16) |
+             ((ULONG)pcm[offset + 3U] << 8) | pcm[offset + 2U];
+      else
+        id = ((ULONG)pcm[offset] << 24) |
+             ((ULONG)pcm[offset + 1U] << 16) |
+             ((ULONG)pcm[offset + 2U] << 8) | pcm[offset + 3U];
+      if (id != period * TEST_PERIOD_FRAMES + frame) {
+        check(0, "transport ring contains continuous whole periods");
+        period = fixture.rounds_limit;
+        break;
+      }
+    }
+  }
+  if (!fixture.failures)
+    printf("PASS: %s %s PlayerFreq, frames, timer pairs and ring wrap\n",
+           fabric ? "fabric" : "legacy",
+           fractional ? "59.5 Hz fractional" : "60 to 25 Hz");
+  return fixture.failures;
+}
+
 int main(void)
 {
   int failures = 0;
@@ -286,6 +435,12 @@ int main(void)
   failures += recovery_case(1);
   failures += recovery_case(0);
   failures += oversize_case();
+  failures += playerfreq_case(0, 0);
+  failures += playerfreq_case(1, 0);
+  failures += playerfreq_case(0, 1);
+  failures += playerfreq_case(1, 1);
+  failures += playerfreq_skip_case(0);
+  failures += playerfreq_skip_case(1);
   CloseLibrary(UtilityBase);
   return failures ? 20 : 0;
 }

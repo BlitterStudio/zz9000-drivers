@@ -68,8 +68,8 @@
 
 #define REAL_HARDWARE 1
 
-// ZZ_AX_AUDIO_BUFSZ is the hardware-side ring size (8 periods). The CPU-side
-// bounce buffer is only ever filled one period at a time — see BOUNCE_BUFSZ.
+// ZZ_AX_AUDIO_BUFSZ is the hardware-side ring size (8 periods). Each
+// MixerFunc call writes at most one transport period into the bounce buffer.
 #define BOUNCE_BUFSZ ZZ_AX_BOUNCE_BUFSZ
 // AHI sample frames = 16-bit stereo => 4 bytes per frame. This is what
 // ahiac_BuffSamples counts and what AHIDB_MaxPlaySamples must advertise;
@@ -373,13 +373,14 @@ static void process_recording(struct z9ax *ahi_data,
   if (available > ZZ_AX_AUDIO_RX_RESIDENT_PERIODS)
     available = ZZ_AX_AUDIO_RX_RESIDENT_PERIODS;
 
-  if (AudioCtrl->ahiac_BuffSamples > BOUNCE_MAX_FRAMES) {
+  uint32_t record_frames = AudioCtrl->ahiac_MixFreq / 50U;
+  if (record_frames > BOUNCE_MAX_FRAMES) {
     ahi_data->record_sequence = sequence;
     return;
   }
 
   newest_period = zz_ax_audio_rx_status_period(status);
-  bytes = AudioCtrl->ahiac_BuffSamples << 2;
+  bytes = record_frames << 2;
 
   for (index = 0; index < available; index++) {
     uint8_t period = (uint8_t)((newest_period + ZZ_AX_AUDIO_PERIODS -
@@ -393,7 +394,7 @@ static void process_recording(struct z9ax *ahi_data,
     ahi_data->record_message.ahirm_Type = AHIST_S16S;
     ahi_data->record_message.ahirm_Buffer =
         (void *)ahi_data->record_buf_addr;
-    ahi_data->record_message.ahirm_Length = AudioCtrl->ahiac_BuffSamples;
+    ahi_data->record_message.ahirm_Length = record_frames;
 
     if (AudioCtrl->ahiac_SamplerFunc) {
       CallHookPkt(AudioCtrl->ahiac_SamplerFunc, AudioCtrl,
@@ -481,13 +482,77 @@ static void fabric_lease_flush_accum(struct z9ax *ahi_data,
   }
 }
 
+/* Start one player interval, reading the live 16.16 Hz after the hook so a
+ * tempo change made there applies to the samples it just configured.
+ * Division remainder is carried exactly at an unchanged frequency. On a
+ * frequency change, rescale that fraction rather than resetting phase.
+ * Only integer/libgcc arithmetic is used by this startup-less device. */
+static void software_player_tick(struct z9ax *ahi_data,
+                                  struct AHIAudioCtrlDrv *AudioCtrl)
+{
+  uint32_t numerator = AudioCtrl->ahiac_MixFreq << 16;
+  uint32_t frequency;
+  uint64_t frames;
+
+  CallHookPkt(AudioCtrl->ahiac_PlayerFunc, AudioCtrl, NULL);
+  frequency = (uint32_t)AudioCtrl->ahiac_PlayerFreq;
+  if (frequency == 0U) frequency = 50U << 16;
+  /* One source frame is the smallest representable interval. Normal AHI
+   * clients promise MinPlayerFreq/MaxPlayerFreq within this range. */
+  if (frequency > numerator) frequency = numerator;
+  if (ahi_data->player_freq && frequency != ahi_data->player_freq)
+    ahi_data->player_remainder = (uint32_t)(
+        (uint64_t)ahi_data->player_remainder * frequency /
+        ahi_data->player_freq);
+  ahi_data->player_freq = frequency;
+  frames = (uint64_t)numerator + ahi_data->player_remainder;
+  ahi_data->player_frames_left = (uint32_t)(frames / frequency);
+  ahi_data->player_remainder = (uint32_t)(frames % frequency);
+}
+
+/* Render one fixed transport period, splitting at player boundaries. Slow
+ * ticks span several wakes; fast ticks subdivide a wake. Always mix into the
+ * start of the full bounce buffer: ahi.device clears its allocation-sized
+ * output even when BuffSamples is smaller. The caller owns ONE timer pair
+ * for this wake, not one per back-to-back chunk (which falsely overloads
+ * AHI's CPU limiter). A skipped wake still advances every player tick. */
+static void software_mix_period(struct z9ax *ahi_data,
+                                 struct AHIAudioCtrlDrv *AudioCtrl,
+                                 uint8_t *destination, BOOL mix, BOOL swap)
+{
+  uint32_t period_frames = AudioCtrl->ahiac_MixFreq / 50U;
+  uint32_t remaining = period_frames;
+  uint32_t offset = 0U;
+  void *bounce = (void *)(uintptr_t)ahi_data->audio_buf_addr;
+
+  while (remaining) {
+    uint32_t chunk;
+    if (!ahi_data->player_frames_left)
+      software_player_tick(ahi_data, AudioCtrl);
+    chunk = ahi_data->player_frames_left;
+    if (chunk > remaining) chunk = remaining;
+    AudioCtrl->ahiac_BuffSamples = chunk;
+    if (mix) {
+      CallHookPkt(AudioCtrl->ahiac_MixerFunc, AudioCtrl, bounce);
+      if (destination) {
+        if (swap) fabric_swap_period_le(bounce, chunk << 2);
+        if (destination + offset != bounce)
+          CopyMem(bounce, destination + offset, chunk << 2);
+      }
+    }
+    ahi_data->player_frames_left -= chunk;
+    remaining -= chunk;
+    offset += chunk << 2;
+  }
+  AudioCtrl->ahiac_BuffSamples = period_frames;
+}
+
 
 
 /* One lease-pacing pass (worker context, timer wake): recover an active
  * revoked lease with a rate-bounded mailbox acquire, adopt firmware
- * credits, stage whole source-rate periods while credited space and
- * the play direction allow (PlayerFunc/MixerFunc per period -- the
- * same cadence the legacy path drives from the card interrupt), then
+ * credits, stage whole source-rate transport periods, with player ticks
+ * and mixer chunks scheduled independently inside each period, then
  * publish the producer line: cursor after PCM, heartbeat on every
  * publication (R6/R11). Disable suppresses AHI callbacks but still
  * publishes the heartbeat. Stop(PLAY) prevents further production and
@@ -574,13 +639,10 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
   if (AudioCtrl->ahiac_BuffSamples > BOUNCE_MAX_FRAMES)
     return;  /* the legacy defence-in-depth bound still applies */
 
-  /* PlayerFunc runs at the period rate; PreTimer gates only the mix.
-   * Every PreTimer must be paired with PostTimer, even when it skips
-   * mixing, so AHI's CPU accounting never uses a stale exit timestamp.
-   * The lease adaptations are only at the output side: the mix
-   * accumulates and stages whole grant periods under ring backpressure,
-   * and the lease stays PAUSED until the configured runway is staged
-   * (inaudible prefill). */
+  /* PreTimer gates one transport wake. Every PreTimer is paired with
+   * PostTimer even when it skips mixing. The output still stages whole
+   * grant periods under backpressure and stays PAUSED until the configured
+   * runway is staged (inaudible prefill). */
   {
     uint32_t lease_period =
         (session->grant.source_rate / 50U) * 4U;
@@ -592,31 +654,19 @@ static void fabric_lease_pump(struct z9ax *ahi_data,
       /* Drain credited whole periods before mixing so newly available
        * ring space prevents an avoidable drop. */
       fabric_lease_flush_accum(ahi_data, session, lease_period);
-      CallHookPkt(AudioCtrl->ahiac_PlayerFunc, AudioCtrl, NULL);
-      if (!(*AudioCtrl->ahiac_PreTimer)()) {
-        uint32_t mix_bytes = AudioCtrl->ahiac_BuffSamples << 2;
+      if (!ahi_data->player_frames_left)
+        software_player_tick(ahi_data, AudioCtrl);
+      {
+        BOOL mix = !(*AudioCtrl->ahiac_PreTimer)();
+        uint32_t mix_bytes = (AudioCtrl->ahiac_MixFreq / 50U) << 2;
         uint32_t room = BOUNCE_BUFSZ - ahi_data->lease_accum_fill;
-
-        if (mix_bytes != 0U) {
-          CallHookPkt(AudioCtrl->ahiac_MixerFunc, AudioCtrl,
-                      (void *)(uintptr_t)ahi_data->audio_buf_addr);
-          /* Never concatenate a truncated prefix with a later mixer
-           * period. If backpressure leaves insufficient accumulator
-           * room, the complete newly mixed period is discarded; AHI's
-           * timing pair is still completed. */
-          if (mix_bytes == lease_period && mix_bytes <= room) {
-            if (!ahi_data->lease_source_be)
-              fabric_swap_period_le(
-                  (void *)(uintptr_t)ahi_data->audio_buf_addr,
-                  mix_bytes);
-            memcpy(ahi_data->lease_accum +
-                       ahi_data->lease_accum_fill,
-                   (const void *)(uintptr_t)
-                       ahi_data->audio_buf_addr,
-                   mix_bytes);
-            ahi_data->lease_accum_fill += mix_bytes;
-          }
-        }
+        BOOL stage = mix_bytes == lease_period && mix_bytes <= room;
+        /* Backpressure discards the complete new transport period, never
+         * a truncated prefix. AHI still mixes to advance channel state. */
+        software_mix_period(ahi_data, AudioCtrl,
+            stage ? ahi_data->lease_accum + ahi_data->lease_accum_fill : NULL,
+            mix, !ahi_data->lease_source_be);
+        if (mix && stage) ahi_data->lease_accum_fill += mix_bytes;
       }
       (*AudioCtrl->ahiac_PostTimer)();
       fabric_lease_flush_accum(ahi_data, session, lease_period);
@@ -786,15 +836,12 @@ void WorkerProcess() {
     uint32_t period_offset = ahi_data->buf_offset;
 
     if (playback_period_ready(ahi_data, &period_offset)) {
-      CallHookPkt(AudioCtrl->ahiac_PlayerFunc, AudioCtrl, NULL);
+      if (!ahi_data->player_frames_left)
+        software_player_tick(ahi_data, AudioCtrl);
 
-      if (!(*AudioCtrl->ahiac_PreTimer)()) {
-        // Defence in depth: the mixer writes ahiac_BuffSamples*4 bytes into
-        // our bounce buffer. We set BuffSamples to MixFreq/50 in AllocAudio,
-        // which is bounded by our advertised max mix rate (48 kHz => 960
-        // frames => 3840 bytes = BOUNCE_BUFSZ). If anything ever drifts —
-        // AHI layer override, higher mix rate added to freqs[], buffer
-        // shrunk — catch it here instead of smashing memory.
+      BOOL mix = !(*AudioCtrl->ahiac_PreTimer)();
+      {
+        // Defence in depth: no MixerFunc call may exceed our bounce buffer.
         if (AudioCtrl->ahiac_BuffSamples > BOUNCE_MAX_FRAMES) {
           kprintf((CONST_STRPTR)"ZZ9000AX: BuffSamples %ld exceeds bounce cap %ld; skipping\n",
                   (long)AudioCtrl->ahiac_BuffSamples,
@@ -804,41 +851,38 @@ void WorkerProcess() {
             process_recording(ahi_data, AudioCtrl);
           continue;
         }
+        uint32_t period_frames = AudioCtrl->ahiac_MixFreq / 50U;
+        // A whole-tick period (including PlayerFreq 50) needs no assembly
+        // copy. Split periods reuse the otherwise idle lease accumulator.
+        uint8_t *pcm = ahi_data->player_frames_left >= period_frames ?
+            (uint8_t *)(uintptr_t)ahi_data->audio_buf_addr :
+            ahi_data->lease_accum;
+        software_mix_period(ahi_data, AudioCtrl, pcm, mix, FALSE);
+        uint32_t bytes = period_frames << 2;
+
+        if (mix) {
+          int overrun = 0;
 #ifdef REAL_HARDWARE
-        CallHookPkt(AudioCtrl->ahiac_MixerFunc, AudioCtrl,
-                    (void*)ahi_data->audio_buf_addr);
-#else
-        CallHookPkt(AudioCtrl->ahiac_MixerFunc, AudioCtrl, glob_buf);
-        uint32_t* xbuf = (uint32_t*)glob_buf;
-        kprintf((uint8_t*)"%lx %lx %lx %lx\n", xbuf[0], xbuf[1],
-                xbuf[2], xbuf[3]);
+          // SCALE describes the source rate for a fixed 20 ms hardware
+          // period, never the length of an individual player tick.
+          write_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_SCALE, period_frames);
+          CopyMem(pcm,
+                  (void*)(ahi_data->audio_hw_buf_addr + period_offset),
+                  bytes);
+          // byteswap, resample and play the complete transport period
+          write_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_SWAB,
+                    period_offset >> 8);
+          overrun = read_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_SWAB);
 #endif
-        uint32_t bytes = AudioCtrl->ahiac_BuffSamples << 2;
-
-        int overrun = 0;
-#ifdef REAL_HARDWARE
-        write_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_SCALE,
-                  AudioCtrl->ahiac_BuffSamples);
-
-        // def. the faster way
-        CopyMem((void*)ahi_data->audio_buf_addr,
-                (void*)(ahi_data->audio_hw_buf_addr + period_offset),
-                bytes);
-        // byteswap, resample and play buffer
-        write_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_SWAB,
-                  period_offset>>8);
-        overrun = read_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_SWAB);
-#endif
-
-        if (overrun == 1) {
-          ahi_data->buf_offset = 0;
-        } else {
-          ahi_data->buf_offset =
-              period_offset + ZZ_AX_BYTES_PER_PERIOD;
-        }
-
-        if (ahi_data->buf_offset >= ZZ_AX_AUDIO_BUFSZ) {
-          ahi_data->buf_offset = 0;
+          if (overrun == 1) {
+            ahi_data->buf_offset = 0;
+          } else {
+            ahi_data->buf_offset =
+                period_offset + ZZ_AX_BYTES_PER_PERIOD;
+          }
+          if (ahi_data->buf_offset >= ZZ_AX_AUDIO_BUFSZ) {
+            ahi_data->buf_offset = 0;
+          }
         }
       }
       /* AHI v4 requires PostTimer even when PreTimer skips the mix. */
@@ -2951,6 +2995,9 @@ static void __attribute__((used)) intAHIsub_Stop(uint32_t Flags asm("d0"), struc
       ahi_data->play_stop = 1;
       ahi_data->play_transport_generation++;
       ahi_data->buf_offset = 0;
+      ahi_data->player_frames_left = 0U;
+      ahi_data->player_remainder = 0U;
+      ahi_data->player_freq = 0U;
     }
     if (Flags & AHISF_RECORD) ahi_data->record_stop = 1;
     update_hw_interrupts(ahi_data);
@@ -3030,6 +3077,9 @@ static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), 
         result = AHIE_UNKNOWN;
       } else {
         ahi_data->buf_offset = 0;
+        ahi_data->player_frames_left = 0U;
+        ahi_data->player_remainder = 0U;
+        ahi_data->player_freq = 0U;
         /* PAUSED stays as acquired: the worker clears it once two
          * periods are staged (primed-ring prefill). */
         ahi_data->play_stop = 0;
@@ -3064,6 +3114,9 @@ static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), 
 
     Forbid();
     ahi_data->buf_offset = 0;
+    ahi_data->player_frames_left = 0U;
+    ahi_data->player_remainder = 0U;
+    ahi_data->player_freq = 0U;
     ahi_data->play_sequence = play_sequence;
     ahi_data->play_stop = 0;
     update_hw_interrupts(ahi_data);
@@ -3088,7 +3141,7 @@ static uint32_t __attribute__((used)) intAHIsub_Start(uint32_t flags asm("d0"), 
                         offset_rx & 0xffff);
     }
     write_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_SCALE,
-              AudioCtrl->ahiac_BuffSamples);
+              AudioCtrl->ahiac_MixFreq / 50U);
     status = read_reg(ahi_data->hw_addr, ZZ_REG_AUDIO_RX_STATUS);
 
     Forbid();
@@ -3156,9 +3209,8 @@ static int32_t __attribute__((used)) intAHIsub_GetAttr(uint32_t attr_ asm("d0"),
       // In a hardware-mixing mode every AHI channel is a voice of the card.
       return voice ? (int32_t)ZZ9K_VOICE_MAX_VOICES : ZZ_AX_AHI_MAX_CHANNELS;
     case AHIDB_MaxPlaySamples:
-      // AHI contract: this is sample frames, NOT bytes. At the highest mix
-      // rate we advertise (48 kHz) the driver sets ahiac_BuffSamples to
-      // MixFreq/50 = 960 frames, which is exactly BOUNCE_MAX_FRAMES.
+      // Frames per individual MixerFunc call, not per player tick.
+      // Slow ticks span multiple calls without enlarging the bounce buffer.
       // In a hardware-mixing mode there is no mixing buffer: its ceiling
       // is the sample bank.
       return voice ? (int32_t)ZZ9K_VOICE_BANK_MAX_BYTES : BOUNCE_MAX_FRAMES;
@@ -3263,6 +3315,7 @@ void __attribute__((used)) cintAHIsub_Disable(struct AHIAudioCtrlDrv *AudioCtrl 
 
 static void __attribute__((used)) intAHIsub_Update(uint32_t flags asm("d0"), struct AHIAudioCtrlDrv *AudioCtrlDrv asm("a2"))
 {
+  /* Worker reads the live hooks and PlayerFreq at each player boundary. */
 }
 
 static uint32_t __attribute__((used)) intAHIsub_SetVol(uint16_t channel asm("d0"), uint32_t volume asm("d1"), uint32_t pan asm("d2"), struct AHIAudioCtrlDrv *AudioCtrl asm("a2"), uint32_t flags asm("d3"))

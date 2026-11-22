@@ -25,6 +25,11 @@ struct z9ax {
   int8_t worker_signal;
   int8_t enable_signal;
   uint32_t mix_freq;
+  /* Software player clock, independent of the fixed 20 ms transport.
+   * Remainder/player_freq is the fractional frame carried to the next tick. */
+  uint32_t player_frames_left;
+  uint32_t player_remainder;
+  uint32_t player_freq;
   int32_t monitor_volume, input_gain, output_volume;
   uint16_t disable_cnt;
   uint8_t zorro_version;
