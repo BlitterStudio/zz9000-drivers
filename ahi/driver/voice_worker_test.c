@@ -5,13 +5,14 @@
  * mailbox, the worker's init, service and end steps run by hand, and the
  * test checks what the driver sends and what it refuses.
  *
- * Run on AmigaOS or with vamos --cpu=68020 --stack-size=64. In the
+ * Run on AmigaOS or with vamos --cpu=68020 -m 8000 --stack-size=64 (the
+ * default vamos memory is too small for the fixture). In the
  * amigadev/crosstools:m68k-amigaos image, from ahi/driver after build.sh
  * staged zz9k-headers:
  *   m68k-amigaos-gcc voice_worker_test.c voice_model.c asmfuncs.s -O1 -m68020 \
  *       -I../../include -Izz9k-headers -Wl,--allow-multiple-definition \
  *       -o voice_worker_test -ldebug
- *   vamos --cpu=68020 --stack-size=64 voice_worker_test
+ *   vamos --cpu=68020 -m 8000 --stack-size=64 voice_worker_test
  * (--allow-multiple-definition lets the driver's SysBase coexist with the
  * startup file's.)
  */
@@ -803,6 +804,8 @@ static int case_start_and_ticks(void)
   const ZZ9KVoiceRecord *record;
   uint32_t before;
   uint32_t i;
+  uint32_t sounds_before;
+  uint32_t heartbeat_before;
 
   struct AHISampleInfo *info = (struct AHISampleInfo *)sample;
 
@@ -860,20 +863,37 @@ static int case_start_and_ticks(void)
         "a changed PlayerFreq changes the tick rate");
   check(fx.driver.voice->model.ticks == fx.players, "each tick calls the player");
 
-  /* AHIsub_Disable nests: nothing is taken from the FIFO. On the Amiga the
-   * worker cannot even run while another task holds Disable; the harness
-   * can, so only the FIFO is checked. */
+  /* AHIsub_Disable nests and is only a counter, so the worker keeps
+   * running: it must take nothing from the FIFO and call no client hook,
+   * while the status reads keep the session alive. */
+  cintAHIsub_Disable(&fx.audio);
   cintAHIsub_Disable(&fx.audio);
   intAHIsub_SetFreq(0U, 10000U, &fx.audio, AHISF_IMM);
-  advance_card(1920U);
-  voice_service(&fx.driver);
+  before = fx.players;
+  sounds_before = fx.sounds;
+  heartbeat_before = fx.driver.voice->session.heartbeat;
+  for (i = 0U; i < 3U; i++) {
+    advance_card(960U);
+    voice_service(&fx.driver);
+  }
   check(vm_fifo_pending(&fx.driver.voice->model) == 1U,
         "the FIFO is not drained while Disable is nested");
+  check(fx.players == before && fx.sounds == sounds_before,
+        "no PlayerFunc or SoundFunc while Disable is held (%u, %u)",
+        (unsigned)(fx.players - before),
+        (unsigned)(fx.sounds - sounds_before));
+  check(fx.driver.voice->session.heartbeat != heartbeat_before,
+        "the heartbeat goes on while Disable is held");
   cintAHIsub_Enable(&fx.audio);
-  advance_card(1920U);
+  advance_card(960U);
+  voice_service(&fx.driver);
+  check(fx.players == before, "one Enable of two keeps the hooks held");
+  cintAHIsub_Enable(&fx.audio);
+  advance_card(960U);
   voice_service(&fx.driver);
   check(vm_fifo_pending(&fx.driver.voice->model) == 0U,
         "Enable lets the worker drain the FIFO");
+  check(fx.players > before, "Enable lets PlayerFunc run again");
   check(fw.writes_outside_worker == 0U,
         "still only the worker writes the ring");
 

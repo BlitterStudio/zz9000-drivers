@@ -603,6 +603,109 @@ static void test_stop_start_resume(void)
   }
 }
 
+/* More sounds are unloaded, while playback runs, than the quarantine can
+ * track. A range the engine may still read must never come back early, and
+ * a sound whose range is still held cannot be redefined over it. */
+static void test_quarantine_never_reuses_early(void)
+{
+  const uint32_t total = 1U << 20;
+  const uint32_t per_round = 16U;   /* the model of setup() has 16 sounds */
+  /* One round past what the quarantine tracks: that round's sounds are held. */
+  const uint32_t rounds = VM_MAX_QUARANTINE / per_round + 1U;
+  const uint32_t pending = rounds * per_round * 4U;
+  uint32_t round;
+  uint32_t i;
+  uint32_t probe;
+
+  setup(2U, 1);
+  vm_start(model, 5000U);
+  /* Every round loads the sound table with 4-byte sounds and unloads it
+   * again, so more ranges wait for the engine than the quarantine tracks.
+   * The last sound of each round plays on channel 0 when it is unloaded. */
+  for (round = 1U; round <= rounds; round++) {
+    for (i = 0U; i < per_round; i++) {
+      uint32_t bank;
+
+      CHECK(vm_bank_alloc(model, 4U, &bank) == 0, "round %u: alloc %u", round,
+            i);
+      CHECK(vm_sound_define(model, i, VM_AHI_M8S, bank, 4U) == 0,
+            "round %u: define %u", round, i);
+    }
+    set_sound(model, 0U, (uint16_t)(per_round - 1U), 0U, 0, 1);
+    set_freq(model, 0U, 48000U, 1);
+    vm_run_async(model);
+    for (i = 0U; i < per_round; i++)
+      CHECK(vm_sound_remove(model, i) == 0, "round %u: remove %u", round, i);
+    /* The horizon has not moved: nothing may be handed out again. */
+    vm_bank_poll(model, 5000U);
+    CHECK(vm_bank_free_bytes(model) == total - round * per_round * 4U,
+          "round %u: %u of %u bytes free before the horizon passes", round,
+          vm_bank_free_bytes(model), total);
+    CHECK(vm_bank_alloc(model, 4U, &probe) == 0 &&
+              probe == round * per_round * 4U,
+          "round %u: a new sound gets fresh memory (offset %u)", round, probe);
+    vm_bank_release(model, probe, 4U);
+  }
+  /* The tracking is full: the ranges stay with their sounds, and a sound
+   * whose range is still held cannot be defined over another range. */
+  CHECK(vm_sound_define(model, 0U, VM_AHI_M8S, 0U, 4U) != 0,
+        "a held sound is not redefined");
+  CHECK(vm_sound_held(model, 0U), "sound 0 is held");
+  CHECK(vm_bank_free_bytes(model) == total - pending,
+        "held ranges stay allocated");
+  vm_bank_poll(model, 5000U + 2U * 7680U);
+  CHECK(vm_bank_free_bytes(model) == total,
+        "the horizon passing the stops frees every range");
+  CHECK(vm_sound_define(model, 0U, VM_AHI_M8S, 0U, 4U) == 0,
+        "the sound can be loaded again");
+}
+
+/* A pass that ends exactly at the model time, then an immediate pause from
+ * another task: the queued sound must still follow, and its SoundFunc must
+ * run, when the channel resumes. */
+static void test_async_pause_at_pass_end(void)
+{
+  const ZZ9KVoiceRecord *r;
+  uint32_t count;
+  uint32_t i;
+  uint32_t starts = 0U;
+  uint32_t last_arg0 = 0U;
+  uint32_t last_arg1 = 0U;
+
+  setup(1U, 1);
+  /* Sound 9: 960 frames, one 50 Hz tick at 48 kHz. Sound 1 plays next. */
+  CHECK(vm_sound_define(model, 9U, VM_AHI_M8S, 8192U, 960U) == 0, "define 9");
+  vm_start(model, 0U);
+  set_sound(model, 0U, 9U, 0U, 0, 1);
+  set_freq(model, 0U, 48000U, 1);
+  set_vol(model, 0U, 0x10000, 0, 1);
+  set_sound(model, 0U, 1U, 100U, 200, 0);
+  vm_tick(model);
+  CHECK(model->now == 960U, "one tick ends where the pass ends");
+  CHECK(app.sound_calls == 1U, "SoundFunc at the first pass");
+
+  set_freq(model, 0U, 0U, 1);
+  vm_run_async(model);
+  clear_records();
+  set_freq(model, 0U, 48000U, 1);
+  vm_run_async(model);
+
+  r = vm_records(model, &count);
+  for (i = 0U; i < count; i++) {
+    if (r[i].op == ZZ9K_VOICE_OP_START) {
+      starts++;
+      last_arg0 = r[i].arg0;
+      last_arg1 = r[i].arg1;
+    }
+  }
+  CHECK(starts == 1U && last_arg0 == 1024U + 100U && last_arg1 == 200U,
+        "the resume plays the queued pass (START %u at %u, length %u)", starts,
+        last_arg0, last_arg1);
+  CHECK(app.sound_calls == 2U && model->sound_stamp == 960U,
+        "SoundFunc ran at the queued pass (%u calls, last at %u)",
+        app.sound_calls, model->sound_stamp);
+}
+
 int main(void)
 {
   test_imm_set_start_loop();
@@ -621,6 +724,8 @@ int main(void)
   test_disable_blocks_the_fifo();
   test_records_are_nondecreasing();
   test_stop_start_resume();
+  test_quarantine_never_reuses_early();
+  test_async_pause_at_pass_end();
   if (failures) {
     printf("%d failure(s)\n", failures);
     return 1;

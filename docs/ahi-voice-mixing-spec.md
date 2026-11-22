@@ -115,8 +115,10 @@ record with the model time at which `ahi.device` would have made the change.
 
 A batch of calls that arrives together, for example the three calls of one
 `AHI_PlayA` channel, makes one `START`. `AHIsub_Disable` keeps the batch
-whole: the worker takes nothing from the queue while the client holds
-`Disable`.
+whole and keeps the client's hooks quiet: while the client holds `Disable`
+the worker takes nothing from the queue and calls no `PlayerFunc`,
+`SoundFunc` or channel-info hook. It still reads the status block, so the
+session stays alive, and sends the records it already made.
 
 ### Levels
 
@@ -154,7 +156,9 @@ type.
 - `AHI_UnloadSound` never calls the mailbox, so it cannot break a `Forbid()`.
   The worker frees the sound: a voice that plays it stops at the model time,
   and the bank range is handed out again only after the engine horizon has
-  passed that frame.
+  passed that frame. The driver tracks up to 256 such ranges. Past that, the
+  range stays with its sound number until the horizon passes, and loading
+  that number again in the meantime returns `AHIE_NOMEM`.
 - `AHIST_S8S` and `AHIST_S16S` need firmware that advertises
   `ZZ9K_SERVICE_FLAG_AUDIO_VOICE_STEREO` (bit 29 of the audio service flags).
   Without the flag a stereo `AHI_LoadSound` returns `AHIE_BADSAMPLETYPE` and

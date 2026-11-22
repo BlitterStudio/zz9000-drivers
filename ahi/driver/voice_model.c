@@ -323,7 +323,7 @@ static int vm_pass_from_call(const VmModel *m, VmPass *p, uint32_t sound,
     return -1;
   }
   s = &m->sounds[sound];
-  if (!s->used || s->frames == 0U) {
+  if (s->used != VM_SOUND_LOADED || s->frames == 0U) {
     return -1;
   }
   shift = vm_view_shift(s->view);
@@ -876,6 +876,10 @@ void vm_tick(VmModel *m)
 
 void vm_run_async(VmModel *m)
 {
+  /* A pass that ended exactly at the model time has not been installed
+   * yet: do it before the calls, as the tick start does, so a pause made
+   * now cannot drop the queued pass. Its SoundFunc runs after the calls. */
+  vm_walk(m, m->now + 1U, 0);
   vm_drain(m, m->now, 1);
   vm_run_eos(m, m->now);
   vm_flush_tick(m);
@@ -1021,11 +1025,16 @@ int vm_sound_define(VmModel *m, uint32_t id, uint32_t ahi_type, uint32_t bank,
     return -1;
   }
   s = &m->sounds[id];
+  /* A removed sound whose range still waits for the engine cannot take a
+   * new one: the old range would be lost. */
+  if (s->used == VM_SOUND_HELD) {
+    return -1;
+  }
   s->used = 0U;
   s->view = (uint8_t)view;
   s->bank = bank;
   s->frames = frames;
-  s->used = 1U;
+  s->used = VM_SOUND_LOADED;
   return 0;
 }
 
@@ -1120,6 +1129,8 @@ void vm_bank_release(VmModel *m, uint32_t offset, uint32_t bytes)
 void vm_bank_poll(VmModel *m, uint32_t horizon)
 {
   uint32_t i = 0U;
+  uint32_t len;
+  VmSound *s;
 
   while (i < m->quarantine_n) {
     VmQuarantine *q = &m->quarantine[i];
@@ -1134,6 +1145,15 @@ void vm_bank_poll(VmModel *m, uint32_t horizon)
       m->quarantine_n--;
     } else {
       i++;
+    }
+  }
+  /* Ranges that stayed with their sounds because the list was full. */
+  for (i = 0U; i < m->cfg.sounds && i < VM_MAX_SOUNDS; i++) {
+    s = &m->sounds[i];
+    if (s->used == VM_SOUND_HELD && vm_sdiff(horizon, s->hold_stamp) > 0) {
+      len = ((s->frames << vm_view_shift(s->view)) + 3U) & ~3U;
+      vm_free_insert(m, s->bank, len);
+      s->used = 0U;
     }
   }
 }
@@ -1156,7 +1176,8 @@ int vm_sound_remove(VmModel *m, uint32_t id)
   uint32_t off;
   uint32_t len;
 
-  if (id >= m->cfg.sounds || id >= VM_MAX_SOUNDS || !m->sounds[id].used) {
+  if (id >= m->cfg.sounds || id >= VM_MAX_SOUNDS ||
+      m->sounds[id].used != VM_SOUND_LOADED) {
     return -1;
   }
   s = &m->sounds[id];
@@ -1175,22 +1196,33 @@ int vm_sound_remove(VmModel *m, uint32_t id)
     }
   }
   off = s->bank;
-  len = s->frames << vm_view_shift(s->view);
+  len = ((s->frames << vm_view_shift(s->view)) + 3U) & ~3U;
   s->used = 0U;
   /* The bank range is a whole number of 4-byte units from the allocator. */
-  len = (len + 3U) & ~3U;
   if (len == 0U) {
+    vm_flush_tick(m);
     return 0;
   }
-  if (m->running && m->quarantine_n < VM_MAX_QUARANTINE) {
+  if (!m->running) {
+    vm_free_insert(m, off, len);
+  } else if (m->quarantine_n < VM_MAX_QUARANTINE) {
     VmQuarantine *q = &m->quarantine[m->quarantine_n++];
 
     q->off = off;
     q->len = len;
     q->stamp = m->now;
   } else {
-    vm_free_insert(m, off, len);
+    /* Nothing left to track the range with: it stays with the sound until
+     * the engine horizon passes. It is never handed out early. */
+    s->used = VM_SOUND_HELD;
+    s->hold_stamp = m->now;
   }
   vm_flush_tick(m);
   return 0;
+}
+
+int vm_sound_held(VmModel *m, uint32_t id)
+{
+  return id < m->cfg.sounds && id < VM_MAX_SOUNDS &&
+         m->sounds[id].used == VM_SOUND_HELD;
 }

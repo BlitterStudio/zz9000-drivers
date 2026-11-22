@@ -1921,8 +1921,15 @@ static void voice_service(struct z9ax *ahi_data)
     vm_start(&v->model, voice_anchor(v));
     v->resyncs++;
   }
-  vm_run_async(&v->model);
+  /* While the client holds AHIsub_Disable its hooks wait, as the software
+   * modes' interrupt does: no PlayerFunc, no SoundFunc and no channel info.
+   * The status read above keeps the session alive, and records already
+   * made still go out. */
+  if (ahi_data->disable_cnt == 0U)
+    vm_run_async(&v->model);
   for (budget = Z9AX_VOICE_TICKS_PER_POLL; budget != 0U; budget--) {
+    if (ahi_data->disable_cnt != 0U)
+      break;
     /* The ring is slow: let it drain before the record buffer fills. */
     if (v->model.out_n > VM_OUT_RECORDS / 2U)
       break;
@@ -1931,7 +1938,8 @@ static void voice_service(struct z9ax *ahi_data)
     vm_tick(&v->model);
   }
   voice_write_records(ahi_data);
-  voice_channel_info(ahi_data);
+  if (ahi_data->disable_cnt == 0U)
+    voice_channel_info(ahi_data);
 }
 
 static char *voice_text_number(char *p, uint32_t value)
@@ -2342,7 +2350,7 @@ static void voice_unload_sound(struct z9ax *ahi_data, uint16_t sound)
   if (sound >= VM_MAX_SOUNDS)
     return;
   Forbid();
-  if (v->model.sounds[sound].used)
+  if (v->model.sounds[sound].used == VM_SOUND_LOADED)
     v->unload_pending[sound >> 5] |= 1UL << (sound & 31U);
   Permit();
 }
@@ -2417,6 +2425,13 @@ static uint32_t voice_load_sound(struct z9ax *ahi_data, uint16_t sound,
   voice_run_unloads(ahi_data);
   Forbid();
   vm_bank_poll(&v->model, v->status.horizon);
+  if (vm_sound_held(&v->model, sound)) {
+    Permit();
+    KPrintF((CONST_STRPTR)"ZZ9000AX: hardware mixing: sound %ld was unloaded"
+            " and its bank range is still in use by the card.\n",
+            (long)sound);
+    return AHIE_NOMEM;
+  }
   taken = vm_bank_alloc(&v->model, bytes, &bank_offset) == 0 ? 1U : 0U;
   Permit();
   if (!taken) {
@@ -2440,6 +2455,8 @@ static uint32_t voice_load_sound(struct z9ax *ahi_data, uint16_t sound,
   Forbid();
   defined = vm_sound_define(&v->model, sound, sample->ahisi_Type, bank_offset,
                             sample->ahisi_Length) == 0 ? 1U : 0U;
+  if (!defined)
+    vm_bank_release(&v->model, bank_offset, bytes);
   Permit();
   return defined ? AHIE_OK : AHIE_BADSAMPLETYPE;
 }

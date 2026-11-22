@@ -33,8 +33,10 @@
 #define VM_MAX_SOUNDS   256U
 #define VM_FIFO_SIZE    256U
 #define VM_OUT_RECORDS  2048U
-#define VM_MAX_FREE_RANGES 64U
-#define VM_MAX_QUARANTINE  64U
+/* Sized for a whole sound table loaded and unloaded inside one lead, so the
+ * allocator and the quarantine do not run out of entries in normal use. */
+#define VM_MAX_FREE_RANGES 256U
+#define VM_MAX_QUARANTINE  256U
 
 /* A queued tick or boundary walk gives up on a channel after this many pass
  * boundaries in one window, so a client that asks for one-frame passes cannot
@@ -96,11 +98,18 @@ typedef struct VmConfig {
   VmHooks hooks;
 } VmConfig;
 
+/* A sound entry is free (used 0), loaded, or held: removed while the engine
+ * may still read its range, with no room left in the quarantine list. A
+ * held entry keeps its range until vm_bank_poll sees the horizon pass. */
+#define VM_SOUND_LOADED 1U
+#define VM_SOUND_HELD   2U
+
 typedef struct VmSound {
-  uint8_t used;
+  uint8_t used;        /* 0, VM_SOUND_LOADED or VM_SOUND_HELD */
   uint8_t view;
-  uint32_t bank;      /* byte offset in the bank (4-byte aligned) */
-  uint32_t frames;    /* length in sample frames */
+  uint32_t bank;       /* byte offset in the bank (4-byte aligned) */
+  uint32_t frames;     /* length in sample frames */
+  uint32_t hold_stamp; /* model frame a held range waits for */
 } VmSound;
 
 /* One AHI-visible pass of a channel: what ahi.device keeps as the current
@@ -226,6 +235,9 @@ int vm_sound_define(VmModel *m, uint32_t id, uint32_t ahi_type,
  * (STOP at the model time) and the bank range is held back until the engine
  * horizon passes that stamp. Returns 0, or -1 for an unknown id. */
 int vm_sound_remove(VmModel *m, uint32_t id);
+/* True while a removed sound's bank range still waits for the engine: it
+ * cannot be defined again until vm_bank_poll released the range. */
+int vm_sound_held(VmModel *m, uint32_t id);
 uint32_t vm_bank_free_bytes(const VmModel *m);
 
 /* Producer side, any context, under Disable(). Returns 0, or -1 and counts a
