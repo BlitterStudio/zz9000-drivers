@@ -6,7 +6,7 @@ The drivers release includes selected end-user components built from the [`sdk/`
 | --- | --- | --- |
 | `zz9k.library` | `LIBS:` | AmigaOS gateway for SDK firmware services and the board's mailbox. |
 | `aar.library` | `LIBS:` | AAR client library: claims, loads, starts and stops apps on the ARM cores and keeps their leases alive. |
-| `mpega.library` | `LIBS:` | Replacement MPEGA library that decodes MP3 on the card. |
+| `mpega.library` | `LIBS:` | Replacement MPEGA library that decodes MP3 on the card. When the card cannot decode a stream it uses `LIBS:mpega-software.library`, where the installer keeps the software `mpega.library` it replaced. |
 | `zz9k-picture.datatype` | `SYS:Classes/DataTypes/` | Picture DataType that decodes JPEG, PNG, and WebP on the card. |
 | `zz9k-sound.datatype` | `SYS:Classes/DataTypes/` | Sound DataType that decodes MP3, FLAC, and Ogg Vorbis on the card and plays them through the system `sound.datatype`. |
 | `ZZ9000-JPEG`, `ZZ9000-PNG`, `ZZ9000-WebP`, `ZZ9000-MP3`, `ZZ9000-FLAC`, and `ZZ9000-OggVorbis` descriptors | `SYS:Storage/DataTypes/` | Inactive DataType descriptors for explicit installation. |
@@ -44,7 +44,7 @@ Current generation-2 2 MiB and 4 MiB Zorro II layouts provide a shared 16 KiB CP
 
 | Payload or operation | 2 MiB | 4 MiB | Current behavior |
 | --- | --- | --- | --- |
-| `mpega.library` | No | No | Its compact PCM ring is 32 KiB, followed by 16 KiB of feed staging. Neither current layout has a 32 KiB host window. |
+| `mpega.library` | No | No | Its compact PCM ring is 32 KiB, followed by 16 KiB of feed staging. Neither current layout has a 32 KiB host window, so streams decode through `LIBS:mpega-software.library` when it exists. |
 | ZZPlay with AHI | No | No | The compact AHI path requires a 32 KiB PCM ring and 16 KiB staging buffer. |
 | ZZPlay card-local streaming | Limited | Limited | Card-local PCM and compressed rings use up to 16 KiB of host-window staging and require an otherwise free window. |
 | `zz9k-view` JPEG, PNG, and WebP | No | No | Each viewer path requests a 32 KiB host-window staging buffer. |

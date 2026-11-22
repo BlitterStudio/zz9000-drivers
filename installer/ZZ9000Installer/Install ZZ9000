@@ -472,13 +472,27 @@
                 (source "Libs/zz9k.library")
                 (dest "LIBS:")))
 
-         (if (askbool (prompt "Install the ARM-accelerated mpega.library into LIBS:?\n\nThis replaces any existing software mpega.library (keep a backup if you want to revert).")
-                      (help "A drop-in MPEGA replacement: MP3 decoding runs on the ZZ9000's ARM cores instead of the 68k. Applications using mpega.library (e.g. AmigaAMP) need no changes."))
-             (copyfiles
-                (prompt "Install mpega.library into LIBS:")
-                (help "ARM-accelerated drop-in MPEGA replacement.")
-                (source "Libs/mpega.library")
-                (dest "LIBS:")))
+         (if (askbool (prompt "Install the ARM-accelerated mpega.library into LIBS:?\n\nA software mpega.library already in LIBS: is kept as LIBS:mpega-software.library. The ZZ9000 library hands MP3 decoding to it when the card cannot decode.")
+                      (help "A drop-in MPEGA replacement: MP3 decoding runs on the ZZ9000's ARM cores instead of the 68k. Applications using mpega.library (e.g. AmigaAMP) need no changes.\n\nWithout the card's MP3 service (no SDK firmware, or no room in the Zorro 2 host window) it uses LIBS:mpega-software.library. To go back to the software library, delete LIBS:mpega.library and rename mpega-software.library to mpega.library."))
+             (
+                ; Keep the first software library found. A ZZ9000 build
+                ; carries "ZZ9000 SDK" in its version string; Search
+                ; returns 0 when it finds the text and 5 when it does not.
+                (if (and (exists "LIBS:mpega.library")
+                         (not (exists "LIBS:mpega-software.library"))
+                         (<> 0 (run "Search >NIL: LIBS:mpega.library \"ZZ9000 SDK\" QUIET")))
+                    (copyfiles
+                       (prompt "Keep the existing software mpega.library as LIBS:mpega-software.library")
+                       (help "The ZZ9000 mpega.library loads this file when the card cannot decode a stream.")
+                       (source "LIBS:mpega.library")
+                       (dest "LIBS:")
+                       (newname "mpega-software.library")))
+                (copyfiles
+                   (prompt "Install mpega.library into LIBS:")
+                   (help "ARM-accelerated drop-in MPEGA replacement.")
+                   (source "Libs/mpega.library")
+                   (dest "LIBS:"))
+             ))
 
          (copyfiles
             (prompt "Install zz9k-picture.datatype into SYS:Classes/DataTypes/")
