@@ -4,7 +4,7 @@ AMIGA_DOCKER = ./tools/amiga-docker.sh
 
 .PHONY: all build-all package-local check-release quality rtg-tests mhi-tests \
 	net-tests ahi-voice-tests rtg zztop zzscanlines zzgamma zzdebugout zzfwupdate \
-	usb-poseidon sd-boot net ZZNetStats mhi ahi ahi-duplextest ZZDiag ZZCapture sdk \
+	usb-poseidon sd-boot net ZZNetStats mhi ahi ahi-duplextest ahi-voicetest ZZDiag ZZCapture sdk \
 	amissl
 
 all: build-all
@@ -90,6 +90,9 @@ ahi:
 
 ahi-duplextest:
 	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) ahi/duplextest ./build.sh
+
+ahi-voicetest:
+	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) ahi/voicetest ./build.sh
 
 ZZCapture:
 	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) ZZCapture ./build.sh

@@ -125,7 +125,8 @@ tracked_artifacts=$(
         ZZDiag/ZZDiag \
         ZZCapture/ZZCapture \
         ahi/axtest/axtest \
-        ahi/duplextest/ZZAXDuplexTest
+        ahi/duplextest/ZZAXDuplexTest \
+        ahi/voicetest/ZZAXVoiceTest
     do
         if git ls-files --error-unmatch "$path" >/dev/null 2>&1; then
             echo "$path"

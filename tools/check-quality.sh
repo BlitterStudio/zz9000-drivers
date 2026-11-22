@@ -18,7 +18,7 @@ if command -v shellcheck >/dev/null 2>&1; then
         rtg/build.sh net/build.sh usb-poseidon/build.sh sd-boot/build.sh \
         ZZTop/build-gcc.sh \
         ahi/driver/build.sh ahi/axtest/build-gcc-single.sh \
-        ahi/duplextest/build.sh mhi/build.sh \
+        ahi/duplextest/build.sh ahi/voicetest/build.sh mhi/build.sh \
         ZZDiag/build.sh ZZCapture/build.sh || status=$?
 else
     echo "SKIP: shellcheck not installed"

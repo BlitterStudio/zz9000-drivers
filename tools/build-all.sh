@@ -31,6 +31,7 @@ mhi/build.sh
 # itself through amiga-docker.sh — run it on the host like CI does.
 ahi/driver/build.sh
 "$amiga_docker" ahi/duplextest ./build.sh
+"$amiga_docker" ahi/voicetest ./build.sh
 "$amiga_docker" ZZDiag ./build.sh
 "$amiga_docker" ZZNetReady ./build.sh
 "$amiga_docker" ZZCapture ./build.sh

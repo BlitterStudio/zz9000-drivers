@@ -357,7 +357,7 @@ jobs:
           if-no-files-found: error
 
   ahi:
-    name: ahi — zz9000ax.audio + duplex test
+    name: ahi - zz9000ax.audio + duplex and voice tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -372,6 +372,9 @@ jobs:
       - name: Build ZZAXDuplexTest
         run: |
           tools/amiga-docker.sh ahi/duplextest ./build.sh
+      - name: Build ZZAXVoiceTest
+        run: |
+          tools/amiga-docker.sh ahi/voicetest ./build.sh
       - uses: actions/upload-artifact@v7
         with:
           name: zz9000ax.audio
@@ -386,6 +389,11 @@ jobs:
         with:
           name: ZZAXDuplexTest
           path: ahi/duplextest/ZZAXDuplexTest
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ZZAXVoiceTest
+          path: ahi/voicetest/ZZAXVoiceTest
           if-no-files-found: error
 
   m68k-smoke:
@@ -413,7 +421,8 @@ jobs:
           for f in ZZTop/ZZTop ZZScanlines/ZZScanlines ZZGamma/ZZGamma \
                    ZZFwUpdate/ZZFwUpdate ZZNetStats/ZZNetStats ZZDiag/ZZDiag \
                    ZZNetReady/ZZNetReady ZZCapture/ZZCapture \
-                   ZZAXDuplexTest/ZZAXDuplexTest; do
+                   ZZAXDuplexTest/ZZAXDuplexTest \
+                   ZZAXVoiceTest/ZZAXVoiceTest; do
             cp "artifacts/$f" smoke/
           done
           cp artifacts/sdk-payloads/C/aar-run smoke/

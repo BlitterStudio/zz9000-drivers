@@ -18,6 +18,7 @@ ZZGamma/ZZGamma
 ZZTop/ZZTop
 ahi/axtest/axtest
 ahi/duplextest/ZZAXDuplexTest
+ahi/voicetest/ZZAXVoiceTest
 ahi/driver/ZZ9000AX
 ahi/driver/timer_pair_test
 rtg/tests/build/
