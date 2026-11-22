@@ -441,7 +441,7 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("ahi_data->disable_cnt == 0U", pump)
         self.assertLess(
             pump.index("ahi_data->disable_cnt == 0U"),
-            pump.index("CallHookPkt(AudioCtrl->ahiac_PlayerFunc")
+            pump.index("software_player_tick(ahi_data, AudioCtrl)")
         )
         self.assertIn("ahi_data->lease_accum_fill = 0U;", stop)
         self.assertIn("fabric_lease_release(ahi_data);", stop)
