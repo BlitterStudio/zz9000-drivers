@@ -327,7 +327,11 @@ static void test_close_library(struct Library *library)
 static void test_add_int_server(ULONG int_number, struct Interrupt *interrupt)
 {
   (void)int_number;
-  (void)interrupt;
+  /* Exec calls is_Code for every interrupt in the chain. */
+  check(interrupt->is_Code != NULL && interrupt->is_Data != NULL &&
+            interrupt->is_Node.ln_Type == NT_INTERRUPT,
+        "AddIntServer gets a prepared node (%s)",
+        interrupt->is_Node.ln_Name ? interrupt->is_Node.ln_Name : "no name");
   fw.int_servers_added++;
 }
 

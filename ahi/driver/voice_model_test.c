@@ -706,6 +706,47 @@ static void test_async_pause_at_pass_end(void)
         app.sound_calls, model->sound_stamp);
 }
 
+/* The same pass end, then Stop and Start: the restart must play the queued
+ * pass, and its SoundFunc must still run once playback goes on. */
+static void test_stop_at_pass_end(void)
+{
+  const ZZ9KVoiceRecord *r;
+  uint32_t count;
+  uint32_t i;
+  uint32_t starts = 0U;
+  uint32_t last_arg0 = 0U;
+  uint32_t last_arg1 = 0U;
+
+  setup(1U, 1);
+  CHECK(vm_sound_define(model, 9U, VM_AHI_M8S, 8192U, 960U) == 0, "define 9");
+  vm_start(model, 0U);
+  set_sound(model, 0U, 9U, 0U, 0, 1);
+  set_freq(model, 0U, 48000U, 1);
+  set_vol(model, 0U, 0x10000, 0, 1);
+  set_sound(model, 0U, 1U, 100U, 200, 0);
+  vm_tick(model);
+  CHECK(model->now == 960U && app.sound_calls == 1U,
+        "one tick ends where the pass ends");
+
+  vm_stop(model);
+  vm_start(model, 20000U);
+  r = vm_records(model, &count);
+  for (i = 0U; i < count; i++) {
+    if (r[i].op == ZZ9K_VOICE_OP_START) {
+      starts++;
+      last_arg0 = r[i].arg0;
+      last_arg1 = r[i].arg1;
+    }
+  }
+  CHECK(starts == 1U && last_arg0 == 1024U + 100U && last_arg1 == 200U,
+        "the restart plays the queued pass (START %u at %u, length %u)",
+        starts, last_arg0, last_arg1);
+  vm_run_async(model);
+  CHECK(app.sound_calls == 2U,
+        "the queued pass's SoundFunc runs after the restart (%u calls)",
+        app.sound_calls);
+}
+
 int main(void)
 {
   test_imm_set_start_loop();
@@ -726,6 +767,7 @@ int main(void)
   test_stop_start_resume();
   test_quarantine_never_reuses_early();
   test_async_pause_at_pass_end();
+  test_stop_at_pass_end();
   if (failures) {
     printf("%d failure(s)\n", failures);
     return 1;

@@ -2229,7 +2229,9 @@ static uint32_t voice_alloc_audio(uint8_t mode,
     goto fail;
 
   /* The ownership claim of the software path: only a fabric-qualified MHI
-   * may coexist, because the voice slot is mixed by the fabric. */
+   * may coexist, because the voice slot is mixed by the fabric. The
+   * interrupt nodes join the shared chain, so they are filled in first. */
+  prepare_irq_struct(ahi_data);
   Forbid();
   mhi_mode = mhi_mode_locked();
   if (Z9AXBase->owner || Z9AXBase->allocating != ahi_data ||

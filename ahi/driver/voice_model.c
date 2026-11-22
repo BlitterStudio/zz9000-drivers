@@ -926,6 +926,12 @@ void vm_stop(VmModel *m)
 {
   uint32_t ci;
 
+  /* A pass that ended exactly at the model time is installed first, so a
+   * restart plays the queued pass. Its SoundFunc stays owed (eos) and runs
+   * at the first call after Start. The records it makes are dropped below. */
+  if (m->running) {
+    vm_walk(m, m->now + 1U, 0);
+  }
   for (ci = 0U; ci < m->cfg.channels; ci++) {
     VmChannel *c = &m->ch[ci];
 
