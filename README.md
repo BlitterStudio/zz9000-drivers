@@ -21,7 +21,7 @@ shared-memory layout before SDK services are exposed.
 | [Board and command-line tools](docs/cli-tools.md) | `ZZDiag`, `ZZFwUpdate`, `ZZScanlines`, `ZZGamma`, and their command-line reference. |
 | [ZZCapture](ZZCapture/README.md) | Native-video timing observation and experimental A4000/C28 capture diagnostics. |
 | [aar-run](https://github.com/BlitterStudio/aar/blob/main/client/run/README.md) | Shell and Workbench launcher for trusted ARM apps, built in the aar repository and shipped with the SDK runtime; on the Zorro III app runtime each app has its own claim. |
-| [ZZ9000AX audio](ahi/README.md) | `zz9000ax.audio`, its AudioMode, and `mhizz9000.library` for PCM playback, recording, and hardware MP3 decoding. |
+| [ZZ9000AX audio](ahi/README.md) | `zz9000ax.audio`, its AudioModes (software mixing, and hardware mixing of up to 32 channels on the card), and `mhizz9000.library` for PCM playback, recording, and hardware MP3 decoding. |
 | [Poseidon USB](usb-poseidon/README.md) | `zzusbhw.device` for the external Poseidon 4.5 USB stack. |
 | [SD-card boot](sd-boot/README.md) | `zzsd.device` in `BOOT.bin`, which boots an HDF file from the FAT-formatted microSD card. |
 | [ZZTop](ZZTop/README.md) | The `ZZTop` control panel. |
