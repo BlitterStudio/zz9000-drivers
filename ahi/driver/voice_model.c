@@ -1107,6 +1107,16 @@ int vm_bank_alloc(VmModel *m, uint32_t bytes, uint32_t *offset)
   return -1;
 }
 
+/* Gives back a range that nothing references (an upload that failed before
+ * the sound was defined), so it is free at once. */
+void vm_bank_release(VmModel *m, uint32_t offset, uint32_t bytes)
+{
+  if (bytes == 0U) {
+    bytes = 4U;
+  }
+  vm_free_insert(m, offset, (bytes + 3U) & ~3U);
+}
+
 void vm_bank_poll(VmModel *m, uint32_t horizon)
 {
   uint32_t i = 0U;

@@ -214,6 +214,9 @@ void vm_init(VmModel *m, const VmConfig *cfg);
 /* Bank allocator and sound table. vm_alloc returns 0 and the byte offset, or
  * -1 when no range fits. Sizes round up to 4 bytes. */
 int vm_bank_alloc(VmModel *m, uint32_t bytes, uint32_t *offset);
+/* Gives back a range vm_bank_alloc handed out when the upload failed before
+ * the sound was defined. */
+void vm_bank_release(VmModel *m, uint32_t offset, uint32_t bytes);
 void vm_bank_poll(VmModel *m, uint32_t horizon);
 /* Defines sound id over the bank range [bank, bank + frames * frame size).
  * Returns 0, or -1 for a bad id, type or view. */
