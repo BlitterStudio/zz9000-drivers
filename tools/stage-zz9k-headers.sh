@@ -54,11 +54,23 @@ if [ -n "$sdk_src" ] && [ -d "$sdk_src/include/zz9k" ]; then
   fi
   # The voice engine core, for the host model tests that run the driver's
   # records through the real engine (tools/ahi-voice-tests.sh). The firmware
-  # keeps it beside the SDK subtree, not inside it.
+  # keeps it beside the SDK subtree, not inside it. The engine includes the
+  # half-band table of the stream reducer (audio_reduce_table.h, its 2x
+  # oversampling decimator): every local include of audio_voice.c is staged
+  # with it, and a missing one fails here instead of in the compiler.
   engine_src="$sdk_src/../ZZ9000_proto.sdk/ZZ9000OS/src"
   if [ -f "$engine_src/audio_voice.c" ] && [ -f "$engine_src/audio_voice.h" ]; then
     mkdir -p "$stage_dir/engine"
     cp "$engine_src/audio_voice.c" "$engine_src/audio_voice.h" "$stage_dir/engine/"
+    for inc in $(sed -n 's/^#include "\([^"]*\)".*$/\1/p' "$engine_src/audio_voice.c"); do
+      if [ ! -f "$stage_dir/engine/$inc" ]; then
+        if [ ! -f "$engine_src/$inc" ]; then
+          echo "ERROR: audio_voice.c includes $inc, which is not beside it in the SDK checkout." >&2
+          exit 1
+        fi
+        cp "$engine_src/$inc" "$stage_dir/engine/"
+      fi
+    done
   fi
 fi
 

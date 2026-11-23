@@ -637,6 +637,54 @@ class RepoToolingTests(unittest.TestCase):
         for relpath in scripts:
             subprocess.run(["sh", "-n", str(ROOT / relpath)], check=True)
 
+    def _stage_engine_tree(self, tmp, engine_includes):
+        """A minimal firmware checkout: an sdk/ subtree and the engine."""
+        sdk = pathlib.Path(tmp) / "sdk"
+        engine = pathlib.Path(tmp) / "ZZ9000_proto.sdk" / "ZZ9000OS" / "src"
+        for rel in (
+            "include/zz9k/voice.h",
+            "host/include/zz9k/request.h",
+            "amiga/include/zz9k/library.h",
+            "amiga/include/proto/zz9k.h",
+            "amiga/include/clib/zz9k_protos.h",
+        ):
+            (sdk / rel).parent.mkdir(parents=True, exist_ok=True)
+            (sdk / rel).write_text("/* stub */\n")
+        engine.mkdir(parents=True)
+        (engine / "audio_voice.h").write_text("/* header */\n")
+        source = '#include "audio_voice.h"\r\n'
+        for name in engine_includes:
+            source += '#include "%s"\r\n' % name
+        source += "#include <string.h>\n"
+        (engine / "audio_voice.c").write_text(source)
+        return sdk, engine
+
+    def test_stage_headers_stages_the_local_includes_of_the_engine(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sdk, engine = self._stage_engine_tree(tmp, ["audio_reduce_table.h"])
+            (engine / "audio_reduce_table.h").write_text("/* taps */\n")
+            stage = pathlib.Path(tmp) / "stage"
+            subprocess.run(
+                ["sh", str(ROOT / "tools/stage-zz9k-headers.sh"), str(stage), str(ROOT)],
+                check=True,
+                env={**os.environ, "ZZ9000_SDK": str(sdk)},
+            )
+            for name in ("audio_voice.c", "audio_voice.h", "audio_reduce_table.h"):
+                self.assertTrue((stage / "engine" / name).is_file(), name)
+            self.assertTrue((stage / "zz9k" / "voice.h").is_file())
+
+    def test_stage_headers_fails_on_an_engine_include_that_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sdk, _engine = self._stage_engine_tree(tmp, ["audio_reduce_table.h"])
+            stage = pathlib.Path(tmp) / "stage"
+            result = subprocess.run(
+                ["sh", str(ROOT / "tools/stage-zz9k-headers.sh"), str(stage), str(ROOT)],
+                env={**os.environ, "ZZ9000_SDK": str(sdk)},
+                stderr=subprocess.PIPE,
+            )
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn(b"audio_reduce_table.h", result.stderr)
+
     def test_shell_scripts_avoid_ci_shellcheck_patterns(self):
         bad_cdpath = []
         # Enumerate tracked files rather than walking the tree: CI checks the
