@@ -20,23 +20,39 @@ The drivers release includes selected end-user components built from the [`sdk/`
 
 ## Build and package
 
-`sdk/build.sh` reads `SDK_REF` and uses `ZZ9000_SDK`, a sibling `zz9000-firmware/sdk` checkout, or a clone in `sdk/work/zz9000-firmware`. Unless `SDK_SKIP_BUILD=1`, it runs the SDK's `scripts/build-m68k-amigaos.sh` and `scripts/package-m68k-amigaos.sh --skip-build`, then copies the selected payloads to `sdk/out/` in installer layout. `SDK_REF` holds the pinned firmware commit. The SDK package also carries `libaarserve.a` and its header for programs that embed the serving loop; `sdk/build.sh` does not collect them, because the installer does not ship them.
+`sdk/build.sh` reads `SDK_REF` and uses `ZZ9000_SDK`, a sibling `zz9000-firmware/sdk` checkout, or a clone in `sdk/work/zz9000-firmware`. Unless `SDK_SKIP_BUILD=1`, it runs the SDK's `scripts/build-m68k-amigaos.sh` and `scripts/package-m68k-amigaos.sh --skip-build`, then copies the selected payloads to `sdk/out/` in installer layout. `SDK_REF` holds the pinned firmware commit.
 
 To use a newer SDK revision, update `SDK_REF`, rebuild with `sdk/build.sh`, and follow the SDK's [`docs/zz9k-release-smoke.md`](https://github.com/BlitterStudio/zz9000-firmware/blob/master/sdk/docs/zz9k-release-smoke.md). Keep the SDK revision synchronized with driver code that consumes SDK headers or allocation flags.
 
 ## App runtime
 
-Apps for the ARM cores are loaded and served over the AAR queue transport.
-`zz9k.library` no longer carries a `ZZ9KApp*` client API. The launcher
-`aar-run` calls the AAR client library `aar.library` instead. The firmware SDK
-builds and packages both, from the aar repository, and the installer puts
-`aar.library` in `LIBS:` and `aar-run` in `C:`. The library claims an app,
-loads and starts it and keeps its lease alive; `aar-run` serves its requests.
-`aar.library` uses `zz9k.library` only to reach the board's mailbox (revision
-36 or later). It also needs `mmu.library` 41 or later to map the card's shared
-buffers cache-inhibited. See the
+The ZZ9000 app runtime implements AAR API 0.5. The launcher `aar-run` calls the
+AAR client library `aar.library`. The firmware SDK builds `aar.library` from
+aar's `client/src/` and its own `sdk/amiga/src/aar_zz9000.c`, and packages it
+with `aar-run`. The library claims an app, loads and starts it and keeps its
+lease alive; `aar-run` serves its requests.
+
+The ZZ9000 app runtime requires:
+
+- a Zorro III board with firmware that has the AAR queue transport;
+- `zz9k.library` revision 36 or later, which `aar.library` uses only to reach
+  the board's mailbox;
+- `mmu.library` 41 or later, to map the card's shared buffers
+  cache-inhibited.
+
+See the
 [aar-run manual](https://github.com/BlitterStudio/aar/blob/main/client/run/README.md),
 installed as `aar-run.guide`, for launcher behaviour.
+
+The SDK package also holds `libaarserve.a` in `Developer/Lib/` and its header
+`libraries/aar_serve.h` in `Developer/Include/`, for programs that embed the
+serving loop of `aar-run`. The installer does not ship them. The serving loop
+is described in the aar
+[serve API](https://github.com/BlitterStudio/aar/blob/main/docs/aar-serve-api.md),
+the client library in its
+[client API](https://github.com/BlitterStudio/aar/blob/main/docs/aar-client-api.md),
+and apps for the ARM cores in the
+[developer guide](https://github.com/BlitterStudio/aar/blob/main/docs/aar-developer-guide.md).
 
 ## Zorro II support
 
