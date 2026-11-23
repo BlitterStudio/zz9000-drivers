@@ -150,8 +150,13 @@ type.
   buffer, so a multi-megabyte sample set loads in few round trips.
 - `AHI_LoadSound` copies the sample in staging-sized pieces, then defines the
   sound in the driver. The voice session belongs to the worker process that
-  opened it, and the firmware refuses a voice request from any other task,
-  so the worker sends the copy: the calling task reserves the bank range and
+  opened it, and the firmware refuses a voice request under any other
+  client id. `zz9k.library` sends `ZZ9KVoiceOpen`, `Close` and `Reset` as
+  client 0 and `ZZ9KCall` as the client id of the calling task's opener
+  (0 for a task that never opened the library), so the worker does not open
+  `zz9k.library` itself: only then its raw upload and define requests carry
+  the id the session was opened under. The worker therefore sends the copy:
+  the calling task reserves the bank range and
   checks for a held sound as before, hands the sample to the worker, wakes
   it and waits for the answer. Two tasks that load at once take turns. The
   worker copies one staging buffer per pass and reads the status in every

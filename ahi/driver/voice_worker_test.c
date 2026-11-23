@@ -4,8 +4,10 @@
  * card. The fake session answers the six zz9k.library voice calls and the
  * mailbox, the worker's init, service and end steps run by hand, and the
  * test checks what the driver sends and what it refuses. Like the firmware,
- * the fake ties the voice session to the task that opened it (the worker)
- * and answers a voice request from any other task with BAD_HANDLE.
+ * the fake models the library's client ids (a task gets one by opening
+ * zz9k.library, 0 otherwise; ZZ9KCall carries the caller's id, the Voice
+ * API always 0), ties the voice session to the id it was opened under and
+ * answers a request under any other id with BAD_HANDLE.
  *
  * Run on AmigaOS or with vamos --cpu=68020 -m 8000 --stack-size=64 (the
  * default vamos memory is too small for the fixture). In the
@@ -155,6 +157,13 @@ static void worker_run_service(struct z9ax *ahi_data)
 #define voice_worker_end(ahi_data, live) worker_run_end(ahi_data, live)
 #define voice_service(ahi_data) worker_run_service(ahi_data)
 
+/* zz9k.library's Voice API (ZZ9KVoiceOpen, Close, Reset) sends its requests
+ * through the host's zz9k_call, which never stamps the client id of the
+ * context into the request (only zz9k_submit does, and so ZZ9KCall and
+ * ZZ9KCallAsync): they always carry client 0. */
+#define FAKE_VOICE_API_ID 0U
+
+#define FAKE_OPENERS 4U
 #define FAKE_BANK_BYTES (2U * 1024U * 1024U)
 #define FAKE_LEAD 7680U
 #define FAKE_SERVICE_FLAGS \
@@ -185,7 +194,14 @@ static struct {
   uint16_t read_cursor;
   LONG write_budget;           /* records the ring still takes, -1 = no limit */
   uint32_t writes_outside_worker;
-  struct Task *owner;             /* the task that opened the voice session */
+  uint16_t owner_id;              /* client id the voice session belongs to */
+  uint8_t session_live;
+  struct {
+    struct Task *task;
+    uint16_t id;
+    uint32_t refs;
+  } openers[FAKE_OPENERS];        /* zz9k.library's opener records */
+  uint16_t next_client_id;
   uint32_t refused;               /* voice requests from a task but the owner */
   uint32_t query_caps;
   uint8_t mhi_mode;            /* 0 none, 1 legacy MHI, 2 fabric MHI */
@@ -281,8 +297,10 @@ static ULONG test_wait(ULONG signals)
     /* The handshake of AllocAudio: the worker publishes its result first. */
     if (voice_worker_init(driver))
       fx.worker_live = 1;
-    else
+    else {
+      voice_worker_end(driver, 0);
       driver->worker_process = NULL;
+    }
     return signals;
   }
   if (driver->worker_process)
@@ -357,13 +375,56 @@ static struct Process *test_create_process(Tag first_tag, ...)
   return &fx.process;
 }
 
+/* zz9k.library hands every task that opened it a client id of its own, and
+ * a task that never opened it calls with id 0, as the library does. */
+static uint16_t fake_client_id_of(const struct Task *task)
+{
+  uint32_t i;
+
+  for (i = 0U; i < FAKE_OPENERS; i++) {
+    if (fw.openers[i].refs != 0U && fw.openers[i].task == task)
+      return fw.openers[i].id;
+  }
+  return 0U;
+}
+
+static uint16_t fake_client_id(void)
+{
+  return fake_client_id_of(test_find_task(NULL));
+}
+
+/* The firmware's voice_session_owned_by: the request's client id must be the
+ * one the session was opened under. */
+static int fake_refuses(uint16_t client_id)
+{
+  return fw.session_live && client_id != fw.owner_id;
+}
+
 static struct Library *test_open_library(CONST_STRPTR name, ULONG version)
 {
+  struct Task *task = test_find_task(NULL);
+  uint32_t i;
+
   if (strcmp((const char *)name, ZZ9K_LIBRARY_NAME) == 0) {
     fw.library_opens++;
     if (!fw.library_present)
       return NULL;
     fw.library.lib_Revision = fw.revision;
+    for (i = 0U; i < FAKE_OPENERS; i++) {
+      if (fw.openers[i].refs != 0U && fw.openers[i].task == task)
+        break;
+    }
+    if (i == FAKE_OPENERS) {
+      for (i = 0U; i < FAKE_OPENERS && fw.openers[i].refs != 0U; i++)
+        ;
+      if (i == FAKE_OPENERS) {
+        check(0, "the fake library has room for the openers");
+        return NULL;
+      }
+      fw.openers[i].task = task;
+      fw.openers[i].id = ++fw.next_client_id;
+    }
+    fw.openers[i].refs++;
     return &fw.library;
   }
   /* The driver opens no other library outside init(), which is not run. */
@@ -371,13 +432,27 @@ static struct Library *test_open_library(CONST_STRPTR name, ULONG version)
   return NULL;
 }
 
+/* The last close of a task's opener releases its client id; the firmware
+ * then shuts down a voice session that id still owns. */
 static void test_close_library(struct Library *library)
 {
-  if (library == &fw.library) {
-    fw.library_closes++;
+  struct Task *task = test_find_task(NULL);
+  uint32_t i;
+
+  if (library != &fw.library) {
+    check(0, "the driver closed a library it did not open through the fake");
     return;
   }
-  check(0, "the driver closed a library it did not open through the fake");
+  fw.library_closes++;
+  for (i = 0U; i < FAKE_OPENERS; i++) {
+    if (fw.openers[i].refs != 0U && fw.openers[i].task == task)
+      break;
+  }
+  if (i == FAKE_OPENERS) {
+    check(0, "a task closed zz9k.library without having opened it");
+    return;
+  }
+  fw.openers[i].refs--;
 }
 
 static void test_add_int_server(ULONG int_number, struct Interrupt *interrupt)
@@ -483,9 +558,10 @@ static int test_zz9k_call(ZZ9KRequest *request, ZZ9KMailboxEntry *reply,
   }
   if (request->entry.opcode != ZZ9K_OP_AUDIO_VOICE_UPLOAD)
     return ZZ9K_STATUS_UNSUPPORTED;
-  /* A voice request names the session: only the task that opened it owns
-   * it, as the firmware's voice_session_owned_by check has it. */
-  if (fw.owner != NULL && test_find_task(NULL) != fw.owner) {
+  /* A raw voice request (ZZ9KCall) carries the client id of the calling
+   * task's opener, and the firmware's voice_session_owned_by check wants the
+   * id the session was opened under. */
+  if (fake_refuses(fake_client_id())) {
     fw.refused++;
     return ZZ9K_STATUS_BAD_HANDLE;
   }
@@ -551,26 +627,27 @@ static int zz_ax_voice_open(const ZZ9KVoiceOpenDesc *desc,
   session->heartbeat = 1U;
   session->mapped = 1U;
   fw.read_cursor = 0U;
-  /* The session belongs to the task that opened it. */
-  fw.owner = test_find_task(NULL);
+  /* The Voice API's request carries FAKE_VOICE_API_ID, whoever calls. */
+  fw.owner_id = FAKE_VOICE_API_ID;
+  fw.session_live = 1U;
   return ZZ9K_STATUS_OK;
 }
 
 static int zz_ax_voice_close(ZZ9KVoiceSession *session)
 {
-  if (fw.owner != NULL && test_find_task(NULL) != fw.owner) {
+  if (fake_refuses(FAKE_VOICE_API_ID)) {
     fw.refused++;
     return ZZ9K_STATUS_BAD_HANDLE;
   }
   fw.closes++;
-  fw.owner = NULL;
+  fw.session_live = 0U;
   session->mapped = 0U;
   return ZZ9K_STATUS_OK;
 }
 
 static int zz_ax_voice_reset(ZZ9KVoiceSession *session)
 {
-  if (fw.owner != NULL && test_find_task(NULL) != fw.owner) {
+  if (fake_refuses(FAKE_VOICE_API_ID)) {
     fw.refused++;
     return ZZ9K_STATUS_BAD_HANDLE;
   }
@@ -604,10 +681,7 @@ static uint32_t zz_ax_voice_write(ZZ9KVoiceSession *session,
 static int zz_ax_voice_get_status(ZZ9KVoiceSession *session,
                                   ZZ9KVoiceStatus *status)
 {
-  if (fw.owner != NULL && test_find_task(NULL) != fw.owner) {
-    fw.refused++;
-    return ZZ9K_STATUS_BAD_HANDLE;
-  }
+  /* The library's GetStatus reads shared memory: no mailbox request. */
   if (!fw.state && fx.worker_live == 2U)
     return ZZ9K_STATUS_IO_ERROR;
   memset(status, 0, sizeof(*status));
@@ -1158,14 +1232,28 @@ static int case_load_other_task(void)
   for (i = 0U; i < 3000U; i++)
     sample[i] = (uint8_t)(i * 7U);
   check(alloc_voice() == 0U, "allocation");
-  check(fw.owner == &fx.process.pr_Task,
-        "the worker opened the session, not the AllocAudio task");
+  check(fw.session_live && fw.owner_id == 0U,
+        "the Voice API opens the session as client 0 (%u)",
+        (unsigned)fw.owner_id);
+  check(fake_client_id_of(&fx.process.pr_Task) == 0U,
+        "the worker never opened the library, so its ZZ9KCall requests are"
+        " client 0 too, like the Voice API's (%u)",
+        (unsigned)fake_client_id_of(&fx.process.pr_Task));
+  check(fake_client_id_of(&fx.main_task) != 0U,
+        "the AllocAudio task has a client id of its own (%u)",
+        (unsigned)fake_client_id_of(&fx.main_task));
   fx.driver.voice->session.staging_bytes = 1024U;
   info->ahisi_Type = AHIST_M8S;
   info->ahisi_Address = sample + 64U;
   info->ahisi_Length = 2900U;
 
-  /* The client's own task loads a sound while the card plays. */
+  /* The client's own task, which opened zz9k.library as a client does,
+   * loads a sound while the card plays. */
+  fx.current = &fx.other_task;
+  test_open_library((CONST_STRPTR)ZZ9K_LIBRARY_NAME, 0);
+  fx.current = NULL;
+  check(fake_client_id_of(&fx.other_task) != 0U,
+        "the client's other task has a client id of its own");
   check(intAHIsub_Start(AHISF_PLAY, &fx.audio) == AHIE_OK, "Start");
   fx.current = &fx.other_task;
   heartbeat = fx.driver.voice->session.heartbeat;
@@ -1205,6 +1293,8 @@ static int case_load_other_task(void)
   fx.current = &fx.other_task;
   intAHIsub_UnloadSound(1U, &fx.audio);
   intAHIsub_Stop(AHISF_PLAY, &fx.audio);
+  fx.current = &fx.other_task;
+  test_close_library(&fw.library);
   fx.current = NULL;
   intAHIsub_FreeAudio(&fx.audio);
   check(fw.refused == 0U, "the whole run made no refused voice request");
