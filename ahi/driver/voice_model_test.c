@@ -747,6 +747,114 @@ static void test_stop_at_pass_end(void)
         app.sound_calls);
 }
 
+/* The boundary walk with many channels. Every channel loops a 100-frame
+ * region at a rate that makes a pass of 50, 100, 200, 400 or 800 frames, so
+ * boundaries of different channels interleave and many fall on the same
+ * frame. The SoundFunc calls must come in frame order, channel number
+ * order within a frame. */
+static uint32_t walk_n;
+static uint16_t walk_ch[2048];
+static uint32_t walk_stamp[2048];
+static uint32_t walk_channels;
+static int walk_touch;
+
+static void sound_walk(App *a, uint16_t ch)
+{
+  if (walk_n < 2048U) {
+    walk_ch[walk_n] = ch;
+    walk_stamp[walk_n] = a->m->sound_stamp;
+  }
+  walk_n++;
+  if (walk_touch) {
+    uint16_t o;
+
+    /* Every other channel gets the same next pass again: its boundary does
+     * not move, but the walk's order must be rebuilt after each call. */
+    for (o = 0U; o < walk_channels; o++) {
+      if (o != ch) {
+        set_sound(a->m, o, 0U, 0U, 100, 0);
+      }
+    }
+  }
+}
+
+static void walk_order_case(uint32_t channels, int touch)
+{
+  static const uint32_t hz[5] = {48000U, 24000U, 96000U, 12000U, 6000U};
+  static const uint32_t period[5] = {100U, 200U, 50U, 400U, 800U};
+  uint32_t c;
+  uint32_t t;
+  uint32_t i = 0U;
+
+  setup(channels, 0);
+  vm_start(model, 0U);
+  for (c = 0U; c < channels; c++) {
+    set_sound(model, (uint16_t)c, 0U, 0U, 100, 1);
+    set_freq(model, (uint16_t)c, hz[c % 5U], 1);
+    set_vol(model, (uint16_t)c, 0x10000, 0, 1);
+  }
+  walk_n = 0U;
+  walk_channels = channels;
+  walk_touch = touch;
+  app.sound = sound_walk;
+  vm_tick(model);
+  /* Calls at the IMM start of every channel, then the boundaries before 960. */
+  for (c = 0U; c < channels; c++, i++) {
+    CHECK(i < walk_n && walk_ch[i] == c && walk_stamp[i] == 0U,
+          "walk %u ch touch=%d: start call %u", channels, touch, i);
+  }
+  for (t = 1U; t < 960U; t++) {
+    for (c = 0U; c < channels; c++) {
+      if (t % period[c % 5U] == 0U) {
+        CHECK(i < walk_n && i < 2048U && walk_ch[i] == c &&
+                  walk_stamp[i] == t,
+              "walk %u ch touch=%d: call %u is ch %u at %u, want ch %u at %u",
+              channels, touch, i, i < 2048U ? walk_ch[i] : 0U,
+              i < 2048U ? walk_stamp[i] : 0U, c, t);
+        i++;
+      }
+    }
+  }
+  CHECK(walk_n == i, "walk %u ch touch=%d: %u calls, want %u", channels,
+        touch, walk_n, i);
+  CHECK(model->overload == 0U, "walk overload %u", model->overload);
+}
+
+static void test_walk_order(void)
+{
+  walk_order_case(32U, 0);
+  walk_order_case(32U, 1);
+  walk_order_case(7U, 0);
+  walk_order_case(7U, 1);
+  walk_order_case(1U, 0);
+}
+
+static void sound_count(App *a, uint16_t ch)
+{
+  (void)ch;
+  (void)a;
+}
+
+/* A client that asks for one-frame passes cannot hold the walk: it stops
+ * after VM_MAX_BOUNDARIES_PER_TICK boundaries and counts an overload. */
+static void test_walk_overload_cap(void)
+{
+  setup(2U, 0);
+  vm_start(model, 0U);
+  set_sound(model, 0U, 0U, 0U, 1, 1);
+  set_freq(model, 0U, 48000U, 1);
+  set_vol(model, 0U, 0x10000, 0, 1);
+  set_sound(model, 1U, 0U, 0U, 100, 1);
+  set_freq(model, 1U, 48000U, 1);
+  set_vol(model, 1U, 0x10000, 0, 1);
+  app.sound = sound_count;
+  vm_tick(model);
+  CHECK(model->overload == 1U, "overload %u", model->overload);
+  /* 2 start calls, then one SoundFunc call per walk step until the cap. */
+  CHECK(app.sound_calls == 2U + VM_MAX_BOUNDARIES_PER_TICK,
+        "sound calls %u", app.sound_calls);
+}
+
 int main(void)
 {
   test_imm_set_start_loop();
@@ -768,6 +876,8 @@ int main(void)
   test_quarantine_never_reuses_early();
   test_async_pause_at_pass_end();
   test_stop_at_pass_end();
+  test_walk_order();
+  test_walk_overload_cap();
   if (failures) {
     printf("%d failure(s)\n", failures);
     return 1;

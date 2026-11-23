@@ -71,12 +71,121 @@ void vm_volume_to_engine(int32_t volume, int32_t pan, uint16_t *left,
   *right = (uint16_t)(r > 0xFFFFU ? 0xFFFFU : r);
 }
 
+/* ---- 68060-safe arithmetic ----
+ *
+ * The 68060 does not implement the 64-bit forms of MULU.L and DIVU.L (the
+ * Dh:Dl and Dr:Dq register pairs): each one traps into 68060.library, and so
+ * does every libgcc 64-bit divide. The code below keeps the per-boundary and
+ * per-call paths on instructions every 68020..68060 executes, with results
+ * bit-identical to the plain 64-bit expressions. */
+
+/* a * b without a 32x32->64 multiply: four 16x16 products. */
+static uint64_t vm_mul32(uint32_t a, uint32_t b)
+{
+  uint32_t al = a & 0xFFFFU;
+  uint32_t ah = a >> 16;
+  uint32_t bl = b & 0xFFFFU;
+  uint32_t bh = b >> 16;
+  uint32_t ll;
+  uint32_t lh;
+  uint32_t hl;
+  uint32_t mid;
+  uint32_t lo;
+  uint32_t hi;
+
+  if (((a | b) >> 16) == 0U) {
+    return (uint64_t)(uint32_t)(a * b);
+  }
+  ll = al * bl;
+  lh = al * bh;
+  hl = ah * bl;
+  mid = (ll >> 16) + (lh & 0xFFFFU) + (hl & 0xFFFFU);
+  lo = (ll & 0xFFFFU) | (mid << 16);
+  hi = ah * bh + (lh >> 16) + (hl >> 16) + (mid >> 16);
+  return ((uint64_t)hi << 32) | lo;
+}
+
+/* zz9k_voice_rate_step() with the divide in 32 bits below 64 kHz. */
+static uint32_t vm_rate_step(uint32_t hz)
+{
+  if (hz <= 0xFFFFU) {
+    return (hz << 16) / ZZ9K_VOICE_OUTPUT_RATE;
+  }
+  return zz9k_voice_rate_step(hz);
+}
+
+/* zz9k_voice_pass_frames() without a 64-bit divide on the paths that matter.
+ * With frac below 65536 the forward distance is d * 65536 - frac and the
+ * backward one d * 65536 + frac, d being the whole frames to the bound. Up
+ * to 32 bits that is one 32-bit divide. Up to 48 bits with step below 65536
+ * it is a long division in base 65536 whose partial dividends stay below
+ * step * 65536. Anything else (a step of 65536 or more over a long
+ * distance, or an out-of-range frac) takes the shared function. */
+static uint32_t vm_pass_frames(int backward, uint32_t pos, uint32_t frac,
+                               uint32_t bound, uint32_t step)
+{
+  uint64_t n;
+  uint32_t nl;
+  uint32_t q;
+  uint32_t r;
+
+  if (step == 0U || frac > 0xFFFFU) {
+    return zz9k_voice_pass_frames(backward, pos, frac, bound, step);
+  }
+  if (!backward) {
+    if (pos >= bound) {
+      return 1U;
+    }
+    n = ((uint64_t)(bound - pos) << 16) - frac;
+  } else {
+    if (pos < bound) {
+      return 1U;
+    }
+    n = ((uint64_t)(pos - bound) << 16) + frac;
+  }
+  nl = (uint32_t)n;
+  if ((n >> 32) == 0U) {
+    q = nl / step;
+    r = nl - q * step;
+  } else if (step <= 0xFFFFU) {
+    uint32_t nh = (uint32_t)(n >> 32);
+    uint32_t t;
+    uint32_t q1;
+    uint32_t q0;
+
+    if (nh >= step) {
+      return ZZ9K_VOICE_PASS_NEVER; /* the quotient needs 33 bits or more */
+    }
+    t = (nh << 16) | (nl >> 16);
+    q1 = t / step;
+    t = ((t - q1 * step) << 16) | (nl & 0xFFFFU);
+    q0 = t / step;
+    q = (q1 << 16) | q0;
+    r = t - q0 * step;
+  } else {
+    return zz9k_voice_pass_frames(backward, pos, frac, bound, step);
+  }
+  /* Forward rounds the quotient up, backward counts the frame that crosses
+   * the bound. A result of 2^32 or more is PASS_NEVER, which 32 bits of all
+   * ones already is. */
+  if (backward || r != 0U) {
+    if (q == 0xFFFFFFFFU) {
+      return ZZ9K_VOICE_PASS_NEVER;
+    }
+    q++;
+  }
+  return q;
+}
+
 /* The ideal master gain in 1/65536 of Q8.8 units: master / (channels * 256)
  * in Q8.8 is master * 256 / channels in this scale. */
 static uint64_t vm_gain_hp(uint32_t master_m16, uint32_t channels)
 {
   if (channels == 0U) {
     channels = 1U;
+  }
+  if (master_m16 <= 0xFFFFFFU) {
+    return (master_m16 << 8) / channels;
   }
   return ((uint64_t)master_m16 << 8) / channels;
 }
@@ -115,9 +224,12 @@ void vm_levels(uint32_t master_m16, uint32_t channels, int32_t volume,
   /* The engine's gain is a whole number of 1/256. The voices carry the
    * rounding residual, so the mix is as ahi.device's to within a rounding
    * step, whatever the channel count. */
-  factor = hp / gain;
-  l = (uint32_t)(((uint64_t)l * factor) >> 16);
-  r = (uint32_t)(((uint64_t)r * factor) >> 16);
+  /* hp / gain is at most 2^25 (gain is hp / 65536 rounded up, or the 16-bit
+   * ceiling), so factor fits 32 bits and l * factor needs no 64-bit
+   * multiply instruction. */
+  factor = (hp >> 32) == 0U ? (uint64_t)((uint32_t)hp / gain) : hp / gain;
+  l = (uint32_t)(vm_mul32(l, (uint32_t)factor) >> 16);
+  r = (uint32_t)(vm_mul32(r, (uint32_t)factor) >> 16);
   *left = (uint16_t)(l > 0xFFFFU ? 0xFFFFU : l);
   *right = (uint16_t)(r > 0xFFFFU ? 0xFFFFU : r);
 }
@@ -217,7 +329,7 @@ static void vm_bnd_update(VmChannel *c)
     return;
   }
   bound = c->e_bw ? c->e_ls : c->e_end;
-  k = zz9k_voice_pass_frames(c->e_bw, c->e_idx, c->e_frac, bound, c->e_step);
+  k = vm_pass_frames(c->e_bw, c->e_idx, c->e_frac, bound, c->e_step);
   if (k == ZZ9K_VOICE_PASS_NEVER) {
     return;
   }
@@ -232,7 +344,7 @@ static void vm_mirror_to(VmChannel *c, uint32_t stamp)
   if (c->e_active && c->e_step != 0U) {
     uint32_t dt = stamp - c->e_t0;
     uint64_t pos = ((uint64_t)c->e_idx << 16) | c->e_frac;
-    uint64_t d = (uint64_t)dt * c->e_step;
+    uint64_t d = vm_mul32(dt, c->e_step);
 
     if (c->e_bw) {
       pos = pos > d ? pos - d : 0U;
@@ -252,7 +364,7 @@ static uint32_t vm_engine_wrap(VmChannel *c, uint32_t f)
 {
   uint32_t k = f - c->e_t0;
   uint64_t pos = ((uint64_t)c->e_idx << 16) | c->e_frac;
-  uint64_t d = (uint64_t)k * c->e_step;
+  uint64_t d = vm_mul32(k, c->e_step);
   uint32_t carry;
 
   if (!c->e_bw) {
@@ -387,7 +499,7 @@ static void vm_emit_set(VmModel *m, VmChannel *c, uint32_t ci, uint32_t stamp,
           (flags & ZZ9K_VOICE_SET_RATE) ? hz : 0U, (vl << 16) | vr);
   if (flags & ZZ9K_VOICE_SET_RATE) {
     c->e_hz = hz;
-    c->e_step = zz9k_voice_rate_step(hz);
+    c->e_step = vm_rate_step(hz);
   }
   if (flags & ZZ9K_VOICE_SET_VOLUME) {
     c->e_vl = vl;
@@ -646,6 +758,7 @@ static void vm_reconcile(VmModel *m, VmChannel *c, uint32_t ci,
   if (!(flags & VM_DIRTY)) {
     return;
   }
+  m->bnd_dirty = 1U;
   if (!m->running) {
     if (flags & VM_RESTART) {
       c->e_active = 0U;
@@ -736,7 +849,9 @@ static void vm_drain(VmModel *m, uint32_t stamp, int imm_allowed)
   /* One reconcile per channel after the whole batch, so a SetSound, SetFreq
    * and SetVol sequence makes one START and not a record per call. */
   for (ci = 0U; ci < m->cfg.channels; ci++) {
-    vm_reconcile(m, &m->ch[ci], ci, stamp);
+    if (m->ch[ci].dirty) {
+      vm_reconcile(m, &m->ch[ci], ci, stamp);
+    }
   }
 }
 
@@ -814,34 +929,124 @@ static void vm_process_boundary(VmModel *m, uint32_t ci, int inline_sound)
   }
 }
 
-/* Processes every pass boundary before limit, in frame order. */
+/* The channels whose next boundary lies before the walk limit, as a binary
+ * min-heap ordered by (boundary frame, channel index): the order the walk
+ * processes them in. Every candidate lies within 2^31 frames below the
+ * limit, so the key e_bnd - (limit - 2^31) is below 2^31 exactly for a
+ * candidate and orders like the wrap-aware frame compare. */
+typedef struct VmWalkEntry {
+  uint32_t key;
+  uint32_t ci;
+} VmWalkEntry;
+
+typedef struct VmWalk {
+  uint32_t base;
+  uint32_t n;
+  VmWalkEntry heap[VM_MAX_CHANNELS];
+} VmWalk;
+
+static int vm_walk_ready(const VmWalk *w, const VmChannel *c)
+{
+  return c->e_active && c->e_bnd_valid &&
+         (uint32_t)(c->e_bnd - w->base) < 0x80000000U;
+}
+
+static int vm_walk_less(const VmWalkEntry *a, const VmWalkEntry *b)
+{
+  return a->key < b->key || (a->key == b->key && a->ci < b->ci);
+}
+
+static void vm_walk_push(VmWalk *w, const VmChannel *c, uint32_t ci)
+{
+  VmWalkEntry e;
+  uint32_t i = w->n++;
+
+  e.key = c->e_bnd - w->base;
+  e.ci = ci;
+  while (i > 0U) {
+    uint32_t parent = (i - 1U) >> 1;
+
+    if (!vm_walk_less(&e, &w->heap[parent])) {
+      break;
+    }
+    w->heap[i] = w->heap[parent];
+    i = parent;
+  }
+  w->heap[i] = e;
+}
+
+/* Puts e in the free root slot of the heap and sifts it down. */
+static void vm_walk_sift_root(VmWalk *w, VmWalkEntry e)
+{
+  uint32_t i = 0U;
+
+  for (;;) {
+    uint32_t child = 2U * i + 1U;
+
+    if (child >= w->n) {
+      break;
+    }
+    if (child + 1U < w->n &&
+        vm_walk_less(&w->heap[child + 1U], &w->heap[child])) {
+      child++;
+    }
+    if (!vm_walk_less(&w->heap[child], &e)) {
+      break;
+    }
+    w->heap[i] = w->heap[child];
+    i = child;
+  }
+  w->heap[i] = e;
+}
+
+static void vm_walk_build(VmWalk *w, VmModel *m, uint32_t limit)
+{
+  uint32_t ci;
+
+  w->base = limit - 0x80000000U;
+  w->n = 0U;
+  for (ci = 0U; ci < m->cfg.channels; ci++) {
+    if (vm_walk_ready(w, &m->ch[ci])) {
+      vm_walk_push(w, &m->ch[ci], ci);
+    }
+  }
+  m->bnd_dirty = 0U;
+}
+
+/* Processes every pass boundary before limit, in frame order. Processing a
+ * boundary changes only its own channel's boundary, so the order is built
+ * once and the processed channel, still at the root, is given its new
+ * boundary. A SoundFunc can change any channel through vm_drain; whatever
+ * does marks m->bnd_dirty and the order is built again. */
 static void vm_walk(VmModel *m, uint32_t limit, int inline_sound)
 {
   uint32_t iterations = 0U;
+  VmWalk w;
 
-  for (;;) {
-    uint32_t best = VM_MAX_CHANNELS;
-    uint32_t ci;
+  vm_walk_build(&w, m, limit);
+  while (w.n > 0U) {
+    uint32_t best = w.heap[0].ci;
+    const VmChannel *c = &m->ch[best];
 
-    for (ci = 0U; ci < m->cfg.channels; ci++) {
-      const VmChannel *c = &m->ch[ci];
-
-      if (!c->e_active || !c->e_bnd_valid || vm_sdiff(c->e_bnd, limit) >= 0) {
-        continue;
-      }
-      if (best == VM_MAX_CHANNELS ||
-          vm_sdiff(c->e_bnd, m->ch[best].e_bnd) < 0) {
-        best = ci;
-      }
-    }
-    if (best == VM_MAX_CHANNELS) {
-      return;
-    }
     if (++iterations > VM_MAX_BOUNDARIES_PER_TICK) {
       m->overload++;
       return;
     }
     vm_process_boundary(m, best, inline_sound);
+    if (m->bnd_dirty) {
+      vm_walk_build(&w, m, limit);
+    } else if (vm_walk_ready(&w, c)) {
+      VmWalkEntry e;
+
+      e.key = c->e_bnd - w.base;
+      e.ci = best;
+      vm_walk_sift_root(&w, e);
+    } else {
+      w.n--;
+      if (w.n > 0U) {
+        vm_walk_sift_root(&w, w.heap[w.n]);
+      }
+    }
   }
 }
 
@@ -852,6 +1057,7 @@ void vm_tick(VmModel *m)
   uint32_t s0 = m->now;
   uint64_t t1;
   uint32_t s1;
+  uint32_t freq16;
 
   /* Boundaries exactly at the tick start were reached at the end of the
    * previous mix period in ahi.device: install them before PlayerFunc, but
@@ -863,9 +1069,14 @@ void vm_tick(VmModel *m)
   vm_drain(m, s0, 1);
   vm_run_eos(m, s0);
   /* PlayerFunc may change AHIA_PlayerFreq: the next tick follows it. */
-  t1 = m->t + vm_tick_frames16(m->cfg.hooks.player_freq
-                                   ? m->cfg.hooks.player_freq(m->cfg.hooks.user)
-                                   : 0U);
+  freq16 = m->cfg.hooks.player_freq
+               ? m->cfg.hooks.player_freq(m->cfg.hooks.user)
+               : 0U;
+  if (m->tick_len == 0U || freq16 != m->tick_len_freq) {
+    m->tick_len = vm_tick_frames16(freq16);
+    m->tick_len_freq = freq16;
+  }
+  t1 = m->t + m->tick_len;
   s1 = (uint32_t)(t1 >> 16);
   vm_walk(m, s1, 1);
   m->t = t1;
@@ -960,7 +1171,7 @@ void vm_channel_offsets(const VmModel *m, uint32_t *offsets, uint32_t count)
       if (c->e_active && c->e_step != 0U) {
         uint32_t dt = m->now - c->e_t0;
         uint64_t pos = ((uint64_t)c->e_idx << 16) | c->e_frac;
-        uint64_t d = (uint64_t)dt * c->e_step;
+        uint64_t d = vm_mul32(dt, c->e_step);
 
         pos = c->e_bw ? (pos > d ? pos - d : 0U) : pos + d;
         idx = (uint32_t)(pos >> 16);
@@ -1196,6 +1407,7 @@ int vm_sound_remove(VmModel *m, uint32_t id)
         vm_stop_voice(m, c, ci, m->now);
       }
       c->e_active = 0U;
+      m->bnd_dirty = 1U;
     }
     if (c->next.sound_ok && c->next.sound == id) {
       c->next.sound_ok = 0U;

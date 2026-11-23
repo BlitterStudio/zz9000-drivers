@@ -70,7 +70,8 @@ if [ -f mhi/mhizz9000.library.decode-only ]; then
         "$inst/Docs/mhizz9000.library.decode-only"
 fi
 
-# SDK runtime payloads (built by sdk/build.sh from the pinned zz9000-sdk ref).
+# SDK runtime payloads (built by sdk/build.sh from the firmware SDK;
+# sdk/SDK_REF pins the firmware commit when that script clones it).
 install -Dm644 sdk/out/Libs/zz9k.library        "$inst/Libs/zz9k.library"
 install -Dm644 sdk/out/Libs/aar.library         "$inst/Libs/aar.library"
 install -Dm644 sdk/out/Libs/mpega.library       "$inst/Libs/mpega.library"
@@ -101,8 +102,8 @@ install -Dm644 sdk/out/Docs/aar-run.guide       "$inst/Docs/aar-run.guide"
 
 # Accelerated AmiSSL core libraries, per CPU (optional: built by
 # amissl/build.sh, slow). amissl_v362 serves AmiSSL 5 applications,
-# amissl_v41x AmiSSL 6 ones. Laid out exactly like AmiSSL's own release —
-# Libs/AmiSSL/<cpu>/ — so the installer can pick the build matching the host
+# amissl_v41x AmiSSL 6 ones. Laid out exactly like AmiSSL's own release,
+# Libs/AmiSSL/<cpu>/, so the installer can pick the build matching the host
 # CPU (68020-40 covers 68020/030/040(/080); 68060 its own). An os3-68020 lib
 # on a 68060 traps and emulates 64-bit multiplies in software (~2.5x slower
 # crypto), so this match matters.

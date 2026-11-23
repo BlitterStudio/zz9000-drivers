@@ -1,3 +1,4 @@
+#include <exec/semaphores.h>
 #include <devices/timer.h>
 #include <zz9k/abi.h>
 #include <zz9k/voice.h>
@@ -113,6 +114,17 @@ struct z9ax_voice {
   struct Task *cmd_task;
   int8_t cmd_signal;
   uint32_t unload_pending[VM_MAX_SOUNDS / 32U]; /* UnloadSound, any task */
+  /* LoadSound's copy into the bank. The session belongs to the worker that
+   * opened it, so the worker sends the mailbox requests: the client's task
+   * fills the request under upload_lock and waits for the answer. */
+  struct SignalSemaphore upload_lock; /* one LoadSound at a time */
+  volatile uint8_t up_pending;        /* a request waits for the worker */
+  struct Task *up_task;               /* the waiting task */
+  int8_t up_signal;
+  const uint8_t *up_data;             /* the rest of the sample */
+  uint32_t up_length;                 /* bytes still to copy */
+  uint32_t up_offset;                 /* bank offset of up_data */
+  volatile uint32_t up_status;        /* ZZ9K_STATUS_* of the copy */
   struct AHIEffChannelInfo *channelinfo;        /* SetEffect, any task */
   uint32_t ring_full;          /* writes that took fewer records than asked */
   uint32_t status_failures;

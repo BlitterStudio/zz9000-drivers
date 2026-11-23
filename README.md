@@ -20,12 +20,12 @@ shared-memory layout before SDK services are exposed.
 | [Networking](#networking-and-diagnostics) | `ZZ9000Net.device`, the optional Roadshow `ZZ9000Net` template, `ZZNetReady`, and `ZZNetStats`. |
 | [Board and command-line tools](docs/cli-tools.md) | `ZZDiag`, `ZZFwUpdate`, `ZZScanlines`, `ZZGamma`, and their command-line reference. |
 | [ZZCapture](ZZCapture/README.md) | Native-video timing observation and experimental A4000/C28 capture diagnostics. |
-| [aar-run](https://github.com/BlitterStudio/aar/blob/main/client/run/README.md) | Shell and Workbench launcher for trusted ARM apps, built in the aar repository and shipped with the SDK runtime; on the Zorro III app runtime each app has its own claim. |
+| [aar-run](https://github.com/BlitterStudio/aar/blob/main/client/run/README.md) | Shell and Workbench launcher for trusted ARM apps, built in the aar repository and shipped with the SDK runtime; each app instance gets its own claim. |
 | [ZZ9000AX audio](ahi/README.md) | `zz9000ax.audio`, its AudioModes (software mixing, and hardware mixing of up to 32 channels on the card), and `mhizz9000.library` for PCM playback, recording, and hardware MP3 decoding. |
 | [Poseidon USB](usb-poseidon/README.md) | `zzusbhw.device` for the external Poseidon 4.5 USB stack. |
 | [SD-card boot](sd-boot/README.md) | `zzsd.device` in `BOOT.bin`, which boots an HDF file from the FAT-formatted microSD card. |
 | [ZZTop](ZZTop/README.md) | The `ZZTop` control panel. |
-| [SDK runtime payloads](sdk/README.md) | SDK-built `zz9k.library` 2.41, `aar.library`, `mpega.library`, `zz9k-picture.datatype`, `zz9k-sound.datatype`, SDK tools, ZZPlay, and aar-run. |
+| [SDK runtime payloads](sdk/README.md) | SDK-built `zz9k.library`, `aar.library`, `mpega.library`, `zz9k-picture.datatype`, `zz9k-sound.datatype`, SDK tools, ZZPlay, and aar-run. |
 | [AmiSSL provider](amissl/README.md) | CPU-specific `amissl_v362.library` (AmiSSL 5.27) and `amissl_v41x.library` (AmiSSL 6.1) builds with supported ZZ9000 TLS crypto offload. |
 
 ## Install from a release
@@ -162,6 +162,7 @@ GitHub for a newer firmware release and install the complete bundle.
 | USB | Interrupt and ISO paths require the matched firmware 2.9 and `zzusbhw.device` 2.2 pair. The [USB manual](usb-poseidon/README.md) and [qualification matrix](docs/usb-qualification-matrix.md) record tested devices and pending qualification. |
 | RTG 2.9.0 | `ZZ9000.card` 2.14 requires matching firmware 2.9.0 and its matching bitstream because it changes the Zorro III P96/firmware memory boundary. |
 | Zorro II SDK services | Generation 1 supplies a 64 KiB host heap; generation 2 supplies a 16 KiB host heap and reserves 48 KiB for the audio direct ring. The [SDK manual](sdk/README.md) lists supported payloads, PIP limits, fallbacks, and qualification status. |
+| App runtime | The [SDK manual](sdk/README.md#app-runtime) lists the board, firmware, and library requirements for `aar-run` and `aar.library`. |
 | ZZCapture calibration | `phase`, `check`, `startup`, and `calibrate` remain experimental A4000/C28 diagnostics. Follow the [ZZCapture manual](ZZCapture/README.md) before running them. |
 
 ## Building and releases

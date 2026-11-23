@@ -55,6 +55,13 @@ $cc -std=c99 $cflags -Wall -Wextra -Werror -I"$stage" -I"$driver_dir" \
   "$driver_dir/voice_model.c" "$driver_dir/voice_model_test.c"
 "$build/voice_model_test"
 
+# voice_math_test includes voice_model.c: it pins the 32-bit arithmetic of the
+# model against the plain 64-bit expressions and zz9k/voice.h.
+# shellcheck disable=SC2086
+$cc -std=c99 $cflags -Wall -Wextra -Werror -I"$stage" -I"$driver_dir" \
+  -o "$build/voice_math_test" "$driver_dir/voice_math_test.c"
+"$build/voice_math_test"
+
 # shellcheck disable=SC2086
 $cc -std=c99 $cflags -Wall -Wextra -Werror -I"$stage" -I"$stage/engine" \
   -I"$driver_dir" -o "$build/voice_ref_test" \
