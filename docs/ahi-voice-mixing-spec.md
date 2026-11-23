@@ -86,7 +86,11 @@ record with the model time at which `ahi.device` would have made the change.
   late record is not resynchronised; it is counted as `late`.
 - `AHI_ControlAudio` stop resets the engine and stops the model. Start begins
   a new timeline and every channel that was sounding starts again at its
-  model position.
+  model position. A reset moves the engine on (its playing frame resumes at
+  the staged cursor and it renders silence up to the lead again), so Start
+  and a resync read the status again after the reset and anchor on that
+  one; an anchor from the status before it would sit behind the new horizon
+  and count its first records as `late`.
 
 ## AHI calls and engine records
 

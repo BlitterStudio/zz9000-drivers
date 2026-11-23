@@ -166,6 +166,7 @@ static void worker_run_service(struct z9ax *ahi_data)
 #define FAKE_OPENERS 4U
 #define FAKE_BANK_BYTES (2U * 1024U * 1024U)
 #define FAKE_LEAD 7680U
+#define FAKE_RESET_JUMP 1920U    /* periods the TX ring held, staged but unplayed */
 #define FAKE_SERVICE_FLAGS \
   (ZZ9K_SERVICE_FLAG_AUDIO_VOICE | ZZ9K_SERVICE_FLAG_AUDIO_VOICE_STEREO)
 
@@ -191,6 +192,8 @@ static struct {
   uint32_t playing_frame, horizon;
   uint32_t state;
   uint32_t late;
+  uint32_t late_records;          /* records written stamped before the horizon */
+  uint8_t slot_live;              /* the first records reached the engine */
   uint16_t read_cursor;
   LONG write_budget;           /* records the ring still takes, -1 = no limit */
   uint32_t writes_outside_worker;
@@ -653,6 +656,12 @@ static int zz_ax_voice_reset(ZZ9KVoiceSession *session)
   }
   fw.resets++;
   fw.read_cursor = session->write_cursor;
+  if (fw.slot_live) {
+    /* audio_voice_session_reset: the playing frame resumes at the staged
+     * cursor and the engine renders silence up to the lead again. */
+    fw.playing_frame += FAKE_RESET_JUMP;
+    fw.horizon = fw.playing_frame + FAKE_LEAD;
+  }
   return ZZ9K_STATUS_OK;
 }
 
@@ -663,6 +672,7 @@ static uint32_t zz_ax_voice_write(ZZ9KVoiceSession *session,
 {
   uint32_t staged = zz9k_voice_ring_stage(session, fw.read_cursor, records,
                                           count);
+  uint32_t i;
 
   if (fx.in_hook || fx.in_interrupt)
     fw.writes_outside_worker++;
@@ -673,6 +683,12 @@ static uint32_t zz_ax_voice_write(ZZ9KVoiceSession *session,
   }
   if (staged == 0U)
     return 0U;
+  /* A record stamped before the engine frame is late (audio_voice_render). */
+  for (i = 0U; i < staged; i++) {
+    if ((int32_t)(records[i].stamp - fw.horizon) < 0)
+      fw.late_records++;
+  }
+  fw.slot_live = 1U;
   fw.writes++;
   zz9k_voice_ring_publish(session);
   return staged;
@@ -1066,6 +1082,43 @@ static int case_start_and_ticks(void)
   return fx.failures;
 }
 
+/* Reset moves the engine on: the firmware (audio_voice_session_reset) sets
+ * the playing frame to the staged cursor and renders silence up to the lead
+ * again, so the status the worker read before the reset is stale. Start and
+ * a resync must anchor on a status read after it. */
+static int case_restart_anchor(void)
+{
+  uint32_t i;
+
+  prepare();
+  check(alloc_voice() == 0U, "allocation");
+  check(intAHIsub_Start(AHISF_PLAY, &fx.audio) == AHIE_OK, "Start");
+  for (i = 0U; i < 3U; i++) {
+    advance_card(960U);
+    voice_service(&fx.driver);
+  }
+  check(fw.slot_live, "the first records took the slot live");
+  check(fw.late_records == 0U, "a first Start has no late record (%lu)",
+        (unsigned long)fw.late_records);
+
+  /* Stop, then Start with the slot live: the engine jumps at both resets. */
+  intAHIsub_Stop(AHISF_PLAY, &fx.audio);
+  advance_card(960U);
+  voice_service(&fx.driver);
+  check(intAHIsub_Start(AHISF_PLAY, &fx.audio) == AHIE_OK, "Start again");
+  check(fw.late_records == 0U,
+        "Start after Stop anchors past the horizon the reset made (%lu late)",
+        (unsigned long)fw.late_records);
+  for (i = 0U; i < 3U; i++) {
+    advance_card(960U);
+    voice_service(&fx.driver);
+  }
+  check(fw.late_records == 0U, "and the records after it are on time (%lu)",
+        (unsigned long)fw.late_records);
+  intAHIsub_FreeAudio(&fx.audio);
+  return fx.failures;
+}
+
 static int case_resync(void)
 {
   prepare();
@@ -1076,6 +1129,9 @@ static int case_resync(void)
   voice_service(&fx.driver);
   check(fx.driver.voice->resyncs == 1U, "a stalled worker re-anchors the model");
   check(fw.resets == 2U, "the resync drops the stale records");
+  check(fw.late_records == 0U,
+        "the re-anchored records are not late (%lu)",
+        (unsigned long)fw.late_records);
   intAHIsub_FreeAudio(&fx.audio);
   check(strstr(fx.stats, "resyncs=1 ") != NULL, "the stats count the resync");
   return fx.failures;
@@ -1419,6 +1475,7 @@ int main(void)
   RUN(case_bank_halves);
   RUN(case_start_and_ticks);
   RUN(case_resync);
+  RUN(case_restart_anchor);
   RUN(case_ring_full);
   RUN(case_session_lost);
   RUN(case_load_unload);
@@ -1433,6 +1490,6 @@ int main(void)
     printf("%d failure(s)\n", failures);
     return 20;
   }
-  puts("PASS: voice worker (15 cases)");
+  puts("PASS: voice worker (16 cases)");
   return 0;
 }

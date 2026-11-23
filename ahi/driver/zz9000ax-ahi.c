@@ -1906,6 +1906,17 @@ static uint32_t voice_anchor(const struct z9ax_voice *v)
   return stamp;
 }
 
+/* RESET drops the queued records, and the card moves the engine on: its
+ * playing frame resumes at the staged cursor and it renders silence up to the
+ * lead again, so the horizon jumps ahead of every status read before the
+ * reset. The status is read again here, because an anchor taken from the old
+ * one can sit behind the new horizon and its first records count as late. */
+static void voice_engine_reset(struct z9ax *ahi_data)
+{
+  zz_ax_voice_reset(&ahi_data->voice->session);
+  (void)voice_read_status(ahi_data);
+}
+
 /* Start and Stop, as the worker runs them. RESET drops every queued record
  * before the model is moved, so nothing stamped for the old timeline plays. */
 static void voice_handle_cmd(struct z9ax *ahi_data)
@@ -1921,7 +1932,7 @@ static void voice_handle_cmd(struct z9ax *ahi_data)
       v->status.state == ZZ9K_VOICE_STATE_CLOSED) {
     result = AHIE_UNKNOWN;
   } else if (cmd == Z9AX_VOICE_CMD_START) {
-    zz_ax_voice_reset(&v->session);
+    voice_engine_reset(ahi_data);
     vm_stop(&v->model);
     vm_start(&v->model, voice_anchor(v));
     if (v->start_frame == 0U)
@@ -2030,7 +2041,7 @@ static void voice_service(struct z9ax *ahi_data)
    * sound and its records would be late. Anchor the model to the card again
    * instead of replaying a backlog. */
   if ((int32_t)(v->status.playing_frame - v->model.now) > 0) {
-    zz_ax_voice_reset(&v->session);
+    voice_engine_reset(ahi_data);
     vm_stop(&v->model);
     vm_start(&v->model, voice_anchor(v));
     v->resyncs++;
