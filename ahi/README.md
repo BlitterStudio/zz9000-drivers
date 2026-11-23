@@ -252,6 +252,7 @@ for that pair predates the limiter.
 | 4.32 | Current driver identity and capability-gated recording/fabric implementation. |
 | 4.33 | Added the hardware-mixing AudioModes (`$CAFE0002`, `$CAFE0003`): the card mixes up to 32 channels through its voice engine. Not yet qualified on hardware. |
 | Unreleased | Software modes follow live `ahiac_PlayerFreq`, including tempo changes and fractional-frame intervals, on both legacy and fabric playback. The timer-pair fixture covers 60 to 25 Hz and 59.5 Hz over ten seconds; hardware listening remains pending. |
+| Unreleased | Hardware-mixing modes: `AHI_LoadSound` sends its sample copy through the voice worker, the process that opened the voice session. Before, the copy ran in the client's task, the firmware refused it as a request from another client (status 5, `sample upload failed`), and every load returned `AHIE_UNKNOWN` on the card. The worker copies one staging buffer per pass, so the session heartbeat continues during a large load. The worker harness now models the firmware's session ownership; the card run is pending. |
 
 ## References
 

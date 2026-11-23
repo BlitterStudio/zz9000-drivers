@@ -149,8 +149,17 @@ type.
 - On Zorro III the session uses a 1024-record ring and a 64 KiB staging
   buffer, so a multi-megabyte sample set loads in few round trips.
 - `AHI_LoadSound` copies the sample in staging-sized pieces, then defines the
-  sound in the driver. A failed upload frees the range and returns
-  `AHIE_UNKNOWN`. A full bank returns `AHIE_NOMEM` and prints the free space.
+  sound in the driver. The voice session belongs to the worker process that
+  opened it, and the firmware refuses a voice request from any other task,
+  so the worker sends the copy: the calling task reserves the bank range and
+  checks for a held sound as before, hands the sample to the worker, wakes
+  it and waits for the answer. Two tasks that load at once take turns. The
+  worker copies one staging buffer per pass and reads the status in every
+  pass, so a large sample neither lets the session lapse (it closes after 2
+  seconds without a heartbeat) nor stalls the voices that play meanwhile. A
+  failed upload, or a session the card has closed, frees the range and
+  returns `AHIE_UNKNOWN`. A full bank returns `AHIE_NOMEM` and prints the
+  free space.
 - Loading a sound number that is still loaded replaces it, as `ahi.device`
   replaces its own entry. A voice that plays the old sound stops first.
 - `AHI_UnloadSound` never calls the mailbox, so it cannot break a `Forbid()`.
