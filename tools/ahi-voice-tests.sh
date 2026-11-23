@@ -5,8 +5,10 @@ set -eu
 #
 # voice_model_test drives AHI call sequences through the model and checks the
 # records. voice_ref_test runs the model's records through the real voice
-# engine (the firmware's audio_voice.c, staged with the pinned SDK headers by
-# tools/stage-zz9k-headers.sh) and compares every voice, every output frame,
+# engine (the firmware's audio_voice.c and the local headers it includes, such
+# as the reducer's audio_reduce_table.h for the 2x decimator, staged with the
+# pinned SDK headers by tools/stage-zz9k-headers.sh) and compares every voice,
+# every output frame,
 # against an AHI-semantics frame stepper.
 #
 # The tests need only a C compiler. Without one on the PATH the script runs
