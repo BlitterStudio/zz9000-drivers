@@ -20,7 +20,7 @@ The SDK tools, when installed, are documented in `sdk.guide`.
 | `ZZNetReady` | Returns an AmigaDOS status for a boot script that waits for Ethernet negotiation. |
 | `ZZScanlines` | Changes the active scandoubler scanline mode and parity. |
 | `ZZGamma` | Sets the output gamma filter live, or prints the current gamma. |
-| `aar-run` | Loads trusted ARM ELFs through `aar.library`, one claim per app, and serves their files, console, display, audio and input. Built in the aar repository and shipped with the SDK runtime. |
+| `aar-run` | Loads trusted ARM ELFs through `aar.library`, one claim per instance, and serves their files, console, display, audio and input. Built in the aar repository and shipped with the SDK runtime. |
 
 ## ZZFwUpdate: firmware updates
 
@@ -264,14 +264,18 @@ slider on ZZTop's Display page and press Save.
 SDK packages it with its icon and manual, and the installer puts the command in
 `C:` and `aar.library` in `LIBS:`.
 
-On the ZZ9000 it needs a Zorro III board with app-runtime firmware,
-`zz9k.library` revision 36 or later (the SDK runtime in this release ships
-2.41), and `mmu.library` 41 or later. Without `aar.library`, or with no
-platform behind it, `aar-run` stops with return 20.
+The requirements on the ZZ9000 are in the App runtime section of
+`sdk.guide`. Without `aar.library`, or with no platform behind it, `aar-run`
+stops with return 20. A claim the platform refuses (memory, translation
+tables or shared queue memory) also returns 20 and prints `claim refused:`
+with the reason.
+
+Run `Stack 32768` in the launching Shell first. With a stack under 16 KiB,
+`aar-run` prints a request for it and returns 10.
 
 The command forms (`MAXMEM`, `HOSTMEM`, `WEIGHT`, `AUDIO`, `STATUS`,
 `RELEASE`), Workbench ToolTypes, file access below `ROOT`, console, display,
-audio, break handling and return codes are described in the aar-run manual:
-`aar-run.guide` in the manuals drawer, source
+audio, break handling and the other return codes are described in the aar-run
+manual: `aar-run.guide` in the manuals drawer, source
 [client/run/README.md](https://github.com/BlitterStudio/aar/blob/main/client/run/README.md)
 in the aar repository.

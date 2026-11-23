@@ -737,13 +737,13 @@
                                  (help "The AAR client library: aar-run and other launchers use it to load, run and serve ARM apps on the ZZ9000."))
                         (copyfiles
                            (prompt "Install aar.library into LIBS:")
-                           (help "The AAR client library: aar-run and other launchers use it to load, run and serve ARM apps on the ZZ9000. It needs zz9k.library 36 or later and mmu.library 41 or later.")
+                           (help "The AAR client library: aar-run and other launchers use it to load, run and serve ARM apps on the ZZ9000. See App runtime in Docs/sdk.guide for the board, firmware and library requirements.")
                            (source "Libs/aar.library")
                            (dest "LIBS:")))
                  )
                  (copyfiles
                     (prompt "Install aar.library into LIBS:")
-                    (help "The AAR client library: aar-run and other launchers use it to load, run and serve ARM apps on the ZZ9000. It needs zz9k.library 36 or later and mmu.library 41 or later.")
+                    (help "The AAR client library: aar-run and other launchers use it to load, run and serve ARM apps on the ZZ9000. See App runtime in Docs/sdk.guide for the board, firmware and library requirements.")
                     (source "Libs/aar.library")
                     (dest "LIBS:")))
           ))
@@ -752,7 +752,7 @@
       ; and packages it with its icon and manual, like ZZPlay.
       (copyfiles
          (prompt "Install aar-run into C:")
-         (help "Runs trusted ARM apps on the ZZ9000 through aar.library, which this release includes; the board must be in a Zorro III slot. It restores the public screen when an app exits or faults. See Docs/aar-run.guide for ROOT, Workbench ToolTypes, and file access.")
+         (help "Runs trusted ARM apps on the ZZ9000 through aar.library, which this release includes. See App runtime in Docs/sdk.guide for the board, firmware and library requirements. See Docs/aar-run.guide for ROOT, Workbench ToolTypes, file access and launcher behaviour.")
          (source "Tools/aar-run")
          (infos)
          (dest "C:"))

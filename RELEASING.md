@@ -109,7 +109,11 @@ the drivers installer with the same `vX.Y.Z` tag.
 
    Inspect the drivers LHA. It must include the SDK runtime payloads and
    `amissl_v362.library` plus `amissl_v41x.library` in both
-   `Libs/AmiSSL/68020-40/` and `Libs/AmiSSL/68060/`.
+   `Libs/AmiSSL/68020-40/` and `Libs/AmiSSL/68060/`. The SDK runtime payloads
+   include `Libs/aar.library`, `Tools/aar-run`, `Tools/aar-run.info` and
+   `Docs/aar-run.guide`; `tools/check-release.sh` requires their sources
+   (`sdk/out/Libs/aar.library`, `sdk/out/C/aar-run`, `sdk/out/C/aar-run.info`
+   and `sdk/out/Docs/aar-run.guide`).
 
 ## Tag and packaging rules
 

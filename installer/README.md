@@ -47,9 +47,9 @@ manuals always go in the program drawer.
 | SDK runtime | `Libs/zz9k.library`; `Libs/mpega.library`; `Classes/DataTypes/zz9k-picture.datatype`; `Classes/DataTypes/zz9k-sound.datatype`; `Storage/DataTypes/`; `Tools/zz9k-#?`; `Tools/ZZPlay#?` | Offered only when `zz9k.library` is in the release drawer. Installs `zz9k.library` and optional `mpega.library` in `LIBS:`, the picture and sound datatype classes in `SYS:Classes/DataTypes/`, the JPEG, PNG, WebP, MP3, FLAC, and Ogg Vorbis descriptors in inactive `SYS:Storage/DataTypes/`, the `zz9k-*` commands in `C:`, and `ZZPlay` in the program drawer. Before it replaces a software `mpega.library` (one without "ZZ9000 SDK" in its version string), it copies that file to `LIBS:mpega-software.library`, unless that file already exists. The ZZ9000 `mpega.library` decodes through the saved library when the card cannot. |
 | Accelerated AmiSSL | `Libs/AmiSSL/68020-40/amissl_v362.library`; `Libs/AmiSSL/68060/amissl_v362.library`; `Libs/AmiSSL/68020-40/amissl_v41x.library`; `Libs/AmiSSL/68060/amissl_v41x.library` | Offered only when a staged build and `LIBS:AmiSSL/amissl_v362.library` (AmiSSL 5.27) or `LIBS:AmiSSL/amissl_v41x.library` (AmiSSL 6.1) already exist. Replaces only the installed libraries: backs up each one once, then installs the chosen CPU build in `LIBS:AmiSSL/`. |
 | Control panel | `Tools/ZZTop` | Installs in the program drawer. |
-| Command-line tools | `Tools/ZZScanlines`; `Tools/ZZGamma`; `Tools/ZZFwUpdate`; `Tools/ZZNetStats`; `Tools/ZZDiag`; `Tools/ZZNetReady`; `Tools/aar-run`; `Libs/aar.library` | Installs each command in `C:`. `aar-run` needs `aar.library`, so the script installs it in `LIBS:` first, like `zz9k.library`, and asks before it replaces one that is already there. |
+| Command-line tools | `Tools/ZZScanlines`; `Tools/ZZGamma`; `Tools/ZZFwUpdate`; `Tools/ZZNetStats`; `Tools/ZZDiag`; `Tools/ZZNetReady` | Installs each command in `C:`. |
 | Native capture diagnostic | `Tools/ZZCapture` | Optional. Installs in `C:` when selected. |
-| Trusted app launcher | `Tools/aar-run`; `Tools/aar-run.info`; `Libs/aar.library`; `Docs/aar-run.guide` | Launches trusted ARM apps, one claim each, on a Zorro III card with matching app-runtime firmware. The firmware SDK package supplies `aar-run`, its icon and its manual. It calls the app runtime through `aar.library`, which needs `zz9k.library` 36 or later (the SDK runtime in this release includes `zz9k.library` 2.41) and `mmu.library` 41 or later. |
+| Trusted app launcher | `Libs/aar.library`; `Tools/aar-run`; `Tools/aar-run.info`; `Docs/aar-run.guide` | Launches trusted ARM apps. Installs `aar.library` in `LIBS:` first and asks before replacing an existing copy. It then installs `aar-run` and its icon in `C:`. The firmware SDK package supplies all four files. See the [SDK manual](../sdk/README.md#app-runtime) for app-runtime requirements and `aar-run.guide` for launcher behaviour. |
 
 When `ZZTop` or `ZZPlay` is installed, the final prompt defaults to adding the
 program drawer to `S:User-Startup`. It writes a replaceable `;BEGIN ZZ9000` /
@@ -70,7 +70,10 @@ installed.
 | `sdk.guide` | SDK runtime |
 | `amissl.guide` | Accelerated AmiSSL |
 | `tools.guide` | Command-line tools |
+| `aar-run.guide` | Trusted app launcher |
 | `ZZCapture.guide` | `ZZCapture` |
+| `ZZPlay.guide` | `ZZPlay`, beside the program |
+| `ZZTop.guide` | `ZZTop`, beside the program |
 
 ### Firmware bundles
 
