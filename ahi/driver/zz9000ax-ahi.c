@@ -2122,13 +2122,14 @@ static void voice_write_stats(struct z9ax *ahi_data)
  * model. Returns 1 when the worker can run; on 0 v->reason says why (0 for
  * a local failure) and nothing is left allocated.
  *
- * The worker must not open zz9k.library. The firmware matches the client id
- * of every voice request against the id the session was opened under, and
- * the library stamps two ids: ZZ9KVoiceOpen, Close and Reset (the host's
- * zz9k_call) always send client 0, while ZZ9KCall (zz9k_submit) sends the id
- * of the calling task's opener, 0 for a task that never opened the library.
- * Only a task without an opener has one id for both, and the upload and
- * define requests below are ZZ9KCall. */
+ * The worker does not open zz9k.library. The firmware matches the client id
+ * of every voice request against the id the session was opened under.
+ * Before revision 44 the library stamped two ids: ZZ9KVoiceOpen, Close and
+ * Reset (the host's zz9k_call) always sent client 0, while ZZ9KCall
+ * (zz9k_submit) sent the id of the calling task's opener. From revision 44
+ * both carry the opener's id. A task that never opened the library sends 0
+ * on both with every revision, so the upload and define requests below,
+ * which are ZZ9KCall, always match the session. */
 static int voice_worker_init(struct z9ax *ahi_data)
 {
   struct z9ax_voice *v = ahi_data->voice;
