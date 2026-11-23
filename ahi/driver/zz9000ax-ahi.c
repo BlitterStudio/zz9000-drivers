@@ -1906,6 +1906,17 @@ static uint32_t voice_anchor(const struct z9ax_voice *v)
   return stamp;
 }
 
+/* RESET drops the queued records, and the card moves the engine on: its
+ * playing frame resumes at the staged cursor and it renders silence up to the
+ * lead again, so the horizon jumps ahead of every status read before the
+ * reset. The status is read again here, because an anchor taken from the old
+ * one can sit behind the new horizon and its first records count as late. */
+static void voice_engine_reset(struct z9ax *ahi_data)
+{
+  zz_ax_voice_reset(&ahi_data->voice->session);
+  (void)voice_read_status(ahi_data);
+}
+
 /* Start and Stop, as the worker runs them. RESET drops every queued record
  * before the model is moved, so nothing stamped for the old timeline plays. */
 static void voice_handle_cmd(struct z9ax *ahi_data)
@@ -1921,7 +1932,7 @@ static void voice_handle_cmd(struct z9ax *ahi_data)
       v->status.state == ZZ9K_VOICE_STATE_CLOSED) {
     result = AHIE_UNKNOWN;
   } else if (cmd == Z9AX_VOICE_CMD_START) {
-    zz_ax_voice_reset(&v->session);
+    voice_engine_reset(ahi_data);
     vm_stop(&v->model);
     vm_start(&v->model, voice_anchor(v));
     if (v->start_frame == 0U)
@@ -1938,6 +1949,75 @@ static void voice_handle_cmd(struct z9ax *ahi_data)
     Signal(v->cmd_task, 1UL << v->cmd_signal);
 }
 
+/* One COPY upload through the staging buffer: at most one staging buffer of
+ * whole longwords from the front of the data. Only the worker calls this.
+ * *done is the number of bytes the mailbox took. */
+static int voice_copy_step(struct z9ax_voice *v, uint32_t bank_offset,
+                           const uint8_t *data, uint32_t length,
+                           uint32_t *done)
+{
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  uint32_t chunk_max = v->session.staging_bytes & ~3U;
+  uint32_t chunk = length < chunk_max ? length : chunk_max;
+  int status;
+
+  *done = 0U;
+  if (chunk == 0U)
+    return ZZ9K_STATUS_BAD_REQUEST;
+  memcpy((void *)(uintptr_t)v->session.staging, data, chunk);
+  zz9k_audio_ring_cache_flush(v->session.staging, chunk);
+  status = zz9k_request_audio_voice_upload(
+      &request, v->session.grant.session, ZZ9K_VOICE_UPLOAD_FLAG_COPY, 0U,
+      bank_offset, chunk, 0U, 0U, 0U, 0U);
+  if (status != ZZ9K_STATUS_OK)
+    return status;
+  memset(&reply, 0, sizeof(reply));
+  status = ZZ9KCall(&request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+  if (status == ZZ9K_STATUS_OK)
+    *done = chunk;
+  return status;
+}
+
+/* Ends the waiting LoadSound's request with `status` and wakes its task. */
+static void voice_upload_done(struct z9ax_voice *v, int status)
+{
+  struct Task *task = v->up_task;
+  int8_t signal = v->up_signal;
+
+  v->up_status = (uint32_t)status;
+  v->up_pending = 0U;
+  Signal(task, 1UL << signal);
+}
+
+/* The copy of a LoadSound, one staging buffer per worker pass: the status
+ * read of every pass keeps the heartbeat (each upload call counts as
+ * liveness too) and the model ticks go on, so even a sample of megabytes
+ * neither lets the session lapse nor stalls playing voices. A request that
+ * is not finished wakes the worker again at once through its own signal. */
+static void voice_handle_upload(struct z9ax *ahi_data)
+{
+  struct z9ax_voice *v = ahi_data->voice;
+  uint32_t done = 0U;
+  int status;
+
+  if (!v->up_pending)
+    return;
+  if (!v->session_open || v->session_lost) {
+    voice_upload_done(v, ZZ9K_STATUS_BAD_HANDLE);
+    return;
+  }
+  status = voice_copy_step(v, v->up_offset, v->up_data, v->up_length, &done);
+  v->up_data += done;
+  v->up_offset += done;
+  v->up_length -= done;
+  if (status == ZZ9K_STATUS_OK && v->up_length != 0U) {
+    Signal(FindTask(NULL), 1UL << ahi_data->enable_signal);
+    return;
+  }
+  voice_upload_done(v, status);
+}
+
 /* One worker pass: the command, the heartbeat and the clock, the bank, then
  * as many ticks as are due. */
 static void voice_service(struct z9ax *ahi_data)
@@ -1946,6 +2026,7 @@ static void voice_service(struct z9ax *ahi_data)
   uint32_t budget;
 
   voice_handle_cmd(ahi_data);
+  voice_handle_upload(ahi_data);
   if (!v->session_open)
     return;
   if (!voice_read_status(ahi_data))
@@ -1960,7 +2041,7 @@ static void voice_service(struct z9ax *ahi_data)
    * sound and its records would be late. Anchor the model to the card again
    * instead of replaying a backlog. */
   if ((int32_t)(v->status.playing_frame - v->model.now) > 0) {
-    zz_ax_voice_reset(&v->session);
+    voice_engine_reset(ahi_data);
     vm_stop(&v->model);
     vm_start(&v->model, voice_anchor(v));
     v->resyncs++;
@@ -2039,7 +2120,15 @@ static void voice_write_stats(struct z9ax *ahi_data)
 
 /* The worker's first step: its signal, the timer, the session and the
  * model. Returns 1 when the worker can run; on 0 v->reason says why (0 for
- * a local failure) and nothing is left allocated. */
+ * a local failure) and nothing is left allocated.
+ *
+ * The worker must not open zz9k.library. The firmware matches the client id
+ * of every voice request against the id the session was opened under, and
+ * the library stamps two ids: ZZ9KVoiceOpen, Close and Reset (the host's
+ * zz9k_call) always send client 0, while ZZ9KCall (zz9k_submit) sends the id
+ * of the calling task's opener, 0 for a task that never opened the library.
+ * Only a task without an opener has one id for both, and the upload and
+ * define requests below are ZZ9KCall. */
 static int voice_worker_init(struct z9ax *ahi_data)
 {
   struct z9ax_voice *v = ahi_data->voice;
@@ -2065,6 +2154,9 @@ static void voice_worker_end(struct z9ax *ahi_data, int live)
 {
   struct z9ax_voice *v = ahi_data->voice;
 
+  /* A LoadSound still waiting for the copy cannot be served any more. */
+  if (v->up_pending)
+    voice_upload_done(v, ZZ9K_STATUS_BAD_HANDLE);
   if (live && v->session_open) {
     if (zz_ax_voice_get_status(&v->session, &v->status) != ZZ9K_STATUS_OK)
       v->status_failures++;
@@ -2231,6 +2323,7 @@ static uint32_t voice_alloc_audio(uint8_t mode,
   v->sounds = AudioCtrl->ahiac_Sounds;
   v->cmd = Z9AX_VOICE_CMD_NONE;
   v->cmd_signal = -1;
+  InitSemaphore(&v->upload_lock);
 
   /* Serialize before touching the driver-global zz9k.library base. */
   Forbid();
@@ -2361,31 +2454,56 @@ static void voice_push(struct z9ax *ahi_data, const VmCall *call)
   Enable();
 }
 
-/* COPY-only uploads through the staging buffer, in whole-longword chunks. */
-static int voice_copy(struct z9ax_voice *v, uint32_t bank_offset,
-                      const uint8_t *data, uint32_t length)
+/* Copies the rest of an upload into the bank, the way LoadSound hands it
+ * over. The session belongs to the worker that opened it and the firmware
+ * refuses a request from any other task, so the mailbox requests are the
+ * worker's: LoadSound fills the request under upload_lock, wakes the worker
+ * and waits for its answer. Bank allocation, the held-sound check and the
+ * define stay in the caller. Returns a ZZ9K_STATUS_*. */
+static int voice_upload(struct z9ax *ahi_data, uint32_t bank_offset,
+                        const uint8_t *data, uint32_t length)
 {
-  ZZ9KRequest request;
-  ZZ9KMailboxEntry reply;
-  uint32_t chunk_max = v->session.staging_bytes & ~3U;
+  struct z9ax_voice *v = ahi_data->voice;
+  struct Task *me = FindTask(NULL);
+  struct Task *worker = (struct Task *)ahi_data->worker_process;
+  int8_t signal;
   int status = ZZ9K_STATUS_OK;
 
-  while (length != 0U && status == ZZ9K_STATUS_OK) {
-    uint32_t chunk = length < chunk_max ? length : chunk_max;
+  if (!worker)
+    return ZZ9K_STATUS_BAD_HANDLE;
+  if (worker == me) {
+    /* The worker is the owner: it copies without a hand-over. */
+    while (length != 0U && status == ZZ9K_STATUS_OK) {
+      uint32_t done = 0U;
 
-    memcpy((void *)(uintptr_t)v->session.staging, data, chunk);
-    zz9k_audio_ring_cache_flush(v->session.staging, chunk);
-    status = zz9k_request_audio_voice_upload(
-        &request, v->session.grant.session, ZZ9K_VOICE_UPLOAD_FLAG_COPY, 0U,
-        bank_offset, chunk, 0U, 0U, 0U, 0U);
-    if (status == ZZ9K_STATUS_OK) {
-      memset(&reply, 0, sizeof(reply));
-      status = ZZ9KCall(&request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+      status = voice_copy_step(v, bank_offset, data, length, &done);
+      data += done;
+      bank_offset += done;
+      length -= done;
     }
-    data += chunk;
-    bank_offset += chunk;
-    length -= chunk;
+    return status;
   }
+  signal = AllocSignal(-1);
+  if (signal == -1)
+    return ZZ9K_STATUS_NO_MEMORY;
+  ObtainSemaphore(&v->upload_lock);
+  Forbid();
+  v->up_status = ZZ9K_STATUS_BAD_HANDLE;
+  if (ahi_data->worker_process) {
+    v->up_task = me;
+    v->up_signal = signal;
+    v->up_data = data;
+    v->up_length = length;
+    v->up_offset = bank_offset;
+    v->up_pending = 1U;
+    Signal(worker, 1UL << ahi_data->enable_signal);
+  }
+  Permit();
+  while (v->up_pending)
+    Wait(1UL << signal);
+  status = (int)v->up_status;
+  ReleaseSemaphore(&v->upload_lock);
+  FreeSignal(signal);
   return status;
 }
 
@@ -2487,8 +2605,9 @@ static uint32_t voice_load_sound(struct z9ax *ahi_data, uint16_t sound,
             (unsigned long)vm_bank_free_bytes(&v->model));
     return AHIE_NOMEM;
   }
-  status = (uint32_t)voice_copy(v, bank_offset,
-                                (const uint8_t *)sample->ahisi_Address, bytes);
+  status = (uint32_t)voice_upload(ahi_data, bank_offset,
+                                  (const uint8_t *)sample->ahisi_Address,
+                                  bytes);
   if (status != ZZ9K_STATUS_OK) {
     Forbid();
     vm_bank_release(&v->model, bank_offset, bytes);

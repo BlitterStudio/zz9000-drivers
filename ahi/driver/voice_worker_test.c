@@ -3,13 +3,17 @@
  * driver with a fake voice session and controlled scheduling instead of a
  * card. The fake session answers the six zz9k.library voice calls and the
  * mailbox, the worker's init, service and end steps run by hand, and the
- * test checks what the driver sends and what it refuses.
+ * test checks what the driver sends and what it refuses. Like the firmware,
+ * the fake models the library's client ids (a task gets one by opening
+ * zz9k.library, 0 otherwise; ZZ9KCall carries the caller's id, the Voice
+ * API always 0), ties the voice session to the id it was opened under and
+ * answers a request under any other id with BAD_HANDLE.
  *
  * Run on AmigaOS or with vamos --cpu=68020 -m 8000 --stack-size=64 (the
  * default vamos memory is too small for the fixture). In the
  * amigadev/crosstools:m68k-amigaos image, from ahi/driver after build.sh
  * staged zz9k-headers:
- *   m68k-amigaos-gcc voice_worker_test.c voice_model.c asmfuncs.s -O1 -m68020 \
+ *   m68k-amigaos-gcc voice_worker_test.c voice_model.c asmfuncs.s -O1 -m68020-60 \
  *       -I../../include -Izz9k-headers -Wl,--allow-multiple-definition \
  *       -o voice_worker_test -ldebug
  *   vamos --cpu=68020 -m 8000 --stack-size=64 voice_worker_test
@@ -114,8 +118,55 @@ static int zz_ax_voice_get_status(ZZ9KVoiceSession *session,
 #include "zz9000ax-ahi.c"
 #undef _start
 
+/* The worker's steps run as the worker task: the fake firmware, like the
+ * real one, ties a voice session to the task that opened it. */
+static void worker_task_enter(struct Task **saved);
+static void worker_task_leave(struct Task *saved);
+
+static int worker_run_init(struct z9ax *ahi_data)
+{
+  struct Task *saved;
+  int ready;
+
+  worker_task_enter(&saved);
+  ready = voice_worker_init(ahi_data);
+  worker_task_leave(saved);
+  return ready;
+}
+
+static void worker_run_end(struct z9ax *ahi_data, int live)
+{
+  struct Task *saved;
+
+  worker_task_enter(&saved);
+  voice_worker_end(ahi_data, live);
+  worker_task_leave(saved);
+}
+
+static void worker_run_service(struct z9ax *ahi_data)
+{
+  struct Task *saved;
+
+  worker_task_enter(&saved);
+  voice_service(ahi_data);
+  worker_task_leave(saved);
+}
+
+/* Every case and test_wait below reach the worker through these. */
+#define voice_worker_init(ahi_data) worker_run_init(ahi_data)
+#define voice_worker_end(ahi_data, live) worker_run_end(ahi_data, live)
+#define voice_service(ahi_data) worker_run_service(ahi_data)
+
+/* zz9k.library's Voice API (ZZ9KVoiceOpen, Close, Reset) sends its requests
+ * through the host's zz9k_call, which never stamps the client id of the
+ * context into the request (only zz9k_submit does, and so ZZ9KCall and
+ * ZZ9KCallAsync): they always carry client 0. */
+#define FAKE_VOICE_API_ID 0U
+
+#define FAKE_OPENERS 4U
 #define FAKE_BANK_BYTES (2U * 1024U * 1024U)
 #define FAKE_LEAD 7680U
+#define FAKE_RESET_JUMP 1920U    /* periods the TX ring held, staged but unplayed */
 #define FAKE_SERVICE_FLAGS \
   (ZZ9K_SERVICE_FLAG_AUDIO_VOICE | ZZ9K_SERVICE_FLAG_AUDIO_VOICE_STEREO)
 
@@ -141,9 +192,20 @@ static struct {
   uint32_t playing_frame, horizon;
   uint32_t state;
   uint32_t late;
+  uint32_t late_records;          /* records written stamped before the horizon */
+  uint8_t slot_live;              /* the first records reached the engine */
   uint16_t read_cursor;
   LONG write_budget;           /* records the ring still takes, -1 = no limit */
   uint32_t writes_outside_worker;
+  uint16_t owner_id;              /* client id the voice session belongs to */
+  uint8_t session_live;
+  struct {
+    struct Task *task;
+    uint16_t id;
+    uint32_t refs;
+  } openers[FAKE_OPENERS];        /* zz9k.library's opener records */
+  uint16_t next_client_id;
+  uint32_t refused;               /* voice requests from a task but the owner */
   uint32_t query_caps;
   uint8_t mhi_mode;            /* 0 none, 1 legacy MHI, 2 fabric MHI */
   struct Node mhi_node;
@@ -155,6 +217,8 @@ static struct {
   struct AHIAudioCtrlDrv audio;
   struct Process process;
   struct Task main_task;
+  struct Task other_task;         /* a second client task */
+  struct Task *current;           /* the running task, NULL = main_task */
   struct Hook player;
   struct Hook sound;
   uint32_t players, sounds;
@@ -201,7 +265,18 @@ static void check(int condition, const char *message, ...)
 static struct Task *test_find_task(CONST_STRPTR name)
 {
   (void)name;
-  return &fx.main_task;
+  return fx.current ? fx.current : &fx.main_task;
+}
+
+static void worker_task_enter(struct Task **saved)
+{
+  *saved = fx.current;
+  fx.current = &fx.process.pr_Task;
+}
+
+static void worker_task_leave(struct Task *saved)
+{
+  fx.current = saved;
 }
 
 /* The worker runs whenever a task blocks on it: a Start or Stop waits for
@@ -225,8 +300,10 @@ static ULONG test_wait(ULONG signals)
     /* The handshake of AllocAudio: the worker publishes its result first. */
     if (voice_worker_init(driver))
       fx.worker_live = 1;
-    else
+    else {
+      voice_worker_end(driver, 0);
       driver->worker_process = NULL;
+    }
     return signals;
   }
   if (driver->worker_process)
@@ -301,13 +378,56 @@ static struct Process *test_create_process(Tag first_tag, ...)
   return &fx.process;
 }
 
+/* zz9k.library hands every task that opened it a client id of its own, and
+ * a task that never opened it calls with id 0, as the library does. */
+static uint16_t fake_client_id_of(const struct Task *task)
+{
+  uint32_t i;
+
+  for (i = 0U; i < FAKE_OPENERS; i++) {
+    if (fw.openers[i].refs != 0U && fw.openers[i].task == task)
+      return fw.openers[i].id;
+  }
+  return 0U;
+}
+
+static uint16_t fake_client_id(void)
+{
+  return fake_client_id_of(test_find_task(NULL));
+}
+
+/* The firmware's voice_session_owned_by: the request's client id must be the
+ * one the session was opened under. */
+static int fake_refuses(uint16_t client_id)
+{
+  return fw.session_live && client_id != fw.owner_id;
+}
+
 static struct Library *test_open_library(CONST_STRPTR name, ULONG version)
 {
+  struct Task *task = test_find_task(NULL);
+  uint32_t i;
+
   if (strcmp((const char *)name, ZZ9K_LIBRARY_NAME) == 0) {
     fw.library_opens++;
     if (!fw.library_present)
       return NULL;
     fw.library.lib_Revision = fw.revision;
+    for (i = 0U; i < FAKE_OPENERS; i++) {
+      if (fw.openers[i].refs != 0U && fw.openers[i].task == task)
+        break;
+    }
+    if (i == FAKE_OPENERS) {
+      for (i = 0U; i < FAKE_OPENERS && fw.openers[i].refs != 0U; i++)
+        ;
+      if (i == FAKE_OPENERS) {
+        check(0, "the fake library has room for the openers");
+        return NULL;
+      }
+      fw.openers[i].task = task;
+      fw.openers[i].id = ++fw.next_client_id;
+    }
+    fw.openers[i].refs++;
     return &fw.library;
   }
   /* The driver opens no other library outside init(), which is not run. */
@@ -315,13 +435,27 @@ static struct Library *test_open_library(CONST_STRPTR name, ULONG version)
   return NULL;
 }
 
+/* The last close of a task's opener releases its client id; the firmware
+ * then shuts down a voice session that id still owns. */
 static void test_close_library(struct Library *library)
 {
-  if (library == &fw.library) {
-    fw.library_closes++;
+  struct Task *task = test_find_task(NULL);
+  uint32_t i;
+
+  if (library != &fw.library) {
+    check(0, "the driver closed a library it did not open through the fake");
     return;
   }
-  check(0, "the driver closed a library it did not open through the fake");
+  fw.library_closes++;
+  for (i = 0U; i < FAKE_OPENERS; i++) {
+    if (fw.openers[i].refs != 0U && fw.openers[i].task == task)
+      break;
+  }
+  if (i == FAKE_OPENERS) {
+    check(0, "a task closed zz9k.library without having opened it");
+    return;
+  }
+  fw.openers[i].refs--;
 }
 
 static void test_add_int_server(ULONG int_number, struct Interrupt *interrupt)
@@ -427,6 +561,13 @@ static int test_zz9k_call(ZZ9KRequest *request, ZZ9KMailboxEntry *reply,
   }
   if (request->entry.opcode != ZZ9K_OP_AUDIO_VOICE_UPLOAD)
     return ZZ9K_STATUS_UNSUPPORTED;
+  /* A raw voice request (ZZ9KCall) carries the client id of the calling
+   * task's opener, and the firmware's voice_session_owned_by check wants the
+   * id the session was opened under. */
+  if (fake_refuses(fake_client_id())) {
+    fw.refused++;
+    return ZZ9K_STATUS_BAD_HANDLE;
+  }
   upload = (const ZZ9KAudioVoiceUploadPayload *)request->entry.payload.inline_data;
   flags = zz9k_get_be32(upload->flags);
   bank_offset = zz9k_get_be32(upload->bank_offset);
@@ -489,20 +630,38 @@ static int zz_ax_voice_open(const ZZ9KVoiceOpenDesc *desc,
   session->heartbeat = 1U;
   session->mapped = 1U;
   fw.read_cursor = 0U;
+  /* The Voice API's request carries FAKE_VOICE_API_ID, whoever calls. */
+  fw.owner_id = FAKE_VOICE_API_ID;
+  fw.session_live = 1U;
   return ZZ9K_STATUS_OK;
 }
 
 static int zz_ax_voice_close(ZZ9KVoiceSession *session)
 {
+  if (fake_refuses(FAKE_VOICE_API_ID)) {
+    fw.refused++;
+    return ZZ9K_STATUS_BAD_HANDLE;
+  }
   fw.closes++;
+  fw.session_live = 0U;
   session->mapped = 0U;
   return ZZ9K_STATUS_OK;
 }
 
 static int zz_ax_voice_reset(ZZ9KVoiceSession *session)
 {
+  if (fake_refuses(FAKE_VOICE_API_ID)) {
+    fw.refused++;
+    return ZZ9K_STATUS_BAD_HANDLE;
+  }
   fw.resets++;
   fw.read_cursor = session->write_cursor;
+  if (fw.slot_live) {
+    /* audio_voice_session_reset: the playing frame resumes at the staged
+     * cursor and the engine renders silence up to the lead again. */
+    fw.playing_frame += FAKE_RESET_JUMP;
+    fw.horizon = fw.playing_frame + FAKE_LEAD;
+  }
   return ZZ9K_STATUS_OK;
 }
 
@@ -513,6 +672,7 @@ static uint32_t zz_ax_voice_write(ZZ9KVoiceSession *session,
 {
   uint32_t staged = zz9k_voice_ring_stage(session, fw.read_cursor, records,
                                           count);
+  uint32_t i;
 
   if (fx.in_hook || fx.in_interrupt)
     fw.writes_outside_worker++;
@@ -523,6 +683,12 @@ static uint32_t zz_ax_voice_write(ZZ9KVoiceSession *session,
   }
   if (staged == 0U)
     return 0U;
+  /* A record stamped before the engine frame is late (audio_voice_render). */
+  for (i = 0U; i < staged; i++) {
+    if ((int32_t)(records[i].stamp - fw.horizon) < 0)
+      fw.late_records++;
+  }
+  fw.slot_live = 1U;
   fw.writes++;
   zz9k_voice_ring_publish(session);
   return staged;
@@ -531,6 +697,7 @@ static uint32_t zz_ax_voice_write(ZZ9KVoiceSession *session,
 static int zz_ax_voice_get_status(ZZ9KVoiceSession *session,
                                   ZZ9KVoiceStatus *status)
 {
+  /* The library's GetStatus reads shared memory: no mailbox request. */
   if (!fw.state && fx.worker_live == 2U)
     return ZZ9K_STATUS_IO_ERROR;
   memset(status, 0, sizeof(*status));
@@ -915,6 +1082,43 @@ static int case_start_and_ticks(void)
   return fx.failures;
 }
 
+/* Reset moves the engine on: the firmware (audio_voice_session_reset) sets
+ * the playing frame to the staged cursor and renders silence up to the lead
+ * again, so the status the worker read before the reset is stale. Start and
+ * a resync must anchor on a status read after it. */
+static int case_restart_anchor(void)
+{
+  uint32_t i;
+
+  prepare();
+  check(alloc_voice() == 0U, "allocation");
+  check(intAHIsub_Start(AHISF_PLAY, &fx.audio) == AHIE_OK, "Start");
+  for (i = 0U; i < 3U; i++) {
+    advance_card(960U);
+    voice_service(&fx.driver);
+  }
+  check(fw.slot_live, "the first records took the slot live");
+  check(fw.late_records == 0U, "a first Start has no late record (%lu)",
+        (unsigned long)fw.late_records);
+
+  /* Stop, then Start with the slot live: the engine jumps at both resets. */
+  intAHIsub_Stop(AHISF_PLAY, &fx.audio);
+  advance_card(960U);
+  voice_service(&fx.driver);
+  check(intAHIsub_Start(AHISF_PLAY, &fx.audio) == AHIE_OK, "Start again");
+  check(fw.late_records == 0U,
+        "Start after Stop anchors past the horizon the reset made (%lu late)",
+        (unsigned long)fw.late_records);
+  for (i = 0U; i < 3U; i++) {
+    advance_card(960U);
+    voice_service(&fx.driver);
+  }
+  check(fw.late_records == 0U, "and the records after it are on time (%lu)",
+        (unsigned long)fw.late_records);
+  intAHIsub_FreeAudio(&fx.audio);
+  return fx.failures;
+}
+
 static int case_resync(void)
 {
   prepare();
@@ -925,6 +1129,9 @@ static int case_resync(void)
   voice_service(&fx.driver);
   check(fx.driver.voice->resyncs == 1U, "a stalled worker re-anchors the model");
   check(fw.resets == 2U, "the resync drops the stale records");
+  check(fw.late_records == 0U,
+        "the re-anchored records are not late (%lu)",
+        (unsigned long)fw.late_records);
   intAHIsub_FreeAudio(&fx.audio);
   check(strstr(fx.stats, "resyncs=1 ") != NULL, "the stats count the resync");
   return fx.failures;
@@ -1068,6 +1275,111 @@ static int case_mid_load_failure(void)
   return fx.failures;
 }
 
+/* The mailbox copy of a LoadSound belongs to the worker, the task that
+ * opened the session, whichever task AHI calls LoadSound from. */
+static int case_load_other_task(void)
+{
+  struct AHISampleInfo *info = (struct AHISampleInfo *)sample;
+  uint32_t heartbeat;
+  uint32_t rc;
+  uint32_t i;
+
+  prepare();
+  for (i = 0U; i < 3000U; i++)
+    sample[i] = (uint8_t)(i * 7U);
+  check(alloc_voice() == 0U, "allocation");
+  check(fw.session_live && fw.owner_id == 0U,
+        "the Voice API opens the session as client 0 (%u)",
+        (unsigned)fw.owner_id);
+  check(fake_client_id_of(&fx.process.pr_Task) == 0U,
+        "the worker never opened the library, so its ZZ9KCall requests are"
+        " client 0 too, like the Voice API's (%u)",
+        (unsigned)fake_client_id_of(&fx.process.pr_Task));
+  check(fake_client_id_of(&fx.main_task) != 0U,
+        "the AllocAudio task has a client id of its own (%u)",
+        (unsigned)fake_client_id_of(&fx.main_task));
+  fx.driver.voice->session.staging_bytes = 1024U;
+  info->ahisi_Type = AHIST_M8S;
+  info->ahisi_Address = sample + 64U;
+  info->ahisi_Length = 2900U;
+
+  /* The client's own task, which opened zz9k.library as a client does,
+   * loads a sound while the card plays. */
+  fx.current = &fx.other_task;
+  test_open_library((CONST_STRPTR)ZZ9K_LIBRARY_NAME, 0);
+  fx.current = NULL;
+  check(fake_client_id_of(&fx.other_task) != 0U,
+        "the client's other task has a client id of its own");
+  check(intAHIsub_Start(AHISF_PLAY, &fx.audio) == AHIE_OK, "Start");
+  fx.current = &fx.other_task;
+  heartbeat = fx.driver.voice->session.heartbeat;
+  rc = intAHIsub_LoadSound(0U, AHIST_SAMPLE, info, &fx.audio);
+  fx.current = NULL;
+  check(rc == AHIE_OK, "LoadSound from a task that is not the worker (%lu)",
+        (unsigned long)rc);
+  check(fw.refused == 0U, "the card refused %lu voice requests from a task"
+        " that does not own the session", (unsigned long)fw.refused);
+  check(fw.uploads == 3U, "2900 bytes go in three chunks (%lu)",
+        (unsigned long)fw.uploads);
+  check(memcmp(fw.bank, sample + 64U, 2900U) == 0, "the bank holds the sample");
+  check(fx.driver.voice->session.heartbeat - heartbeat >= 3U,
+        "the worker keeps the heartbeat during the upload (%lu)",
+        (unsigned long)(fx.driver.voice->session.heartbeat - heartbeat));
+  check(fx.driver.voice->model.sounds[0].used == VM_SOUND_LOADED,
+        "the sound is defined");
+
+  /* Replacing it from the AllocAudio task, then a stereo sound from the
+   * other task, with the first still in the bank. */
+  info->ahisi_Length = 100U;
+  rc = intAHIsub_LoadSound(0U, AHIST_SAMPLE, info, &fx.audio);
+  check(rc == AHIE_OK, "LoadSound from the AllocAudio task");
+  info->ahisi_Type = AHIST_S16S;
+  fx.current = &fx.other_task;
+  rc = intAHIsub_LoadSound(1U, AHIST_SAMPLE, info, &fx.audio);
+  fx.current = NULL;
+  check(rc == AHIE_OK, "a stereo LoadSound from a second task");
+  check(fw.refused == 0U, "still no refused voice request");
+  /* A client hook on the worker that loads a sound is the owner itself: it
+   * copies without waiting on itself. */
+  fx.current = &fx.process.pr_Task;
+  rc = intAHIsub_LoadSound(2U, AHIST_SAMPLE, info, &fx.audio);
+  fx.current = NULL;
+  check(rc == AHIE_OK, "LoadSound called on the worker task");
+  check(fw.refused == 0U, "the worker's own load is not refused");
+  fx.current = &fx.other_task;
+  intAHIsub_UnloadSound(1U, &fx.audio);
+  intAHIsub_Stop(AHISF_PLAY, &fx.audio);
+  fx.current = &fx.other_task;
+  test_close_library(&fw.library);
+  fx.current = NULL;
+  intAHIsub_FreeAudio(&fx.audio);
+  check(fw.refused == 0U, "the whole run made no refused voice request");
+  check(fw.closes == 1U, "FreeAudio closes the session once");
+  return fx.failures;
+}
+
+/* A load that cannot reach a live session ends instead of waiting. */
+static int case_load_after_loss(void)
+{
+  struct AHISampleInfo *info = (struct AHISampleInfo *)sample;
+  uint32_t rc;
+
+  prepare();
+  check(alloc_voice() == 0U, "allocation");
+  fw.state = ZZ9K_VOICE_STATE_CLOSED;
+  voice_service(&fx.driver);
+  check(fx.driver.voice->session_lost, "the card closed the session");
+  info->ahisi_Type = AHIST_M8S;
+  info->ahisi_Address = sample + 64U;
+  info->ahisi_Length = 100U;
+  rc = intAHIsub_LoadSound(0U, AHIST_SAMPLE, info, &fx.audio);
+  check(rc == AHIE_UNKNOWN, "LoadSound after the loss is an error");
+  check(vm_bank_free_bytes(&fx.driver.voice->model) == FAKE_BANK_BYTES,
+        "its bank range is given back");
+  intAHIsub_FreeAudio(&fx.audio);
+  return fx.failures;
+}
+
 static int case_getattr(void)
 {
   check(intAHIsub_GetAttr(AHIDB_MaxChannels, 0, 0, voice_tags, &fx.audio) ==
@@ -1163,10 +1475,13 @@ int main(void)
   RUN(case_bank_halves);
   RUN(case_start_and_ticks);
   RUN(case_resync);
+  RUN(case_restart_anchor);
   RUN(case_ring_full);
   RUN(case_session_lost);
   RUN(case_load_unload);
   RUN(case_mid_load_failure);
+  RUN(case_load_other_task);
+  RUN(case_load_after_loss);
   RUN(case_effects);
   RUN(case_getattr);
   RUN(case_mhi);
@@ -1175,6 +1490,6 @@ int main(void)
     printf("%d failure(s)\n", failures);
     return 20;
   }
-  puts("PASS: voice worker (13 cases)");
+  puts("PASS: voice worker (16 cases)");
   return 0;
 }

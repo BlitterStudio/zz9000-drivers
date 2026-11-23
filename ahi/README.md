@@ -67,8 +67,11 @@ AHI lists two more ZZ9000AX modes: `ZZ9000AX:Hardware mixing, 32 voices`
 (`$CAFE0002`) and `ZZ9000AX:Hardware mixing, 32 voices, interpolated`
 (`$CAFE0003`). In these modes `ahi.device` mixes nothing. The driver maps each
 AHI channel to a voice of the card's wavetable voice engine, so the channel
-count costs no 68k time: a 32-channel module needs the same 68k work as a
-4-channel one, apart from the replayer itself.
+count costs no mixing time on the 68k: the 68k work is the channel model, one
+small update per pass boundary of a voice, so a looping sound costs an update
+per loop pass and nothing per output frame. The model is built for 68020 to
+68060 (`-m68020-60`) and keeps the 64-bit multiplies and divides, which the
+68060 does not execute, off that path.
 
 The modes are for programs that set a sound, a frequency and a volume on each
 channel: HippoPlayer's module players, DeliTracker 2 with the AHI NotePlayer,
@@ -251,7 +254,10 @@ for that pair predates the limiter.
 | 4.29 | Raised `AHIDB_MaxChannels` from 1 to 8. |
 | 4.32 | Current driver identity and capability-gated recording/fabric implementation. |
 | 4.33 | Added the hardware-mixing AudioModes (`$CAFE0002`, `$CAFE0003`): the card mixes up to 32 channels through its voice engine. Not yet qualified on hardware. |
-| Unreleased | Software modes follow live `ahiac_PlayerFreq`, including tempo changes and fractional-frame intervals, on both legacy and fabric playback. The timer-pair fixture covers 60 to 25 Hz and 59.5 Hz over ten seconds; hardware listening remains pending. |
+| Unreleased | Software modes follow live `ahiac_PlayerFreq`, including tempo changes and fractional-frame intervals, on both legacy and fabric playback. The timer-pair fixture covers 60 to 25 Hz and 59.5 Hz over ten seconds. On the card, ZZAXVoiceTest S4 measured `PlayerFunc` within 0.25% of `AHIA_PlayerFreq` from 25 to 125 Hz in `$CAFE0000`. |
+| Unreleased | Hardware-mixing modes: the 68k work per pass boundary no longer grows with the channel count and no longer uses 64-bit `mulu.l`/`divu.l` forms. `vm_walk` keeps the channels due before the walk limit in a heap, so a boundary costs one heap update instead of a scan of every channel (on ZZAXVoiceTest S2 with 32 voices a 20 ms tick has about 192 boundaries). The boundary arithmetic (`k * step`, the pass length) and the level math use exact 32-bit paths, and the driver is built with `-m68020-60`; before it used `-m68020`, whose inline 64-bit multiplies trap into `68060.library` on a 68060. Records, `SoundFunc` order and stamps are unchanged. On a 68060 the model's S2 tick fell from 7.0 ms to 2.6 ms of CPU time per 20 ms (4 voices: 351 to 160 us). Before, S2 left a priority-0 task about a sixth of the CPU in `$CAFE0002`, and in `$CAFE0003` the extra bus stalls while the card rendered took the 68k to 100%: the priority-110 worker kept the client from ever stopping the session, and the mouse froze. |
+| Unreleased | Hardware-mixing modes: `AHI_LoadSound` sends its sample copy through the voice worker, the process that opened the voice session. Before, the copy ran in the client's task, the firmware refused it as a request from another client (status 5, `sample upload failed`), and every load returned `AHIE_UNKNOWN` on the card. The worker does not open `zz9k.library` itself: the library sends the Voice API calls as client 0 and `ZZ9KCall` as the caller's opener id, and only a task without an opener has one id for both. The worker copies one staging buffer per pass, so the session heartbeat continues during a large load. Start and the resync read the status again after the engine reset before they anchor the timeline; before, a Stop followed by Start counted its first records as `late` (13 in ZZAXVoiceTest S8). The worker harness models the library's client ids, the firmware's session ownership and the engine jump of a reset. |
+| Hardware-mixing card run | A4000 with a 68060, ZZ9000 on Zorro III, AmigaOS 3.2, with this driver and firmware that renders one voice period per main-loop pass. ZZAXVoiceTest `SCENARIO ALL` passed 10 of 10 in `$CAFE0000`, `$CAFE0002` and `$CAFE0003`, with no `late`, underrun or resync in any session, and nothing wrong by ear. HippoPlayer 2.67 played 8, 16 and 32 channel modules in `$CAFE0002`; a 16 channel module played beside ZZPlay's MPEG-2 video with direct AX audio. Play16 in a hardware-mixing mode gets the `AHIST_DYNAMICSAMPLE` refusal on the debug channel. Zorro II is not qualified. |
 
 ## References
 
