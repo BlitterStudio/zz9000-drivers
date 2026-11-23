@@ -62,7 +62,11 @@ if [ -n "$sdk_src" ] && [ -d "$sdk_src/include/zz9k" ]; then
   if [ -f "$engine_src/audio_voice.c" ] && [ -f "$engine_src/audio_voice.h" ]; then
     mkdir -p "$stage_dir/engine"
     cp "$engine_src/audio_voice.c" "$engine_src/audio_voice.h" "$stage_dir/engine/"
-    for inc in $(sed -n 's/^#include "\([^"]*\)".*$/\1/p' "$engine_src/audio_voice.c"); do
+    local_includes=$(sed -n 's/^#include "\([^"]*\)".*$/\1/p' "$engine_src/audio_voice.c")
+    # Read from a here-document, not a pipe: the exit below must end this
+    # script, and a piped loop would run in a subshell.
+    while IFS= read -r inc; do
+      [ -n "$inc" ] || continue
       if [ ! -f "$stage_dir/engine/$inc" ]; then
         if [ ! -f "$engine_src/$inc" ]; then
           echo "ERROR: audio_voice.c includes $inc, which is not beside it in the SDK checkout." >&2
@@ -70,7 +74,9 @@ if [ -n "$sdk_src" ] && [ -d "$sdk_src/include/zz9k" ]; then
         fi
         cp "$engine_src/$inc" "$stage_dir/engine/"
       fi
-    done
+    done <<EOF
+$local_includes
+EOF
   fi
 fi
 
