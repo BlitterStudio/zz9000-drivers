@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build the zz9000-sdk user-facing payloads (zz9k.library, aar.library, the accelerated
+# Build the user-facing SDK payloads (zz9k.library, aar.library, the accelerated
 # mpega.library, the picture and sound datatypes + descriptors, the end-user CLI tools
 # and the aar-run launcher)
 # by driving the SDK's own Docker build, then collect them into sdk/out/ in
@@ -10,8 +10,8 @@
 # script extracts the subtree. Sources stay in the firmware repo
 # ("pull, not move"); this repo only consumes build products.
 #
-# Run on the host (the SDK build script invokes Docker itself — do not wrap
-# this in tools/amiga-docker.sh).
+# Run on the host; the SDK build script invokes Docker itself. Do not wrap
+# this in tools/amiga-docker.sh.
 #
 # Environment:
 #   ZZ9000_SDK      use an existing SDK-subtree root (e.g.
@@ -22,7 +22,7 @@
 #   SDK_REPO        git URL of the firmware repository used when cloning
 #   SDK_SKIP_BUILD  set to 1 to only collect payloads from an SDK tree
 #                   already built+packaged (Windows hosts: run the SDK's
-#                   scripts\*.ps1 first — Git Bash mangles the .sh variant's
+#                   scripts\*.ps1 first; Git Bash mangles the .sh variant's
 #                   docker paths)
 set -eu
 
@@ -83,7 +83,8 @@ cp "$pkg/C/ZZPlay.info" "$out/C/"
 cp "$pkg/Docs/ZZPlay.guide"         "$out/Docs/"
 cp "$pkg/Docs/ZZPlay-project.info" "$out/Docs/"
 # aar-run is the reference AAR launcher, built from the aar checkout that the
-# SDK pins (sdk/AAR_REF) and packaged by the SDK like ZZPlay: a Shell command
+# firmware SDK pins (sdk/AAR_REF in the firmware repository) and packaged by
+# the SDK like ZZPlay: a Shell command
 # the installer puts in C:, with its Workbench icon and manual. The static
 # libaarserve.a and its header stay in the SDK package's Developer/ drawer;
 # they are for programs that embed the serving loop, not for the installer.
