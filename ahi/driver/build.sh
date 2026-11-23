@@ -67,5 +67,5 @@ vasmm68k_mot -quiet -phxass -Fhunk -m68020 -o PREFSFILE.uncut prefsfile.a -I"$nd
 # remove 0x28 bytes from the start
 dd bs=1 skip=40 if=PREFSFILE.uncut of=ZZ9000AX
 
-m68k-amigaos-gcc zz9000ax-ahi.c voice_model.c asmfuncs.s -O3 -I../../include -Izz9k-headers -Wl,-Map,zz9000ax.audio.map -o zz9000ax.audio -Wall -Wextra -Wno-unused-parameter -nostartfiles -m68020 -ldebug
+m68k-amigaos-gcc zz9000ax-ahi.c voice_model.c asmfuncs.s -O3 -I../../include -Izz9k-headers -Wl,-Map,zz9000ax.audio.map -o zz9000ax.audio -Wall -Wextra -Wno-unused-parameter -nostartfiles -m68020-60 -ldebug
 ../../tools/check-link-map.sh zz9000ax.audio zz9000ax.audio.map

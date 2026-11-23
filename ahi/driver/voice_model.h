@@ -194,6 +194,14 @@ typedef struct VmModel {
   uint32_t overload;      /* walks cut short by VM_MAX_BOUNDARIES_PER_TICK */
   uint32_t ticks;
   uint32_t sound_stamp;   /* pass start of the SoundFunc call in progress */
+  /* Set by anything that changes a channel's pass boundary outside the
+   * boundary being processed (a reconcile, a sound removal); vm_walk then
+   * rebuilds its boundary order. */
+  uint8_t bnd_dirty;
+  /* Last vm_tick_frames16 result of a tick: PlayerFreq rarely changes, so
+   * the 64-bit divide runs only when it does. tick_len 0 is empty. */
+  uint32_t tick_len_freq;
+  uint64_t tick_len;
 
   /* Bank allocator. */
   VmFree free_list[VM_MAX_FREE_RANGES];

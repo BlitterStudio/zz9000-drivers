@@ -13,7 +13,7 @@
  * default vamos memory is too small for the fixture). In the
  * amigadev/crosstools:m68k-amigaos image, from ahi/driver after build.sh
  * staged zz9k-headers:
- *   m68k-amigaos-gcc voice_worker_test.c voice_model.c asmfuncs.s -O1 -m68020 \
+ *   m68k-amigaos-gcc voice_worker_test.c voice_model.c asmfuncs.s -O1 -m68020-60 \
  *       -I../../include -Izz9k-headers -Wl,--allow-multiple-definition \
  *       -o voice_worker_test -ldebug
  *   vamos --cpu=68020 -m 8000 --stack-size=64 voice_worker_test

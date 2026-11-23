@@ -78,7 +78,17 @@ record with the model time at which `ahi.device` would have made the change.
   `PlayerFunc` and `SoundFunc` run 160 to 320 ms ahead of what is heard.
 - Every pass boundary is predicted with the engine's own arithmetic
   (`zz9k_voice_pass_frames` in `zz9k/voice.h`), and `SoundFunc` is called at
-  that frame, in frame order.
+  that frame, in frame order. The walk keeps the channels that have a
+  boundary due in a heap ordered by (frame, channel number), so a boundary
+  costs one heap update whatever the channel count; a call made inside
+  `SoundFunc` can move any channel's boundary, and the heap is built again
+  then. The model uses 32-bit arithmetic on that path (a 64-bit product from
+  16-bit pieces, a long division in base 65536 for the pass length),
+  bit-identical to `zz9k_voice_pass_frames`, because the 68060 does not
+  execute the 64-bit `mulu.l` and `divu.l` forms. A rate of 48 kHz or more
+  over a pass longer than 65535 frames still takes the shared function and
+  its libgcc divide. The driver is built with `-m68020-60` for the same
+  reason.
 - Stamps never decrease. The worker is the only writer of the command ring.
 - A worker that could not run for longer than the lead is behind the sound.
   It resets the engine, which drops the queued records, and starts the model
@@ -204,6 +214,10 @@ whole), `ticks` (`PlayerFunc` calls), `frames` (model frames run),
   against the firmware's engine source (`voice_ref_test.c`): every voice, on
   every frame, against an independent AHI frame stepper, for random call
   sequences with up to 32 channels.
+- `voice_math_test.c` (also in `make ahi-voice-tests`) compares the model's
+  32-bit arithmetic with the plain 64-bit expressions and with
+  `zz9k_voice_pass_frames`: the edges of every fast path and millions of
+  random operands.
 - `ahi/driver/voice_worker_test.c` compiles the driver with a fake voice
   session and runs the worker's steps by hand under vamos. Its header comment
   has the build and run commands.
