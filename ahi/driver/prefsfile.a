@@ -10,6 +10,7 @@ FALSE		EQU	0
 * AHI developer includes put a driver's own tags; the NDK copy has no name.
 AHIDB_ZZVoice		EQU	AHI_TagBase+500
 AHIDB_ZZVoiceLinear	EQU	AHI_TagBase+501
+AHIDB_ZZVoiceCubic	EQU	AHI_TagBase+502
 
 BEG:
 
@@ -65,8 +66,9 @@ ModeB:
 *** AUDM
 * Hardware mixing: ahi.device mixes nothing, the driver maps every AHI
 * channel to a voice of the card's voice engine. The private tags name the
-* mode for the driver (AHIDB_ZZVoice nearest, AHIDB_ZZVoiceLinear interpolated);
-* their data is the mode id.
+* mode for the driver (AHIDB_ZZVoice nearest, AHIDB_ZZVoiceLinear interpolated,
+* AHIDB_ZZVoiceCubic 4-point cubic interpolation); their data is the mode id.
+* $CAFE0000 to $CAFE0003 keep their meaning: $CAFE0004 is a separate mode.
 ModeC:
 	dc.l	ID_AUDM
 	dc.l	.e-.s
@@ -103,6 +105,26 @@ ModeD:
 	dc.l	AHIDB_Name,		.name-.s
 	dc.l	TAG_DONE
 .name	dc.b	"ZZ9000AX:Hardware mixing, 32 voices, interpolated",0
+.e
+	CNOP	0,2
+
+*** AUDM
+ModeE:
+	dc.l	ID_AUDM
+	dc.l	.e-.s
+.s
+	dc.l	AHIDB_AudioID,		$CAFE0004
+	dc.l	AHIDB_ZZVoiceCubic,	$CAFE0004
+
+	dc.l	AHIDB_Volume,		TRUE
+	dc.l	AHIDB_Panning,		TRUE
+	dc.l	AHIDB_Stereo,		TRUE
+	dc.l	AHIDB_HiFi,			FALSE
+	dc.l	AHIDB_PingPong,		TRUE
+
+	dc.l	AHIDB_Name,		.name-.s
+	dc.l	TAG_DONE
+.name	dc.b	"ZZ9000AX:Hardware mixing, 32 voices, cubic",0
 .e
 	CNOP	0,2
 

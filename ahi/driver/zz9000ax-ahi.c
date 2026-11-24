@@ -1421,8 +1421,9 @@ static void fabric_lease_release(struct z9ax *ahi_data)
 
 /* ---- Hardware-mixing modes (voice engine) ----
  *
- * AudioModes $CAFE0002 (nearest sample) and $CAFE0003 (linear interpolation)
- * carry the private tags AHIDB_ZZVoice and AHIDB_ZZVoiceLinear, whose data
+ * AudioModes $CAFE0002 (nearest sample), $CAFE0003 (linear interpolation)
+ * and $CAFE0004 (4-point cubic interpolation) carry the private tags
+ * AHIDB_ZZVoice, AHIDB_ZZVoiceLinear and AHIDB_ZZVoiceCubic, whose data
  * is the mode id. ahi.device hands a mode's tag list to AllocAudio and
  * GetAttr, so the driver reads the mode from it. In these modes AllocAudio
  * returns no AHISF_* flag: ahi.device mixes nothing and forwards every
@@ -1435,6 +1436,14 @@ static void fabric_lease_release(struct z9ax *ahi_data)
  * LoadSound copies into the card bank through the session's staging buffer.
  * Nothing falls back to software mixing: when the engine cannot be used,
  * AllocAudio fails and the debug channel says why.
+ *
+ * The firmware says what its engine can do in the features word of the
+ * status block (ZZ9K_VOICE_FEATURE_*), read once after the open. Every
+ * Start sends CONFIG records for what is advertised and nothing else: a ramp
+ * of ahiac_AntiClickSamples frames (0 is off, 512 is the most) when RAMP is
+ * advertised, the soft limiter when LIMITER is, and in $CAFE0004 the cubic
+ * default interpolation. $CAFE0004 is refused when the firmware does not
+ * advertise cubic interpolation: it never plays another interpolation.
  */
 
 /* AHIDB_UserBase is in the AHI developer includes, not in every NDK. */
@@ -1443,9 +1452,11 @@ static void fabric_lease_release(struct z9ax *ahi_data)
 #endif
 #define AHIDB_ZZVoice       (AHIDB_UserBase + 0)
 #define AHIDB_ZZVoiceLinear (AHIDB_UserBase + 1)
+#define AHIDB_ZZVoiceCubic  (AHIDB_UserBase + 2)
 
 #define Z9AX_VOICE_ID_NEAREST 0xCAFE0002UL
 #define Z9AX_VOICE_ID_LINEAR  0xCAFE0003UL
+#define Z9AX_VOICE_ID_CUBIC   0xCAFE0004UL
 
 #define Z9AX_VOICE_REASON_LIBRARY   1U
 #define Z9AX_VOICE_REASON_REVISION  2U
@@ -1454,6 +1465,13 @@ static void fabric_lease_release(struct z9ax *ahi_data)
 #define Z9AX_VOICE_REASON_OPEN      5U
 #define Z9AX_VOICE_REASON_MEMORY    6U
 #define Z9AX_VOICE_REASON_VIEW      7U
+#define Z9AX_VOICE_REASON_FEATURES  8U
+
+/* What $CAFE0004 needs: the CONFIG record, the default interpolation and
+ * cubic reading itself. */
+#define Z9AX_VOICE_NEED_CUBIC \
+  (ZZ9K_VOICE_FEATURE_CONFIG | ZZ9K_VOICE_FEATURE_VOICE_INTERP | \
+   ZZ9K_VOICE_FEATURE_CUBIC)
 
 /* The sample bank on the card. ENV:ZZ9K_AHI_BANK (KiB) overrides the
  * request; the card may grant less (see voice_open_session). */
@@ -1490,23 +1508,32 @@ int zz_ax_voice_get_status(ZZ9KVoiceSession *session, ZZ9KVoiceStatus *status);
 #endif
 static void voice_timer_end(struct z9ax *ahi_data);
 
-/* The mode the tag list names: Z9AX_VOICE_NEAREST, Z9AX_VOICE_LINEAR, or
- * Z9AX_VOICE_NONE for a software mode (or no tag list). */
+/* The mode the tag list names: Z9AX_VOICE_NEAREST, Z9AX_VOICE_LINEAR,
+ * Z9AX_VOICE_CUBIC, or Z9AX_VOICE_NONE for a software mode (or no tag
+ * list). A private tag with another mode's id is no hardware mode. */
 static uint8_t voice_mode_of(const struct TagItem *tags)
 {
   const struct TagItem *tag;
   uint32_t id = 0U;
+  uint32_t want = 0U;
   uint8_t mode = Z9AX_VOICE_NONE;
 
   for (tag = tags; tag != NULL && tag->ti_Tag != TAG_DONE; tag++) {
-    if (tag->ti_Tag == AHIDB_ZZVoice || tag->ti_Tag == AHIDB_ZZVoiceLinear) {
-      id = tag->ti_Data;
-      mode = (uint8_t)(tag->ti_Tag == AHIDB_ZZVoice ? Z9AX_VOICE_NEAREST
-                                                    : Z9AX_VOICE_LINEAR);
+    if (tag->ti_Tag == AHIDB_ZZVoice) {
+      mode = Z9AX_VOICE_NEAREST;
+      want = Z9AX_VOICE_ID_NEAREST;
+    } else if (tag->ti_Tag == AHIDB_ZZVoiceLinear) {
+      mode = Z9AX_VOICE_LINEAR;
+      want = Z9AX_VOICE_ID_LINEAR;
+    } else if (tag->ti_Tag == AHIDB_ZZVoiceCubic) {
+      mode = Z9AX_VOICE_CUBIC;
+      want = Z9AX_VOICE_ID_CUBIC;
+    } else {
+      continue;
     }
+    id = tag->ti_Data;
   }
-  if ((mode == Z9AX_VOICE_NEAREST && id != Z9AX_VOICE_ID_NEAREST) ||
-      (mode == Z9AX_VOICE_LINEAR && id != Z9AX_VOICE_ID_LINEAR)) {
+  if (mode != Z9AX_VOICE_NONE && id != want) {
     mode = Z9AX_VOICE_NONE;
   }
   return mode;
@@ -1529,6 +1556,9 @@ static const char *voice_reason_text(uint8_t reason)
       return "the card has no memory for the sample bank";
     case Z9AX_VOICE_REASON_VIEW:
       return "the voice engine refused the sample views";
+    case Z9AX_VOICE_REASON_FEATURES:
+      return "the firmware does not advertise cubic interpolation"
+             " (the cubic mode never falls back to another one)";
     default:
       return "unknown";
   }
@@ -1695,6 +1725,20 @@ static int voice_define_view(struct z9ax_voice *v, uint32_t view)
   return ZZ9KCall(&request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
 }
 
+/* The features word of the status block. GetStatus invalidates the CPU
+ * cache over the block, so the extended words read after it are current.
+ * 0 when the status cannot be read, which reads as no features. */
+static uint32_t voice_read_features(struct z9ax_voice *v)
+{
+  ZZ9KVoiceStatus status;
+  ZZ9KVoiceExtStatus ext;
+
+  if (zz_ax_voice_get_status(&v->session, &status) != ZZ9K_STATUS_OK)
+    return 0U;
+  zz9k_voice_ext_status_read(v->session.status, &ext);
+  return ext.features;
+}
+
 /* Opens the voice session and starts the model. Returns 1, or 0 with
  * v->reason and v->open_status set. A NO_MEMORY answer halves the bank down
  * to its floor, then drops the large host buffers for the defaults. */
@@ -1745,6 +1789,13 @@ static int voice_open_session(struct z9ax *ahi_data)
       v->session.grant.bank_bytes < 4U) {
     v->reason = Z9AX_VOICE_REASON_OPEN;
     v->open_status = ZZ9K_STATUS_INTERNAL_ERROR;
+    goto fail;
+  }
+  v->features = voice_read_features(v);
+  if (v->cubic &&
+      (v->features & Z9AX_VOICE_NEED_CUBIC) != Z9AX_VOICE_NEED_CUBIC) {
+    v->reason = Z9AX_VOICE_REASON_FEATURES;
+    v->open_status = ZZ9K_STATUS_UNSUPPORTED;
     goto fail;
   }
   v->lead = v->session.grant.lead_frames;
@@ -1917,6 +1968,33 @@ static void voice_engine_reset(struct z9ax *ahi_data)
   (void)voice_read_status(ahi_data);
 }
 
+/* Moves the model to a new timeline at the anchor. The CONFIG records of
+ * the start carry what the firmware advertises and nothing more: the ramp
+ * from ahiac_AntiClickSamples (the mode runs at the engine rate, so a sample
+ * is an engine frame; 0 is off), the soft limiter, and in the cubic mode the
+ * default interpolation. */
+static void voice_model_start(struct z9ax *ahi_data)
+{
+  struct z9ax_voice *v = ahi_data->voice;
+  uint32_t ramp = 0U;
+  uint32_t limiter = 0U;
+
+  if ((v->features & ZZ9K_VOICE_FEATURE_CONFIG) != 0U) {
+    if ((v->features & ZZ9K_VOICE_FEATURE_RAMP) != 0U)
+      ramp = ahi_data->audioctrl->ahiac_AntiClickSamples;
+    if ((v->features & ZZ9K_VOICE_FEATURE_LIMITER) != 0U)
+      limiter = 1U;
+  }
+  if (ramp > VM_MAX_RAMP_FRAMES)
+    ramp = VM_MAX_RAMP_FRAMES;
+  v->ramp_frames = ramp;
+  v->limiter = limiter;
+  vm_stop(&v->model);
+  vm_set_quality(&v->model, ramp, limiter,
+                 v->cubic ? ZZ9K_VOICE_INTERP_CUBIC : 0U);
+  vm_start(&v->model, voice_anchor(v));
+}
+
 /* Start and Stop, as the worker runs them. RESET drops every queued record
  * before the model is moved, so nothing stamped for the old timeline plays. */
 static void voice_handle_cmd(struct z9ax *ahi_data)
@@ -1933,8 +2011,7 @@ static void voice_handle_cmd(struct z9ax *ahi_data)
     result = AHIE_UNKNOWN;
   } else if (cmd == Z9AX_VOICE_CMD_START) {
     voice_engine_reset(ahi_data);
-    vm_stop(&v->model);
-    vm_start(&v->model, voice_anchor(v));
+    voice_model_start(ahi_data);
     if (v->start_frame == 0U)
       v->start_frame = v->model.now;
     v->playing = 1U;
@@ -1950,33 +2027,53 @@ static void voice_handle_cmd(struct z9ax *ahi_data)
 }
 
 /* One COPY upload through the staging buffer: at most one staging buffer of
- * whole longwords from the front of the data. Only the worker calls this.
- * *done is the number of bytes the mailbox took. */
-static int voice_copy_step(struct z9ax_voice *v, uint32_t bank_offset,
-                           const uint8_t *data, uint32_t length,
-                           uint32_t *done)
+ * whole longwords from the front of the stream (zero lead, sample, zero
+ * tail). Only the worker calls this. The stream moves on by what the mailbox
+ * took. */
+static int voice_copy_step(struct z9ax_voice *v, struct z9ax_voice_stream *s)
 {
   ZZ9KRequest request;
   ZZ9KMailboxEntry reply;
+  uint8_t *stage = (uint8_t *)(uintptr_t)v->session.staging;
   uint32_t chunk_max = v->session.staging_bytes & ~3U;
-  uint32_t chunk = length < chunk_max ? length : chunk_max;
+  uint32_t zl = s->lead < chunk_max ? s->lead : chunk_max;
+  uint32_t room = chunk_max - zl;
+  uint32_t dl = s->length < room ? s->length : room;
+  uint32_t zt = 0U;
+  uint32_t chunk;
   int status;
 
-  *done = 0U;
+  if (dl == s->length) {
+    room -= dl;
+    zt = s->tail < room ? s->tail : room;
+  }
+  chunk = zl + dl + zt;
   if (chunk == 0U)
     return ZZ9K_STATUS_BAD_REQUEST;
-  memcpy((void *)(uintptr_t)v->session.staging, data, chunk);
+  memset(stage, 0, zl);
+  memcpy(stage + zl, s->data, dl);
+  memset(stage + zl + dl, 0, zt);
   zz9k_audio_ring_cache_flush(v->session.staging, chunk);
   status = zz9k_request_audio_voice_upload(
       &request, v->session.grant.session, ZZ9K_VOICE_UPLOAD_FLAG_COPY, 0U,
-      bank_offset, chunk, 0U, 0U, 0U, 0U);
+      s->offset, chunk, 0U, 0U, 0U, 0U);
   if (status != ZZ9K_STATUS_OK)
     return status;
   memset(&reply, 0, sizeof(reply));
   status = ZZ9KCall(&request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
-  if (status == ZZ9K_STATUS_OK)
-    *done = chunk;
+  if (status == ZZ9K_STATUS_OK) {
+    s->offset += chunk;
+    s->lead -= zl;
+    s->data += dl;
+    s->length -= dl;
+    s->tail -= zt;
+  }
   return status;
+}
+
+static uint32_t voice_stream_left(const struct z9ax_voice_stream *s)
+{
+  return s->lead + s->length + s->tail;
 }
 
 /* Ends the waiting LoadSound's request with `status` and wakes its task. */
@@ -1998,7 +2095,6 @@ static void voice_upload_done(struct z9ax_voice *v, int status)
 static void voice_handle_upload(struct z9ax *ahi_data)
 {
   struct z9ax_voice *v = ahi_data->voice;
-  uint32_t done = 0U;
   int status;
 
   if (!v->up_pending)
@@ -2007,11 +2103,8 @@ static void voice_handle_upload(struct z9ax *ahi_data)
     voice_upload_done(v, ZZ9K_STATUS_BAD_HANDLE);
     return;
   }
-  status = voice_copy_step(v, v->up_offset, v->up_data, v->up_length, &done);
-  v->up_data += done;
-  v->up_offset += done;
-  v->up_length -= done;
-  if (status == ZZ9K_STATUS_OK && v->up_length != 0U) {
+  status = voice_copy_step(v, &v->up);
+  if (status == ZZ9K_STATUS_OK && voice_stream_left(&v->up) != 0U) {
     Signal(FindTask(NULL), 1UL << ahi_data->enable_signal);
     return;
   }
@@ -2042,8 +2135,7 @@ static void voice_service(struct z9ax *ahi_data)
    * instead of replaying a backlog. */
   if ((int32_t)(v->status.playing_frame - v->model.now) > 0) {
     voice_engine_reset(ahi_data);
-    vm_stop(&v->model);
-    vm_start(&v->model, voice_anchor(v));
+    voice_model_start(ahi_data);
     v->resyncs++;
   }
   /* While the client holds AHIsub_Disable its hooks wait, as the software
@@ -2097,7 +2189,7 @@ static char *voice_text_field(char *p, const char *name, uint32_t value)
 static void voice_write_stats(struct z9ax *ahi_data)
 {
   struct z9ax_voice *v = ahi_data->voice;
-  char text[256];
+  char text[320];
   char *p = text;
 
   p = voice_text_field(p, "late", v->status.late);
@@ -2110,6 +2202,9 @@ static void voice_write_stats(struct z9ax *ahi_data)
   p = voice_text_field(p, "resyncs", v->resyncs);
   p = voice_text_field(p, "fifodrops", v->model.fifo_drops);
   p = voice_text_field(p, "recorddrops", v->model.out_drops);
+  p = voice_text_field(p, "features", v->features);
+  p = voice_text_field(p, "ramp", v->ramp_frames);
+  p = voice_text_field(p, "limiter", v->limiter);
   p = voice_text_field(p, "overload", v->model.overload);
   p[-1] = '\0';
   SetVar((CONST_STRPTR)"ZZ9K_AHI_VOICE_STATS", (STRPTR)text, -1L,
@@ -2319,6 +2414,7 @@ static uint32_t voice_alloc_audio(uint8_t mode,
   ahi_data->voice_mode = mode;
   ahi_data->voice = v;
   v->linear = (uint8_t)(mode == Z9AX_VOICE_LINEAR);
+  v->cubic = (uint8_t)(mode == Z9AX_VOICE_CUBIC);
   v->zorro = Z9AXBase->zorro_version;
   v->channels = AudioCtrl->ahiac_Channels;
   v->sounds = AudioCtrl->ahiac_Sounds;
@@ -2390,7 +2486,8 @@ static uint32_t voice_alloc_audio(uint8_t mode,
   KPrintF((CONST_STRPTR)"ZZ9000AX: hardware mixing: %lu channels, %s"
           " interpolation, bank %lu bytes, lead %lu frames, ring %lu"
           " records%s.\n",
-          (unsigned long)v->channels, v->linear ? "linear" : "nearest",
+          (unsigned long)v->channels,
+          v->cubic ? "cubic" : (v->linear ? "linear" : "nearest"),
           (unsigned long)v->session.grant.bank_bytes, (unsigned long)v->lead,
           (unsigned long)v->session.grant.ring_records,
           v->stereo_ok ? ", stereo samples" : "");
@@ -2467,21 +2564,23 @@ static int voice_upload(struct z9ax *ahi_data, uint32_t bank_offset,
   struct z9ax_voice *v = ahi_data->voice;
   struct Task *me = FindTask(NULL);
   struct Task *worker = (struct Task *)ahi_data->worker_process;
+  struct z9ax_voice_stream stream;
   int8_t signal;
   int status = ZZ9K_STATUS_OK;
 
+  /* The data starts a guard above the allocation and the stream ends a
+   * guard past the sample rounded up to a longword. */
+  stream.offset = bank_offset - VM_GUARD_BYTES;
+  stream.lead = VM_GUARD_BYTES;
+  stream.data = data;
+  stream.length = length;
+  stream.tail = ((length + 3U) & ~3U) - length + VM_GUARD_BYTES;
   if (!worker)
     return ZZ9K_STATUS_BAD_HANDLE;
   if (worker == me) {
     /* The worker is the owner: it copies without a hand-over. */
-    while (length != 0U && status == ZZ9K_STATUS_OK) {
-      uint32_t done = 0U;
-
-      status = voice_copy_step(v, bank_offset, data, length, &done);
-      data += done;
-      bank_offset += done;
-      length -= done;
-    }
+    while (voice_stream_left(&stream) != 0U && status == ZZ9K_STATUS_OK)
+      status = voice_copy_step(v, &stream);
     return status;
   }
   signal = AllocSignal(-1);
@@ -2493,9 +2592,7 @@ static int voice_upload(struct z9ax *ahi_data, uint32_t bank_offset,
   if (ahi_data->worker_process) {
     v->up_task = me;
     v->up_signal = signal;
-    v->up_data = data;
-    v->up_length = length;
-    v->up_offset = bank_offset;
+    v->up = stream;
     v->up_pending = 1U;
     Signal(worker, 1UL << ahi_data->enable_signal);
   }

@@ -47,7 +47,9 @@ MODE,SCENARIO,CHANNELS/K/N,SECONDS/K/N,CYCLES/K/N
 `MODE` and `SCENARIO` can also be positional, for example
 `ZZAXVoiceTest $CAFE0003 S7`. Mode IDs are hexadecimal, with an optional
 `$` or `0x` prefix. The default is `$CAFE0002`, hardware mixing with nearest
-sampling. `$CAFE0003` selects interpolated hardware mixing. A software mode,
+sampling. `$CAFE0003` selects interpolated hardware mixing and `$CAFE0004`
+cubic hardware mixing, which needs firmware that advertises cubic
+interpolation. A software mode,
 such as `$CAFE0000`, runs the same scenarios through ahi.device's mixer.
 The program opens ahi.device version 4 through `AHI_NO_UNIT`, then requests
 48 kHz, the channels and sounds needed by the scenario, and its hooks.

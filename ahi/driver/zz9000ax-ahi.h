@@ -77,18 +77,31 @@ struct z9ax {
   struct z9ax_voice *voice;
 };
 
-/* Hardware-mixing modes ($CAFE0002 and $CAFE0003). ahi.device does no mixing
- * there: the driver maps every AHI channel to a voice of the card's voice
- * engine (see docs/ahi-voice-mixing-spec.md). Everything below is owned by
- * the voice worker process, except the call FIFO inside the model and the
+/* Hardware-mixing modes ($CAFE0002, $CAFE0003 and $CAFE0004). ahi.device does
+ * no mixing there: the driver maps every AHI channel to a voice of the card's
+ * voice engine (see docs/ahi-voice-mixing-spec.md). Everything below is owned
+ * by the voice worker process, except the call FIFO inside the model and the
  * fields marked for other tasks. */
 #define Z9AX_VOICE_NONE    0U
 #define Z9AX_VOICE_NEAREST 1U
 #define Z9AX_VOICE_LINEAR  2U
+#define Z9AX_VOICE_CUBIC   3U
 
 #define Z9AX_VOICE_CMD_NONE  0U
 #define Z9AX_VOICE_CMD_START 1U
 #define Z9AX_VOICE_CMD_STOP  2U
+
+/* What a LoadSound still has to write into the bank, in bank order: `lead`
+ * zero bytes, `length` bytes of the sample and `tail` zero bytes, starting at
+ * `offset`. The zeros are the allocation's guards and the sample's rounding
+ * bytes (voice_model.c, "Asset isolation"), written on every load. */
+struct z9ax_voice_stream {
+  uint32_t offset;
+  uint32_t lead;
+  const uint8_t *data;
+  uint32_t length;
+  uint32_t tail;
+};
 
 struct z9ax_voice {
   ZZ9KVoiceSession session;
@@ -100,8 +113,11 @@ struct z9ax_voice {
   uint8_t stereo_ok;           /* firmware advertises S8S/S16S voice samples */
   uint8_t zorro;
   uint8_t reason;              /* Z9AX_VOICE_REASON_* when the open failed */
-  uint8_t pad;
+  uint8_t cubic;               /* $CAFE0004: cubic interpolation, or refused */
   uint32_t open_status;        /* ZZ9K_STATUS_* of the failed step */
+  uint32_t features;           /* ZZ9K_VOICE_FEATURE_*, read after the open */
+  uint32_t ramp_frames;        /* ramp the last Start asked for, 0 = off */
+  uint32_t limiter;            /* limiter the last Start asked for */
   uint32_t channels;
   uint32_t sounds;             /* AHIA_Sounds */
   uint32_t lead;               /* granted lead, engine frames */
@@ -121,9 +137,7 @@ struct z9ax_voice {
   volatile uint8_t up_pending;        /* a request waits for the worker */
   struct Task *up_task;               /* the waiting task */
   int8_t up_signal;
-  const uint8_t *up_data;             /* the rest of the sample */
-  uint32_t up_length;                 /* bytes still to copy */
-  uint32_t up_offset;                 /* bank offset of up_data */
+  struct z9ax_voice_stream up;        /* what is still to copy */
   volatile uint32_t up_status;        /* ZZ9K_STATUS_* of the copy */
   struct AHIEffChannelInfo *channelinfo;        /* SetEffect, any task */
   uint32_t ring_full;          /* writes that took fewer records than asked */

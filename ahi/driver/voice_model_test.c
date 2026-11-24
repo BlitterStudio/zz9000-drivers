@@ -117,11 +117,25 @@ static void set_master(VmModel *m, uint32_t vol)
 }
 
 static VmModel *model;
+/* Allocates the sound's data with its guards and defines it. The data of
+ * sound 0 starts at VM_GUARD_BYTES, the next at 1024 (sound 0 is 1000
+ * bytes, so its allocation is 1016 long), and so on. */
+static void define_sound(uint32_t id, uint32_t ahi_type, uint32_t frames)
+{
+  uint32_t bytes = frames << ((ahi_type == VM_AHI_M16S || ahi_type == VM_AHI_S8S)
+                                  ? 1U
+                                  : (ahi_type == VM_AHI_S16S ? 2U : 0U));
+  uint32_t off;
+
+  CHECK(vm_bank_alloc(model, bytes, &off) == 0, "allocate sound %u", id);
+  CHECK(vm_sound_define(model, id, ahi_type, off, frames) == 0, "define %u",
+        id);
+}
+
 static App app;
 
-/* Sounds: 0 mono 8-bit 1000 frames at bank 0; 1 mono 8-bit 2000 frames;
- * 2 mono 16-bit 500 frames; 3 stereo 16-bit 300 frames. */
-static void setup(uint32_t channels, int stereo)
+/* A model with no sound defined. */
+static void setup_empty(uint32_t channels, int stereo)
 {
   VmConfig cfg;
 
@@ -142,12 +156,19 @@ static void setup(uint32_t channels, int stereo)
   cfg.hooks.user = &app;
   vm_init(model, &cfg);
   app.m = model;
-  CHECK(vm_sound_define(model, 0U, VM_AHI_M8S, 0U, 1000U) == 0, "define 0");
-  CHECK(vm_sound_define(model, 1U, VM_AHI_M8S, 1024U, 2000U) == 0, "define 1");
-  CHECK(vm_sound_define(model, 2U, VM_AHI_M16S, 4096U, 500U) == 0, "define 2");
+}
+
+/* Sounds: 0 mono 8-bit 1000 frames, data at VM_GUARD_BYTES; 1 mono 8-bit 2000
+ * frames, data at 1024; 2 mono 16-bit 500 frames; 3 stereo 16-bit 300
+ * frames. */
+static void setup(uint32_t channels, int stereo)
+{
+  setup_empty(channels, stereo);
+  define_sound(0U, VM_AHI_M8S, 1000U);
+  define_sound(1U, VM_AHI_M8S, 2000U);
+  define_sound(2U, VM_AHI_M16S, 500U);
   if (stereo) {
-    CHECK(vm_sound_define(model, 3U, VM_AHI_S16S, 8192U, 300U) == 0,
-          "define 3");
+    define_sound(3U, VM_AHI_S16S, 300U);
   }
 }
 
@@ -223,10 +244,12 @@ static void test_imm_set_start_loop(void)
           "set rate/vol");
     r = rec(1);
     CHECK(r->op == ZZ9K_VOICE_OP_START && r->stamp == 1000U &&
-              r->flags == VM_VIEW_S8 && r->arg0 == 0U && r->arg1 == 1000U,
+              r->flags == VM_VIEW_S8 && r->arg0 == VM_GUARD_BYTES &&
+              r->arg1 == 1000U,
           "start");
     r = rec(2);
-    CHECK(r->op == ZZ9K_VOICE_OP_LOOP && r->stamp == 1000U && r->arg0 == 0U &&
+    CHECK(r->op == ZZ9K_VOICE_OP_LOOP && r->stamp == 1000U &&
+              r->arg0 == VM_GUARD_BYTES &&
               r->arg1 == 1000U,
           "loop");
   } else {
@@ -342,10 +365,12 @@ static void test_backward_pass_records(void)
   vm_tick(model);
   /* SET, START at 99, LOOP (0, 100), DIRECTION backward. */
   CHECK(is_op(0, ZZ9K_VOICE_OP_SET, 0U, 0U), "set");
-  CHECK(is_op(1, ZZ9K_VOICE_OP_START, 0U, 0U) && rec(1)->arg0 == 99U &&
+  CHECK(is_op(1, ZZ9K_VOICE_OP_START, 0U, 0U) &&
+            rec(1)->arg0 == VM_GUARD_BYTES + 99U &&
             rec(1)->arg1 == 0U,
         "start backward");
-  CHECK(is_op(2, ZZ9K_VOICE_OP_LOOP, 0U, 0U) && rec(2)->arg0 == 0U &&
+  CHECK(is_op(2, ZZ9K_VOICE_OP_LOOP, 0U, 0U) &&
+            rec(2)->arg0 == VM_GUARD_BYTES &&
             rec(2)->arg1 == 100U,
         "loop is the region");
   CHECK(is_op(3, ZZ9K_VOICE_OP_DIRECTION, 0U, 0U) &&
@@ -426,27 +451,48 @@ static void test_allocator(void)
   uint32_t b;
   uint32_t c;
   uint32_t d;
+  uint32_t used;
 
   setup(1U, 1);
-  CHECK(vm_bank_alloc(model, 100U, &a) == 0 && a == 0U, "first at 0");
-  CHECK(vm_bank_alloc(model, 10U, &b) == 0 && b == 100U, "aligned: %u", b);
-  CHECK(vm_bank_alloc(model, 4U, &c) == 0 && c == 112U, "third: %u", c);
-  CHECK(vm_bank_free_bytes(model) == (1U << 20) - 116U, "free bytes");
-  /* Not running: a removed sound frees at once. */
-  vm_sound_define(model, 5U, VM_AHI_M8S, b, 10U);
+  used = (1U << 20) - vm_bank_free_bytes(model);
+  /* An allocation is the data rounded up to 4 bytes with a guard on each side;
+   * the returned offset is that of the data. */
+  CHECK(vm_bank_alloc(model, 100U, &a) == 0 && a == used + VM_GUARD_BYTES,
+        "first after the setup sounds: %u", a);
+  CHECK(vm_bank_alloc(model, 10U, &b) == 0 &&
+            b == used + 100U + 2U * VM_GUARD_BYTES + VM_GUARD_BYTES,
+        "aligned, next allocation: %u", b);
+  CHECK(vm_bank_alloc(model, 4U, &c) == 0 &&
+            c == b + 12U + 2U * VM_GUARD_BYTES,
+        "third: %u", c);
+  CHECK(vm_bank_free_bytes(model) ==
+            (1U << 20) - used - (100U + 12U + 4U + 6U * VM_GUARD_BYTES),
+        "free bytes");
+  /* Not running: a removed sound frees its whole allocation at once. */
+  CHECK(vm_sound_define(model, 5U, VM_AHI_M8S, b, 10U) == 0, "define");
   CHECK(vm_sound_remove(model, 5U) == 0, "remove");
-  CHECK(vm_bank_alloc(model, 12U, &d) == 0 && d == 100U,
-        "freed range is reused: %u", d);
+  CHECK(vm_bank_alloc(model, 12U, &d) == 0 && d == b,
+        "freed allocation is reused: %u", d);
   CHECK(vm_bank_alloc(model, 1U << 20, &d) != 0, "exhaustion");
   CHECK(vm_bank_alloc(model, 0U, &d) == 0, "zero bytes still gives a unit");
+  /* A sound needs its guards inside the bank and a 4-byte aligned offset. */
+  CHECK(vm_sound_define(model, 6U, VM_AHI_M8S, 0U, 4U) != 0,
+        "no room for a guard below the data");
+  CHECK(vm_sound_define(model, 6U, VM_AHI_M8S, 1U << 20, 4U) != 0,
+        "no room for a guard above the data");
+  CHECK(vm_sound_define(model, 6U, VM_AHI_M8S, 10U, 4U) != 0, "aligned");
+  CHECK(vm_sound_define(model, 6U, VM_AHI_M8S, VM_GUARD_BYTES, 4U) == 0,
+        "the lowest legal offset");
 }
 
 static void test_coalesce(void)
 {
   uint32_t o[3];
   uint32_t big;
+  uint32_t before;
 
   setup(1U, 1);
+  before = vm_bank_free_bytes(model);
   CHECK(vm_bank_alloc(model, 400U, &o[0]) == 0, "a");
   CHECK(vm_bank_alloc(model, 400U, &o[1]) == 0, "b");
   CHECK(vm_bank_alloc(model, 400U, &o[2]) == 0, "c");
@@ -457,8 +503,9 @@ static void test_coalesce(void)
   vm_sound_remove(model, 8U);
   vm_sound_remove(model, 7U);
   /* All three neighbours merged with the tail: one range again. */
-  CHECK(vm_bank_free_bytes(model) == (1U << 20), "all free again");
-  CHECK(vm_bank_alloc(model, 1U << 20, &big) == 0 && big == 0U,
+  CHECK(vm_bank_free_bytes(model) == before, "all free again");
+  CHECK(vm_bank_alloc(model, before - 2U * VM_GUARD_BYTES, &big) == 0 &&
+            big == o[0],
         "one whole range after coalescing");
 }
 
@@ -469,8 +516,10 @@ static void test_quarantine(void)
 
   setup(2U, 1);
   vm_start(model, 5000U);
-  CHECK(vm_bank_alloc(model, 1U << 20, &off) == 0, "take the whole bank");
-  vm_sound_define(model, 4U, VM_AHI_M8S, 0U, 1000U);
+  CHECK(vm_bank_alloc(model, vm_bank_free_bytes(model) - 2U * VM_GUARD_BYTES,
+                      &off) == 0,
+        "take the whole bank");
+  vm_sound_define(model, 4U, VM_AHI_M8S, off, 1000U);
   set_sound(model, 0U, 4U, 0U, 0, 1);
   set_freq(model, 0U, 8000U, 1);
   vm_tick(model);
@@ -484,7 +533,7 @@ static void test_quarantine(void)
   CHECK(vm_bank_alloc(model, 16U, &again) != 0,
         "horizon below the stop stamp keeps it");
   vm_bank_poll(model, 5000U + 960U + 1U);
-  CHECK(vm_bank_alloc(model, 16U, &again) == 0 && again == 0U,
+  CHECK(vm_bank_alloc(model, 16U, &again) == 0 && again == off,
         "horizon past the stop stamp releases it");
 }
 
@@ -612,12 +661,12 @@ static void test_quarantine_never_reuses_early(void)
   const uint32_t per_round = 16U;   /* the model of setup() has 16 sounds */
   /* One round past what the quarantine tracks: that round's sounds are held. */
   const uint32_t rounds = VM_MAX_QUARANTINE / per_round + 1U;
-  const uint32_t pending = rounds * per_round * 4U;
+  const uint32_t pending = rounds * per_round * (4U + 2U * VM_GUARD_BYTES);
   uint32_t round;
   uint32_t i;
   uint32_t probe;
 
-  setup(2U, 1);
+  setup_empty(2U, 1);
   vm_start(model, 5000U);
   /* Every round loads the sound table with 4-byte sounds and unloads it
    * again, so more ranges wait for the engine than the quarantine tracks.
@@ -638,17 +687,19 @@ static void test_quarantine_never_reuses_early(void)
       CHECK(vm_sound_remove(model, i) == 0, "round %u: remove %u", round, i);
     /* The horizon has not moved: nothing may be handed out again. */
     vm_bank_poll(model, 5000U);
-    CHECK(vm_bank_free_bytes(model) == total - round * per_round * 4U,
+    CHECK(vm_bank_free_bytes(model) ==
+              total - round * per_round * (4U + 2U * VM_GUARD_BYTES),
           "round %u: %u of %u bytes free before the horizon passes", round,
           vm_bank_free_bytes(model), total);
     CHECK(vm_bank_alloc(model, 4U, &probe) == 0 &&
-              probe == round * per_round * 4U,
+              probe == round * per_round * (4U + 2U * VM_GUARD_BYTES) +
+                           VM_GUARD_BYTES,
           "round %u: a new sound gets fresh memory (offset %u)", round, probe);
     vm_bank_release(model, probe, 4U);
   }
   /* The tracking is full: the ranges stay with their sounds, and a sound
    * whose range is still held cannot be defined over another range. */
-  CHECK(vm_sound_define(model, 0U, VM_AHI_M8S, 0U, 4U) != 0,
+  CHECK(vm_sound_define(model, 0U, VM_AHI_M8S, VM_GUARD_BYTES, 4U) != 0,
         "a held sound is not redefined");
   CHECK(vm_sound_held(model, 0U), "sound 0 is held");
   CHECK(vm_bank_free_bytes(model) == total - pending,
@@ -656,7 +707,7 @@ static void test_quarantine_never_reuses_early(void)
   vm_bank_poll(model, 5000U + 2U * 7680U);
   CHECK(vm_bank_free_bytes(model) == total,
         "the horizon passing the stops frees every range");
-  CHECK(vm_sound_define(model, 0U, VM_AHI_M8S, 0U, 4U) == 0,
+  CHECK(vm_sound_define(model, 0U, VM_AHI_M8S, VM_GUARD_BYTES, 4U) == 0,
         "the sound can be loaded again");
 }
 
@@ -855,6 +906,427 @@ static void test_walk_overload_cap(void)
         "sound calls %u", app.sound_calls);
 }
 
+/* ---- Ramps: CONFIG records and fade tails ---- */
+
+static void test_config_records(void)
+{
+  setup(1U, 1);
+  vm_start(model, 5000U);
+  CHECK(rec_count() == 1U && is_op(0, ZZ9K_VOICE_OP_MASTER, 0U, 5000U),
+        "no quality settings: the MASTER record alone (%u records)",
+        rec_count());
+
+  setup(1U, 1);
+  vm_set_quality(model, 256U, 1U, ZZ9K_VOICE_INTERP_CUBIC);
+  vm_start(model, 5000U);
+  CHECK(rec_count() == 3U, "MASTER and two CONFIG records (%u)", rec_count());
+  CHECK(is_op(0, ZZ9K_VOICE_OP_MASTER, 0U, 5000U), "MASTER first");
+  CHECK(is_op(1, ZZ9K_VOICE_OP_CONFIG, 0U, 5000U) &&
+            rec(1)->flags ==
+                (ZZ9K_VOICE_CONFIG_RAMP | ZZ9K_VOICE_CONFIG_LIMITER) &&
+            rec(1)->arg0 == 256U && rec(1)->arg1 == 1U,
+        "ramp and limiter in one record");
+  CHECK(is_op(2, ZZ9K_VOICE_OP_CONFIG, 0U, 5000U) &&
+            rec(2)->flags == ZZ9K_VOICE_CONFIG_INTERP &&
+            rec(2)->arg0 == ZZ9K_VOICE_INTERP_CUBIC && rec(2)->arg1 == 0U,
+        "the default interpolation in its own record");
+
+  setup(1U, 1);
+  vm_set_quality(model, 0U, 1U, 0U);
+  vm_start(model, 5000U);
+  CHECK(rec_count() == 2U && rec(1)->flags == ZZ9K_VOICE_CONFIG_LIMITER &&
+            rec(1)->arg0 == 0U && rec(1)->arg1 == 1U,
+        "a limiter-only record carries arg0 0");
+
+  setup(1U, 1);
+  vm_set_quality(model, 100000U, 0U, 9U);
+  vm_start(model, 5000U);
+  CHECK(rec_count() == 2U && rec(1)->flags == ZZ9K_VOICE_CONFIG_RAMP &&
+            rec(1)->arg0 == VM_MAX_RAMP_FRAMES,
+        "the ramp is cut to the engine maximum, an unknown interpolation is "
+        "not sent");
+
+  /* The settings go out again with every new timeline. */
+  setup(1U, 1);
+  vm_set_quality(model, 64U, 0U, 0U);
+  vm_start(model, 5000U);
+  clear_records();
+  vm_stop(model);
+  vm_start(model, 9000U);
+  CHECK(rec_count() == 2U && is_op(1, ZZ9K_VOICE_OP_CONFIG, 0U, 9000U),
+        "a restart sends the ramp again");
+}
+
+/* A model with every sound of setup() and a sound 4 (1000 frames of 8 bits)
+ * in a bank taken whole: whatever is free was released by a poll. */
+static void tail_setup(uint32_t channels, uint32_t ramp, uint32_t anchor)
+{
+  uint32_t off;
+
+  setup(channels, 1);
+  define_sound(4U, VM_AHI_M8S, 1000U);
+  vm_set_quality(model, ramp, 0U, 0U);
+  CHECK(vm_bank_alloc(model, vm_bank_free_bytes(model) - 2U * VM_GUARD_BYTES,
+                      &off) == 0,
+        "take the whole bank");
+  vm_start(model, anchor);
+  clear_records();
+}
+
+static void play(uint16_t ch, uint16_t sound, uint32_t hz)
+{
+  set_sound(model, ch, sound, 0U, 0, 1);
+  set_freq(model, ch, hz, 1);
+  set_vol(model, ch, 0x10000, 0x8000, 1);
+}
+
+/* The bank is free at `horizon` and not before. */
+static void expect_held_until(uint32_t until, const char *what)
+{
+  vm_bank_poll(model, until);
+  CHECK(vm_bank_free_bytes(model) == 0U, "%s: still held at frame %u", what,
+        (unsigned)until);
+  vm_bank_poll(model, until + 1U);
+  CHECK(vm_bank_free_bytes(model) != 0U,
+        "%s: free when the horizon is past frame %u", what, (unsigned)until);
+}
+
+static uint32_t expect_tail_off;
+static uint32_t expect_tail_len;
+
+static void tail_stop_and_unload(uint32_t anchor, uint32_t ramp)
+{
+  uint32_t now0;
+
+  tail_setup(2U, ramp, anchor);
+  {
+    uint32_t bank = model->sounds[4].bank;
+    uint32_t lo = (bank - 1U) & ~3U;
+
+    expect_tail_off = lo;
+    expect_tail_len = ((bank + 1000U + 1U + 3U) & ~3U) - lo;
+  }
+  play(0U, 4U, 8000U);
+  vm_tick(model);
+  clear_records();
+  now0 = model->now;
+  CHECK(vm_sound_remove(model, 4U) == 0, "remove");
+  CHECK(rec_count() == 1U && is_op(0, ZZ9K_VOICE_OP_STOP, 0U, now0),
+        "unload stops the voice at the model time");
+  if (ramp == 0U) {
+    CHECK(model->tail_n == 0U, "no ramp, no tail");
+    expect_held_until(now0, "ramp 0");
+    return;
+  }
+  CHECK(model->tail_n == 1U && model->tails[0].off == expect_tail_off &&
+            model->tails[0].len == expect_tail_len &&
+            model->tails[0].until == now0 + ramp,
+        "the stop is a tail of the sound's bytes and a frame each side, up to "
+        "stamp + ramp");
+  /* The plain rule would release the range one frame after the stop. */
+  vm_bank_poll(model, now0 + 1U);
+  CHECK(vm_bank_free_bytes(model) == 0U, "the fade still reads the range");
+  expect_held_until(now0 + ramp, "unload of a playing sound");
+}
+
+static void test_tail_stop_unload(void)
+{
+  tail_stop_and_unload(5000U, 256U);
+  tail_stop_and_unload(5000U, 1U);
+  tail_stop_and_unload(5000U, VM_MAX_RAMP_FRAMES);
+  /* The tail crosses the frame counter wrap. */
+  tail_stop_and_unload(0xFFFFFC00U, 300U);
+  tail_stop_and_unload(0xFFFFFFF0U, 256U);
+  /* Ramp off: the old rule, one frame past the stop. */
+  tail_stop_and_unload(5000U, 0U);
+}
+
+/* A restart hands the old sound to a fade slot: its range outlives the
+ * restart by the ramp, though the channel plays another sound. */
+static void test_tail_restart_unload(void)
+{
+  uint32_t now0;
+  uint32_t first;
+  uint32_t i;
+  int started = 0;
+
+  tail_setup(2U, 256U, 5000U);
+  play(0U, 0U, 8000U);
+  vm_tick(model);
+  clear_records();
+  now0 = model->now;
+  set_sound(model, 0U, 1U, 0U, 0, 1);
+  vm_run_async(model);
+  first = rec_count();
+  for (i = 0U; i < first; i++) {
+    started |= rec(i)->op == ZZ9K_VOICE_OP_START && rec(i)->stamp == now0;
+  }
+  CHECK(started, "the restart is a START at the model time");
+  CHECK(vm_sound_remove(model, 0U) == 0, "remove the old sound");
+  CHECK(rec_count() == first, "the channel does not play it: no record");
+  expect_held_until(now0 + 256U, "unload of a sound in a fade slot");
+}
+
+/* Two voices play one sound and stop at different stamps, and at one. */
+static void test_tail_shared_sound(void)
+{
+  uint32_t x;
+
+  tail_setup(3U, 256U, 5000U);
+  play(0U, 0U, 8000U);
+  play(1U, 0U, 9000U);
+  vm_tick(model);
+  x = model->now;
+  set_sound(model, 0U, VM_NOSOUND, 0U, 0, 1);
+  vm_run_async(model);
+  vm_tick(model);
+  set_sound(model, 1U, VM_NOSOUND, 0U, 0, 1);
+  vm_run_async(model);
+  CHECK(model->tail_n == 1U && model->tails[0].until == x + 960U + 256U,
+        "equal ranges share one tail and it ends with the later stop (%u)",
+        model->tail_n);
+  CHECK(vm_sound_remove(model, 0U) == 0, "remove");
+  expect_held_until(x + 960U + 256U, "shared sound, different stamps");
+
+  tail_setup(3U, 256U, 5000U);
+  play(0U, 0U, 8000U);
+  play(1U, 0U, 9000U);
+  vm_tick(model);
+  x = model->now;
+  set_sound(model, 1U, VM_NOSOUND, 0U, 0, 1);
+  set_sound(model, 0U, VM_NOSOUND, 0U, 0, 1);
+  vm_run_async(model);
+  CHECK(model->tail_n == 1U && model->tails[0].until == x + 256U,
+        "two stops at one stamp");
+  CHECK(vm_sound_remove(model, 0U) == 0, "remove");
+  expect_held_until(x + 256U, "shared sound, same stamp");
+}
+
+/* A later record cannot shorten what an earlier one froze, even with a
+ * shorter ramp. */
+static void test_tail_never_shortens(void)
+{
+  uint32_t now0;
+
+  tail_setup(1U, VM_MAX_RAMP_FRAMES, 10000U);
+  play(0U, 0U, 8000U);
+  vm_tick(model);
+  now0 = model->now;
+  set_sound(model, 0U, VM_NOSOUND, 0U, 0, 1);
+  vm_run_async(model);
+  CHECK(model->tail_n == 1U && model->tails[0].until == now0 + 512U,
+        "tail of the first stop");
+  vm_stop(model);
+  vm_set_quality(model, 1U, 0U, 0U);
+  vm_start(model, now0 + 40U);
+  play(0U, 0U, 8000U);
+  vm_run_async(model);
+  set_sound(model, 0U, VM_NOSOUND, 0U, 0, 1);
+  vm_run_async(model);
+  CHECK(model->tail_n == 1U && model->tails[0].until == now0 + 512U,
+        "a later stop with a shorter ramp keeps the longer tail (%u)",
+        (unsigned)model->tails[0].until);
+  CHECK(vm_sound_remove(model, 0U) == 0, "remove");
+  expect_held_until(now0 + 512U, "earlier, longer tail");
+}
+
+/* A record behind the engine applies at the horizon: its fade starts there. */
+static void test_tail_late_record(void)
+{
+  uint32_t now0;
+
+  tail_setup(1U, 256U, 5000U);
+  play(0U, 0U, 8000U);
+  vm_tick(model);
+  now0 = model->now;
+  vm_bank_poll(model, now0 + 3000U);
+  CHECK(vm_sound_remove(model, 0U) == 0, "remove");
+  CHECK(model->tails[0].until == now0 + 3000U + 256U,
+        "a stop behind the horizon fades from the horizon (%u)",
+        (unsigned)model->tails[0].until);
+  expect_held_until(now0 + 3000U + 256U, "late stop");
+}
+
+/* A sound that a queued pass would wrap into is not left programmed as the
+ * loop when it is unloaded: the engine reads the loop start as the partner of
+ * the last frames of the pass, and with a ramp it fades out after the wrap,
+ * both after the range may be free. The loop is cleared with or without a
+ * ramp. */
+static void test_tail_unload_of_queued_sound(void)
+{
+  uint32_t i;
+  int saw_loop = 0;
+
+  tail_setup(1U, 256U, 5000U);
+  play(0U, 0U, 8000U);
+  set_sound(model, 0U, 1U, 0U, 0, 0);
+  vm_run_async(model);
+  for (i = 0U; i < rec_count(); i++) {
+    saw_loop |= rec(i)->op == ZZ9K_VOICE_OP_LOOP && rec(i)->arg0 == 1024U &&
+                rec(i)->arg1 == 2000U;
+  }
+  CHECK(saw_loop, "the queued sound is the programmed loop");
+  clear_records();
+  CHECK(vm_sound_remove(model, 1U) == 0, "remove the queued sound");
+  CHECK(rec_count() == 1U && rec(0)->op == ZZ9K_VOICE_OP_LOOP &&
+            rec(0)->arg0 == 0U && rec(0)->arg1 == 0U &&
+            rec(0)->stamp == model->now,
+        "the loop is cleared at the model time (%u records)", rec_count());
+
+  tail_setup(1U, 0U, 5000U);
+  play(0U, 0U, 8000U);
+  set_sound(model, 0U, 1U, 0U, 0, 0);
+  vm_run_async(model);
+  clear_records();
+  CHECK(vm_sound_remove(model, 1U) == 0, "remove the queued sound");
+  CHECK(rec_count() == 1U && rec(0)->op == ZZ9K_VOICE_OP_LOOP &&
+            rec(0)->arg0 == 0U && rec(0)->arg1 == 0U,
+        "ramp 0: the loop is cleared too (%u records)", rec_count());
+}
+/* The pass of sound 0 ends exactly at the model time and sound 1 is queued
+ * behind it. The engine is already in sound 1 at that frame, so unloading it
+ * must stop the voice there; clearing the loop alone would leave the voice
+ * playing the freed range. */
+static void test_unload_at_a_pass_boundary(void)
+{
+  uint32_t ramp;
+
+  for (ramp = 0U; ramp <= 256U; ramp += 256U) {
+    uint32_t now0;
+
+    tail_setup(1U, ramp, 5000U);
+    set_sound(model, 0U, 0U, 0U, 960, 1);
+    set_freq(model, 0U, 48000U, 1);
+    set_sound(model, 0U, 1U, 0U, 0, 0);
+    vm_tick(model);
+    now0 = model->now;
+    clear_records();
+    CHECK(vm_sound_remove(model, 1U) == 0, "remove");
+    CHECK(rec_count() == 1U && is_op(0, ZZ9K_VOICE_OP_STOP, 0U, now0),
+          "ramp %u: the voice stops at the boundary frame (%u records)", ramp,
+          rec_count());
+  }
+}
+
+
+/* More distinct fades than the list holds: ranges merge and no tail ends
+ * earlier than it did. */
+static void test_tail_list_full(void)
+{
+  uint32_t i;
+  uint32_t now0;
+
+  tail_setup(1U, 256U, 5000U);
+  play(0U, 1U, 8000U);
+  vm_run_async(model);
+  now0 = model->now;
+  for (i = 0U; i < VM_MAX_TAILS + 40U; i++) {
+    set_sound(model, 0U, 1U, 8U * i, 4, 1);
+    vm_run_async(model);
+  }
+  CHECK(model->tail_n <= VM_MAX_TAILS, "the list stays inside its array");
+  CHECK(model->tail_merges > 0U, "a full list merges tails");
+  for (i = 0U; i < model->tail_n; i++) {
+    CHECK(model->tails[i].until == now0 + 256U, "tail %u ends at %u", i,
+          (unsigned)model->tails[i].until);
+  }
+  CHECK(vm_sound_remove(model, 1U) == 0, "remove");
+  expect_held_until(now0 + 256U, "full tail list");
+}
+
+/* The pass model does not see tails: records other than CONFIG, SoundFunc
+ * order and CHANNELINFO offsets are the same with and without a ramp. */
+#define SCEN_RECORDS 4096U
+
+typedef struct Scenario {
+  ZZ9KVoiceRecord records[SCEN_RECORDS];
+  uint32_t n;
+  uint16_t log[64];
+  uint32_t calls;
+  uint32_t offsets[40][3];
+} Scenario;
+
+static void scenario_sound(App *a, uint16_t ch)
+{
+  set_sound(a->m, ch, (uint16_t)(ch == 2U ? 2U : 1U), ch * 40U, 300, 0);
+}
+
+static void run_scenario(uint32_t ramp, Scenario *s)
+{
+  uint32_t t;
+
+  memset(s, 0, sizeof(*s));
+  setup(3U, 1);
+  vm_set_quality(model, ramp, 0U, 0U);
+  app.sound = scenario_sound;
+  vm_start(model, 20000U);
+  play(0U, 0U, 22050U);
+  set_sound(model, 1U, 1U, 100U, 500, 1);
+  set_freq(model, 1U, 30000U, 1);
+  set_vol(model, 1U, 0x8000, 0x4000, 1);
+  set_sound(model, 2U, 2U, 0U, 200, 1);
+  set_freq(model, 2U, 11025U, 1);
+  set_vol(model, 2U, 0x10000, 0x10000, 1);
+  for (t = 0U; t < 40U; t++) {
+    uint32_t n;
+    uint32_t i;
+    const ZZ9KVoiceRecord *r;
+
+    vm_tick(model);
+    if (t % 3U == 0U) {
+      set_sound(model, 0U, (uint16_t)(t % 2U), t * 7U, 0, 1);
+    }
+    if (t % 5U == 0U) {
+      set_sound(model, 1U, VM_NOSOUND, 0U, 0, 1);
+    }
+    if (t % 5U == 2U) {
+      set_sound(model, 1U, 1U, 0U, 400, 1);
+      set_freq(model, 1U, 24000U, 1);
+    }
+    if (t % 7U == 0U) {
+      set_freq(model, 2U, 0U, 1);
+    }
+    if (t % 7U == 3U) {
+      set_freq(model, 2U, 15000U, 1);
+    }
+    vm_run_async(model);
+    r = vm_records(model, &n);
+    for (i = 0U; i < n; i++) {
+      if (r[i].op != ZZ9K_VOICE_OP_CONFIG && s->n < SCEN_RECORDS) {
+        s->records[s->n++] = r[i];
+      }
+    }
+    vm_records_taken(model, n);
+    vm_channel_offsets(model, s->offsets[t], 3U);
+  }
+  s->calls = app.sound_calls;
+  memcpy(s->log, app.sound_log, sizeof(s->log));
+}
+
+static void test_ramp_leaves_the_pass_model_alone(void)
+{
+  static Scenario off;
+  static Scenario on;
+  uint32_t i;
+
+  run_scenario(0U, &off);
+  run_scenario(300U, &on);
+  CHECK(off.n > 20U, "the scenario produces records (%u)", off.n);
+  CHECK(off.n == on.n, "same number of non-CONFIG records (%u, %u)", off.n,
+        on.n);
+  for (i = 0U; i < off.n && i < on.n; i++) {
+    CHECK(memcmp(&off.records[i], &on.records[i], sizeof(off.records[i])) == 0,
+          "record %u differs with a ramp", i);
+  }
+  CHECK(off.calls == on.calls && off.calls > 10U,
+        "SoundFunc calls: %u without, %u with a ramp", off.calls, on.calls);
+  CHECK(memcmp(off.log, on.log, sizeof(off.log)) == 0,
+        "SoundFunc channel order is the same");
+  CHECK(memcmp(off.offsets, on.offsets, sizeof(off.offsets)) == 0,
+        "CHANNELINFO offsets are the same");
+  CHECK(model->tail_n > 0U, "the ramped run made tails");
+}
+
 int main(void)
 {
   test_imm_set_start_loop();
@@ -878,6 +1350,16 @@ int main(void)
   test_stop_at_pass_end();
   test_walk_order();
   test_walk_overload_cap();
+  test_config_records();
+  test_tail_stop_unload();
+  test_tail_restart_unload();
+  test_tail_shared_sound();
+  test_tail_never_shortens();
+  test_tail_late_record();
+  test_tail_unload_of_queued_sound();
+  test_tail_list_full();
+  test_unload_at_a_pass_boundary();
+  test_ramp_leaves_the_pass_model_alone();
   if (failures) {
     printf("%d failure(s)\n", failures);
     return 1;

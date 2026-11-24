@@ -1,6 +1,7 @@
 /*
  * ZZAXVoiceTest: a low-level AHI client for the ZZ9000AX hardware-mixing
- * AudioModes ($CAFE0002 and $CAFE0003) and, for comparison, any software mode.
+ * AudioModes ($CAFE0002, $CAFE0003 and $CAFE0004) and, for comparison, any
+ * software mode.
  *
  * It drives AHI the way a tracker does: one AHIST_SAMPLE sound holding the
  * whole sample set, AHI_SetSound offsets into it, a PlayerFunc for timing and
@@ -34,6 +35,7 @@
 
 #define MODE_HW_NEAREST 0xCAFE0002UL
 #define MODE_HW_LINEAR  0xCAFE0003UL
+#define MODE_HW_CUBIC   0xCAFE0004UL
 #define DEFAULT_MODE    MODE_HW_NEAREST
 #define MIX_FREQ        48000UL
 #define STATS_VAR       "ZZ9K_AHI_VOICE_STATS"
@@ -1698,7 +1700,8 @@ static void usage(void)
       "                    [CHANNELS 1-32] [SECONDS 1-%lu] [CYCLES 1-%lu]\n"
       "Template: %s\n"
       "MODE is a hexadecimal audio ID, default $CAFE0002 (hardware mixing);\n"
-      "$CAFE0003 is the interpolated hardware mode.\n",
+      "$CAFE0003 is the interpolated hardware mode and $CAFE0004 the cubic\n"
+      "hardware mode.\n",
       (unsigned long)MAX_SECONDS, (unsigned long)MAX_CYCLES, TEMPLATE);
 }
 
@@ -1806,7 +1809,8 @@ int main(void)
     opt.cycles = (ULONG)v;
   }
   FreeArgs(rda);
-  opt.voice = (opt.mode == MODE_HW_NEAREST || opt.mode == MODE_HW_LINEAR);
+  opt.voice = (opt.mode == MODE_HW_NEAREST || opt.mode == MODE_HW_LINEAR ||
+               opt.mode == MODE_HW_CUBIC);
 
   port = CreateMsgPort();
   if (port)

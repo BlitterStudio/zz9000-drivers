@@ -386,6 +386,7 @@ static uint32_t vm_engine_wrap(VmChannel *c, uint32_t f)
       c->e_idx = c->e_ls + over;
       c->e_frac = (uint32_t)(pos & 0xFFFFU);
       c->e_end = c->e_ls + c->e_ll;
+      c->e_lo = c->e_ls;
     }
   } else {
     uint32_t idx;
@@ -411,6 +412,7 @@ static uint32_t vm_engine_wrap(VmChannel *c, uint32_t f)
         under = 0U;
       }
       c->e_end = c->e_ls + c->e_ll;
+      c->e_lo = c->e_ls;
       c->e_idx = c->e_end - under - 1U;
       c->e_frac = frac;
     }
@@ -418,6 +420,151 @@ static uint32_t vm_engine_wrap(VmChannel *c, uint32_t f)
   c->e_t0 = f;
   vm_bnd_update(c);
   return carry;
+}
+
+/* ---- Fade tails ----
+ *
+ * With a ramp, the engine does not silence a voice at a STOP or a restart:
+ * the sound fades out over the ramp length, from the voice itself (STOP) or
+ * from a fade slot that a START hands the old sound to. The AHI picture of
+ * the channel knows nothing about it, and the tail may play a sound that
+ * the client unloads at once. So every STOP and every START over a sounding
+ * voice notes the bank bytes the engine can read for that voice, and keeps
+ * them busy until the horizon is strictly past the last frame of the fade
+ * (stamp + ramp). The ranges are the pass region the engine plays and its
+ * programmed loop, from the engine mirror (never from the AHI picture, which
+ * a restart has already replaced), one frame wider on each side: the cubic
+ * reader looks one frame behind the frame it plays, which for a forward pass
+ * at its first frame lies below the region and for a backward pass at its
+ * first frame lies above it. Equal ranges share an entry and an entry only
+ * ever ends later, so
+ * a later record cannot shorten an earlier tail. A tail is not part of the
+ * channel's pass: SoundFunc and AHIET_CHANNELINFO never see it. */
+
+/* The frame at which a record stamped `stamp` really applies: the ring is
+ * ordered by stamp, so a record is lifted to the stamps already queued, and
+ * a record behind the engine applies at the horizon. */
+static uint32_t vm_tail_until(const VmModel *m, uint32_t stamp)
+{
+  uint32_t at = stamp;
+
+  if (vm_sdiff(m->last_stamp, at) > 0) {
+    at = m->last_stamp;
+  }
+  if (m->horizon_valid && vm_sdiff(m->horizon_seen, at) > 0) {
+    at = m->horizon_seen;
+  }
+  return at + m->ramp_frames;
+}
+
+static void vm_tail_add(VmModel *m, uint32_t off, uint32_t len, uint32_t until)
+{
+  uint32_t i;
+  uint32_t first = 0U;
+  VmTail *t;
+
+  for (i = 0U; i < m->tail_n; i++) {
+    t = &m->tails[i];
+    if (t->off == off && t->len == len) {
+      if (vm_sdiff(until, t->until) > 0) {
+        t->until = until;
+      }
+      return;
+    }
+    if (vm_sdiff(t->until, m->tails[first].until) < 0) {
+      first = i;
+    }
+  }
+  if (m->tail_n < VM_MAX_TAILS) {
+    t = &m->tails[m->tail_n++];
+    t->off = off;
+    t->len = len;
+    t->until = until;
+    return;
+  }
+  /* Full: the entry that ends first takes the new range as well. The merged
+   * range covers both and ends with the later of the two. */
+  t = &m->tails[first];
+  {
+    uint32_t end = t->off + t->len;
+    uint32_t new_end = off + len;
+
+    if (off < t->off) {
+      t->off = off;
+    }
+    if (new_end > end) {
+      end = new_end;
+    }
+    t->len = end - t->off;
+  }
+  if (vm_sdiff(until, t->until) > 0) {
+    t->until = until;
+  }
+  m->tail_merges++;
+}
+
+static void vm_tail_range(VmModel *m, uint32_t shift, uint32_t lo, uint32_t hi,
+                          uint32_t until)
+{
+  uint32_t off;
+  uint32_t end;
+
+  if (hi <= lo) {
+    return;
+  }
+  if (lo > 0U) {
+    lo--;
+  }
+  hi++;
+  off = (lo << shift) & ~3U;
+  end = ((hi << shift) + 3U) & ~3U;
+  vm_tail_add(m, off, end - off, until);
+}
+
+/* The engine voice of channel c is about to be stopped or restarted at
+ * stamp. Call before the mirror changes. */
+static void vm_tail_note(VmModel *m, const VmChannel *c, uint32_t stamp)
+{
+  uint32_t until;
+  uint32_t shift;
+
+  if (m->ramp_frames == 0U || !c->e_active || !c->e_has_view) {
+    return;
+  }
+  until = vm_tail_until(m, stamp);
+  shift = vm_view_shift(c->e_view);
+  vm_tail_range(m, shift, c->e_lo, c->e_end, until);
+  if (c->e_ll != 0U) {
+    vm_tail_range(m, shift, c->e_ls, c->e_ls + c->e_ll, until);
+  }
+}
+
+/* True while a fade may still read part of [off, off + len). */
+static int vm_tail_busy(const VmModel *m, uint32_t off, uint32_t len)
+{
+  uint32_t i;
+
+  for (i = 0U; i < m->tail_n; i++) {
+    const VmTail *t = &m->tails[i];
+
+    if (off < t->off + t->len && t->off < off + len) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static void vm_tail_prune(VmModel *m, uint32_t horizon)
+{
+  uint32_t i = 0U;
+
+  while (i < m->tail_n) {
+    if (vm_sdiff(horizon, m->tails[i].until) > 0) {
+      m->tails[i] = m->tails[--m->tail_n];
+    } else {
+      i++;
+    }
+  }
 }
 
 /* ---- Pass geometry ---- */
@@ -573,6 +720,7 @@ static void vm_start_pass(VmModel *m, VmChannel *c, uint32_t ci,
     c->e_end = p->lo + p->n;
   }
   c->e_active = 1U;
+  c->e_lo = p->lo;
   c->e_bw = 0U;
   c->e_idx = idx;
   c->e_frac = 0U;
@@ -595,6 +743,7 @@ static void vm_stop_voice(VmModel *m, VmChannel *c, uint32_t ci,
     return;
   }
   vm_mirror_to(c, stamp);
+  vm_tail_note(m, c, stamp);
   vm_emit(m, stamp, ci, ZZ9K_VOICE_OP_STOP, 0U, 0U, 0U);
   c->e_active = 0U;
   c->e_bnd_valid = 0U;
@@ -770,6 +919,7 @@ static void vm_reconcile(VmModel *m, VmChannel *c, uint32_t ci,
       if (!(flags & VM_RESTART)) {
         vm_mirror_to(c, stamp);
       }
+      vm_tail_note(m, c, stamp);
       vm_emit(m, stamp, ci, ZZ9K_VOICE_OP_STOP, 0U, 0U, 0U);
       c->e_active = 0U;
       c->e_bnd_valid = 0U;
@@ -792,6 +942,7 @@ static void vm_reconcile(VmModel *m, VmChannel *c, uint32_t ci,
     return;
   }
   /* A restart or a resume from a pause: START from the mirrored index. */
+  vm_tail_note(m, c, stamp);
   c->e_active = 0U;
   vm_run_cur(m, c, ci, stamp, c->e_idx);
 }
@@ -920,6 +1071,7 @@ static void vm_process_boundary(VmModel *m, uint32_t ci, int inline_sound)
       uint32_t idx = c->cur.backward ? vm_pass_first(&c->cur) - carry
                                      : c->cur.lo + carry;
 
+      vm_tail_note(m, c, f);
       c->e_active = 0U;
       vm_run_cur(m, c, ci, f, idx);
     }
@@ -1104,6 +1256,44 @@ int vm_tick_due(const VmModel *m, uint32_t playing_frame, uint32_t run_ahead)
 
 /* ---- Playback control ---- */
 
+void vm_set_quality(VmModel *m, uint32_t ramp_frames, uint32_t limiter,
+                    uint32_t interp)
+{
+  m->ramp_frames =
+      ramp_frames > VM_MAX_RAMP_FRAMES ? VM_MAX_RAMP_FRAMES : ramp_frames;
+  m->limiter = limiter != 0U ? 1U : 0U;
+  m->interp = (interp >= ZZ9K_VOICE_INTERP_NEAREST &&
+               interp <= ZZ9K_VOICE_INTERP_CUBIC)
+                  ? (uint8_t)interp
+                  : 0U;
+}
+
+/* The CONFIG records of vm_set_quality, after the MASTER record: the ramp
+ * and the limiter in one record, the default interpolation in its own (the
+ * engine takes it alone). A session that asked for nothing sends nothing. */
+static void vm_emit_config(VmModel *m, uint32_t stamp)
+{
+  uint32_t flags = 0U;
+  uint32_t a0 = 0U;
+  uint32_t a1 = 0U;
+
+  if (m->ramp_frames != 0U) {
+    flags |= ZZ9K_VOICE_CONFIG_RAMP;
+    a0 = m->ramp_frames;
+  }
+  if (m->limiter) {
+    flags |= ZZ9K_VOICE_CONFIG_LIMITER;
+    a1 = 1U;
+  }
+  if (flags != 0U) {
+    vm_emit(m, stamp, 0U, ZZ9K_VOICE_OP_CONFIG, flags, a0, a1);
+  }
+  if (m->interp != 0U) {
+    vm_emit(m, stamp, 0U, ZZ9K_VOICE_OP_CONFIG, ZZ9K_VOICE_CONFIG_INTERP,
+            m->interp, 0U);
+  }
+}
+
 void vm_start(VmModel *m, uint32_t stamp)
 {
   uint32_t ci;
@@ -1114,6 +1304,7 @@ void vm_start(VmModel *m, uint32_t stamp)
   m->last_stamp = stamp;
   m->out_tick = m->out_n;
   vm_emit_master(m, stamp);
+  vm_emit_config(m, stamp);
   for (ci = 0U; ci < m->cfg.channels; ci++) {
     VmChannel *c = &m->ch[ci];
 
@@ -1213,6 +1404,37 @@ void vm_init(VmModel *m, const VmConfig *cfg)
   }
 }
 
+/* ---- Asset isolation ----
+ *
+ * Every sound sits in an allocation of its own: VM_GUARD_BYTES of zeros, the
+ * data rounded up to 4 bytes (the rounding bytes zero as well), and
+ * VM_GUARD_BYTES of zeros. The sound's bank offset is that of its data; the
+ * allocation, which is what the allocator hands out and takes back and what
+ * the quarantine holds, starts VM_GUARD_BYTES below it.
+ *
+ * The bound of what the engine reads outside a pass, from audio_voice.c: the
+ * nearest and linear readers stay inside the pass (the blend partner is the
+ * next frame in the play direction, or the loop start). The cubic reader
+ * also reads the frame behind the one it plays: one frame below the pass
+ * for a forward pass at its first frame, one frame above it for a backward
+ * pass at its first frame; the two frames ahead are clamped to the pass or
+ * the loop. A pass lies inside its sound, so the engine never reads further
+ * than one frame (4 bytes at most) outside a sound, and the guard of two
+ * widest frames also covers an ARM vector load that takes whole taps. */
+static uint32_t vm_data_bytes(uint32_t frames, uint32_t view)
+{
+  uint32_t bytes = (frames << vm_view_shift(view)) + 3U;
+
+  bytes &= ~3U;
+  return bytes != 0U ? bytes : 4U;
+}
+
+static void vm_sound_span(const VmSound *s, uint32_t *off, uint32_t *len)
+{
+  *off = s->bank - VM_GUARD_BYTES;
+  *len = vm_data_bytes(s->frames, s->view) + 2U * VM_GUARD_BYTES;
+}
+
 int vm_sound_define(VmModel *m, uint32_t id, uint32_t ahi_type, uint32_t bank,
                     uint32_t frames)
 {
@@ -1245,6 +1467,11 @@ int vm_sound_define(VmModel *m, uint32_t id, uint32_t ahi_type, uint32_t bank,
   /* A removed sound whose range still waits for the engine cannot take a
    * new one: the old range would be lost. */
   if (s->used == VM_SOUND_HELD) {
+    return -1;
+  }
+  if ((bank & 3U) != 0U || bank < VM_GUARD_BYTES ||
+      bank + vm_data_bytes(frames, view) + VM_GUARD_BYTES >
+          (m->cfg.bank_bytes & ~3U)) {
     return -1;
   }
   s->used = 0U;
@@ -1308,17 +1535,14 @@ int vm_bank_alloc(VmModel *m, uint32_t bytes, uint32_t *offset)
   if (bytes == 0U) {
     bytes = 4U;
   }
-  bytes = (bytes + 3U) & ~3U;
-  if (bytes < 4U) {
-    return -1;
-  }
+  bytes = ((bytes + 3U) & ~3U) + 2U * VM_GUARD_BYTES;
   for (i = 0U; i < m->free_n; i++) {
     VmFree *f = &m->free_list[i];
 
     if (f->len >= bytes) {
       uint32_t j;
 
-      *offset = f->off;
+      *offset = f->off + VM_GUARD_BYTES;
       f->off += bytes;
       f->len -= bytes;
       if (f->len == 0U) {
@@ -1333,26 +1557,35 @@ int vm_bank_alloc(VmModel *m, uint32_t bytes, uint32_t *offset)
   return -1;
 }
 
-/* Gives back a range that nothing references (an upload that failed before
- * the sound was defined), so it is free at once. */
+/* Gives back the allocation vm_bank_alloc handed out for `bytes` at `offset`
+ * when nothing references it (an upload that failed before the sound was
+ * defined), so it is free at once. */
 void vm_bank_release(VmModel *m, uint32_t offset, uint32_t bytes)
 {
   if (bytes == 0U) {
     bytes = 4U;
   }
-  vm_free_insert(m, offset, (bytes + 3U) & ~3U);
+  vm_free_insert(m, offset - VM_GUARD_BYTES,
+                 ((bytes + 3U) & ~3U) + 2U * VM_GUARD_BYTES);
 }
 
 void vm_bank_poll(VmModel *m, uint32_t horizon)
 {
   uint32_t i = 0U;
+  uint32_t off;
   uint32_t len;
-  VmSound *s;
 
+  if (!m->horizon_valid || vm_sdiff(horizon, m->horizon_seen) > 0) {
+    m->horizon_seen = horizon;
+    m->horizon_valid = 1U;
+  }
+  vm_tail_prune(m, horizon);
   while (i < m->quarantine_n) {
     VmQuarantine *q = &m->quarantine[i];
 
-    if (vm_sdiff(horizon, q->stamp) > 0) {
+    /* Free once the horizon is past the removal and no fade tail reads the
+     * range any more. */
+    if (vm_sdiff(horizon, q->stamp) > 0 && !vm_tail_busy(m, q->off, q->len)) {
       uint32_t j;
 
       vm_free_insert(m, q->off, q->len);
@@ -1366,11 +1599,15 @@ void vm_bank_poll(VmModel *m, uint32_t horizon)
   }
   /* Ranges that stayed with their sounds because the list was full. */
   for (i = 0U; i < m->cfg.sounds && i < VM_MAX_SOUNDS; i++) {
-    s = &m->sounds[i];
-    if (s->used == VM_SOUND_HELD && vm_sdiff(horizon, s->hold_stamp) > 0) {
-      len = ((s->frames << vm_view_shift(s->view)) + 3U) & ~3U;
-      vm_free_insert(m, s->bank, len);
-      s->used = 0U;
+    const VmSound *hs = &m->sounds[i];
+
+    if (hs->used != VM_SOUND_HELD || vm_sdiff(horizon, hs->hold_stamp) <= 0) {
+      continue;
+    }
+    vm_sound_span(hs, &off, &len);
+    if (!vm_tail_busy(m, off, len)) {
+      vm_free_insert(m, off, len);
+      m->sounds[i].used = 0U;
     }
   }
 }
@@ -1398,6 +1635,13 @@ int vm_sound_remove(VmModel *m, uint32_t id)
     return -1;
   }
   s = &m->sounds[id];
+  /* A pass that ends exactly at the model time has not been installed yet,
+   * and the engine is already in the next pass (and in its loop) at that
+   * frame: install it first, as vm_stop does, so that the records below act
+   * on the pass the engine really plays. Its SoundFunc stays owed. */
+  if (m->running) {
+    vm_walk(m, m->now + 1U, 0);
+  }
   for (ci = 0U; ci < m->cfg.channels; ci++) {
     VmChannel *c = &m->ch[ci];
 
@@ -1411,16 +1655,19 @@ int vm_sound_remove(VmModel *m, uint32_t id)
     }
     if (c->next.sound_ok && c->next.sound == id) {
       c->next.sound_ok = 0U;
+      /* The engine reads the loop start of a programmed loop as the blend
+       * partner of the last frames of the pass (linear) and as the two taps
+       * ahead (cubic), and wraps into it at the pass end, where a ramp lets
+       * the voice fade out. Clear the loop now, so the engine never reads the
+       * removed range after it is free again: the voice then ends at the
+       * pass end. */
+      if (m->running && c->e_active) {
+        vm_program_loop(m, c, ci, m->now);
+      }
     }
   }
-  off = s->bank;
-  len = ((s->frames << vm_view_shift(s->view)) + 3U) & ~3U;
+  vm_sound_span(s, &off, &len);
   s->used = 0U;
-  /* The bank range is a whole number of 4-byte units from the allocator. */
-  if (len == 0U) {
-    vm_flush_tick(m);
-    return 0;
-  }
   if (!m->running) {
     vm_free_insert(m, off, len);
   } else if (m->quarantine_n < VM_MAX_QUARANTINE) {

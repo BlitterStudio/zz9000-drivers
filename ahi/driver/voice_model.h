@@ -38,6 +38,18 @@
 #define VM_MAX_FREE_RANGES 256U
 #define VM_MAX_QUARANTINE  256U
 
+/* Zero bytes below and above every sound's allocation: two frames of the
+ * widest format. See "Asset isolation" in voice_model.c. */
+#define VM_GUARD_BYTES 8U
+/* Ranges the engine may still read for a sound that a ramped STOP or restart
+ * fades out (voice_model.c, "Fade tails"). The list is not a sound list: a
+ * tail outlives the AHI picture of the channel that made it. When it is full
+ * the new tail is merged into the entry that ends first. */
+#define VM_MAX_TAILS 128U
+
+/* The longest ramp the engine accepts (ZZ9K_VOICE_RAMP_MAX_FRAMES). */
+#define VM_MAX_RAMP_FRAMES 512U
+
 /* A queued tick or boundary walk gives up on a channel after this many pass
  * boundaries in one window, so a client that asks for one-frame passes cannot
  * hold the worker forever. The count is in vm->overload. */
@@ -151,6 +163,7 @@ typedef struct VmChannel {
   uint32_t e_t0;
   uint32_t e_bnd;       /* absolute frame of the next pass boundary */
   uint8_t e_bnd_valid;
+  uint32_t e_lo;        /* first frame of the region the engine plays */
 } VmChannel;
 
 typedef struct VmFree {
@@ -164,6 +177,15 @@ typedef struct VmQuarantine {
   uint32_t stamp;     /* free once the engine horizon passes this frame */
 } VmQuarantine;
 
+/* A bank byte range the engine can still read, from a sound that fades out
+ * after a ramped STOP or restart. The last read is frame `until`: the range
+ * is busy until the engine horizon is past it. */
+typedef struct VmTail {
+  uint32_t off;
+  uint32_t len;
+  uint32_t until;
+} VmTail;
+
 typedef struct VmModel {
   VmConfig cfg;
   uint32_t master_m16;    /* AHIET_MASTERVOLUME, Fixed */
@@ -173,6 +195,15 @@ typedef struct VmModel {
   uint32_t now;           /* frame: every boundary before it is processed */
   uint64_t t;             /* tick clock, 16.16 frames */
   uint32_t last_stamp;
+  /* Quality settings the next vm_start sends (vm_set_quality). */
+  uint32_t ramp_frames;
+  uint8_t limiter;
+  uint8_t interp;
+  uint32_t horizon_seen;  /* last horizon given to vm_bank_poll */
+  uint8_t horizon_valid;  /* vm_bank_poll has run */
+  VmTail tails[VM_MAX_TAILS];
+  uint32_t tail_n;
+  uint32_t tail_merges;   /* tails merged into another entry (list full) */
 
   VmSound sounds[VM_MAX_SOUNDS];
   VmChannel ch[VM_MAX_CHANNELS];
@@ -228,25 +259,45 @@ uint64_t vm_tick_frames16(uint32_t freq16);
 /* Setup. cfg is copied. */
 void vm_init(VmModel *m, const VmConfig *cfg);
 
-/* Bank allocator and sound table. vm_alloc returns 0 and the byte offset, or
- * -1 when no range fits. Sizes round up to 4 bytes. */
+/* Bank allocator and sound table. vm_bank_alloc takes the size of a sound's
+ * data and returns 0 and the bank offset of that data, or -1 when no range
+ * fits. The allocation behind it is larger: the data rounded up to 4 bytes
+ * with VM_GUARD_BYTES below and above. The caller writes zeros to the
+ * guards and to the rounding bytes every time it loads a sound, because the
+ * range may hold an older sound; no sound's reads leave its own allocation
+ * (see "Asset isolation" in voice_model.c). Offsets are 4-byte aligned. */
 int vm_bank_alloc(VmModel *m, uint32_t bytes, uint32_t *offset);
-/* Gives back a range vm_bank_alloc handed out when the upload failed before
- * the sound was defined. */
+/* Gives back the allocation vm_bank_alloc handed out for `bytes` at `offset`
+ * when the upload failed before the sound was defined. */
 void vm_bank_release(VmModel *m, uint32_t offset, uint32_t bytes);
 void vm_bank_poll(VmModel *m, uint32_t horizon);
-/* Defines sound id over the bank range [bank, bank + frames * frame size).
- * Returns 0, or -1 for a bad id, type or view. */
+/* Defines sound id over the bank bytes [bank, bank + frames * frame size),
+ * which must be the data of a vm_bank_alloc allocation: bank is 4-byte
+ * aligned with VM_GUARD_BYTES below it, and the guard above the rounded data
+ * lies inside the bank. Returns 0, or -1 for a bad id, type, view or
+ * offset. */
 int vm_sound_define(VmModel *m, uint32_t id, uint32_t ahi_type,
                     uint32_t bank, uint32_t frames);
 /* Frees the sound at once from the AHI side: channels using it fall silent
- * (STOP at the model time) and the bank range is held back until the engine
- * horizon passes that stamp. Returns 0, or -1 for an unknown id. */
+ * (STOP at the model time) and the whole allocation, guards included, is
+ * held back until the engine horizon passes that stamp and every fade tail
+ * that can read it has ended. Returns 0, or -1 for an unknown id. */
 int vm_sound_remove(VmModel *m, uint32_t id);
 /* True while a removed sound's bank range still waits for the engine: it
  * cannot be defined again until vm_bank_poll released the range. */
 int vm_sound_held(VmModel *m, uint32_t id);
 uint32_t vm_bank_free_bytes(const VmModel *m);
+
+/* Quality settings of the session, sent as CONFIG records by the next
+ * vm_start (after the MASTER record): ramp_frames 0..VM_MAX_RAMP_FRAMES (0
+ * off, larger values are cut), limiter 0 or 1, interp 0 (leave the open
+ * default) or ZZ9K_VOICE_INTERP_NEAREST..CUBIC. The caller sets only what
+ * the firmware advertises (ZZ9K_VOICE_FEATURE_*); the model never asks for
+ * more. With a ramp, a STOP or a restart of a sounding voice lets the sound
+ * fade out over ramp_frames, so its bank range stays busy until the engine
+ * horizon passes the fade (vm_bank_poll). */
+void vm_set_quality(VmModel *m, uint32_t ramp_frames, uint32_t limiter,
+                    uint32_t interp);
 
 /* Producer side, any context, under Disable(). Returns 0, or -1 and counts a
  * drop when the FIFO is full. */

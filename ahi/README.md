@@ -8,7 +8,7 @@
 `zz9000ax.audio` is the AHI subdriver for ZZ9000AX PCM playback and, when the
 firmware exposes its receive capability, stereo RCA recording. It sends one
 16-bit stereo stream to the card after AHI has mixed the application's
-channels, and in its two hardware mixing modes it hands the channels to the
+channels, and in its three hardware mixing modes it hands the channels to the
 card's voice engine instead. `mhizz9000.library` is a separate MHI library
 for the card's MP3 decoder.
 
@@ -40,7 +40,7 @@ The driver advertises these AHI properties:
 | Playback buffer limit | 960 sample frames at 48 kHz (`AHIDB_MaxPlaySamples`) |
 | Output | One output, `OUT 1` |
 | Mixing ceiling | 8 channels (`AHIDB_MaxChannels`) |
-| Hardware mixing | Two modes, `$CAFE0002` and `$CAFE0003`, in which the card mixes up to 32 channels; see below |
+| Hardware mixing | Three modes, `$CAFE0002`, `$CAFE0003` and `$CAFE0004`, in which the card mixes up to 32 channels; see below |
 
 `AHISF_MIXING` means `ahi.device` performs linear interpolation and 32-bit
 accumulation on the Amiga CPU. The card receives the final stereo stream, so
@@ -63,9 +63,10 @@ AHI's silence path.
 
 ## Hardware mixing modes
 
-AHI lists two more ZZ9000AX modes: `ZZ9000AX:Hardware mixing, 32 voices`
-(`$CAFE0002`) and `ZZ9000AX:Hardware mixing, 32 voices, interpolated`
-(`$CAFE0003`). In these modes `ahi.device` mixes nothing. The driver maps each
+AHI lists three more ZZ9000AX modes: `ZZ9000AX:Hardware mixing, 32 voices`
+(`$CAFE0002`, nearest sample), `ZZ9000AX:Hardware mixing, 32 voices,
+interpolated` (`$CAFE0003`, linear) and `ZZ9000AX:Hardware mixing, 32 voices,
+cubic` (`$CAFE0004`, 4-point cubic). In these modes `ahi.device` mixes nothing. The driver maps each
 AHI channel to a voice of the card's wavetable voice engine, so the channel
 count costs no mixing time on the 68k: the 68k work is the channel model, one
 small update per pass boundary of a voice, so a looping sound costs an update
@@ -87,6 +88,27 @@ and trackers. They need firmware that advertises the voice engine and
 | Latency | At least 160 ms, the engine's lead. `PlayerFunc` and `SoundFunc` run 160 to 320 ms ahead of the sound. |
 | Recording | None |
 
+Firmware that advertises the engine's quality features gets them in all three
+modes. The driver reads the features once after the session opens and sends
+only what is advertised:
+
+- The ramp is `ahiac_AntiClickSamples`, in samples at the mode's 48000 Hz and
+  at most 512. Volume changes, starts, stops and restarts fade over that many
+  frames instead of stepping. 0 leaves ramping off.
+- The soft limiter bends a loud sum toward the 16-bit rails instead of
+  clipping it, and leaves anything below three quarters of full scale alone.
+- `$CAFE0004` needs cubic interpolation in the firmware. On firmware without
+  it the allocation fails with a debug line that says so; the mode never plays
+  with another interpolation. `$CAFE0002` and `$CAFE0003` keep their
+  interpolation.
+
+Firmware without these features plays as before. A sound that a program
+unloads while it fades out keeps its bank range until the fade has ended.
+Every sound sits between 8 bytes of zero on each side in the card bank, so
+the samples of a sound do not depend on the sounds loaded beside it: the
+engine's interpolation reads one frame past the first or last frame of a
+pass, and that frame is zero.
+
 Limits:
 
 - Streaming clients do not work in these modes. Play16, ZZPlay's AHI output
@@ -95,7 +117,7 @@ Limits:
 - One voice session runs at a time. `zz9k-voiceplay` and a hardware mixing
   mode cannot play together; the second one is refused.
 - A Zorro II card is refused until firmware advertises the voice engine there.
-- The anti-click smoothing of immediate changes is not reproduced.
+- Oversampling is not used in these modes.
 
 ```text
 setenv ZZ9K_AHI_BANK 16384   ; sample bank in KiB, default 16384
@@ -105,8 +127,10 @@ setenv ZZ9K_AHI_LEAD 9600    ; lead in 48 kHz frames, default 0, the firmware fl
 When a hardware mixing session closes, the driver writes
 `ENV:ZZ9K_AHI_VOICE_STATS`. It holds the engine counters `late`, `rejected`,
 `underruns` and `dropped`, then the driver's `ringfull`, `ticks`, `frames`,
-`resyncs`, `fifodrops`, `recorddrops` and `overload`. A clean run has zeros
-everywhere except `ticks` and `frames`.
+`resyncs`, `fifodrops`, `recorddrops` and `overload`, then `features` (the
+features word the firmware advertised), `ramp` and `limiter`. A clean run has
+zero `late`, `rejected`, `underruns`, `dropped`, `ringfull`, `resyncs`,
+`fifodrops`, `recorddrops` and `overload`.
 
 The call-by-call mapping is in the
 [hardware mixing specification](../docs/ahi-voice-mixing-spec.md).
@@ -239,7 +263,7 @@ for that pair predates the limiter.
 | A burst occurs before the first playback after boot | Use the current driver, which silences the DAC during allocation. |
 | An AHI application has no recording option | Install firmware that reports receive status and the matching `zz9000ax.audio` driver. |
 | Recording is silent | Set both auxiliary jumpers to `IN` and select `RCA In`. |
-| `ZZ9000AX: hardware mixing refused: ...` on the debug channel | The line names the reason: firmware without the voice flag, `zz9k.library` older than revision 42, another voice client open, no card memory for the sample bank, or a Zorro II card. Use a 16 bit Stereo mode until it is fixed. |
+| `ZZ9000AX: hardware mixing refused: ...` on the debug channel | The line names the reason: firmware without the voice flag, `zz9k.library` older than revision 42, another voice client open, no card memory for the sample bank, a Zorro II card, or (in `$CAFE0004` only) firmware without cubic interpolation. Use a 16 bit Stereo mode, or `$CAFE0003` for the cubic case, until it is fixed. |
 | A streaming player fails to load sounds in a hardware mixing mode | Play16, ZZPlay AHI output and the datatypes need `AHIST_DYNAMICSAMPLE`, which these modes refuse with `AHIE_BADSOUNDTYPE`. Select `ZZ9000AX:16 bit Stereo` or `16 bit Stereo++` for them. |
 | A tracker's pattern cursor runs ahead of the music in a hardware mixing mode | `PlayerFunc` runs one engine lead (160 ms or more) ahead of the sound there. This is by design; a lower lead needs the low-latency firmware work. |
 | `ENV:ZZ9K_AHI_VOICE_STATS` shows `late` or `resyncs` above zero | The machine could not keep the driver's model ahead of the engine. Raise `ENV:ZZ9K_AHI_LEAD` or lower the load, and report the line. |
@@ -257,6 +281,7 @@ for that pair predates the limiter.
 | Unreleased | Software modes follow live `ahiac_PlayerFreq`, including tempo changes and fractional-frame intervals, on both legacy and fabric playback. The timer-pair fixture covers 60 to 25 Hz and 59.5 Hz over ten seconds. On the card, ZZAXVoiceTest S4 measured `PlayerFunc` within 0.25% of `AHIA_PlayerFreq` from 25 to 125 Hz in `$CAFE0000`. |
 | Unreleased | Hardware-mixing modes: the 68k work per pass boundary no longer grows with the channel count and no longer uses 64-bit `mulu.l`/`divu.l` forms. `vm_walk` keeps the channels due before the walk limit in a heap, so a boundary costs one heap update instead of a scan of every channel (on ZZAXVoiceTest S2 with 32 voices a 20 ms tick has about 192 boundaries). The boundary arithmetic (`k * step`, the pass length) and the level math use exact 32-bit paths, and the driver is built with `-m68020-60`; before it used `-m68020`, whose inline 64-bit multiplies trap into `68060.library` on a 68060. Records, `SoundFunc` order and stamps are unchanged. On a 68060 the model's S2 tick fell from 7.0 ms to 2.6 ms of CPU time per 20 ms (4 voices: 351 to 160 us). Before, S2 left a priority-0 task about a sixth of the CPU in `$CAFE0002`, and in `$CAFE0003` the extra bus stalls while the card rendered took the 68k to 100%: the priority-110 worker kept the client from ever stopping the session, and the mouse froze. |
 | Unreleased | Hardware-mixing modes: `AHI_LoadSound` sends its sample copy through the voice worker, the process that opened the voice session. Before, the copy ran in the client's task, the firmware refused it as a request from another client (status 5, `sample upload failed`), and every load returned `AHIE_UNKNOWN` on the card. The worker does not open `zz9k.library` itself: the library sends the Voice API calls as client 0 and `ZZ9KCall` as the caller's opener id, and only a task without an opener has one id for both. The worker copies one staging buffer per pass, so the session heartbeat continues during a large load. Start and the resync read the status again after the engine reset before they anchor the timeline; before, a Stop followed by Start counted its first records as `late` (13 in ZZAXVoiceTest S8). The worker harness models the library's client ids, the firmware's session ownership and the engine jump of a reset. |
+| Unreleased | Hardware-mixing modes: ramping from `ahiac_AntiClickSamples`, the soft limiter and the new cubic mode `$CAFE0004`, each used only when the firmware advertises it (the `CONFIG`, `RAMP`, `LIMITER`, `VOICE_INTERP` and `CUBIC` features). An unloaded sound keeps its whole bank allocation until the fade that the ramp gives it has ended. Every sound now sits between 8 zero bytes on each side, written on every load, so its samples cannot depend on the neighbouring sounds, and unloading a sound clears a queued loop into it in every mode. Host tests cover the records, the release of the range frame by frame, unload and reload against a real engine and the sample-for-sample isolation of an asset from its neighbours; not yet qualified on the card. |
 | Hardware-mixing card run | A4000 with a 68060, ZZ9000 on Zorro III, AmigaOS 3.2, with this driver and firmware that renders one voice period per main-loop pass. ZZAXVoiceTest `SCENARIO ALL` passed 10 of 10 in `$CAFE0000`, `$CAFE0002` and `$CAFE0003`, with no `late`, underrun or resync in any session, and nothing wrong by ear. HippoPlayer 2.67 played 8, 16 and 32 channel modules in `$CAFE0002`; a 16 channel module played beside ZZPlay's MPEG-2 video with direct AX audio. Play16 in a hardware-mixing mode gets the `AHIST_DYNAMICSAMPLE` refusal on the debug channel. Zorro II is not qualified. |
 
 ## References
