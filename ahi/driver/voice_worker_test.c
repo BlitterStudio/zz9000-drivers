@@ -207,6 +207,10 @@ static struct {
   uint16_t next_client_id;
   uint32_t refused;               /* voice requests from a task but the owner */
   uint32_t query_caps;
+  uint32_t features;              /* the features word the status block shows */
+  uint32_t open_flags;            /* flags of the last open request */
+  struct Library ahi_device;      /* the resident ahi.device node */
+  uint8_t ahi_present;
   uint8_t mhi_mode;            /* 0 none, 1 legacy MHI, 2 fabric MHI */
   struct Node mhi_node;
 } fw;
@@ -242,6 +246,8 @@ static struct TagItem voice_tags[] = {
     {AHIDB_ZZVoice, 0xCAFE0002UL}, {AHIDB_Volume, TRUE}, {TAG_DONE, 0}};
 static struct TagItem linear_tags[] = {
     {AHIDB_ZZVoiceLinear, 0xCAFE0003UL}, {TAG_DONE, 0}};
+static struct TagItem cubic_tags[] = {
+    {AHIDB_ZZVoiceCubic, 0xCAFE0004UL}, {TAG_DONE, 0}};
 static struct TagItem soft_tags[] = {{AHIDB_AudioID, 0xCAFE0000UL},
                                      {TAG_DONE, 0}};
 
@@ -324,6 +330,10 @@ static void test_signal(struct Task *task, ULONG signals)
 static struct Node *test_find_name(struct List *list, CONST_STRPTR name)
 {
   (void)list;
+  /* The driver reads the resident ahi.device's version from the device list
+   * before it trusts the V6 field ahiac_AntiClickSamples. */
+  if (strcmp((const char *)name, "ahi.device") == 0)
+    return fw.ahi_present ? &fw.ahi_device.lib_Node : NULL;
   if (fw.mhi_mode == 0U)
     return NULL;
   /* The node answers only to its own name, as a real server list would. */
@@ -605,6 +615,7 @@ static int zz_ax_voice_open(const ZZ9KVoiceOpenDesc *desc,
                                : ZZ9K_VOICE_STAGING_DEFAULT_BYTES;
 
   fw.opens++;
+  fw.open_flags = desc->flags;
   memset(session, 0, sizeof(*session));
   if (fw.open_status != ZZ9K_STATUS_OK)
     return fw.open_status;
@@ -624,6 +635,8 @@ static int zz_ax_voice_open(const ZZ9KVoiceOpenDesc *desc,
   session->grant.max_samples = ZZ9K_VOICE_MAX_SAMPLES;
   session->ring = fw.ring;
   session->status = fw.status_block;
+  zz9k_put_be32(fw.status_block + ZZ9K_VOICE_STATUS_FEATURES_OFFSET,
+                fw.features);
   session->staging = fw.staging;
   session->staging_bytes = staging_bytes;
   session->write_cursor = 0U;
@@ -749,11 +762,18 @@ static ULONG test_sound(struct Hook *hook asm("a0"),
 
 static uint8_t sample[4096];
 
+/* Version of the fake resident ahi.device that prepare() installs: 0 for none.
+ * 6 is the first version with ahiac_AntiClickSamples. */
+static uint32_t g_ahi_version = 6U;
+
 static void prepare(void)
 {
   memset(&fw, 0, sizeof(fw));
   memset(&fx, 0, sizeof(fx));
   fw.library_present = 1U;
+  fw.ahi_present = g_ahi_version != 0U ? 1U : 0U;
+  fw.ahi_device.lib_Version = (UWORD)g_ahi_version;
+  fw.ahi_device.lib_Node.ln_Name = (char *)"ahi.device";
   fw.revision = ZZ9K_LIBRARY_MIN_REVISION_AUDIO_VOICE;
   fw.service_flags = FAKE_SERVICE_FLAGS;
   fw.write_budget = -1;
@@ -1198,16 +1218,25 @@ static int case_load_unload(void)
   info->ahisi_Type = AHIST_M8S;
   info->ahisi_Address = sample + 64U;
   info->ahisi_Length = 3000U;
+  /* A bank that holds an older sound: the guards must be written. */
+  memset(fw.bank, 0xAA, 4096U);
   calls = fw.calls;
   rc = intAHIsub_LoadSound(0U, AHIST_SAMPLE, info, &fx.audio);
   check(rc == AHIE_OK, "an 8-bit sample loads");
   check(fw.uploads == 3U && fw.calls - calls == 3U,
         "3000 bytes go in three 1024-byte chunks");
   check(fw.defines == 4U, "a sound defines no engine sample");
-  check(memcmp(fw.bank, sample + 64U, 3000U) == 0,
-        "the bank holds the sample");
-  check(vm_bank_free_bytes(&fx.driver.voice->model) == FAKE_BANK_BYTES - 3000U,
-        "the sound takes its range from the bank");
+  check(memcmp(fw.bank + VM_GUARD_BYTES, sample + 64U, 3000U) == 0,
+        "the bank holds the sample, a guard above the allocation start");
+  check(memcmp(fw.bank, "\0\0\0\0\0\0\0\0", VM_GUARD_BYTES) == 0 &&
+            memcmp(fw.bank + VM_GUARD_BYTES + 3000U,
+                   "\0\0\0\0\0\0\0\0", VM_GUARD_BYTES) == 0,
+        "both guards are zero though the bank held other bytes");
+  check(fw.bank[2U * VM_GUARD_BYTES + 3000U] == 0xAAU,
+        "nothing is written past the allocation");
+  check(vm_bank_free_bytes(&fx.driver.voice->model) ==
+            FAKE_BANK_BYTES - (3000U + 2U * VM_GUARD_BYTES),
+        "the sound takes its allocation, guards included, from the bank");
 
   rc = intAHIsub_LoadSound(1U, AHIST_DYNAMICSAMPLE, info, &fx.audio);
   check(rc == AHIE_BADSOUNDTYPE, "AHIST_DYNAMICSAMPLE is refused");
@@ -1229,24 +1258,48 @@ static int case_load_unload(void)
   intAHIsub_UnloadSound(1U, &fx.audio);
   check(fw.calls == calls, "UnloadSound does not call the mailbox");
   check(vm_bank_free_bytes(&fx.driver.voice->model) ==
-            FAKE_BANK_BYTES - 3400U,
+            FAKE_BANK_BYTES - (3000U + 400U + 4U * VM_GUARD_BYTES),
         "the bank waits for the worker");
   voice_service(&fx.driver);
   check(fw.calls == calls, "the worker frees sounds without the mailbox");
   /* Sound 1 was silent: free at once. Sound 0 is playing: its range waits
    * until the engine horizon passes the stop that silenced it. */
   check(vm_bank_free_bytes(&fx.driver.voice->model) ==
-            FAKE_BANK_BYTES - 3400U,
+            FAKE_BANK_BYTES - (3000U + 400U + 4U * VM_GUARD_BYTES),
         "freed ranges wait for the engine horizon");
   voice_service(&fx.driver);
   check(vm_bank_free_bytes(&fx.driver.voice->model) ==
-            FAKE_BANK_BYTES - 3400U,
+            FAKE_BANK_BYTES - (3000U + 400U + 4U * VM_GUARD_BYTES),
         "the ranges wait for the horizon");
   advance_card(FAKE_LEAD + 960U);
   voice_service(&fx.driver);
   check(vm_bank_free_bytes(&fx.driver.voice->model) == FAKE_BANK_BYTES,
         "the horizon passing the stop frees the range");
   check(fx.driver.voice->model.sounds[0].used == 0U, "sound 0 is gone");
+
+  /* A sound whose size is not a multiple of 4: the rounding bytes and both
+   * guards are zero, in a range that held other bytes. */
+  memset(fw.bank, 0xAA, 4096U);
+  info->ahisi_Type = AHIST_M8S;
+  info->ahisi_Address = sample + 64U;
+  info->ahisi_Length = 17U;
+  rc = intAHIsub_LoadSound(3U, AHIST_SAMPLE, info, &fx.audio);
+  check(rc == AHIE_OK, "a 17 byte sample loads");
+  {
+    uint32_t bank = fx.driver.voice->model.sounds[3].bank;
+    uint32_t i;
+    int zero = 1;
+
+    check(memcmp(fw.bank + bank, sample + 64U, 17U) == 0,
+          "the 17 bytes are in the bank");
+    for (i = bank - VM_GUARD_BYTES; i < bank; i++)
+      zero &= fw.bank[i] == 0U;
+    for (i = bank + 17U; i < bank + 20U + VM_GUARD_BYTES; i++)
+      zero &= fw.bank[i] == 0U;
+    check(zero, "the guards and the 3 rounding bytes are zero");
+    check(fw.bank[bank + 20U + VM_GUARD_BYTES] == 0xAAU,
+          "nothing is written past the allocation");
+  }
   intAHIsub_FreeAudio(&fx.audio);
   return fx.failures;
 }
@@ -1321,7 +1374,8 @@ static int case_load_other_task(void)
         " that does not own the session", (unsigned long)fw.refused);
   check(fw.uploads == 3U, "2900 bytes go in three chunks (%lu)",
         (unsigned long)fw.uploads);
-  check(memcmp(fw.bank, sample + 64U, 2900U) == 0, "the bank holds the sample");
+  check(memcmp(fw.bank + VM_GUARD_BYTES, sample + 64U, 2900U) == 0,
+        "the bank holds the sample");
   check(fx.driver.voice->session.heartbeat - heartbeat >= 3U,
         "the worker keeps the heartbeat during the upload (%lu)",
         (unsigned long)(fx.driver.voice->session.heartbeat - heartbeat));
@@ -1455,6 +1509,268 @@ static int case_mhi(void)
   return fx.failures;
 }
 
+/* The records of ops `op` the worker wrote to the fake ring so far. */
+static uint32_t ring_ops(uint8_t op, const ZZ9KVoiceRecord **first)
+{
+  static ZZ9KVoiceRecord found;
+  uint32_t n = 0U;
+  uint32_t i;
+
+  for (i = 0U; i < ring_records(); i++) {
+    const ZZ9KVoiceRecord *r = ring_record(i);
+
+    if (r->op == op) {
+      if (n == 0U)
+        found = *r;
+      n++;
+    }
+  }
+  if (first)
+    *first = &found;
+  return n;
+}
+
+/* Starts a session with the given features and AntiClickSamples and returns
+ * the number of CONFIG records the Start wrote; `config` is the first. */
+static uint32_t start_with(uint32_t features, uint32_t anticlick,
+                           const struct TagItem *tags,
+                           const ZZ9KVoiceRecord **config)
+{
+  uint32_t n;
+
+  prepare();
+  fw.features = features;
+  fx.audio.ahiac_AntiClickSamples = anticlick;
+  if (intAHIsub_AllocAudio((struct TagItem *)tags, &fx.audio) != 0U) {
+    check(0, "allocation with features %lx", (unsigned long)features);
+    return 0U;
+  }
+  check(intAHIsub_Start(AHISF_PLAY, &fx.audio) == AHIE_OK, "Start");
+  n = ring_ops(ZZ9K_VOICE_OP_CONFIG, config);
+  return n;
+}
+
+static void end_session(void)
+{
+  intAHIsub_FreeAudio(&fx.audio);
+}
+
+static int case_quality_config(void)
+{
+  const ZZ9KVoiceRecord *c;
+  uint32_t n;
+  const uint32_t base = ZZ9K_VOICE_FEATURE_CONFIG;
+
+  /* Firmware without features: no CONFIG record and the old stream. */
+  n = start_with(0U, 240U, voice_tags, &c);
+  check(n == 0U, "no features: no CONFIG record (%lu)", (unsigned long)n);
+  check(ring_record(0U)->op == ZZ9K_VOICE_OP_MASTER, "MASTER stays first");
+  check(fx.driver.voice->features == 0U && fx.driver.voice->ramp_frames == 0U,
+        "the driver kept no ramp");
+  end_session();
+
+  /* The ramp is AntiClickSamples, 48 kHz frames, once RAMP is advertised. */
+  n = start_with(base | ZZ9K_VOICE_FEATURE_RAMP, 240U, voice_tags, &c);
+  check(n == 1U && c->flags == ZZ9K_VOICE_CONFIG_RAMP && c->arg0 == 240U,
+        "a ramp of AntiClickSamples (%lu records)", (unsigned long)n);
+  check(ring_record(0U)->op == ZZ9K_VOICE_OP_MASTER &&
+            ring_record(1U)->op == ZZ9K_VOICE_OP_CONFIG,
+        "CONFIG follows the MASTER record");
+  end_session();
+
+  /* Zero is off. */
+  n = start_with(base | ZZ9K_VOICE_FEATURE_RAMP, 0U, voice_tags, &c);
+  check(n == 0U, "AntiClickSamples 0: no ramp record (%lu)", (unsigned long)n);
+  end_session();
+
+  /* More than the engine takes is cut to its maximum. */
+  n = start_with(base | ZZ9K_VOICE_FEATURE_RAMP, 100000U, voice_tags, &c);
+  check(n == 1U && c->arg0 == ZZ9K_VOICE_RAMP_MAX_FRAMES,
+        "the ramp is cut to %u frames", (unsigned)ZZ9K_VOICE_RAMP_MAX_FRAMES);
+  end_session();
+
+  /* The limiter goes with the ramp in one record, or alone with arg0 0. */
+  n = start_with(base | ZZ9K_VOICE_FEATURE_RAMP | ZZ9K_VOICE_FEATURE_LIMITER,
+                 64U, voice_tags, &c);
+  check(n == 1U &&
+            c->flags == (ZZ9K_VOICE_CONFIG_RAMP | ZZ9K_VOICE_CONFIG_LIMITER) &&
+            c->arg0 == 64U && c->arg1 == 1U,
+        "ramp and limiter in one record");
+  end_session();
+  n = start_with(base | ZZ9K_VOICE_FEATURE_LIMITER, 64U, voice_tags, &c);
+  check(n == 1U && c->flags == ZZ9K_VOICE_CONFIG_LIMITER && c->arg0 == 0U &&
+            c->arg1 == 1U,
+        "limiter without RAMP advertised: no ramp, arg0 0");
+  end_session();
+  n = start_with(base | ZZ9K_VOICE_FEATURE_RAMP | ZZ9K_VOICE_FEATURE_LIMITER,
+                 0U, voice_tags, &c);
+  check(n == 1U && c->flags == ZZ9K_VOICE_CONFIG_LIMITER && c->arg0 == 0U,
+        "zero ramp with the limiter: the limiter alone");
+  end_session();
+
+  /* Bits without the CONFIG record itself send nothing. */
+  n = start_with(ZZ9K_VOICE_FEATURE_RAMP | ZZ9K_VOICE_FEATURE_LIMITER, 240U,
+                 voice_tags, &c);
+  check(n == 0U, "RAMP and LIMITER without CONFIG: nothing is sent");
+  end_session();
+
+  /* The nearest and linear modes never send a default interpolation. */
+  n = start_with(0xFFU, 240U, linear_tags, &c);
+  check(ring_ops(ZZ9K_VOICE_OP_CONFIG, &c) == 1U &&
+            (c->flags & ZZ9K_VOICE_CONFIG_INTERP) == 0U,
+        "the linear mode sends no interpolation record");
+  check((fw.open_flags & ZZ9K_VOICE_OPEN_FLAG_LINEAR) != 0U,
+        "the linear mode opens with the linear flag");
+  end_session();
+
+  /* A restart of the timeline sends it again. */
+  n = start_with(base | ZZ9K_VOICE_FEATURE_RAMP, 128U, voice_tags, &c);
+  check(n == 1U, "first Start");
+  intAHIsub_Stop(AHISF_PLAY, &fx.audio);
+  advance_card(960U);
+  voice_service(&fx.driver);
+  check(intAHIsub_Start(AHISF_PLAY, &fx.audio) == AHIE_OK, "Start again");
+  check(ring_ops(ZZ9K_VOICE_OP_CONFIG, &c) == 2U,
+        "the second Start sends the ramp again");
+  end_session();
+  check(strstr(fx.stats, "ramp=128 ") != NULL,
+        "the stats name the ramp: %s", fx.stats);
+  return fx.failures;
+}
+
+static int case_cubic_mode(void)
+{
+  const ZZ9KVoiceRecord *c;
+  uint32_t n;
+  uint32_t i;
+  const uint32_t need = ZZ9K_VOICE_FEATURE_CONFIG |
+                        ZZ9K_VOICE_FEATURE_VOICE_INTERP |
+                        ZZ9K_VOICE_FEATURE_CUBIC;
+  const uint32_t missing[] = {0U,
+                              ZZ9K_VOICE_FEATURE_CONFIG,
+                              need & ~ZZ9K_VOICE_FEATURE_CONFIG,
+                              need & ~ZZ9K_VOICE_FEATURE_VOICE_INTERP,
+                              need & ~ZZ9K_VOICE_FEATURE_CUBIC,
+                              ZZ9K_VOICE_FEATURE_RAMP |
+                                  ZZ9K_VOICE_FEATURE_LIMITER};
+
+  /* Firmware that lacks any piece refuses the mode: no other interpolation
+   * is played in its place. */
+  for (i = 0U; i < sizeof(missing) / sizeof(missing[0]); i++) {
+    prepare();
+    fw.features = missing[i];
+    check(intAHIsub_AllocAudio(cubic_tags, &fx.audio) == AHISF_ERROR,
+          "features %lx: the cubic mode is refused",
+          (unsigned long)missing[i]);
+    check(fx.voice.reason == Z9AX_VOICE_REASON_FEATURES,
+          "features %lx: the reason is recorded (%u)",
+          (unsigned long)missing[i], (unsigned)fx.voice.reason);
+    check(Z9AXBase->owner == NULL && Z9AXBase->allocating == NULL &&
+              ZZ9KBase == NULL && fx.audio.ahiac_DriverData == NULL,
+          "features %lx: a refusal leaves nothing behind",
+          (unsigned long)missing[i]);
+    check(fw.closes == fw.opens && fw.opens == 1U,
+          "features %lx: the session the worker opened is closed",
+          (unsigned long)missing[i]);
+  }
+
+  /* The pieces together: the mode is recognised, opens without the linear
+   * flag and sends the cubic default after the master record. */
+  n = start_with(need, 0U, cubic_tags, &c);
+  check(n == 1U && c->flags == ZZ9K_VOICE_CONFIG_INTERP &&
+            c->arg0 == ZZ9K_VOICE_INTERP_CUBIC && c->arg1 == 0U,
+        "the cubic default interpolation record (%lu)", (unsigned long)n);
+  check(fx.driver.voice_mode == Z9AX_VOICE_CUBIC && fx.driver.voice->cubic &&
+            !fx.driver.voice->linear,
+        "the mode is recognised");
+  check((fw.open_flags & ZZ9K_VOICE_OPEN_FLAG_LINEAR) == 0U,
+        "the cubic mode does not open with the linear flag");
+  check(ring_record(0U)->op == ZZ9K_VOICE_OP_MASTER &&
+            ring_record(1U)->op == ZZ9K_VOICE_OP_CONFIG,
+        "the record follows the MASTER record");
+  end_session();
+
+  /* With ramp and limiter advertised: their record, then the interpolation. */
+  n = start_with(need | ZZ9K_VOICE_FEATURE_RAMP | ZZ9K_VOICE_FEATURE_LIMITER,
+                 96U, cubic_tags, &c);
+  check(n == 2U && ring_record(1U)->op == ZZ9K_VOICE_OP_CONFIG &&
+            ring_record(1U)->flags ==
+                (ZZ9K_VOICE_CONFIG_RAMP | ZZ9K_VOICE_CONFIG_LIMITER) &&
+            ring_record(1U)->arg0 == 96U && ring_record(2U)->flags ==
+                                                ZZ9K_VOICE_CONFIG_INTERP,
+        "ramp and limiter first, then the interpolation (%lu records)",
+        (unsigned long)n);
+  end_session();
+
+  /* A plain mode on the same firmware keeps its interpolation. */
+  prepare();
+  fw.features = need;
+  check(intAHIsub_AllocAudio(voice_tags, &fx.audio) == 0U,
+        "the nearest mode on cubic firmware");
+  check(!fx.driver.voice->cubic, "it does not turn cubic");
+  end_session();
+  return fx.failures;
+}
+
+/* ahiac_AntiClickSamples exists from ahi.device 6. An older device does not
+ * fill the field in, so whatever it holds (here a plausible nonzero value) is
+ * not a ramp; a V6 device's value is one. */
+static int case_anticlick_ahi_version(void)
+{
+  static const uint32_t versions[] = {0U, 3U, 4U, 5U};
+  const ZZ9KVoiceRecord *c;
+  const uint32_t features = ZZ9K_VOICE_FEATURE_CONFIG |
+                            ZZ9K_VOICE_FEATURE_RAMP;
+  uint32_t n;
+  uint32_t i;
+
+  for (i = 0U; i < sizeof(versions) / sizeof(versions[0]); i++) {
+    g_ahi_version = versions[i];
+    n = start_with(features, 240U, voice_tags, &c);
+    check(n == 0U,
+          "ahi.device %lu (0 is none): a stale AntiClickSamples of 240 gives "
+          "no ramp (%lu records)", (unsigned long)versions[i],
+          (unsigned long)n);
+    check(fx.driver.voice->anticlick == 0U && fx.driver.voice->ramp_frames == 0U,
+          "ahi.device %lu: the driver keeps no ramp", (unsigned long)versions[i]);
+    end_session();
+    check(strstr(fx.stats, "ramp=0 ") != NULL,
+          "ahi.device %lu: the stats say ramp=0: %s", (unsigned long)versions[i],
+          fx.stats);
+  }
+
+  /* Version 6 and newer honour the value, 0 included. */
+  g_ahi_version = 6U;
+  n = start_with(features, 240U, voice_tags, &c);
+  check(n == 1U && c->flags == ZZ9K_VOICE_CONFIG_RAMP && c->arg0 == 240U,
+        "ahi.device 6: AntiClickSamples 240 is the ramp (%lu records)",
+        (unsigned long)n);
+  end_session();
+  check(strstr(fx.stats, "ramp=240 ") != NULL, "the stats say ramp=240: %s",
+        fx.stats);
+  g_ahi_version = 41U;
+  n = start_with(features, 128U, voice_tags, &c);
+  check(n == 1U && c->arg0 == 128U,
+        "a newer ahi.device honours it too (%lu records)", (unsigned long)n);
+  end_session();
+  g_ahi_version = 6U;
+  n = start_with(features, 0U, voice_tags, &c);
+  check(n == 0U, "ahi.device 6: AntiClickSamples 0 is no ramp");
+  end_session();
+
+  /* The cubic mode asks for its interpolation whatever the device version. */
+  g_ahi_version = 5U;
+  n = start_with(ZZ9K_VOICE_FEATURE_CONFIG | ZZ9K_VOICE_FEATURE_VOICE_INTERP |
+                     ZZ9K_VOICE_FEATURE_CUBIC | ZZ9K_VOICE_FEATURE_RAMP,
+                 240U, cubic_tags, &c);
+  check(n == 1U && c->flags == ZZ9K_VOICE_CONFIG_INTERP,
+        "ahi.device 5 and cubic: only the interpolation record (%lu)",
+        (unsigned long)n);
+  end_session();
+  g_ahi_version = 6U;
+  return fx.failures;
+}
+
 int main(void)
 {
   int failures = 0;
@@ -1470,6 +1786,9 @@ int main(void)
     (void)case_name();                         \
   } while (0)
   RUN(case_alloc_and_free);
+  RUN(case_quality_config);
+  RUN(case_cubic_mode);
+  RUN(case_anticlick_ahi_version);
   RUN(case_refusals);
   RUN(case_second_alloc);
   RUN(case_bank_halves);
@@ -1490,6 +1809,6 @@ int main(void)
     printf("%d failure(s)\n", failures);
     return 20;
   }
-  puts("PASS: voice worker (16 cases)");
+  puts("PASS: voice worker (19 cases)");
   return 0;
 }
