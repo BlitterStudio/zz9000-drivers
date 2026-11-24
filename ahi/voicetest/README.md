@@ -36,12 +36,13 @@ ZZAXVoiceTest MODE $CAFE0002 SCENARIO S1 CHANNELS 32 SECONDS 30
 ZZAXVoiceTest MODE $CAFE0003 SCENARIO ALL SECONDS 10
 ZZAXVoiceTest MODE $CAFE0000 SCENARIO S1 CHANNELS 8 SECONDS 30
 ZZAXVoiceTest MODE $CAFE0002 SCENARIO S10 CYCLES 50
+ZZAXVoiceTest MODE 0xCAFE0004 SCENARIO S1 CHANNELS 32 SECONDS 20 ANTICLICK 240
 ```
 
 The ReadArgs template is:
 
 ```text
-MODE,SCENARIO,CHANNELS/K/N,SECONDS/K/N,CYCLES/K/N
+MODE,SCENARIO,CHANNELS/K/N,SECONDS/K/N,CYCLES/K/N,ANTICLICK/K/N
 ```
 
 `MODE` and `SCENARIO` can also be positional, for example
@@ -62,6 +63,47 @@ Minimum measurement windows can make those scenarios longer: S3 needs
 several passes at each length; S4 uses at least 2 seconds at each rate.
 S5 and S9 have fixed scripts. S10 plays for 100 ms per allocation;
 `CYCLES` selects 1 to 2000 repetitions and defaults to 50.
+
+The waits count 20 ms `Delay` steps, not elapsed time, so under load a step
+takes longer and `SECONDS` is a nominal `Delay`-step budget, not a wall-clock
+deadline. On the card, S1 with 32 cubic voices
+and `SECONDS 20` ran 34.9 s of engine time (1673280 frames and 1743
+`PlayerFunc` ticks in the statistics). S3, S4 and S6 read the E clock and
+compute the expected counts from the time that actually elapsed, so a
+stretched window does not fail them. `ALL` with `SECONDS 10` adds up to about
+92 s of waits plus 59 allocation sessions (nine scenarios and 50 S10 cycles)
+when the machine keeps pace; leave a generous margin when a job has a
+time limit.
+
+`ANTICLICK` passes `AHIA_AntiClickSamples` (`AHI_TagBase + 13`, an
+`ahi.device` 6 tag) to `AHI_AllocAudio`. The value is a number of sample frames
+at the mode's 48000 Hz, so 240 is 5 ms, and the driver cuts it to 512. It
+accepts 0 to 512. 0 passes the tag with the value 0, which switches the ramp
+off whatever the preferences hold. Without `ANTICLICK` the tag is not passed
+and AHI uses the default anti-click time of AHI Preferences. The tool needs
+`ahi.device` 6 or newer for `ANTICLICK` and exits with 10 otherwise, because an
+older device ignores the tag.
+
+With `ANTICLICK` and a hardware mode, the tool reads `features` and `ramp`
+from the driver statistics (see below) after every session. It passes the
+run only when the firmware advertises `CONFIG` and `RAMP` and the driver
+sent `ramp` equal to the value given. A firmware that does not advertise
+them fails the run, because the ramp was not exercised. The statistics prove
+what the driver sent. Whether the ramp sounds right is a listening check.
+
+The Shell expands `$name` as a variable, so the `0x` form of a mode ID
+(`MODE 0xCAFE0004`) is the safe spelling in a script or when a variable of that
+name might exist.
+
+To test the default instead of a given value, leave `ANTICLICK` out and set
+the default anti-click time in AHI Preferences, on the `Advanced settings` page
+(`Default anti-click time`, in milliseconds; AHI turns it into samples at the
+mix rate). That needs the Preferences window, so someone at the machine has to
+operate it: note the current value before changing it, save the test value,
+and set the noted value back afterwards. The command line `ANTICLICK` leaves
+the preferences alone and is the way to run a ramp without touching them. The
+driver reads the value as `ahiac_AntiClickSamples` once, in AllocAudio, and
+the stats line shows what it used as `ramp=`.
 
 Ctrl-C stops the current scenario, cleans up and returns 5. Keep the
 printed log and record whether the listening checks below sounded right.
@@ -137,8 +179,13 @@ After each FreeAudio the program reads the global ENV variable
 `ZZ9K_AHI_VOICE_STATS` and prints the line:
 
 ```text
-late=N rejected=N underruns=N dropped=N ringfull=N ticks=N frames=N
+late=N rejected=N underruns=N dropped=N ringfull=N ticks=N frames=N ...
 ```
+
+The driver appends `resyncs`, `fifodrops`, `recorddrops`, `overload`,
+`features`, `ramp` and `limiter`. `features` is the firmware features word in
+decimal, `ramp` the ramp length of the last Start in frames, and `limiter` 1
+when the soft limiter was switched on. The tool prints the whole line.
 
 It deletes the old value before each allocation so it cannot mistake stale
 counters for the current session. Hardware mode must publish a new value.

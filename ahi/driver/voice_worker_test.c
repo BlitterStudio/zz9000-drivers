@@ -209,6 +209,8 @@ static struct {
   uint32_t query_caps;
   uint32_t features;              /* the features word the status block shows */
   uint32_t open_flags;            /* flags of the last open request */
+  struct Library ahi_device;      /* the resident ahi.device node */
+  uint8_t ahi_present;
   uint8_t mhi_mode;            /* 0 none, 1 legacy MHI, 2 fabric MHI */
   struct Node mhi_node;
 } fw;
@@ -328,6 +330,10 @@ static void test_signal(struct Task *task, ULONG signals)
 static struct Node *test_find_name(struct List *list, CONST_STRPTR name)
 {
   (void)list;
+  /* The driver reads the resident ahi.device's version from the device list
+   * before it trusts the V6 field ahiac_AntiClickSamples. */
+  if (strcmp((const char *)name, "ahi.device") == 0)
+    return fw.ahi_present ? &fw.ahi_device.lib_Node : NULL;
   if (fw.mhi_mode == 0U)
     return NULL;
   /* The node answers only to its own name, as a real server list would. */
@@ -756,11 +762,18 @@ static ULONG test_sound(struct Hook *hook asm("a0"),
 
 static uint8_t sample[4096];
 
+/* Version of the fake resident ahi.device that prepare() installs: 0 for none.
+ * 6 is the first version with ahiac_AntiClickSamples. */
+static uint32_t g_ahi_version = 6U;
+
 static void prepare(void)
 {
   memset(&fw, 0, sizeof(fw));
   memset(&fx, 0, sizeof(fx));
   fw.library_present = 1U;
+  fw.ahi_present = g_ahi_version != 0U ? 1U : 0U;
+  fw.ahi_device.lib_Version = (UWORD)g_ahi_version;
+  fw.ahi_device.lib_Node.ln_Name = (char *)"ahi.device";
   fw.revision = ZZ9K_LIBRARY_MIN_REVISION_AUDIO_VOICE;
   fw.service_flags = FAKE_SERVICE_FLAGS;
   fw.write_budget = -1;
@@ -1699,6 +1712,65 @@ static int case_cubic_mode(void)
   return fx.failures;
 }
 
+/* ahiac_AntiClickSamples exists from ahi.device 6. An older device does not
+ * fill the field in, so whatever it holds (here a plausible nonzero value) is
+ * not a ramp; a V6 device's value is one. */
+static int case_anticlick_ahi_version(void)
+{
+  static const uint32_t versions[] = {0U, 3U, 4U, 5U};
+  const ZZ9KVoiceRecord *c;
+  const uint32_t features = ZZ9K_VOICE_FEATURE_CONFIG |
+                            ZZ9K_VOICE_FEATURE_RAMP;
+  uint32_t n;
+  uint32_t i;
+
+  for (i = 0U; i < sizeof(versions) / sizeof(versions[0]); i++) {
+    g_ahi_version = versions[i];
+    n = start_with(features, 240U, voice_tags, &c);
+    check(n == 0U,
+          "ahi.device %lu (0 is none): a stale AntiClickSamples of 240 gives "
+          "no ramp (%lu records)", (unsigned long)versions[i],
+          (unsigned long)n);
+    check(fx.driver.voice->anticlick == 0U && fx.driver.voice->ramp_frames == 0U,
+          "ahi.device %lu: the driver keeps no ramp", (unsigned long)versions[i]);
+    end_session();
+    check(strstr(fx.stats, "ramp=0 ") != NULL,
+          "ahi.device %lu: the stats say ramp=0: %s", (unsigned long)versions[i],
+          fx.stats);
+  }
+
+  /* Version 6 and newer honour the value, 0 included. */
+  g_ahi_version = 6U;
+  n = start_with(features, 240U, voice_tags, &c);
+  check(n == 1U && c->flags == ZZ9K_VOICE_CONFIG_RAMP && c->arg0 == 240U,
+        "ahi.device 6: AntiClickSamples 240 is the ramp (%lu records)",
+        (unsigned long)n);
+  end_session();
+  check(strstr(fx.stats, "ramp=240 ") != NULL, "the stats say ramp=240: %s",
+        fx.stats);
+  g_ahi_version = 41U;
+  n = start_with(features, 128U, voice_tags, &c);
+  check(n == 1U && c->arg0 == 128U,
+        "a newer ahi.device honours it too (%lu records)", (unsigned long)n);
+  end_session();
+  g_ahi_version = 6U;
+  n = start_with(features, 0U, voice_tags, &c);
+  check(n == 0U, "ahi.device 6: AntiClickSamples 0 is no ramp");
+  end_session();
+
+  /* The cubic mode asks for its interpolation whatever the device version. */
+  g_ahi_version = 5U;
+  n = start_with(ZZ9K_VOICE_FEATURE_CONFIG | ZZ9K_VOICE_FEATURE_VOICE_INTERP |
+                     ZZ9K_VOICE_FEATURE_CUBIC | ZZ9K_VOICE_FEATURE_RAMP,
+                 240U, cubic_tags, &c);
+  check(n == 1U && c->flags == ZZ9K_VOICE_CONFIG_INTERP,
+        "ahi.device 5 and cubic: only the interpolation record (%lu)",
+        (unsigned long)n);
+  end_session();
+  g_ahi_version = 6U;
+  return fx.failures;
+}
+
 int main(void)
 {
   int failures = 0;
@@ -1716,6 +1788,7 @@ int main(void)
   RUN(case_alloc_and_free);
   RUN(case_quality_config);
   RUN(case_cubic_mode);
+  RUN(case_anticlick_ahi_version);
   RUN(case_refusals);
   RUN(case_second_alloc);
   RUN(case_bank_halves);
@@ -1736,6 +1809,6 @@ int main(void)
     printf("%d failure(s)\n", failures);
     return 20;
   }
-  puts("PASS: voice worker (18 cases)");
+  puts("PASS: voice worker (19 cases)");
   return 0;
 }

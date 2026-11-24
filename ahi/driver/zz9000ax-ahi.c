@@ -60,9 +60,9 @@
 #define XSTR(s) STR(s)
 
 #define DEVICE_NAME "zz9000ax.audio"
-#define DEVICE_DATE "(22.11.2026)"
+#define DEVICE_DATE "(24.11.2026)"
 #define DEVICE_VERSION 4
-#define DEVICE_REVISION 33
+#define DEVICE_REVISION 34
 #define DEVICE_ID_STRING "ZZ9000AX " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
 #define DEVICE_PRIORITY 0
 
@@ -1444,6 +1444,10 @@ static void fabric_lease_release(struct z9ax *ahi_data)
  * advertised, the soft limiter when LIMITER is, and in $CAFE0004 the cubic
  * default interpolation. $CAFE0004 is refused when the firmware does not
  * advertise cubic interpolation: it never plays another interpolation.
+ * ahiac_AntiClickSamples exists from ahi.device 6 (libraries/ahi_sub.h marks
+ * it V6); an older ahi.device has no such field in its control structure, so
+ * AllocAudio reads it only when the resident ahi.device is version 6 or
+ * newer, and the ramp is 0 otherwise.
  */
 
 /* AHIDB_UserBase is in the AHI developer includes, not in every NDK. */
@@ -1968,11 +1972,31 @@ static void voice_engine_reset(struct z9ax *ahi_data)
   (void)voice_read_status(ahi_data);
 }
 
+/* ahiac_AntiClickSamples of an audio control, or 0 when the running
+ * ahi.device is older than version 6 or cannot be found: the field is V6
+ * and an older device does not fill it in. The version is that of the
+ * resident ahi.device node in the exec device list, read under Forbid. */
+#define Z9AX_AHI_ANTICLICK_VERSION 6U
+
+static uint32_t voice_anticlick_samples(const struct AHIAudioCtrlDrv *audio)
+{
+  struct Library *device;
+  uint32_t samples = 0U;
+
+  Forbid();
+  device = (struct Library *)FindName(&SysBase->DeviceList,
+                                      (CONST_STRPTR)"ahi.device");
+  if (device != NULL && device->lib_Version >= Z9AX_AHI_ANTICLICK_VERSION)
+    samples = audio->ahiac_AntiClickSamples;
+  Permit();
+  return samples;
+}
+
 /* Moves the model to a new timeline at the anchor. The CONFIG records of
  * the start carry what the firmware advertises and nothing more: the ramp
- * from ahiac_AntiClickSamples (the mode runs at the engine rate, so a sample
- * is an engine frame; 0 is off), the soft limiter, and in the cubic mode the
- * default interpolation. */
+ * from ahiac_AntiClickSamples, read once at AllocAudio (the mode runs at the
+ * engine rate, so a sample is an engine frame; 0 is off), the soft limiter,
+ * and in the cubic mode the default interpolation. */
 static void voice_model_start(struct z9ax *ahi_data)
 {
   struct z9ax_voice *v = ahi_data->voice;
@@ -1981,7 +2005,7 @@ static void voice_model_start(struct z9ax *ahi_data)
 
   if ((v->features & ZZ9K_VOICE_FEATURE_CONFIG) != 0U) {
     if ((v->features & ZZ9K_VOICE_FEATURE_RAMP) != 0U)
-      ramp = ahi_data->audioctrl->ahiac_AntiClickSamples;
+      ramp = v->anticlick;
     if ((v->features & ZZ9K_VOICE_FEATURE_LIMITER) != 0U)
       limiter = 1U;
   }
@@ -2415,6 +2439,7 @@ static uint32_t voice_alloc_audio(uint8_t mode,
   ahi_data->voice = v;
   v->linear = (uint8_t)(mode == Z9AX_VOICE_LINEAR);
   v->cubic = (uint8_t)(mode == Z9AX_VOICE_CUBIC);
+  v->anticlick = voice_anticlick_samples(AudioCtrl);
   v->zorro = Z9AXBase->zorro_version;
   v->channels = AudioCtrl->ahiac_Channels;
   v->sounds = AudioCtrl->ahiac_Sounds;

@@ -118,6 +118,8 @@ struct z9ax_voice {
   uint32_t features;           /* ZZ9K_VOICE_FEATURE_*, read after the open */
   uint32_t ramp_frames;        /* ramp the last Start asked for, 0 = off */
   uint32_t limiter;            /* limiter the last Start asked for */
+  uint32_t anticlick;          /* ahiac_AntiClickSamples read at AllocAudio, 0
+                                * when ahi.device is older than version 6 */
   uint32_t channels;
   uint32_t sounds;             /* AHIA_Sounds */
   uint32_t lead;               /* granted lead, engine frames */

@@ -169,7 +169,7 @@ else.
 
 | Firmware advertises | Record | Content |
 | --- | --- | --- |
-| `CONFIG`, `RAMP` | `CONFIG` ramp | A ramp of `ahiac_AntiClickSamples` frames, at most 512. The modes run at 48000 Hz, so one sample is one engine frame. 0 sends no ramp |
+| `CONFIG`, `RAMP` | `CONFIG` ramp | A ramp of `ahiac_AntiClickSamples` frames, at most 512. `ahi.device` 6 fills the field from the client's `AHIA_AntiClickSamples` tag, or from the default anti-click time of AHI Preferences when the client gives none, as a number of samples at the mix rate. The driver reads the field once, in `AHI_AllocAudio`, and only when the resident `ahi.device` (found in the exec device list) is version 6 or newer; an older or missing one gives ramp 0 without reading it. The modes run at 48000 Hz, so one sample is one engine frame. 0 sends no ramp |
 | `CONFIG`, `LIMITER` | `CONFIG` limiter | The soft knee on. It goes in the same record as the ramp when both are sent |
 | `CONFIG`, `VOICE_INTERP`, `CUBIC`, in `$CAFE0004` | `CONFIG` interpolation | Cubic as the default interpolation, in a record of its own |
 
@@ -357,3 +357,28 @@ zero `late`, `rejected`, `underruns`, `dropped`, `ringfull`, `resyncs`,
   session and runs the worker's steps by hand under vamos. Its header comment
   has the build and run commands.
 - [`ZZAXVoiceTest`](../ahi/voicetest/README.md) runs the scenarios on the card.
+
+## Verification on the card
+
+`zz9000ax.audio` 4.34 (24.11.2026) with `ahi.device` 6.6 (27.09.2005) ran
+`ZZAXVoiceTest` in `$CAFE0002`, `$CAFE0003` and `$CAFE0004`, each with
+`SCENARIO ALL SECONDS 10 ANTICLICK 240`, on the bench firmware build 60da8c5a
+(main 3671df80 plus unadvertised work and bench diagnostics; the unadvertised
+work was not used), with the features word 143 (`CONFIG`, `RAMP`, `LIMITER`,
+`VOICE_INTERP`, `CUBIC`). Every mode passed 10 of 10 scenarios. Each wrote 59
+statistics lines (9 scenario sessions and the 50 S10 cycles), and in every
+line the error counters (`late`, `rejected`, `underruns`, `dropped`,
+`ringfull`, `resyncs`, `fifodrops`, `recorddrops`, `overload`) were 0 and
+`features=143 ramp=240 limiter=1`. `S1 CHANNELS 32 SECONDS 20 ANTICLICK 240`
+passed in all three modes, and `$CAFE0004` with `ANTICLICK 0` reported
+`ramp=0`. That is 181 statistics lines in seven runs.
+
+What this shows: with `ahi.device` 6.6 the client's `AHIA_AntiClickSamples`
+reached the driver, the driver sent the ramp and the limiter, and the engine
+took the records without a late, rejected or dropped one. What it does not
+show: the speakers were off, so nothing was heard and no PCM was captured. The
+sound of the ramp, the limiter and cubic reading is not qualified. The host
+tests have no independent oracle for the level or the PCM with ramp, limiter
+or cubic reading enabled: the level oracle of `voice_ref_test` runs with the
+quality features off, and the isolation test compares two banks against each
+other. The firmware's own golden tests cover the engine.

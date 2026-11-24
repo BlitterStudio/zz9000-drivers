@@ -31,7 +31,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define TEMPLATE "MODE,SCENARIO,CHANNELS/K/N,SECONDS/K/N,CYCLES/K/N"
+/* AHIA_AntiClickSamples is an ahi.device V6 tag; older developer includes
+ * lack the name. Its data is a number of sample frames at the mixing rate. */
+#ifndef AHIA_AntiClickSamples
+#define AHIA_AntiClickSamples (AHI_TagBase + 13)
+#endif
+
+#define TEMPLATE \
+  "MODE,SCENARIO,CHANNELS/K/N,SECONDS/K/N,CYCLES/K/N,ANTICLICK/K/N"
 
 #define MODE_HW_NEAREST 0xCAFE0002UL
 #define MODE_HW_LINEAR  0xCAFE0003UL
@@ -39,6 +46,11 @@
 #define DEFAULT_MODE    MODE_HW_NEAREST
 #define MIX_FREQ        48000UL
 #define STATS_VAR       "ZZ9K_AHI_VOICE_STATS"
+#define MAX_ANTICLICK   512UL       /* the engine's longest ramp, in frames */
+/* Bits of the features word that the driver prints in the stats line, from
+ * ZZ9K_VOICE_FEATURE_* in zz9k/voice.h. */
+#define FEATURE_RAMP    0x0001UL
+#define FEATURE_CONFIG  0x0080UL
 
 #define MAX_CH          32U
 #define SOFT_MAX_CH     8U
@@ -67,7 +79,7 @@
 #define SND_LOG_MAX     256U
 
 static const char version[] __attribute__((used)) =
-    "\0$VER: ZZAXVoiceTest 1.0 (22.11.2026)";
+    "\0$VER: ZZAXVoiceTest 1.1 (24.11.2026)";
 
 struct Device *TimerBase;
 struct Library *AHIBase;
@@ -96,6 +108,8 @@ struct options {
   ULONG channels;       /* 0: scenario default */
   ULONG seconds;
   ULONG cycles;
+  BOOL anticlick_set;   /* ANTICLICK was given: AHIA_AntiClickSamples is passed */
+  ULONG anticlick;      /* sample frames at 48 kHz */
 };
 
 static struct options opt;
@@ -476,7 +490,7 @@ static ULONG parse_field(const char *line, const char *key, BOOL *found)
  * when a hardware session closes. */
 static void stats_read(void)
 {
-  char buf[200];
+  char buf[400];
   LONG n;
   size_t len;
   BOOL f[4];
@@ -513,6 +527,38 @@ static void stats_read(void)
         (unsigned long)underruns, (unsigned long)dropped);
     g_stats_bad++;
   }
+  if (opt.anticlick_set && opt.voice) {
+    BOOL ff, fr;
+    ULONG features = parse_field(buf, "features", &ff);
+    ULONG ramp = parse_field(buf, "ramp", &fr);
+    ULONG want = opt.anticlick;
+
+    if (!ff || !fr) {
+      out("  ramp FAIL: the stats line has no features and ramp fields; the "
+          "driver predates them\n");
+      g_stats_bad++;
+    }
+    if (ff && fr) {
+      if (want != 0 && (!(features & FEATURE_CONFIG) ||
+                        !(features & FEATURE_RAMP))) {
+        out("  ramp FAIL: ANTICLICK %lu asked for a ramp but the firmware "
+            "does not advertise CONFIG and RAMP (features=0x%lX); the ramp "
+            "was not exercised\n", (unsigned long)opt.anticlick,
+            (unsigned long)features);
+        g_stats_bad++;
+      } else if (ramp != want) {
+        out("  ramp FAIL: ANTICLICK %lu should give ramp=%lu, the driver "
+            "reports ramp=%lu (features=0x%lX)\n",
+            (unsigned long)opt.anticlick, (unsigned long)want,
+            (unsigned long)ramp, (unsigned long)features);
+        g_stats_bad++;
+      } else {
+        out("  ramp ok: ANTICLICK %lu gave ramp=%lu (features=0x%lX)\n",
+            (unsigned long)opt.anticlick, (unsigned long)ramp,
+            (unsigned long)features);
+      }
+    }
+  }
 }
 
 static BOOL session_open(struct session *s, UWORD channels, UWORD sounds,
@@ -537,6 +583,7 @@ static BOOL session_open(struct session *s, UWORD channels, UWORD sounds,
     ADD_TAG(AHIA_MaxPlayerFreq, pmax);
   }
   if (sound) ADD_TAG(AHIA_SoundFunc, sound);
+  if (opt.anticlick_set) ADD_TAG(AHIA_AntiClickSamples, opt.anticlick);
   tags[n].ti_Tag = TAG_DONE;
   tags[n].ti_Data = 0;
 #undef ADD_TAG
@@ -1698,11 +1745,16 @@ static void usage(void)
 {
   out("Usage: ZZAXVoiceTest [MODE <audio id>] [SCENARIO S1..S10|ALL]\n"
       "                    [CHANNELS 1-32] [SECONDS 1-%lu] [CYCLES 1-%lu]\n"
+      "                    [ANTICLICK 0-%lu]\n"
       "Template: %s\n"
       "MODE is a hexadecimal audio ID, default $CAFE0002 (hardware mixing);\n"
       "$CAFE0003 is the interpolated hardware mode and $CAFE0004 the cubic\n"
-      "hardware mode.\n",
-      (unsigned long)MAX_SECONDS, (unsigned long)MAX_CYCLES, TEMPLATE);
+      "hardware mode.\n"
+      "ANTICLICK passes AHIA_AntiClickSamples to AHI_AllocAudio: sample frames\n"
+      "at 48000 Hz, 0 for off. Without it AHI uses the default anti-click time\n"
+      "of AHI Preferences. It needs ahi.device 6 or newer.\n",
+      (unsigned long)MAX_SECONDS, (unsigned long)MAX_CYCLES,
+      (unsigned long)MAX_ANTICLICK, TEMPLATE);
 }
 
 static BOOL eq_nocase(const char *a, const char *b)
@@ -1750,7 +1802,7 @@ static BOOL parse_scenario(const char *text, int *first, int *last)
 
 int main(void)
 {
-  LONG args[5] = { 0, 0, 0, 0, 0 };
+  LONG args[6] = { 0, 0, 0, 0, 0, 0 };
   struct RDArgs *rda;
   int first = 1, last = SCENARIOS, i;
   int passed = 0, failed = 0, result = RETURN_OK;
@@ -1808,6 +1860,17 @@ int main(void)
     }
     opt.cycles = (ULONG)v;
   }
+  if (args[5]) {
+    LONG v = *(LONG *)args[5];
+
+    if (v < 0 || v > (LONG)MAX_ANTICLICK) {
+      out("ERROR: ANTICLICK must be 0 to %lu\n", (unsigned long)MAX_ANTICLICK);
+      FreeArgs(rda);
+      return EXIT_USAGE;
+    }
+    opt.anticlick_set = TRUE;
+    opt.anticlick = (ULONG)v;
+  }
   FreeArgs(rda);
   opt.voice = (opt.mode == MODE_HW_NEAREST || opt.mode == MODE_HW_LINEAR ||
                opt.mode == MODE_HW_CUBIC);
@@ -1831,11 +1894,20 @@ int main(void)
     goto cleanup;
   }
   AHIBase = (struct Library *)request->ahir_Std.io_Device;
+  if (opt.anticlick_set && AHIBase->lib_Version < 6) {
+    out("ERROR: ANTICLICK needs ahi.device 6 or newer, found %u.%u\n",
+        (unsigned int)AHIBase->lib_Version, (unsigned int)AHIBase->lib_Revision);
+    result = EXIT_ALLOC;
+    goto close;
+  }
 
   out("ZZAXVoiceTest: mode $%08lX (%s), %lu s per scenario\n",
       (unsigned long)opt.mode,
       opt.voice ? "hardware mixing" : "software mixing",
       (unsigned long)opt.seconds);
+  if (opt.anticlick_set)
+    out("ZZAXVoiceTest: AHIA_AntiClickSamples %lu (%lu ms at 48000 Hz)\n",
+        (unsigned long)opt.anticlick, (unsigned long)(opt.anticlick / 48UL));
 
   for (i = first; i <= last && !g_break; i++) {
     int rc;
