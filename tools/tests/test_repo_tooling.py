@@ -1342,8 +1342,9 @@ class RepoToolingTests(unittest.TestCase):
         self.assertIn("DeleteIORequest", setup)
         self.assertIn("DeleteMsgPort", setup)
         failure = worker[fatal_gate:success_handshake]
-        self.assertIn("ahi_data->worker_process = NULL", failure)
-        self.assertIn("Signal((struct Task *)ahi_data->t_mainproc", failure)
+        # worker_exit_signal() clears worker_process and signals the parent
+        # under Forbid; timer_pair_test checks that behaviour on this path.
+        self.assertIn("worker_exit_signal(ahi_data);", failure)
         self.assertIn("return;", failure)
 
     def test_ahi_exclusive_owner_is_claimed_before_hardware_mutation(self):
