@@ -155,7 +155,7 @@ GitHub for a newer firmware release and install the complete bundle.
 | Area | Requirement or status |
 |---|---|
 | Base platform | `m68k-amigaos`, an MNT ZZ9000 Zorro II or Zorro III card, and Picasso96 for RTG graphics. |
-| Audio | A ZZ9000AX daughterboard for AHI, MHI, and AX tools. |
+| Audio | A ZZ9000AX daughterboard for AHI, MHI, and AX tools. The AHI hardware mixing modes also need firmware that advertises the voice engine (Zorro III only) and `zz9k.library` revision 42 or newer; see [ZZ9000AX audio](ahi/README.md#hardware-mixing-modes). |
 | SD boot | `zzsd.device` is embedded in `BOOT.bin`; its 7424-byte boot-ROM limit is checked by CI. |
 | Configuration | Firmware 2.3 or newer reads `ZZ9000.CFG`. |
 | Display power management | Picasso96 DPMS needs firmware 2.7 or newer with the matching rebuilt bitstream. |
