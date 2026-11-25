@@ -60,9 +60,9 @@
 #define XSTR(s) STR(s)
 
 #define DEVICE_NAME "zz9000ax.audio"
-#define DEVICE_DATE "(24.11.2026)"
+#define DEVICE_DATE "(25.11.2026)"
 #define DEVICE_VERSION 4
-#define DEVICE_REVISION 34
+#define DEVICE_REVISION 35
 #define DEVICE_ID_STRING "ZZ9000AX " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
 #define DEVICE_PRIORITY 0
 
@@ -205,6 +205,11 @@ static uint32_t __attribute__((used)) init(BPTR seg_list asm("a0"), struct Libra
 
   SysBase = *(struct ExecBase **)4L;
   Z9AXBase = (struct z9ax_base*)dev;
+  AHIsubBase = dev;
+  // Expunge hands the seglist back to exec, which unloads the driver
+  // file; a copy without one (a ROM or Resident module) cannot be loaded
+  // again and is never expunged.
+  Z9AXBase->seglist = seg_list;
 
   // BSS/driver-base may be reused across AutoInit reloads; start clean
   // so AllocAudio's hw_addr/zorro_version gates can't be fooled by stale
@@ -291,13 +296,44 @@ fail:
   return 0;
 }
 
-static uint8_t* __attribute__((used)) expunge(struct Library *libbase asm("a6"))
+// Exec calls the library vectors Open, Close and Expunge with Forbid()
+// held, so the open count and the flags need no extra guard here.
+//
+// Expunge removes the driver once nothing has it open and returns its
+// seglist. Exec calls it for every library on RemLibrary, avail flush
+// and a failed allocation, so while an ahi.device audio control holds the
+// library it only sets LIBF_DELEXP, and close() runs it again at the last
+// close. ahi.device opens the driver in AHI_AllocAudio and closes it in
+// AHI_FreeAudio; AllocAudio and FreeAudio join the worker process, remove
+// the interrupt servers and close zz9k.library, so with an open count of
+// 0 no code of this segment runs or stays registered. The library bases
+// init() opened stay valid for as long as the library is in the list;
+// only a removal closes them, and the next OpenLibrary loads the driver
+// again and runs init().
+static BPTR __attribute__((used)) expunge(struct Library *lib asm("a6"))
 {
-  if(DOSBase)       { CloseLibrary((struct Library *)DOSBase); DOSBase = NULL; }
-  if(UtilityBase)   { CloseLibrary((struct Library *)UtilityBase); UtilityBase = NULL; }
-  if(ExpansionBase) { CloseLibrary((struct Library *)ExpansionBase); ExpansionBase = NULL; }
+  struct z9ax_base *base = (struct z9ax_base *)lib;
+  BPTR seglist = base->seglist;
 
-  return 0;
+  if (lib->lib_OpenCnt != 0) {
+    lib->lib_Flags |= LIBF_DELEXP;
+    return 0;
+  }
+  // A module without a seglist cannot be loaded again, so it stays.
+  if (seglist == 0)
+    return 0;
+
+  Remove(&lib->lib_Node);
+
+  if (DOSBase)       { CloseLibrary((struct Library *)DOSBase); DOSBase = NULL; }
+  if (UtilityBase)   { CloseLibrary((struct Library *)UtilityBase); UtilityBase = NULL; }
+  if (ExpansionBase) { CloseLibrary((struct Library *)ExpansionBase); ExpansionBase = NULL; }
+  AHIsubBase = NULL;
+  Z9AXBase = NULL;
+
+  FreeMem((APTR)((uint8_t *)lib - lib->lib_NegSize),
+          lib->lib_NegSize + lib->lib_PosSize);
+  return seglist;
 }
 
 static uint8_t __attribute__((used)) null()
@@ -305,28 +341,22 @@ static uint8_t __attribute__((used)) null()
   return 0;
 }
 
-static void __attribute__((used)) open(struct Library *dev asm("a6"), struct IORequest *iotd asm("a1"), uint32_t num asm("d0"), uint32_t flags asm("d1"))
+// OpenLibrary() returns what this vector returns in D0, so it must be the
+// library base. The driver is a library, not a device: exec passes no
+// IORequest, and A1 is not ours to write.
+static struct Library * __attribute__((used)) open(struct Library *lib asm("a6"), uint32_t version asm("d0"))
 {
-  if (!AHIsubBase) {
-    AHIsubBase = dev;
-  }
-
-  iotd->io_Error = 0;
-
-  // OpenLibrary/OpenDevice callers are not required to Forbid; guard the
-  // increment explicitly so concurrent opens can't race the counter.
-  Forbid();
-  dev->lib_OpenCnt++;
-  Permit();
+  lib->lib_Flags &= ~LIBF_DELEXP;
+  lib->lib_OpenCnt++;
+  return lib;
 }
 
-static uint8_t* __attribute__((used)) close(struct Library *dev asm("a6"), struct IORequest *iotd asm("a1"))
+static BPTR __attribute__((used)) close(struct Library *lib asm("a6"))
 {
-  // Mirror the Forbid() guard used in open() so the open-count stays consistent
-  // if two tasks close the device concurrently.
-  Forbid();
-  if (dev->lib_OpenCnt > 0) dev->lib_OpenCnt--;
-  Permit();
+  if (lib->lib_OpenCnt != 0)
+    lib->lib_OpenCnt--;
+  if (lib->lib_OpenCnt == 0 && (lib->lib_Flags & LIBF_DELEXP))
+    return expunge(lib);
   return 0;
 }
 
@@ -724,6 +754,21 @@ static void fabric_timer_post(struct z9ax *ahi_data)
   timer_post_micro(ahi_data, 20000U);
 }
 
+// The last step of every worker process, normal exit and failure alike:
+// Forbid(), publish that the worker is gone, and return (or fall off the
+// end) with Forbid still held. The task that wakes on the signal cannot run
+// until dos has removed this process, and exec drops the Forbid then, so
+// nothing of this segment executes once AllocAudio, FreeAudio or a Close
+// that unloads the driver sees the worker as finished. A caller above
+// WORKER_PRIORITY would otherwise preempt at the Signal(). Nothing may be
+// touched after the call.
+static void worker_exit_signal(struct z9ax *ahi_data)
+{
+  Forbid();
+  ahi_data->worker_process = NULL;
+  Signal((struct Task *)ahi_data->t_mainproc, 1UL << ahi_data->mainproc_signal);
+}
+
 void WorkerProcess() {
   struct Process* proc = (struct Process *) FindTask(NULL);
   struct z9ax* ahi_data = proc->pr_Task.tc_UserData;
@@ -744,8 +789,7 @@ void WorkerProcess() {
     if (glob_buf) FreeVec(glob_buf);
 #endif
     // Clear worker_process so AllocAudio can detect the failure after the handshake.
-    ahi_data->worker_process = NULL;
-    Signal((struct Task *)ahi_data->t_mainproc, 1L << ahi_data->mainproc_signal);
+    worker_exit_signal(ahi_data);
     return;
   }
 
@@ -801,8 +845,7 @@ void WorkerProcess() {
     if (glob_buf) FreeVec(glob_buf);
 #endif
     // Clear worker_process so AllocAudio can detect the failure after the handshake.
-    ahi_data->worker_process = NULL;
-    Signal((struct Task *)ahi_data->t_mainproc, 1L << ahi_data->mainproc_signal);
+    worker_exit_signal(ahi_data);
     return;
   }
 
@@ -909,7 +952,6 @@ void WorkerProcess() {
     DeleteMsgPort(ahi_data->lease_timer_port);
     ahi_data->lease_timer_port = NULL;
   }
-  Forbid();
   if (ahi_data->enable_signal != -1) { FreeSignal(ahi_data->enable_signal); ahi_data->enable_signal = -1; }
   if (ahi_data->worker_signal != -1) { FreeSignal(ahi_data->worker_signal); ahi_data->worker_signal = -1; }
 
@@ -917,10 +959,8 @@ void WorkerProcess() {
   if (glob_buf) FreeVec(glob_buf);
 #endif
 
-  ahi_data->worker_process = NULL;
-  Signal((struct Task *)ahi_data->t_mainproc, 1L << ahi_data->mainproc_signal);
-
-  // Multitaking will resume at exit
+  // Last step: Forbid, publish the exit and return with Forbid held.
+  worker_exit_signal(ahi_data);
 }
 
 // TW: C interrupt service routine called by ASM wrapper.
@@ -2300,13 +2340,13 @@ static void VoiceWorkerProcess(void)
     voice_worker_end(ahi_data, 0);
     FreeSignal(ahi_data->enable_signal);
     ahi_data->enable_signal = -1;
-    /* Publish the failure before the handshake, like the software worker. */
-    ahi_data->worker_process = NULL;
-  }
-  timer_sig = ready ? (1UL << ahi_data->lease_timer_signal) : 0UL;
-  Signal(ahi_data->t_mainproc, 1UL << ahi_data->mainproc_signal);
-  if (!ready)
+    /* The failure is published with the handshake, like the software
+     * worker, and the worker leaves under Forbid. */
+    worker_exit_signal(ahi_data);
     return;
+  }
+  timer_sig = 1UL << ahi_data->lease_timer_signal;
+  Signal(ahi_data->t_mainproc, 1UL << ahi_data->mainproc_signal);
 
   for (;;) {
     signals = Wait(SIGBREAKF_CTRL_C | (1UL << ahi_data->enable_signal) |
@@ -2322,12 +2362,9 @@ static void VoiceWorkerProcess(void)
   }
 
   voice_worker_end(ahi_data, 1);
-  Forbid();
   FreeSignal(ahi_data->enable_signal);
   ahi_data->enable_signal = -1;
-  Permit();
-  ahi_data->worker_process = NULL;
-  Signal(ahi_data->t_mainproc, 1UL << ahi_data->mainproc_signal);
+  worker_exit_signal(ahi_data);
 }
 
 /* Hands the worker a Start or a Stop and waits for its answer. AHI calls

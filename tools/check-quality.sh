@@ -14,7 +14,7 @@ if command -v shellcheck >/dev/null 2>&1; then
     shellcheck \
         tools/amiga-docker.sh tools/build-all.sh tools/package-local.sh \
         tools/check-release.sh tools/check-quality.sh tools/stage-zz9k-headers.sh \
-        tools/ahi-voice-tests.sh \
+        tools/ahi-voice-tests.sh tools/ahi-lifecycle-test.sh \
         rtg/build.sh net/build.sh usb-poseidon/build.sh sd-boot/build.sh \
         ZZTop/build-gcc.sh \
         ahi/driver/build.sh ahi/axtest/build-gcc-single.sh \
