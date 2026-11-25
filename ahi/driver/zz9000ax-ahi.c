@@ -60,9 +60,9 @@
 #define XSTR(s) STR(s)
 
 #define DEVICE_NAME "zz9000ax.audio"
-#define DEVICE_DATE "(24.11.2026)"
+#define DEVICE_DATE "(25.11.2026)"
 #define DEVICE_VERSION 4
-#define DEVICE_REVISION 34
+#define DEVICE_REVISION 35
 #define DEVICE_ID_STRING "ZZ9000AX " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
 #define DEVICE_PRIORITY 0
 
@@ -205,6 +205,11 @@ static uint32_t __attribute__((used)) init(BPTR seg_list asm("a0"), struct Libra
 
   SysBase = *(struct ExecBase **)4L;
   Z9AXBase = (struct z9ax_base*)dev;
+  AHIsubBase = dev;
+  // Expunge hands the seglist back to exec, which unloads the driver
+  // file; a copy without one (a ROM or Resident module) cannot be loaded
+  // again and is never expunged.
+  Z9AXBase->seglist = seg_list;
 
   // BSS/driver-base may be reused across AutoInit reloads; start clean
   // so AllocAudio's hw_addr/zorro_version gates can't be fooled by stale
@@ -291,13 +296,44 @@ fail:
   return 0;
 }
 
-static uint8_t* __attribute__((used)) expunge(struct Library *libbase asm("a6"))
+// Exec calls the library vectors Open, Close and Expunge with Forbid()
+// held, so the open count and the flags need no extra guard here.
+//
+// Expunge removes the driver once nothing has it open and returns its
+// seglist. Exec calls it for every library on RemLibrary, avail flush
+// and a failed allocation, so while an ahi.device audio control holds the
+// library it only sets LIBF_DELEXP, and close() runs it again at the last
+// close. ahi.device opens the driver in AHI_AllocAudio and closes it in
+// AHI_FreeAudio; AllocAudio and FreeAudio join the worker process, remove
+// the interrupt servers and close zz9k.library, so with an open count of
+// 0 no code of this segment runs or stays registered. The library bases
+// init() opened stay valid for as long as the library is in the list;
+// only a removal closes them, and the next OpenLibrary loads the driver
+// again and runs init().
+static BPTR __attribute__((used)) expunge(struct Library *lib asm("a6"))
 {
-  if(DOSBase)       { CloseLibrary((struct Library *)DOSBase); DOSBase = NULL; }
-  if(UtilityBase)   { CloseLibrary((struct Library *)UtilityBase); UtilityBase = NULL; }
-  if(ExpansionBase) { CloseLibrary((struct Library *)ExpansionBase); ExpansionBase = NULL; }
+  struct z9ax_base *base = (struct z9ax_base *)lib;
+  BPTR seglist = base->seglist;
 
-  return 0;
+  if (lib->lib_OpenCnt != 0) {
+    lib->lib_Flags |= LIBF_DELEXP;
+    return 0;
+  }
+  // A module without a seglist cannot be loaded again, so it stays.
+  if (seglist == 0)
+    return 0;
+
+  Remove(&lib->lib_Node);
+
+  if (DOSBase)       { CloseLibrary((struct Library *)DOSBase); DOSBase = NULL; }
+  if (UtilityBase)   { CloseLibrary((struct Library *)UtilityBase); UtilityBase = NULL; }
+  if (ExpansionBase) { CloseLibrary((struct Library *)ExpansionBase); ExpansionBase = NULL; }
+  AHIsubBase = NULL;
+  Z9AXBase = NULL;
+
+  FreeMem((APTR)((uint8_t *)lib - lib->lib_NegSize),
+          lib->lib_NegSize + lib->lib_PosSize);
+  return seglist;
 }
 
 static uint8_t __attribute__((used)) null()
@@ -305,28 +341,22 @@ static uint8_t __attribute__((used)) null()
   return 0;
 }
 
-static void __attribute__((used)) open(struct Library *dev asm("a6"), struct IORequest *iotd asm("a1"), uint32_t num asm("d0"), uint32_t flags asm("d1"))
+// OpenLibrary() returns what this vector returns in D0, so it must be the
+// library base. The driver is a library, not a device: exec passes no
+// IORequest, and A1 is not ours to write.
+static struct Library * __attribute__((used)) open(struct Library *lib asm("a6"), uint32_t version asm("d0"))
 {
-  if (!AHIsubBase) {
-    AHIsubBase = dev;
-  }
-
-  iotd->io_Error = 0;
-
-  // OpenLibrary/OpenDevice callers are not required to Forbid; guard the
-  // increment explicitly so concurrent opens can't race the counter.
-  Forbid();
-  dev->lib_OpenCnt++;
-  Permit();
+  lib->lib_Flags &= ~LIBF_DELEXP;
+  lib->lib_OpenCnt++;
+  return lib;
 }
 
-static uint8_t* __attribute__((used)) close(struct Library *dev asm("a6"), struct IORequest *iotd asm("a1"))
+static BPTR __attribute__((used)) close(struct Library *lib asm("a6"))
 {
-  // Mirror the Forbid() guard used in open() so the open-count stays consistent
-  // if two tasks close the device concurrently.
-  Forbid();
-  if (dev->lib_OpenCnt > 0) dev->lib_OpenCnt--;
-  Permit();
+  if (lib->lib_OpenCnt != 0)
+    lib->lib_OpenCnt--;
+  if (lib->lib_OpenCnt == 0 && (lib->lib_Flags & LIBF_DELEXP))
+    return expunge(lib);
   return 0;
 }
 

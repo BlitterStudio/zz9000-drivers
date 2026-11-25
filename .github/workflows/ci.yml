@@ -372,6 +372,12 @@ jobs:
       - name: Build ZZAXDuplexTest
         run: |
           tools/amiga-docker.sh ahi/duplextest ./build.sh
+      # The driver's Open, Close and Expunge vectors, init() and AllocAudio
+      # against a private library list under vamos, with no card. The
+      # script stages the zz9k headers like ahi/driver/build.sh.
+      - name: Run the library lifecycle test under vamos
+        run: |
+          tools/ahi-lifecycle-test.sh
       - name: Build ZZAXVoiceTest
         run: |
           tools/amiga-docker.sh ahi/voicetest ./build.sh

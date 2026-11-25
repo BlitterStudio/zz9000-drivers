@@ -151,6 +151,7 @@ struct z9ax_voice {
 // Driver base
 struct z9ax_base {
   struct Library ahisub_base;
+  BPTR seglist; // from init(); expunge returns it so exec unloads the file
   struct z9ax *owner;
   struct z9ax *allocating;
   uint32_t hw_addr;
