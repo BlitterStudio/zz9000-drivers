@@ -21,6 +21,8 @@
 #include <proto/utility.h>
 #include <utility/hooks.h>
 
+static int forbid_depth;
+static LONG test_open_device(void);
 static struct Task *test_find_task(CONST_STRPTR name);
 static ULONG test_wait(ULONG signals);
 static void test_signal(struct Task *task, ULONG signals);
@@ -42,6 +44,14 @@ static ULONG test_call_hook(struct Hook *hook, APTR object, APTR message);
 #define CacheClearE(address, length, caches) \
   ((void)(address), (void)(length), (void)(caches))
 #define CallHookPkt(hook, object, message) test_call_hook(hook, object, message)
+/* Forbid is counted, not run: the cases check that a worker publishes its
+ * exit under Forbid and returns with it still held. */
+#undef Forbid
+#undef Permit
+#undef OpenDevice
+#define Forbid() (forbid_depth++)
+#define Permit() (forbid_depth--)
+#define OpenDevice(name, unit, request, flags) test_open_device()
 /* The resident owns DOSBase, unlike an executable's libc startup. */
 #define DOSBase test_driver_dos_base
 #define _start timer_test_driver_start
@@ -78,6 +88,9 @@ static struct {
   int ramp;
   BYTE next_signal;
   int failures;
+  int fail_signals;
+  ULONG signals;
+  int last_signal_forbid;
 } fixture;
 
 static void check(int condition, const char *message)
@@ -98,11 +111,15 @@ static void test_signal(struct Task *task, ULONG signals)
 {
   (void)task;
   (void)signals;
+  fixture.signals++;
+  fixture.last_signal_forbid = forbid_depth;
 }
 
 static BYTE test_alloc_signal(LONG number)
 {
   (void)number;
+  if (fixture.fail_signals)
+    return -1;
   return fixture.next_signal++;
 }
 
@@ -212,10 +229,25 @@ static void test_post_timer(void)
   fixture.exit = fixture.now + 100UL;
 }
 
+/* The worker as the process runs it: it signals its exit under Forbid and
+ * returns with Forbid held (dos drops it when it removes the process). */
+static void run_worker(void)
+{
+  fixture.driver.worker_process = &fixture.process;
+  WorkerProcess();
+  check(fixture.signals >= 1U, "the worker signals its parent");
+  check(fixture.last_signal_forbid > 0, "the exit is signalled under Forbid");
+  check(forbid_depth == 1, "the worker returns with Forbid held once");
+  check(fixture.driver.worker_process == NULL,
+        "the worker publishes its exit");
+  Permit();
+}
+
 static void prepare(int fabric, int overload)
 {
   ZZ9KAudioRingSession *session;
   memset(&fixture, 0, sizeof(fixture));
+  forbid_depth = 0;
   fixture.entry = TEST_ENTRY;
   fixture.exit = TEST_ENTRY + (overload ? 13500UL : 100UL);
   fixture.rounds_limit = TEST_ROUNDS;
@@ -270,9 +302,7 @@ static int recovery_case(int fabric)
   } else {
     /* The legacy loop uses the substituted Wait, real period delivery and
      * fake register/RAM addresses; it never accesses a physical card. */
-    WorkerProcess();
-    /* Production teardown leaves Forbid held until the worker exits. */
-    Permit();
+    run_worker();
   }
   check(fixture.bytes_after_skip == 0,
         "overload skip does not publish stale PCM");
@@ -303,12 +333,43 @@ static int recovery_case(int fabric)
   return fixture.failures;
 }
 
+static LONG test_open_device(void)
+{
+  return 1; /* timer.device refuses */
+}
+
+/* Exit order of the worker, normal and failed. Every exit publishes the
+ * worker as gone under Forbid and returns with that Forbid still held, so
+ * the waiting task cannot run (and unload the driver) until the process is
+ * removed. 0: no signal bits, 1: fabric mode without a pacing timer, 2: a
+ * normal run to CTRL-C. */
+static int worker_exit_case(int mode)
+{
+  prepare(mode == 1, 0);
+  fixture.fail_signals = mode == 0;
+  run_worker();
+  if (mode == 2) {
+    check(fixture.signals == 2U,
+          "a normal run signals the handshake, then its exit");
+  } else {
+    check(fixture.signals == 1U && fixture.mixes == 0U,
+          "a failed start signals once, before the mix loop");
+  }
+  if (mode == 1)
+    check(fixture.driver.lease_timer_req == NULL &&
+              fixture.driver.lease_timer_port == NULL,
+          "the failed pacing timer is released before the exit");
+  if (!fixture.failures)
+    printf("PASS: worker exit order (%s)\n",
+           mode == 0 ? "no signals" : mode == 1 ? "no pacing timer" : "normal");
+  return fixture.failures;
+}
+
 static int oversize_case(void)
 {
   prepare(0, 0);
   fixture.audio.ahiac_BuffSamples = BOUNCE_MAX_FRAMES + 1U;
-  WorkerProcess();
-  Permit();
+  run_worker();
   check(fixture.pres == TEST_ROUNDS && fixture.posts == TEST_ROUNDS,
         "oversized legacy periods close each timer exactly once");
   check(fixture.mixes == 0 && published_bytes() == 0,
@@ -328,8 +389,7 @@ static int playerfreq_skip_case(int fabric)
       fabric_lease_pump(&fixture.driver, &fixture.audio);
     }
   } else {
-    WorkerProcess();
-    Permit();
+    run_worker();
   }
   check(fixture.players == 4U,
         "60 Hz player clock advances through the skipped transport period");
@@ -366,8 +426,7 @@ static int playerfreq_case(int fabric, int fractional)
       fabric_lease_pump(&fixture.driver, &fixture.audio);
     }
   } else {
-    WorkerProcess();
-    Permit();
+    run_worker();
   }
   expected = fractional ? 595UL : 85UL;
   check(fixture.players == expected, "PlayerFreq determines tick count");
@@ -434,6 +493,9 @@ int main(void)
   }
   failures += recovery_case(1);
   failures += recovery_case(0);
+  failures += worker_exit_case(0);
+  failures += worker_exit_case(1);
+  failures += worker_exit_case(2);
   failures += oversize_case();
   failures += playerfreq_case(0, 0);
   failures += playerfreq_case(1, 0);

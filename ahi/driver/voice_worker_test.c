@@ -35,6 +35,7 @@
 #include <clib/debug_protos.h>
 
 static struct Task *test_find_task(CONST_STRPTR name);
+static int forbid_depth;
 static ULONG test_wait(ULONG signals);
 static void test_signal(struct Task *task, ULONG signals);
 static BYTE test_alloc_signal(LONG number);
@@ -104,6 +105,11 @@ static int zz_ax_voice_get_status(ZZ9KVoiceSession *session,
 #define CloseLibrary(library) test_close_library(library)
 #define AddIntServer(number, interrupt) test_add_int_server(number, interrupt)
 #define RemIntServer(number, interrupt) test_rem_int_server(number, interrupt)
+/* Forbid is counted, not run: the exit cases check its depth. */
+#undef Forbid
+#undef Permit
+#define Forbid() (forbid_depth++)
+#define Permit() (forbid_depth--)
 #define GetVar(name, buffer, size, flags) \
   test_get_var((const char *)(name), (char *)(buffer), size, flags)
 #define SetVar(name, buffer, size, flags) \
@@ -231,6 +237,12 @@ static struct {
   uint8_t in_interrupt;
   uint8_t worker_live;
   uint8_t stop_sent;
+  uint8_t direct_worker;      /* run VoiceWorkerProcess itself at the wait */
+  uint8_t in_direct_worker;
+  uint8_t direct_ran;
+  uint32_t main_signals;      /* Signal() calls to the main task */
+  int main_signal_forbid;     /* Forbid depth of the last one */
+  int depth_after_worker;     /* Forbid depth after the worker returned */
   BYTE next_signal;
   uint32_t last_signal;
   uint32_t stats_len;
@@ -293,6 +305,25 @@ static ULONG test_wait(ULONG signals)
   struct z9ax *driver = &fx.driver;
 
   (void)signals;
+  if (fx.direct_worker) {
+    struct Task *saved;
+
+    /* The worker's own Wait: end the loop at once. */
+    if (fx.in_direct_worker)
+      return SIGBREAKF_CTRL_C;
+    /* AllocAudio's handshake wait: the worker process runs now. */
+    fx.in_direct_worker = 1;
+    fx.direct_ran = 1;
+    fx.main_signals = 0U;
+    worker_task_enter(&saved);
+    VoiceWorkerProcess();
+    worker_task_leave(saved);
+    fx.in_direct_worker = 0;
+    fx.direct_worker = 0;
+    fx.depth_after_worker = forbid_depth;
+    Permit();
+    return signals;
+  }
   if (fx.stop_sent) {
     fx.stop_sent = 0;
     if (fx.worker_live) {
@@ -319,7 +350,10 @@ static ULONG test_wait(ULONG signals)
 
 static void test_signal(struct Task *task, ULONG signals)
 {
-  (void)task;
+  if (task == &fx.main_task) {
+    fx.main_signals++;
+    fx.main_signal_forbid = forbid_depth;
+  }
   if (signals & SIGBREAKF_CTRL_C)
     fx.stop_sent = 1;
 }
@@ -770,6 +804,7 @@ static void prepare(void)
 {
   memset(&fw, 0, sizeof(fw));
   memset(&fx, 0, sizeof(fx));
+  forbid_depth = 0;
   fw.library_present = 1U;
   fw.ahi_present = g_ahi_version != 0U ? 1U : 0U;
   fw.ahi_device.lib_Version = (UWORD)g_ahi_version;
@@ -839,6 +874,40 @@ static uint32_t alloc_voice(void)
 }
 
 /* ---- cases ---- */
+
+/* The real VoiceWorkerProcess, run at AllocAudio's handshake wait, the way
+ * the process runs once its creator blocks. Its exit, normal or failed, must
+ * be signalled under Forbid and leave with that Forbid held, so the task
+ * that wakes cannot run (and unload the driver) before dos removes the
+ * process. */
+static int worker_exit_run(const char *what, int open_status, uint32_t signals)
+{
+  uint32_t rc;
+
+  prepare();
+  fw.open_status = open_status;
+  fx.direct_worker = 1;
+  rc = alloc_voice();
+  check(rc == AHISF_ERROR, "%s: the worker's exit fails the allocation", what);
+  check(fx.direct_ran, "%s: the worker ran", what);
+  check(fx.main_signals == signals, "%s: signals to the parent: %u, expected %u",
+        what, (unsigned)fx.main_signals, (unsigned)signals);
+  check(fx.main_signal_forbid > 0, "%s: the exit is signalled under Forbid",
+        what);
+  check(fx.depth_after_worker == 1, "%s: the worker returns with Forbid held",
+        what);
+  check(fx.driver.worker_process == NULL, "%s: no worker is left", what);
+  return fx.failures;
+}
+
+static int case_worker_exit(void)
+{
+  /* A refused open: the failure is published with the handshake. */
+  worker_exit_run("failed start", ZZ9K_STATUS_BUSY, 1U);
+  /* A normal run: the handshake, then the exit on CTRL-C. */
+  worker_exit_run("normal exit", ZZ9K_STATUS_OK, 2U);
+  return fx.failures;
+}
 
 static int case_alloc_and_free(void)
 {
@@ -1804,11 +1873,12 @@ int main(void)
   RUN(case_effects);
   RUN(case_getattr);
   RUN(case_mhi);
+  RUN(case_worker_exit);
   failures = failures_total;
   if (failures) {
     printf("%d failure(s)\n", failures);
     return 20;
   }
-  puts("PASS: voice worker (19 cases)");
+  puts("PASS: voice worker (20 cases)");
   return 0;
 }

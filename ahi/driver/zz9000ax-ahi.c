@@ -754,6 +754,21 @@ static void fabric_timer_post(struct z9ax *ahi_data)
   timer_post_micro(ahi_data, 20000U);
 }
 
+// The last step of every worker process, normal exit and failure alike:
+// Forbid(), publish that the worker is gone, and return (or fall off the
+// end) with Forbid still held. The task that wakes on the signal cannot run
+// until dos has removed this process, and exec drops the Forbid then, so
+// nothing of this segment executes once AllocAudio, FreeAudio or a Close
+// that unloads the driver sees the worker as finished. A caller above
+// WORKER_PRIORITY would otherwise preempt at the Signal(). Nothing may be
+// touched after the call.
+static void worker_exit_signal(struct z9ax *ahi_data)
+{
+  Forbid();
+  ahi_data->worker_process = NULL;
+  Signal((struct Task *)ahi_data->t_mainproc, 1UL << ahi_data->mainproc_signal);
+}
+
 void WorkerProcess() {
   struct Process* proc = (struct Process *) FindTask(NULL);
   struct z9ax* ahi_data = proc->pr_Task.tc_UserData;
@@ -774,8 +789,7 @@ void WorkerProcess() {
     if (glob_buf) FreeVec(glob_buf);
 #endif
     // Clear worker_process so AllocAudio can detect the failure after the handshake.
-    ahi_data->worker_process = NULL;
-    Signal((struct Task *)ahi_data->t_mainproc, 1L << ahi_data->mainproc_signal);
+    worker_exit_signal(ahi_data);
     return;
   }
 
@@ -831,8 +845,7 @@ void WorkerProcess() {
     if (glob_buf) FreeVec(glob_buf);
 #endif
     // Clear worker_process so AllocAudio can detect the failure after the handshake.
-    ahi_data->worker_process = NULL;
-    Signal((struct Task *)ahi_data->t_mainproc, 1L << ahi_data->mainproc_signal);
+    worker_exit_signal(ahi_data);
     return;
   }
 
@@ -939,7 +952,6 @@ void WorkerProcess() {
     DeleteMsgPort(ahi_data->lease_timer_port);
     ahi_data->lease_timer_port = NULL;
   }
-  Forbid();
   if (ahi_data->enable_signal != -1) { FreeSignal(ahi_data->enable_signal); ahi_data->enable_signal = -1; }
   if (ahi_data->worker_signal != -1) { FreeSignal(ahi_data->worker_signal); ahi_data->worker_signal = -1; }
 
@@ -947,10 +959,8 @@ void WorkerProcess() {
   if (glob_buf) FreeVec(glob_buf);
 #endif
 
-  ahi_data->worker_process = NULL;
-  Signal((struct Task *)ahi_data->t_mainproc, 1L << ahi_data->mainproc_signal);
-
-  // Multitaking will resume at exit
+  // Last step: Forbid, publish the exit and return with Forbid held.
+  worker_exit_signal(ahi_data);
 }
 
 // TW: C interrupt service routine called by ASM wrapper.
@@ -2330,13 +2340,13 @@ static void VoiceWorkerProcess(void)
     voice_worker_end(ahi_data, 0);
     FreeSignal(ahi_data->enable_signal);
     ahi_data->enable_signal = -1;
-    /* Publish the failure before the handshake, like the software worker. */
-    ahi_data->worker_process = NULL;
-  }
-  timer_sig = ready ? (1UL << ahi_data->lease_timer_signal) : 0UL;
-  Signal(ahi_data->t_mainproc, 1UL << ahi_data->mainproc_signal);
-  if (!ready)
+    /* The failure is published with the handshake, like the software
+     * worker, and the worker leaves under Forbid. */
+    worker_exit_signal(ahi_data);
     return;
+  }
+  timer_sig = 1UL << ahi_data->lease_timer_signal;
+  Signal(ahi_data->t_mainproc, 1UL << ahi_data->mainproc_signal);
 
   for (;;) {
     signals = Wait(SIGBREAKF_CTRL_C | (1UL << ahi_data->enable_signal) |
@@ -2352,12 +2362,9 @@ static void VoiceWorkerProcess(void)
   }
 
   voice_worker_end(ahi_data, 1);
-  Forbid();
   FreeSignal(ahi_data->enable_signal);
   ahi_data->enable_signal = -1;
-  Permit();
-  ahi_data->worker_process = NULL;
-  Signal(ahi_data->t_mainproc, 1UL << ahi_data->mainproc_signal);
+  worker_exit_signal(ahi_data);
 }
 
 /* Hands the worker a Start or a Stop and waits for its answer. AHI calls
