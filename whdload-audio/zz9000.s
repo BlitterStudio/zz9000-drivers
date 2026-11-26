@@ -728,6 +728,7 @@ zzi_publish	move.l	(zv_ctrl,a3),a0
 		move.l	(zv_starthi,a3),(ZZ_P_STARTHI,a0)
 		move.l	(zv_startlo,a3),(ZZ_P_STARTLO,a0)
 		move.l	(zv_streamflags,a3),(ZZ_P_STREAMFLAGS,a0)
+		; Stream gain is for compressed periods only. WAV was scaled by zzi_write.
 		move.l	(zv_vol,a3),(ZZ_P_GAIN,a0)
 		move.l	(zv_seq,a3),(a0)	;sequence even, stable
 		rts
