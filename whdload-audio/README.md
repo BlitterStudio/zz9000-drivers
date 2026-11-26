@@ -97,7 +97,10 @@ control block are held until `waud_exit`, which releases the lease with its
 generation. The ring and the control block go into `waud_mem` as non cachable
 serialized memory, so the driver needs no cache operation while WHDLoad has the
 operating system off. WHDLoad maps those pages and the first 4 KiB of the card
-(its registers) that way.
+(its registers) that way. The AHI driver and the SDK client helpers call
+`CacheClearE` with `CACRF_ClearD` after every write to the ring and the control
+line instead, because AmigaOS may map the board cachable; the firmware reads
+the ring as a non-coherent producer and invalidates before it copies.
 
 `waud_play` reads the WAV header and starts feeding. The card is told to raise
 its vblank interrupt (`ZZ_REG_CONFIG` write `0x82`, acknowledged with `0x48`),
@@ -115,7 +118,8 @@ track, unless the vblank bit of the card is set. For each card interrupt it
 
 At the end of a track the last 20 ms period is completed with silence, because
 the firmware consumes whole source periods only, and a track shorter than the
-preroll of the firmware (6 periods) is extended until the card starts to play.
+preroll of the firmware (23040 bytes, about 130 ms) is extended until the card
+starts to play.
 Then `waud_irq` returns `WAUDIRQF_FINISHED`. That is when the last frame has
 been written, up to 240 ms before it is heard. `WHDLAUDF_LOOP` restarts the
 track from its first frame without a gap. WHDLoad plays the next track of a
@@ -150,7 +154,7 @@ the operating system. WHDLoad has to be started again. The trace file says
   given plays first: the audio fabric queues up to 6 periods (120 ms) in front of
   the output, and the driver keeps up to 12 periods in the ring. A new track
   follows the old one after at most about 240 ms.
-- The first sound comes after the preroll of the firmware (6 periods) and the
+- The first sound comes after the preroll of the firmware (23040 bytes) and the
   fill of the ring, which I estimate at 200 ms; it has not been measured.
 - Playing needs the level 2 interrupt and the card interrupt together. A program
   that masks `INTB_PORTS` for longer than 2 s loses the lease.

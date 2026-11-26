@@ -1016,6 +1016,9 @@ static void play_and_check(const char *what, const struct wav *w, u32 vol,
           what);
     CHECK(irq_ack_errors == 0, "%s: interrupt not acknowledged", what);
     CHECK(finished_count == 1, "%s: finished %d times", what, finished_count);
+    CHECK(V8(V_STATE) == ST_IDLE && be32(L->ctrl + 20) == 1,
+          "%s: not paused after the card played everything (state %u)", what,
+          V8(V_STATE));
     free(exp);
 }
 
@@ -1184,6 +1187,7 @@ static void test_play(void)
     play_and_check("stereo16 3 s", &w, VOL_FULL, 0, 20);
     play_and_check("stereo16 at 60 Hz", &w, VOL_FULL, 0, 17);
     play_and_check("stereo16 at 20 Hz", &w, VOL_FULL, 0, 50);
+    play_and_check("stereo16 at 75 Hz", &w, VOL_FULL, 0, 13);
     play_and_check("stereo16 at 50 Hz, volume 0x4000", &w, 0x4000, 0, 20);
     free(w.data);
 }
