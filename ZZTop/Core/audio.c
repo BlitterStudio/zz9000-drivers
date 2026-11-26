@@ -14,6 +14,7 @@
 #include <string.h>
 
 #include "audio.h"
+#include "audio_model.h"
 #include "zztop.h"
 #include "board.h"
 #include "settings.h"
@@ -30,15 +31,6 @@
 #define AUDIO_TICKS_PER_MINUTE (60UL * 50UL)
 #define AUDIO_MINUTES_PER_DAY (24UL * 60UL)
 
-struct audio_model {
-	struct audio_scene scenes[AUDIO_SCENE_COUNT];
-	UWORD active;
-	UWORD base_paula;
-	UWORD base_ax;
-	UWORD ceiling_paula;
-	UWORD ceiling_ax;
-	UWORD separation;
-};
 
 static struct audio_model model;
 /* Scenes have no firmware readback, so their anchors remain CFG-seeded values. */
@@ -211,11 +203,7 @@ static BOOL audio_install_live_state(void)
 		return FALSE;
 	if (live.active >= AUDIO_SCENE_COUNT)
 		return FALSE;
-	model.active = live.active;
-	model.base_paula = live.base_paula;
-	model.base_ax = live.base_ax;
-	model.ceiling_paula = live.ceiling_paula;
-	model.ceiling_ax = live.ceiling_ax;
+	audio_model_install_live(&model, &live);
 	return TRUE;
 }
 
