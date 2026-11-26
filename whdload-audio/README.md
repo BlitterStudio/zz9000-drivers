@@ -226,6 +226,30 @@ also shows whether WHDLoad calls `waud_resume` before the first track: if
 `resume` is 0 at the end of a run in which the card interrupt worked, the
 heartbeat before the first track depended on the interrupt server only.
 
+## Diagnostic build
+
+`./build.sh diag` writes `out/WHDLoad.Audio.diag`, for finding out where the
+driver stops on a card. It behaves like the normal plugin and adds:
+
+- progress codes: characters written to `REG_ZZ_PRINT_CHR` (`0xF0`), which the
+  firmware prints on its UART between its own lines. The register lies in the
+  page that `waud_mem` gives to WHDLoad. `C` card found and INT2 mode, `Z`
+  `zz9k.library` open, `L` lease taken, `V` interrupt server added, `O` init
+  done; `R` `waud_resume`, `S` `waud_suspend`, `v` `waud_volume`, `P`
+  `waud_play`, `T` `waud_stop`, `X` `waud_exit`, `+` the card interrupt is about
+  to be enabled (written directly after it). In the level 2 routine, for the
+  first 300 codes only: `i` entry, the card status word as four hex digits and a
+  blank, `a` acknowledged, `c` reading the credit line, `p` publishing, `e` end,
+  and `s` for the vertical blank server. The last character before a reset is
+  the place to look at.
+- files in `ENV:` that switch parts off, checked in `waud_init`: `ZZ9K_WA_NORESUME`
+  (`waud_resume` does not enable the card interrupt), `ZZ9K_WA_NOSRV` (no
+  vertical blank server), `ZZ9K_WA_NOIRQ` (`waud_irq` returns at once; use it
+  with NORESUME, otherwise nothing acknowledges the card), `ZZ9K_WA_NOARM` (the
+  card interrupt is never enabled). `echo "" >ENV:ZZ9K_WA_NOARM` creates one;
+  the trace file shows the switches as a number (1 = NORESUME, 2 = NOSRV,
+  4 = NOIRQ, 8 = NOARM).
+
 ## Host test
 
 `tests/run-tests.sh` assembles `zz9000.s` with `tests/harness.s` into a flat
@@ -249,6 +273,9 @@ the consumption by the fill-ahead. It checks:
   loss of the lease by status and by generation, a torn firmware line, a
   stalled consumer, interrupts that are not the card's;
 - that every entry point keeps `d2-d7` and `a2-a6`.
+- that, after init, the driver touches only the pages of the board that it has
+  declared in `waud_mem` (the other pages of the board are made inaccessible
+  while a call runs, like the page tables WHDLoad builds on a 68040 or 68060).
 
 The model is written from `docs/audio-fabric.md` and `audio_fabric_lease.c` of
 zz9000-firmware. It does not replace a run on a card.

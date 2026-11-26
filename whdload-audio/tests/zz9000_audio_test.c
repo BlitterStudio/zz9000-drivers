@@ -66,7 +66,7 @@ enum { ID_TRACE, ID_OPENLIB, ID_CLOSELIB, ID_ADDINT, ID_REMINT, ID_CACHE,
 static u8 *blob;
 static u32 *ctl;
 static u8 *vars;
-static u8 board[BOARD_SIZE] __attribute__((aligned(64)));
+static u8 board[BOARD_SIZE] __attribute__((aligned(4096)));
 
 static int failures;
 static int checks;
@@ -539,6 +539,29 @@ static void os_dispatch(u32 id, u32 *regs)
 /* ------------------------------------------------------------------ */
 /* calling the driver */
 
+/* WHDLoad maps the memory a plugin declares in waud_mem and nothing else of
+ * the card (page tables of the 68040/060, 4 KiB pages). With the operating
+ * system off every access of the driver to the board outside those pages is
+ * an access fault there, so while a call of the driver runs the pages of the
+ * board that are not in the list are made inaccessible here. */
+static int map_board;
+
+static void board_map(int on)
+{
+    u32 *m = (u32 *)(vars + ctl[V_MEM]);
+
+    mprotect(board, BOARD_SIZE, on ? PROT_NONE : PROT_READ | PROT_WRITE);
+    for (; on && be32((u8 *)m) != 0; m += 3) {
+        u32 lo = be32((u8 *)m) & ~4095u;
+        u32 hi = (be32((u8 *)(m + 1)) | 4095u) + 1;
+
+        if (mprotect(addr(lo), hi - lo, PROT_READ | PROT_WRITE)) {
+            perror("mprotect");
+            exit(2);
+        }
+    }
+}
+
 typedef u32 (*chk_t)(void *fn, u32 d0, u32 d1, void *a0, u32 *bad);
 
 /* call an entry of the driver with sentinels in the registers it must keep */
@@ -547,8 +570,12 @@ static u32 call(int idx, u32 d0, u32 d1, const void *a0)
     u32 bad = 0, r;
     chk_t chk = (chk_t)(uintptr_t)(a32(blob) + ctl[C_CALLCHK]);
 
+    if (map_board && idx != C_INIT && idx != C_EXIT)
+        board_map(1);
     r = chk((void *)(uintptr_t)(a32(blob) + ctl[idx]), d0, d1, (void *)a0,
             &bad);
+    if (map_board && idx != C_INIT && idx != C_EXIT)
+        board_map(0);
     CHECK(bad == 0, "entry %d changed registers, mask %x", idx, bad);
     return r;
 }
@@ -700,11 +727,13 @@ static u32 do_init(void)
 {
     u32 r;
 
+    map_board = 0;
     sim_reset();
     board[0xea] = 0;
     board[0xeb] = cfg.cfg_int2 ? 1 : 0;
     r = call(C_INIT, 0, 0, NULL);
     note_hw();
+    map_board = r == 0;
     return r;
 }
 

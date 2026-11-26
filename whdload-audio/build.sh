@@ -11,6 +11,7 @@
 # Usage: ./build.sh            build out/WHDLoad.Audio
 #        ./build.sh slave      build out/audio.slave, the test Slave of winstalls
 #                              (misc/audio.asm, Public Domain)
+#        ./build.sh diag       build out/WHDLoad.Audio.diag with progress codes
 #        ./build.sh harness    build out/harness.bin for tests/run-tests.sh
 # Without vasm on the PATH the script runs itself in the m68k container.
 set -eu
@@ -72,8 +73,8 @@ if [ "$mode" = slave ]; then
     ls -l out/audio.slave
     exit 0
 fi
-if [ "$mode" != plugin ]; then
-    echo "usage: $0 [plugin|slave|harness]" >&2
+if [ "$mode" != plugin ] && [ "$mode" != diag ]; then
+    echo "usage: $0 [plugin|diag|slave|harness]" >&2
     exit 64
 fi
 
@@ -97,5 +98,12 @@ awk '
 # $VER date, shown by WHDLoad in its informational messages
 printf '(%s, with the ZZ9000AX driver)' "$(date -u +%d.%m.%Y)" > "$build/.date"
 
+if [ "$mode" = diag ]; then
+    printf '(%s, ZZ9000AX diagnostic build)' "$(date -u +%d.%m.%Y)" > "$build/.date"
+    vasm -DZZ9000_DIAG=1 -Fhunkexe -o out/WHDLoad.Audio.diag \
+        "$build/WHDLoad.Audio.zz9000.asm"
+    ls -l out/WHDLoad.Audio.diag
+    exit 0
+fi
 vasm -Fhunkexe -o out/WHDLoad.Audio "$build/WHDLoad.Audio.zz9000.asm"
 ls -l out/WHDLoad.Audio

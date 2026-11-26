@@ -147,6 +147,7 @@ ZST_FIN			= 3		;everything fed, wait until the card played it
 		ULONG	zv_st_irqs
 		ULONG	zv_st_susp
 		ULONG	zv_st_resume
+		ULONG	zv_dbgcnt		;ZZ9000_DIAG: progress codes left
 		UBYTE	zv_fmt			;0 s16 stereo, 1 s16 mono, 2 u8 stereo, 3 u8 mono
 		UBYTE	zv_shift		;log2 of the bytes of a frame
 		UBYTE	zv_state		;ZST_*
@@ -156,7 +157,8 @@ ZST_FIN			= 3		;everything fed, wait until the card played it
 		UBYTE	zv_armed		;card interrupt enabled
 		UBYTE	zv_srv			;interrupt server added
 		UBYTE	zv_hbdiv		;counter of the interrupt server
-		STRUCT	zv_pad1,3
+		UBYTE	zv_diag			;ZZ9000_DIAG: ZZ_DIAG_* switches
+		STRUCT	zv_pad1,2
 		STRUCT	zv_mem,(3*3+1)*4	;memory list for WHDLoad
 		STRUCT	zv_int,IS_SIZE		;interrupt server
 		STRUCT	zv_pad2,2
@@ -173,6 +175,31 @@ ZZ_GETEXEC	MACRO
 		move.l	(4).w,\1
 	ENDC
 	ENDM
+
+	;Diagnostic build (ZZ9000_DIAG, build.sh diag): progress codes are written
+	;as characters to REG_ZZ_PRINT_CHR, which the firmware prints on its UART,
+	;and ENV:ZZ9K_WA_* files switch parts of the driver off, see README.md
+ZZ_REG_PRINT		= $f0
+ZZ_DIAG_NORESUME	= 0		;waud_resume does not enable the card interrupt
+ZZ_DIAG_NOSRV		= 1		;no interrupt server
+ZZ_DIAG_NOIRQ		= 2		;waud_irq returns at once
+ZZ_DIAG_NOARM		= 3		;the card interrupt is never enabled
+ZZ_DBG		MACRO
+	IFD ZZ9000_DIAG
+		move.l	d0,-(a7)
+		moveq	#\1,d0
+		bsr	zzi_dbg
+		move.l	(a7)+,d0
+	ENDC
+		ENDM
+ZZ_DBGL		MACRO
+	IFD ZZ9000_DIAG
+		move.l	d0,-(a7)
+		moveq	#\1,d0
+		bsr	zzi_dbgl
+		move.l	(a7)+,d0
+	ENDC
+		ENDM
 
 	CNOP 0,4
 zz9000_driver	dc.l	zz9000_name
@@ -270,7 +297,10 @@ zz9000_init	movem.l	d2-d7/a2-a6,-(a7)
 		beq	.trace
 		tst	d0
 		beq	.trace
-.int2ok
+.int2ok		ZZ_DBG	'C'
+	IFD ZZ9000_DIAG
+		bsr	zzi_envflags
+	ENDC
 	;zz9k.library 2.44
 		move.l	a2,a6
 		lea	(zz9000_n_zz9k,pc),a1
@@ -291,7 +321,7 @@ zz9000_init	movem.l	d2-d7/a2-a6,-(a7)
 		lea	(zz9000_t_oldlib,pc),a0
 		lea	(zf_args,a4),a1
 		bra	.fail_lib
-.libok
+.libok		ZZ_DBG	'Z'
 	;the audio fabric
 		lea	(zf_caps,a4),a0
 		jsr	(ZZ9K_LVO_QueryCaps,a6)
@@ -443,12 +473,17 @@ zz9000_init	movem.l	d2-d7/a2-a6,-(a7)
 		clr.l	(a0)
 
 	;first publication, the lease is paused until a track is played
+		ZZ_DBG	'L'
 		bsr	zzi_publish
 		move.l	a2,a6
 		bsr	zzi_flush
 
 	;vertical blank server, keeps the heartbeat alive while the operating
 	;system is active
+	IFD ZZ9000_DIAG
+		btst	#ZZ_DIAG_NOSRV,(zv_diag,a3)
+		bne	.nosrv
+	ENDC
 		move.l	a2,a6
 		lea	(zv_int,a3),a1
 		move.b	#NT_INTERRUPT,(LN_TYPE,a1)
@@ -461,7 +496,8 @@ zz9000_init	movem.l	d2-d7/a2-a6,-(a7)
 		moveq	#INTB_VERTB,d0
 		jsr	(_LVOAddIntServer,a6)
 		st	(zv_srv,a3)
-
+		ZZ_DBG	'V'
+.nosrv
 		move.l	(zv_slot,a3),(zf_args,a4)
 		move.l	(zv_gen,a3),(zf_args+4,a4)
 		move.l	(zv_cap,a3),(zf_args+8,a4)
@@ -471,6 +507,7 @@ zz9000_init	movem.l	d2-d7/a2-a6,-(a7)
 		lea	(zf_args,a4),a1
 		bsr	_trace
 		moveq	#WAUDINIT_OK,d7
+		ZZ_DBG	'O'
 		bra	.end
 
 .fail_lib	bsr	_trace
@@ -557,6 +594,7 @@ zz9000_exit	movem.l	d2-d7/a2-a6,-(a7)
 		move.l	a7,a4			;A4 = frame
 		lea	(_vars,pc),a3
 		ZZ_GETEXEC a2
+		ZZ_DBG	'X'
 		bsr	zzi_disarm
 		sf	(zv_live,a3)		;the server does nothing from now on
 		tst.b	(zv_srv,a3)
@@ -612,6 +650,7 @@ zz9000_server	tst.b	(zv_live,a1)
 		move.b	#ZZ_HBDIV,(zv_hbdiv,a1)
 		move.l	a3,-(a7)
 		move.l	a1,a3
+		ZZ_DBGL	's'
 		bsr	zzi_publish
 		bsr	zzi_flush
 		move.l	(a7)+,a3
@@ -683,10 +722,16 @@ zzi_credit	movem.l	d2-d4,-(a7)
 ; IN:	a3 = APTR vars
 ; OUT:	a0 destroyed
 
-zzi_arm		move.l	(zv_hw,a3),a0
+zzi_arm
+	IFD ZZ9000_DIAG
+		btst	#ZZ_DIAG_NOARM,(zv_diag,a3)
+		bne	.rts
+		ZZ_DBG	'+'
+	ENDC
+		move.l	(zv_hw,a3),a0
 		move	#ZZ_CFG_VBL_ON,(ZZ_REG_CONFIG,a0)
 		st	(zv_armed,a3)
-		rts
+.rts		rts
 
 zzi_disarm	move.l	(zv_hw,a3),d0
 		beq	.rts			;init failed early
@@ -703,6 +748,7 @@ zzi_disarm	move.l	(zv_hw,a3),d0
 zz9000_suspend	move.l	a3,-(a7)
 		lea	(_vars,pc),a3
 		addq.l	#1,(zv_st_susp,a3)
+		ZZ_DBG	'S'
 		bsr	zzi_disarm
 		move.l	(a7)+,a3
 		rts
@@ -710,7 +756,13 @@ zz9000_suspend	move.l	a3,-(a7)
 zz9000_resume	move.l	a3,-(a7)
 		lea	(_vars,pc),a3
 		addq.l	#1,(zv_st_resume,a3)
+		ZZ_DBG	'R'
+	IFD ZZ9000_DIAG
+		btst	#ZZ_DIAG_NORESUME,(zv_diag,a3)
+		bne	.skip
+	ENDC
 		bsr	zzi_arm
+.skip
 		move.l	(a7)+,a3
 		rts
 
@@ -719,7 +771,14 @@ zz9000_resume	move.l	a3,-(a7)
 ; IN:	d0 = ULONG volume 0..$7fff
 ; OUT:	-
 
-zz9000_volume	cmp.l	#$7fff,d0
+zz9000_volume
+	IFD ZZ9000_DIAG
+		move.l	a3,-(a7)
+		lea	(_vars,pc),a3
+		ZZ_DBG	'v'
+		move.l	(a7)+,a3
+	ENDC
+		cmp.l	#$7fff,d0
 		bls	.set
 		move.l	#$7fff,d0
 .set		lea	(_vars+zv_vol,pc),a0
@@ -733,6 +792,7 @@ zz9000_volume	cmp.l	#$7fff,d0
 
 zz9000_stop	movem.l	d0/a0/a3,-(a7)
 		lea	(_vars,pc),a3
+		ZZ_DBG	'T'
 		clr.b	(zv_state,a3)
 		clr.b	(zv_finpend,a3)
 		clr.l	(zv_pad,a3)
@@ -752,6 +812,7 @@ zz9000_stop	movem.l	d0/a0/a3,-(a7)
 
 zz9000_play	movem.l	d2-d7/a2-a3,-(a7)
 		lea	(_vars,pc),a3
+		ZZ_DBG	'P'
 		clr.b	(zv_state,a3)
 		clr.b	(zv_finpend,a3)
 		clr.l	(zv_pad,a3)
@@ -783,15 +844,25 @@ zz9000_play	movem.l	d2-d7/a2-a3,-(a7)
 zz9000_irq	movem.l	d2-d7/a2-a3,-(a7)
 		lea	(_vars,pc),a3
 		moveq	#0,d7			;D7 = result
+	IFD ZZ9000_DIAG
+		btst	#ZZ_DIAG_NOIRQ,(zv_diag,a3)
+		bne	.end
+		ZZ_DBGL	'i'
+	ENDC
 		tst.b	(zv_armed,a3)
 		beq	.fin
 		move.l	(zv_hw,a3),a2
 		move	(ZZ_REG_CONFIG,a2),d0
+	IFD ZZ9000_DIAG
+		bsr	zzi_dbghexl
+	ENDC
 		btst	#ZZ_INTB_VBLANK,d0	;our interrupt?
 		beq	.fin
 		move	#ZZ_CFG_ACK_VBL,(ZZ_REG_CONFIG,a2)
+		ZZ_DBGL	'a'
 		addq.l	#1,(zv_st_irqs,a3)
 		bsr	zzi_service
+		ZZ_DBGL	'e'
 .fin		tst.b	(zv_finpend,a3)
 		beq	.end
 		clr.b	(zv_finpend,a3)
@@ -809,6 +880,7 @@ zz9000_irq	movem.l	d2-d7/a2-a3,-(a7)
 zzi_service	movem.l	d2-d7/a2,-(a7)
 		tst.b	(zv_dead,a3)
 		bne	.out
+		ZZ_DBGL	'c'
 		bsr	zzi_credit
 		tst.b	(zv_dead,a3)
 		bne	.out
@@ -873,7 +945,8 @@ zzi_service	movem.l	d2-d7/a2,-(a7)
 		move.l	#ZZ9K_RING_PAUSED,(zv_pflags,a3)
 		clr.b	(zv_state,a3)
 
-.publish	bsr	zzi_publish
+.publish	ZZ_DBGL	'p'
+		bsr	zzi_publish
 .out		movem.l	(a7)+,d2-d7/a2
 		rts
 
@@ -1242,6 +1315,115 @@ zzi_le16	moveq	#0,d0
 		rts
 
 ;----------------------------------------
+	IFD ZZ9000_DIAG
+; progress codes
+; IN:	a3 = APTR vars
+;	d0 = character
+; OUT:	all registers and the condition codes preserved
+
+zzi_dbg		movem.l	d0/a0,-(a7)
+		move.l	(zv_hw,a3),d0
+		beq	.e
+		move.l	d0,a0
+		move.l	(a7),d0
+		move	d0,(ZZ_REG_PRINT,a0)
+.e		movem.l	(a7)+,d0/a0
+		rts
+
+	;the same, but only while zv_dbgcnt lasts
+zzi_dbgl	tst.l	(zv_dbgcnt,a3)
+		beq	.e
+		subq.l	#1,(zv_dbgcnt,a3)
+		bsr	zzi_dbg
+.e		rts
+
+	;d0.w as four hex digits and a blank, limited
+zzi_dbghexl	tst.l	(zv_dbgcnt,a3)
+		beq	.e
+		subq.l	#1,(zv_dbgcnt,a3)
+		movem.l	d0-d2,-(a7)
+		move	d0,d2
+		moveq	#3,d1
+.l		rol	#4,d2
+		move	d2,d0
+		and	#15,d0
+		add	#'0',d0
+		cmp	#'9',d0
+		bls	.d
+		addq	#7,d0
+.d		bsr	zzi_dbg
+		dbf	d1,.l
+		moveq	#' ',d0
+		bsr	zzi_dbg
+		movem.l	(a7)+,d0-d2
+.e		rts
+
+	;ENV:ZZ9K_WA_NORESUME, _NOSRV, _NOIRQ, _NOARM switch parts off
+zzi_envflags	movem.l	d0-d1/a0-a1,-(a7)
+		move.l	#300,(zv_dbgcnt,a3)
+		lea	(zz9000_e_noresume,pc),a0
+		bsr	zzi_envflag
+		tst.l	d0
+		beq	.1
+		bset	#ZZ_DIAG_NORESUME,(zv_diag,a3)
+.1		lea	(zz9000_e_nosrv,pc),a0
+		bsr	zzi_envflag
+		tst.l	d0
+		beq	.2
+		bset	#ZZ_DIAG_NOSRV,(zv_diag,a3)
+.2		lea	(zz9000_e_noirq,pc),a0
+		bsr	zzi_envflag
+		tst.l	d0
+		beq	.3
+		bset	#ZZ_DIAG_NOIRQ,(zv_diag,a3)
+.3		lea	(zz9000_e_noarm,pc),a0
+		bsr	zzi_envflag
+		tst.l	d0
+		beq	.4
+		bset	#ZZ_DIAG_NOARM,(zv_diag,a3)
+.4		lea	(zz9000_t_diag,pc),a0
+		moveq	#0,d0
+		move.b	(zv_diag,a3),d0
+		move.l	d0,-(a7)
+		move.l	a7,a1
+		bsr	_trace
+		addq.l	#4,a7
+		movem.l	(a7)+,d0-d1/a0-a1
+		rts
+
+	;IN a0 = name, a2 = exec; OUT d0 = 1 if the file exists
+zzi_envflag	movem.l	d2-d4/a6,-(a7)
+		move.l	a0,d4
+		move.l	a2,a6
+		lea	(zz9000_n_dos,pc),a1
+		moveq	#0,d0
+		jsr	(_LVOOpenLibrary,a6)
+		move.l	d0,d3
+		beq	.end
+		move.l	d0,a6
+		move.l	d4,d1
+		move.l	#MODE_OLDFILE,d2
+		jsr	(_LVOOpen,a6)
+		move.l	d0,d1
+		beq	.no
+		jsr	(_LVOClose,a6)
+		moveq	#1,d4
+		bra	.close
+.no		moveq	#0,d4
+.close		move.l	d3,a1
+		move.l	a2,a6
+		jsr	(_LVOCloseLibrary,a6)
+		move.l	d4,d0
+.end		movem.l	(a7)+,d2-d4/a6
+		rts
+
+zz9000_e_noresume	dc.b	"ENV:ZZ9K_WA_NORESUME",0
+zz9000_e_nosrv		dc.b	"ENV:ZZ9K_WA_NOSRV",0
+zz9000_e_noirq		dc.b	"ENV:ZZ9K_WA_NOIRQ",0
+zz9000_e_noarm		dc.b	"ENV:ZZ9K_WA_NOARM",0
+zz9000_t_diag		dc.b	"audio: ZZ9000AX: diagnostic build, switches %ld",0
+	EVEN
+	ENDC
 
 zz9000_name		dc.b	"ZZ9000AX",0
 zz9000_exts		dc.b	"wav",0,0
