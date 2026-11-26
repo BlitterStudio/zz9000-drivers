@@ -1283,6 +1283,30 @@ int main(void)
     check(!a.audio_limiter_present,
           "out-of-range audio_limiter stays absent");
 
+    /* Stereo separation: kept only when present, 0..100 percent. */
+    defaults(&b);
+    zzcfg_parse_text("audio_active = 1\naudio_separation = 70\n",
+                     (UWORD)strlen("audio_active = 1\naudio_separation = 70\n"),
+                     &b);
+    check(b.audio_separation == 70 && b.audio_separation_present,
+          "audio_separation parses with presence");
+    n = zzcfg_generate(&b, text, sizeof(text));
+    defaults(&a);
+    zzcfg_parse_text(text, n, &a);
+    check(has_exact_line(text, "audio_separation = 70") &&
+          a.audio_separation == 70 && a.audio_separation_present,
+          "audio_separation survives a save");
+    defaults(&a);
+    zzcfg_parse_text("audio_separation = 101\n",
+                     (UWORD)strlen("audio_separation = 101\n"), &a);
+    check(!a.audio_separation_present,
+          "out-of-range audio_separation stays absent");
+    defaults(&b);
+    b.audio_active_present = 1;
+    n = zzcfg_generate(&b, text, sizeof(text));
+    check(has_exact_line(text, "#audio_separation = 100"),
+          "absent audio_separation stays a commented default");
+
     /* A hand-edited partial scene stays partial: only present keys are
      * regenerated, so one Settings save never zero-fills the absent
      * fields (the firmware would fold them into a silent scene). */

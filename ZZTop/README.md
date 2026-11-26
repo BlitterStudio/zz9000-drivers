@@ -174,6 +174,7 @@ Scenes is an advanced child page under Audio. It edits the active scene.
 |---|---|
 | Scene | **Scene** selector and **Name**, up to 16 characters |
 | Master | **Output lowpass** (`1..23900` Hz), **Volume**, **Pre-gain**, and **Pan** (`0..100`, where `50` is centre) |
+| Separation | **Separation** (`0..100` percent) for the whole card output, Paula and AX alike: `100` is full stereo, `0` is mono, and about `70` suits headphones. It is not part of a scene, it needs firmware with stereo separation, and Save keeps it as `audio_separation` |
 | Equaliser (Hz) | Ten bands: `31`, `63`, `125`, `250`, `500`, `1k`, `2k`, `4k`, `8k`, and `16k`; the middle position is flat |
 | Card calibration | **Paula clean ceiling** and **AX clean ceiling**, each `1..4095` |
 
@@ -322,7 +323,7 @@ Automatic are omitted or commented out when saved.
 | `hdf` | Image filename in the microSD root, or `off` |
 
 The firmware audio save owns `audio_active`, `audio_baseline`,
-`audio_limiter`, `audio_ceiling_paula`, `audio_ceiling_ax`, and the eight
+`audio_separation`, `audio_limiter`, `audio_ceiling_paula`, `audio_ceiling_ax`, and the eight
 scene groups
 `audio_scene<N>_{lpf,eq01,eq23,eq45,eq67,eq89,out,pan,nm1..nm8}` for
 zero-based `N=0..7`. ZZTop preserves these fields while completing a shared

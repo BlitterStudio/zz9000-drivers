@@ -28,6 +28,7 @@
 #define G_CEIL_AX 17
 #define G_NOTE 18
 #define G_CAL_NOTE 19
+#define G_SEPARATION 20
 
 static struct Gadget *scene;
 static struct Gadget *name;
@@ -35,6 +36,7 @@ static struct Gadget *lpf;
 static struct Gadget *volume;
 static struct Gadget *prefactor;
 static struct Gadget *pan;
+static struct Gadget *separation;
 static struct Gadget *eq[AUDIO_EQ_BANDS];
 static struct Gadget *ceil_paula;
 static struct Gadget *ceil_ax;
@@ -49,6 +51,7 @@ static char cal_note_buffer[96];
 static UWORD committed_volume;
 static UWORD committed_prefactor;
 static UWORD committed_pan;
+static UWORD committed_separation;
 static UWORD committed_eq[AUDIO_EQ_BANDS];
 
 static const struct audio_scene fallback_scene;
@@ -96,6 +99,7 @@ static void tuning_set_enabled(BOOL enabled)
 	gt_page_set_disabled(volume, !enabled);
 	gt_page_set_disabled(prefactor, !enabled);
 	gt_page_set_disabled(pan, !enabled);
+	gt_page_set_disabled(separation, !enabled || !audio_separation_available());
 	gt_page_set_disabled(ceil_paula, !enabled);
 	gt_page_set_disabled(ceil_ax, !enabled);
 	for (index = 0; index < AUDIO_EQ_BANDS; ++index)
@@ -285,8 +289,16 @@ static BOOL tuning_create(struct gt_page *page)
 		"Measured for each card; sets mix limit.");
 	cal_note = gt_add_note(page, G_CAL_NOTE, left, 9, width, cal_note_buffer);
 
-	page->rows = 10;
-	return scene && name && lpf && volume && prefactor && pan && note &&
+	/* Row 10: Stereo separation (whole card output, not per scene) */
+	ng.ng_LeftEdge = (WORD)(left + left_lbl);
+	ng.ng_TopEdge = gt_row(10);
+	ng.ng_Width = (WORD)(half - left_lbl - vol_val_w);
+	ng.ng_GadgetText = (STRPTR)"Separation";
+	ng.ng_GadgetID = GT_GID(P, G_SEPARATION);
+	separation = gt_page_add(page, SLIDER_KIND, &ng, vol_tags);
+
+	page->rows = 11;
+	return scene && name && lpf && volume && prefactor && pan && separation && note &&
 		ceil_paula && ceil_ax && cal_note;
 }
 
@@ -312,6 +324,7 @@ static void tuning_sync(void)
 	tuning_set(volume, GTSL_Level, value->volume);
 	tuning_set(prefactor, GTSL_Level, value->prefactor);
 	tuning_set(pan, GTSL_Level, value->pan);
+	tuning_set(separation, GTSL_Level, audio_separation());
 	for (index = 0; index < AUDIO_EQ_BANDS; ++index)
 		tuning_set(eq[index], GTSL_Level, value->eq[index]);
 	tuning_set(ceil_paula, GTIN_Number, audio_ceiling_paula());
@@ -319,6 +332,7 @@ static void tuning_sync(void)
 	committed_volume = value->volume;
 	committed_prefactor = value->prefactor;
 	committed_pan = value->pan;
+	committed_separation = audio_separation();
 	for (index = 0; index < AUDIO_EQ_BANDS; ++index)
 		committed_eq[index] = value->eq[index];
 	if (!ok)
@@ -392,6 +406,12 @@ static void tuning_tick(void)
 		committed_pan = (UWORD)val;
 		gt_pending_changed();
 	}
+	val = (LONG)gt_page_get(separation, GTSL_Level);
+	if (val != (LONG)committed_separation && audio_separation_available() &&
+		audio_set_separation((UWORD)val)) {
+		committed_separation = (UWORD)val;
+		gt_pending_changed();
+	}
 	for (index = 0; index < AUDIO_EQ_BANDS; ++index) {
 		val = (LONG)gt_page_get(eq[index], GTSL_Level);
 		if (val != (LONG)committed_eq[index] &&
@@ -428,6 +448,10 @@ static void tuning_gadget(UWORD id, UWORD code)
 		changed = audio_set_scene_value(audio_active_scene(), ZZ9K_AUDIO_SCENE_PARAM_VOLUME, code);
 	} else if (id == G_PREFACTOR) {
 		changed = audio_set_scene_value(audio_active_scene(), ZZ9K_AUDIO_SCENE_PARAM_PREFACTOR, code);
+	} else if (id == G_SEPARATION) {
+		changed = audio_set_separation(code);
+		if (changed)
+			committed_separation = code;
 	} else if (id == G_PAN) {
 		changed = audio_set_scene_value(audio_active_scene(), ZZ9K_AUDIO_SCENE_PARAM_PAN, code);
 	} else if (id >= G_EQ && id < G_EQ + AUDIO_EQ_BANDS) {
@@ -450,7 +474,7 @@ struct gt_page gt_page_tuning = {
 	GT_PAGE_ADVANCED | GT_PAGE_CHILD,
 	NULL,
 	NULL,
-	10,
+	11,
 	tuning_create,
 	tuning_show,
 	NULL,
