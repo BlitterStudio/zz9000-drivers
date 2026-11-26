@@ -1687,14 +1687,59 @@ static void test_exit_midtrack(void)
     free(w.data);
 }
 
+/* WAV files written by tools/make-test-tracks.py (Python wave module):
+ * the canonical 44 byte header */
+static void test_file(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    long size;
+    struct wav w;
+    u32 rate, dsize;
+
+    if (!f) {
+        perror(path);
+        failures++;
+        return;
+    }
+    fseek(f, 0, SEEK_END);
+    size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    w.data = aligned_alloc(4, ((size_t)size + 16 + 3) & ~3u);
+    memset(w.data, 0, (size_t)size + 16);
+    if (fread(w.data, 1, (size_t)size, f) != (size_t)size) {
+        perror(path);
+        failures++;
+        fclose(f);
+        return;
+    }
+    fclose(f);
+    w.len = (u32)size;
+    w.ch = w.data[22];
+    w.bits = w.data[34];
+    rate = w.data[24] | (w.data[25] << 8) | (w.data[26] << 16);
+    dsize = w.data[40] | (w.data[41] << 8) | (w.data[42] << 16) |
+            ((u32)w.data[43] << 24);
+    w.pcm = w.data + 44;
+    w.frames = dsize / ((u32)w.ch * w.bits / 8);
+    CHECK(!memcmp(w.data, "RIFF", 4) && !memcmp(w.data + 36, "data", 4),
+          "%s: header", path);
+    if (rate == 44100)
+        play_and_check(path, &w, VOL_FULL, 0, 20);
+    else
+        expect_refused(path, &w, w.len);
+    free(w.data);
+}
+
 int main(int argc, char **argv)
 {
+    int i;
+
     FILE *f;
     long size;
     u8 *file;
 
-    if (argc != 2) {
-        fprintf(stderr, "usage: %s harness.bin\n", argv[0]);
+    if (argc < 2) {
+        fprintf(stderr, "usage: %s harness.bin [track.wav ...]\n", argv[0]);
         return 2;
     }
     f = fopen(argv[1], "rb");
@@ -1736,6 +1781,8 @@ int main(int argc, char **argv)
     test_torn_and_stall();
     test_irq_filter();
     test_exit_midtrack();
+    for (i = 2; i < argc; i++)
+        test_file(argv[i]);
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

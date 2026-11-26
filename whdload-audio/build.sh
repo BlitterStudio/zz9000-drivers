@@ -9,6 +9,8 @@
 # stored in this repository.
 #
 # Usage: ./build.sh            build out/WHDLoad.Audio
+#        ./build.sh slave      build out/audio.slave, the test Slave of winstalls
+#                              (misc/audio.asm, Public Domain)
 #        ./build.sh harness    build out/harness.bin for tests/run-tests.sh
 # Without vasm on the PATH the script runs itself in the m68k container.
 set -eu
@@ -27,16 +29,18 @@ work=work
 src=$work/winstalls
 build=$work/build
 
-# fetch the pinned commit, only the plugin and the include files
-if [ ! -f "$src/.ref" ] || [ "$(cat "$src/.ref")" != "$ref" ]; then
+# fetch the pinned commit, only the plugin, the test Slave and the includes
+dirs="audio include misc"
+if [ ! -f "$src/.ref" ] || [ "$(cat "$src/.ref")" != "$ref $dirs" ]; then
     rm -rf "$src"
     mkdir -p "$src"
     git -C "$src" init -q
     git -C "$src" remote add origin "$repo"
-    git -C "$src" sparse-checkout set audio include
+    # shellcheck disable=SC2086
+    git -C "$src" sparse-checkout set $dirs
     git -C "$src" fetch -q --depth 1 --filter=blob:none origin "$ref"
     git -C "$src" -c advice.detachedHead=false checkout -q FETCH_HEAD
-    echo "$ref" > "$src/.ref"
+    echo "$ref $dirs" > "$src/.ref"
 fi
 if [ "$(git -C "$src" rev-parse HEAD)" != "$ref" ]; then
     echo "ERROR: fetched $(git -C "$src" rev-parse HEAD), expected $ref" >&2
@@ -61,8 +65,15 @@ if [ "$mode" = harness ]; then
     ls -l out/harness.bin
     exit 0
 fi
+if [ "$mode" = slave ]; then
+    cp "$src/misc/audio.asm" "$src/misc/pic_font_5x6_br.bin" "$build/"
+    printf '(%s)' "$(date -u +%d.%m.%Y)" > "$build/.date"
+    vasm -Fhunkexe -o out/audio.slave "$build/audio.asm"
+    ls -l out/audio.slave
+    exit 0
+fi
 if [ "$mode" != plugin ]; then
-    echo "usage: $0 [plugin|harness]" >&2
+    echo "usage: $0 [plugin|slave|harness]" >&2
     exit 64
 fi
 

@@ -19,17 +19,26 @@ cd "$dir"
 step=${1:-all}
 
 if [ "$step" = all ]; then
+    if command -v python3 >/dev/null 2>&1; then
+        python3 tools/make-test-tracks.py --check out/tracks >/dev/null
+    fi
     ./build.sh harness
     exec sh tests/run-tests.sh run
 fi
 
 mkdir -p out
+# the test tracks go through the driver too, when they have been generated
+tracks=
+if [ -f out/tracks/track01.wav ]; then
+    tracks=$(ls out/tracks/track*.wav)
+fi
 if command -v m68k-linux-gnu-gcc >/dev/null 2>&1 &&
    command -v qemu-m68k >/dev/null 2>&1; then
     m68k-linux-gnu-gcc -std=gnu11 -O1 -g -Wall -Wextra -Werror -static \
         -o out/zz9000_audio_test tests/zz9000_audio_test.c
+    # shellcheck disable=SC2086
     exec qemu-m68k -cpu "${QEMU_CPU:-m68040}" out/zz9000_audio_test \
-        out/harness.bin
+        out/harness.bin $tracks
 fi
 
 image=${HARNESS_IMAGE:-ubuntu:24.04}

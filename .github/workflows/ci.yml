@@ -91,6 +91,7 @@ jobs:
           make -C usb-poseidon/tests test
           make -C net/tests test
           make ahi-voice-tests
+          make whdload-audio-tests
           python3 -m unittest tools/tests/test_repo_tooling.py
           python3 -m unittest tools/tests/test_usb_proxy_contract.py
           python3 -m unittest tools/tests/test_zztop_layout.py
@@ -126,6 +127,25 @@ jobs:
         with:
           name: ZZ9000-debug.card
           path: rtg/ZZ9000-debug.card
+          if-no-files-found: error
+
+  whdload-audio:
+    name: whdload-audio — WHDLoad.Audio with the ZZ9000AX driver
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      # Fetches the winstalls plugin source at the commit in
+      # whdload-audio/WINSTALLS_REF, so it needs network access.
+      - name: Build WHDLoad.Audio and the test Slave
+        run: |
+          whdload-audio/build.sh
+          whdload-audio/build.sh slave
+      - uses: actions/upload-artifact@v7
+        with:
+          name: WHDLoad.Audio
+          path: |
+            whdload-audio/out/WHDLoad.Audio
+            whdload-audio/out/audio.slave
           if-no-files-found: error
 
   zztop:

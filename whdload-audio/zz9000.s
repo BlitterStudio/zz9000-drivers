@@ -11,7 +11,7 @@
 ;
 ; The driver plays WAV files (PCM, 8 or 16 bit, mono or stereo, 44100 Hz)
 ; through the audio fabric of the ZZ9000 firmware. It holds a direct-ring
-; lease for the whole run of WHDLoad: waud_init acquires a 44100 Hz stereo
+; lease while WHDLoad runs: waud_init acquires a 44100 Hz stereo
 ; S16LE lease, waud_exit releases it. The firmware converts the lease to its
 ; 48 kHz output. The card is told to raise its vblank interrupt, which
 ; reaches the level 2 interrupt (INT2 mode of the card, ENV:ZZ9K_INT2 or

@@ -19,7 +19,8 @@ if command -v shellcheck >/dev/null 2>&1; then
         ZZTop/build-gcc.sh \
         ahi/driver/build.sh ahi/axtest/build-gcc-single.sh \
         ahi/duplextest/build.sh ahi/voicetest/build.sh mhi/build.sh \
-        ZZDiag/build.sh ZZCapture/build.sh || status=$?
+        ZZDiag/build.sh ZZCapture/build.sh \
+        whdload-audio/build.sh whdload-audio/tests/run-tests.sh || status=$?
 else
     echo "SKIP: shellcheck not installed"
 fi
