@@ -648,6 +648,12 @@ void zzcfg_parse_text(const char *text, UWORD len, struct zzcfg_values *v)
                 v->audio_baseline = baseline;
                 v->audio_baseline_present = 1;
             }
+        } else if (zzcfg_str_eq_ci(key, "audio_separation")) {
+            UWORD separation;
+            if (zzcfg_parse_u16(value, &separation) && separation <= 100) {
+                v->audio_separation = separation;
+                v->audio_separation_present = 1;
+            }
         } else if (zzcfg_str_eq_ci(key, "audio_limiter")) {
             UWORD limiter;
             if (zzcfg_parse_u16(value, &limiter) &&
@@ -934,7 +940,7 @@ static int zzcfg_audio_present(const struct zzcfg_values *v)
     int i;
 
     if (v->audio_active_present || v->audio_baseline_present ||
-            v->audio_limiter_present ||
+            v->audio_limiter_present || v->audio_separation_present ||
             v->audio_ceiling_paula_present ||
             v->audio_ceiling_ax_present)
         return 1;
@@ -954,12 +960,16 @@ static int zzcfg_append_audio(const struct zzcfg_values *v, char *out,
         "\n"
         "%saudio_active = %u\n"
         "%saudio_baseline = %u\n"
+        "%saudio_separation = %u\n"
         "%saudio_limiter = %u\n"
         "%saudio_ceiling_paula = %u\n"
         "%saudio_ceiling_ax = %u\n",
         v->audio_active_present ? "" : "#", (unsigned)v->audio_active,
         v->audio_baseline_present ? "" : "#",
         (unsigned)v->audio_baseline,
+        /* Absent: show the firmware's full-stereo boot default. */
+        v->audio_separation_present ? "" : "#",
+        v->audio_separation_present ? (unsigned)v->audio_separation : 100U,
         /* Absent: show the firmware's 0.47 FS boot default. */
         v->audio_limiter_present ? "" : "#",
         v->audio_limiter_present ? (unsigned)v->audio_limiter : 47U,

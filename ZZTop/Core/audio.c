@@ -37,6 +37,7 @@ struct audio_model {
 	UWORD base_ax;
 	UWORD ceiling_paula;
 	UWORD ceiling_ax;
+	UWORD separation;
 };
 
 static struct audio_model model;
@@ -50,6 +51,9 @@ static ULONG changed_params[AUDIO_SCENE_COUNT];
 static BOOL changed_names[AUDIO_SCENE_COUNT];
 static BOOL changed_active;
 static BOOL changed_baseline;
+static BOOL changed_separation;
+/* Set once the firmware reports the stereo separation word. */
+static BOOL separation_supported;
 static BOOL changed_calibration;
 static BOOL available;
 static BOOL retryable;
@@ -186,6 +190,10 @@ static BOOL audio_control_state_get(struct audio_model *out, ULONG *out_save)
 			zz9k_get_be32(result.baseline));
 		out->ceiling_paula = (UWORD)zz9k_get_be32(result.ceiling_paula);
 		out->ceiling_ax = (UWORD)zz9k_get_be32(result.ceiling_ax);
+		if (zz9k_get_be32(result.flags) & ZZ9K_AUDIO_CONTROL_FLAG_SEPARATION) {
+			out->separation = (UWORD)zz9k_get_be32(result.separation);
+			separation_supported = TRUE;
+		}
 	}
 	boundary = zz9k_get_be32(result.ceiling);
 	save_status = zz9k_get_be32(result.save_status);
@@ -327,6 +335,9 @@ static void audio_seed_editor_state(struct audio_model *out)
 				out->scenes[scene].eq[pair] = AUDIO_RANGE_MAX;
 		}
 	}
+	out->separation = values->audio_separation_present &&
+		values->audio_separation <= ZZ9K_AUDIO_SEPARATION_MAX ?
+		values->audio_separation : ZZ9K_AUDIO_SEPARATION_MAX;
 	if (values->audio_baseline_present) {
 		out->base_paula = values->audio_baseline >> 8;
 		out->base_ax = values->audio_baseline & 255U;
@@ -361,6 +372,7 @@ static void audio_clear_edits(void)
 	memset(changed_names, 0, sizeof(changed_names));
 	changed_active = FALSE;
 	changed_baseline = FALSE;
+	changed_separation = FALSE;
 	changed_calibration = FALSE;
 	dirty = FALSE;
 	save_pending = FALSE;
@@ -643,6 +655,41 @@ BOOL audio_select_scene(UWORD scene)
 	audio_mark_dirty();
 	audio_text(last_error, sizeof(last_error), "Scene selected - Save to persist");
 	return TRUE;
+}
+
+/* Commits the stereo separation (0..100 percent), re-sending the old value after a hard failure. */
+BOOL audio_set_separation(UWORD percent)
+{
+	UWORD old_percent = model.separation;
+	int status;
+
+	if (!available || calibration_pending || !separation_supported ||
+		percent > ZZ9K_AUDIO_SEPARATION_MAX)
+		return FALSE;
+	status = audio_scene_write_commit(model.active,
+		ZZ9K_AUDIO_SCENE_PARAM_SEPARATION, percent);
+	if (!audio_write_accepted(status, "Separation committed - Save to persist",
+		"Separation committing - Save to persist", "Separation write failed - retry")) {
+		(void)audio_scene_write_commit(model.active,
+			ZZ9K_AUDIO_SCENE_PARAM_SEPARATION, old_percent);
+		return FALSE;
+	}
+	model.separation = percent;
+	changed_separation = TRUE;
+	audio_mark_dirty();
+	return TRUE;
+}
+
+/* Returns the live stereo separation percent. */
+UWORD audio_separation(void)
+{
+	return model.separation;
+}
+
+/* True when the connected firmware supports stereo separation. */
+BOOL audio_separation_available(void)
+{
+	return available && separation_supported;
 }
 
 /* Writes both baseline legs atomically and restores both legs after a hard failure. */
@@ -990,6 +1037,9 @@ BOOL audio_revert(char *msg, UWORD size)
 			!audio_wait_calibration(wanted.ceiling_paula, wanted.ceiling_ax))
 			ok = FALSE;
 	}
+	if (ok && changed_separation && model.separation != wanted.separation &&
+		!audio_set_separation(wanted.separation))
+		ok = FALSE;
 	if (ok && changed_baseline &&
 		(model.base_paula != wanted.base_paula || model.base_ax != wanted.base_ax) &&
 		!audio_set_baseline(wanted.base_paula, wanted.base_ax))
