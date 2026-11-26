@@ -128,6 +128,7 @@ struct config {
     u32 service_flags;
     int slot_status[3];       /* status of the acquire per slot */
     int bad_grant;            /* see fw_call */
+    int old_firmware;         /* no IDLE_PAUSED flag: BAD_REQUEST */
 };
 
 static struct config cfg;
@@ -144,7 +145,7 @@ struct lease {
     u64 W, consumed, credited;
     u32 hb, age, max_age;
     u64 max_lead;
-    int paused, live, stall, torn;
+    int paused, live, stall, torn, idle_paused;
     u32 underruns;
     u64 uev[256];
     u32 silent_ticks;
@@ -166,8 +167,7 @@ static int acquire_calls;
 static u8 *expbase, *dosbase, *zzbase, *execbase;
 static u8 cdbuf[128];
 static int opens[3], closes[3];
-static u32 added_node, removed_node;
-static int add_calls, rem_calls;
+static int add_calls, rem_calls;   /* calls the driver must not make */
 static int cache_calls;
 static u32 cache_last_addr;
 static char tracelog[64][400];
@@ -284,7 +284,10 @@ static void fw_tick(struct lease *L)
                 if (W - L->credited > L->max_lead)
                     L->max_lead = W - L->credited;
                 L->paused = flags & 1;
-                if (hb != L->hb) {
+                if (L->idle_paused && L->paused) {
+                    L->hb = hb;
+                    L->age = 0;
+                } else if (hb != L->hb) {
                     L->hb = hb;
                     L->age = 0;
                     L->hb_changes++;
@@ -298,6 +301,8 @@ static void fw_tick(struct lease *L)
     }
     if (L->age > L->max_age)
         L->max_age = L->age;
+    if (L->idle_paused && L->paused)
+        L->age = 0;           /* seqlock misses of a paused line do not age */
     if (L->age >= 100) {
         fw_revoke(L, 1);
         return;
@@ -365,7 +370,9 @@ static u32 fw_call(u8 *req, u8 *rep)
         acquire_calls++;
         CHECK(be32(pl + 4) == 2, "identity %u", be32(pl + 4));
         CHECK(be32(pl + 8) == 128, "gain %u", be32(pl + 8));
-        CHECK(be32(pl + 12) == 1, "acquire flags %u", be32(pl + 12));
+        CHECK(be32(pl + 12) == 5, "acquire flags %u", be32(pl + 12));
+        if (cfg.old_firmware)
+            return 4;
         CHECK(be32(pl + 16) == 44100, "rate %u", be32(pl + 16));
         if (slot < 1 || slot > 2)
             return 4;
@@ -382,6 +389,7 @@ static u32 fw_call(u8 *req, u8 *rep)
         L->ring = board + ring_off;
         L->ctrl = board + ctrl_off;
         L->cap = cap;
+        L->idle_paused = (be32(pl + 12) & 4) != 0;
         memset(L->ring, 0, cap);
         memset(L->ctrl, 0, 128);
         fw_publish(L);
@@ -485,14 +493,14 @@ static void os_dispatch(u32 id, u32 *regs)
         break;
     case ID_ADDINT:
         CHECK(regs[0] == 5, "interrupt number %u", regs[0]);
-        added_node = regs[3];
         add_calls++;
-        CHECK(addr(added_node)[ctl[C_LN_TYPE]] == 2, "node type");
+        CHECK(0, "the driver added an interrupt server: nothing of the plugin "
+                 "may stay in the operating system behind waud_init");
         break;
     case ID_REMINT:
         CHECK(regs[0] == 5, "interrupt number %u", regs[0]);
-        removed_node = regs[3];
         rem_calls++;
+        CHECK(0, "the driver removed an interrupt server");
         break;
     case ID_CACHE:
         cache_calls++;
@@ -606,7 +614,6 @@ static void sim_reset(void)
     memset(board, 0, 0x1000);
     memset(opens, 0, sizeof(opens));
     memset(closes, 0, sizeof(closes));
-    added_node = removed_node = 0;
     add_calls = rem_calls = cache_calls = 0;
     release_calls = acquire_calls = 0;
     ntrace = 0;
@@ -664,7 +671,6 @@ static int hw_enabled;                /* what the last write to the register sai
 static int finished_count;
 static int irq_count;
 static int os_active;                 /* operating system active: no irq */
-static int server_enabled = 1;
 static int irq_ack_errors;
 
 static u16 hw16(void)
@@ -704,12 +710,6 @@ static void tick_ms(void)
         CHECK((r & ~1u) == 0, "irq result %x", r);
     }
     if (t_ms % 20 == 0) {
-        if (os_active && server_enabled) {
-            void (*server)(void) =
-                (void (*)(void))(uintptr_t)(a32(blob) + ctl[C_RUNSERVER]);
-
-            server();
-        }
         fw_tick_all();
     }
 }
@@ -750,7 +750,6 @@ static int fresh(void)
     hw_enabled = 0;
     finished_count = irq_count = irq_ack_errors = 0;
     os_active = 0;
-    server_enabled = 1;
     if (do_init() != 0) {
         CHECK(0, "init failed");
         return 0;
@@ -1120,6 +1119,12 @@ static void test_init(void)
     CHECK(traced("source rate") && acquire_calls == 0, "trace");
 
     config_default();
+    cfg.old_firmware = 1;
+    CHECK(do_init() == 1, "firmware without IDLE_PAUSED");
+    CHECK(traced("IDLE_PAUSED") && closes[2] == 1 && V8(V_LIVE) == 0,
+          "trace %s", tracelog[0]);
+
+    config_default();
     cfg.slot_status[1] = 2;
     CHECK(do_init() == 0, "slot 2 after slot 1 busy");
     CHECK(V32(V_SLOT) == 2 && acquire_calls == 2, "slot %u", V32(V_SLOT));
@@ -1130,7 +1135,7 @@ static void test_init(void)
     CHECK(do_init() == 1, "both slots busy");
     CHECK(traced("no free direct ring lease, status 2") && closes[2] == 1,
           "trace %s", tracelog[0]);
-    CHECK(add_calls == 0 && V8(V_LIVE) == 0, "state");
+    CHECK(V8(V_LIVE) == 0, "state");
 
     for (i = 1; i <= 10; i++) {
         config_default();
@@ -1140,7 +1145,7 @@ static void test_init(void)
         CHECK(release_calls == 1 && released[1] == 1 &&
               (i == 1 || released_gen[1] == lease[1].gen),
               "bad grant %d: lease not released", i);
-        CHECK(closes[2] == 1 && add_calls == 0 && V8(V_LIVE) == 0,
+        CHECK(closes[2] == 1 && V8(V_LIVE) == 0,
               "bad grant %d: cleanup", i);
     }
 
@@ -1186,13 +1191,8 @@ static void test_init(void)
     CHECK(ctl[V_SIZEOF] <= ctl[V_VARSIZE], "variables %u of %u bytes",
           ctl[V_SIZEOF], ctl[V_VARSIZE]);
 
-    /* the server and the first publication */
-    CHECK(add_calls == 1 && added_node == a32(vars) + ctl[V_INT], "server added");
-    vp = addr(added_node);
-    CHECK(be32(vp + ctl[C_IS_DATA]) == a32(vars), "server data");
-    CHECK(be32(vp + ctl[C_IS_CODE]) != 0, "server code");
-    CHECK(!strcmp((char *)addr(be32(vp + ctl[C_LN_NAME])), "ZZ9000AX"),
-          "server name");
+    /* no hook in the operating system, and the first publication */
+    CHECK(add_calls == 0 && rem_calls == 0, "interrupt servers");
     vp = lease[1].ctrl;
     CHECK((be32(vp) & 1) == 0 && be32(vp) != 0, "producer sequence %u", be32(vp));
     CHECK(be32(vp + 4) == lease[1].gen && be32(vp + 8) == 0 && be32(vp + 12) == 0,
@@ -1203,7 +1203,7 @@ static void test_init(void)
           "control line flushed");
     CHECK(hw16() == 0, "init must not touch the interrupt register");
     drv_exit();
-    CHECK(rem_calls == 1 && removed_node == added_node, "server removed");
+    CHECK(add_calls == 0 && rem_calls == 0, "interrupt servers after exit");
     CHECK(released[1] == 1 && released_gen[1] == lease[1].gen, "lease released");
     CHECK(closes[2] == 1, "zz9k.library closed");
     CHECK(traced("intact"), "exit trace");
@@ -1534,9 +1534,10 @@ static void test_os_active(void)
 {
     struct wav w = simple_wav(2, 16, 44100 * 12);
     struct lease *L;
-    u32 calls;
 
-    /* the operating system is active for 10 s: the server keeps the lease */
+    /* WHDLoad loads for 10 s with the operating system active and nothing of
+     * the plugin runs: suspend paused the lease, the firmware does not time
+     * it out, and resume continues the track */
     if (!fresh())
         return;
     drv_play(w.data, w.len, 0);
@@ -1544,16 +1545,14 @@ static void test_os_active(void)
     run_ms(1000);
     drv_suspend();
     CHECK(!hw_enabled && hw16() == 0x80, "suspend disables the card interrupt");
+    CHECK(be32(L->ctrl + 20) == 1, "suspend pauses the lease");
     os_active = 1;
-    calls = (u32)cache_calls;
     run_ms(10000);
     CHECK(L->revoked == 0, "the lease was revoked in %d", L->revoked);
-    CHECK(L->max_age < 40, "heartbeat age %u ticks", L->max_age);
-    CHECK((u32)cache_calls > calls + 10, "the server flushes the control line");
-    CHECK(cache_last_addr == a32(L->ctrl), "flush address");
     os_active = 0;
     drv_resume();
     CHECK(hw_enabled && hw16() == 0x82, "resume enables the card interrupt");
+    CHECK(be32(L->ctrl + 20) == 0, "resume unpauses a playing lease");
     run_until_finished(MAXTIME);
     run_ms(1500);
     CHECK(L->revoked == 0 && V8(V_DEAD) == 0, "lease intact");
@@ -1562,20 +1561,36 @@ static void test_os_active(void)
     drv_exit();
     CHECK(traced("intact") && traced("suspend 1, resume 1"), "exit trace");
 
-    /* no server: the firmware revokes the lease after 2 s, the driver notices
-     * and ends the track */
+    /* from init to the first track nothing runs for 10 s, not even an
+     * interrupt: the lease is paused since init; a resume while idle keeps it
+     * paused */
     if (!fresh())
         return;
-    server_enabled = 0;
+    L = L1();
+    run_ms(10000);
+    CHECK(L->revoked == 0, "idle lease revoked in %d", L->revoked);
+    drv_resume();
+    CHECK(be32(L->ctrl + 20) == 1, "resume while idle stays paused");
+    run_ms(5000);
+    CHECK(L->revoked == 0, "idle lease after resume revoked in %d", L->revoked);
+    drv_play(w.data, w.len, 0);
+    run_ms(500);
+    CHECK(L->outlen > 0 && V8(V_DEAD) == 0, "plays after a long idle time");
+    drv_stop();
+    run_ms(10000);
+    CHECK(L->revoked == 0, "stopped lease revoked in %d", L->revoked);
+
+    /* the level 2 interrupt is masked for 3 s while a track plays: the
+     * firmware revokes the lease, the driver notices and ends the track */
+    if (!fresh())
+        return;
     drv_play(w.data, w.len, 0);
     L = L1();
     run_ms(500);
-    drv_suspend();
     os_active = 1;
     run_ms(3000);
     CHECK(L->revoked == 1, "revoked by the firmware: %d", L->revoked);
     os_active = 0;
-    drv_resume();
     run_ms(100);
     CHECK(V8(V_DEAD) != 0 && V32(V_DEADSTAT) == 1, "dead %u status %u",
           V8(V_DEAD), V32(V_DEADSTAT));
@@ -1712,8 +1727,8 @@ static void test_exit_midtrack(void)
     drv_stop();
     drv_exit();
     CHECK(hw16() == 0x80 && !hw_enabled, "interrupt disabled on exit");
-    CHECK(V8(V_LIVE) == 0 && V8(V_SRV) == 0, "state after exit");
-    CHECK(rem_calls == 1 && released[1] == 1 && closes[2] == 1, "cleanup");
+    CHECK(V8(V_LIVE) == 0, "state after exit");
+    CHECK(rem_calls == 0 && released[1] == 1 && closes[2] == 1, "cleanup");
     CHECK(traced("tracks 1, refused 0") && traced("intact"), "exit trace %s",
           tracelog[ntrace - 1]);
     CHECK(traced("suspend 0, resume 0"), "exit trace %s", tracelog[ntrace - 1]);

@@ -15,7 +15,6 @@
 ; and values for the test (see enum ctl in the C source).
 
 	INCLUDE	exec/types.i
-	INCLUDE	exec/interrupts.i
 	INCLUDE	libraries/configvars.i
 	INCLUDE	lvo/exec.i
 	INCLUDE	whdload.i
@@ -92,19 +91,6 @@ h_callchk	movem.l	d2-d7/a2-a6,-(a7)
 		movem.l	(a7)+,d2-d7/a2-a6
 		rts
 
-;----------------------------------------
-; run the interrupt server which the driver has added to exec
-; C: void h_runserver(void)
-
-h_runserver	movem.l	d2-d7/a2-a6,-(a7)
-		lea	(_vars+zv_int,pc),a0
-		move.l	(IS_DATA,a0),a1
-		move.l	(IS_CODE,a0),a0
-		move.l	(zz9000_test_exec,pc),a6
-		jsr	(a0)
-		movem.l	(a7)+,d2-d7/a2-a6
-		rts
-
 ;============================================================================
 ; calls back into C: void cfn(ULONG id, ULONG *regs), regs = d0,d1,a0,a1
 ; the C function sets the registers for the return
@@ -155,7 +141,7 @@ zz9000_test_exec dc.l	0			;1 exec base
 		dc.l	zz9000_volume-h_blob	;8
 		dc.l	zz9000_irq-h_blob	;9
 		dc.l	h_callchk-h_blob	;10
-		dc.l	h_runserver-h_blob	;11
+		dc.l	0			;11 (was the interrupt server)
 		dc.l	_vars-h_blob		;12
 		dc.l	zz9000_driver-h_blob	;13
 		dc.l	h_stub0-h_blob		;14 stubs, trace first
@@ -171,10 +157,10 @@ zz9000_test_exec dc.l	0			;1 exec base
 		dc.l	h_stub10-h_blob		;24
 		dc.l	cd_BoardAddr		;25
 		dc.l	cd_BoardSize		;26
-		dc.l	IS_DATA			;27
-		dc.l	IS_CODE			;28
-		dc.l	LN_TYPE			;29
-		dc.l	LN_NAME			;30
+		dc.l	0			;27 (unused)
+		dc.l	0			;28
+		dc.l	0			;29
+		dc.l	0			;30
 		dc.l	LIB_VERSION		;31
 		dc.l	LIB_REVISION		;32
 		dc.l	zv_zz9k			;33 offsets in the variables
@@ -194,9 +180,9 @@ zz9000_test_exec dc.l	0			;1 exec base
 		dc.l	zv_live			;47
 		dc.l	zv_dead			;48
 		dc.l	zv_armed		;49
-		dc.l	zv_srv			;50
+		dc.l	0			;50 (unused)
 		dc.l	zv_mem			;51
-		dc.l	zv_int			;52
+		dc.l	0			;52 (unused)
 		dc.l	zv_st_tracks		;53
 		dc.l	zv_st_refused		;54
 		dc.l	zv_st_irqs		;55

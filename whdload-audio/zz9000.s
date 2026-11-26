@@ -24,11 +24,14 @@
 ; reported to WHDLoad as non cachable serialized memory, so the driver does
 ; not need any cache operation while the operating system is off.
 ;
-; While the operating system is active (loading files) waud_irq is not
-; called. A vertical blank interrupt server added by waud_init keeps the
-; heartbeat of the lease alive then, because the firmware revokes a lease
-; after 2000 ms without a heartbeat. It flushes the data cache for the
-; control line, because the operating system may map the board cachable.
+; The driver leaves nothing in the operating system behind waud_init: no
+; interrupt server, no task, no interrupt. While WHDLoad has the operating
+; system active (loading files) waud_irq is not called, so nothing publishes
+; a heartbeat. The lease is acquired with IDLE_PAUSED, which makes the
+; firmware stop the 2000 ms heartbeat timeout while the producer line says
+; PAUSED. The line is PAUSED from waud_init until the first track, between
+; tracks, and from waud_suspend until waud_resume, so the timeout only runs
+; while a track is playing and the level 2 interrupt is served.
 ;
 ; Firmware interface: docs/audio-fabric.md and sdk/include/zz9k/abi.h of
 ; zz9000-firmware (ZZ9KAudioRing*), zz9k.library revision 2.44 or later
@@ -36,9 +39,6 @@
 ; All routines called by WHDLoad modify d0/d1/a0/a1 only. Internal routines
 ; get the variables in a3 and keep all registers unless stated otherwise.
 
-	IFND EXEC_INTERRUPTS_I
-	INCLUDE	exec/interrupts.i
-	ENDC
 	IFND LIBRARIES_CONFIGVARS_I
 	INCLUDE	libraries/configvars.i
 	ENDC
@@ -50,9 +50,6 @@
 	ENDC
 	IFND LVO_DOS_I
 	INCLUDE	lvo/dos.i
-	ENDC
-	IFND HARDWARE_INTBITS_I
-	INCLUDE	hardware/intbits.i
 	ENDC
 
 ;############################################################################
@@ -87,6 +84,7 @@ ZZ9K_SFB_FABRIC		= 22
 ZZ9K_SFB_FABRIC_RATE	= 23
 ZZ9K_IDENTITY_MEDIA	= 2
 ZZ9K_ACQ_SOURCE_RATE	= 1
+ZZ9K_ACQ_IDLE_PAUSED	= 4		;no heartbeat timeout while PAUSED
 ZZ9K_CONTRACT_SOURCE_RATE = 2		;stereo S16LE at the source rate
 ZZ9K_RING_PERIOD_BYTES	= 3840
 ZZ9K_RING_PERIOD_US	= 20000
@@ -99,7 +97,6 @@ ZZ_PREROLL		= 6*ZZ9K_RING_PERIOD_BYTES	;bytes before the firmware plays
 ZZ_LEAD			= 12*ZZ_PERIOD	;bytes the producer keeps ahead
 ZZ_CALLMAX		= 3*ZZ_PERIOD		;bytes written per call at most
 ZZ_RINGMIN		= 8*ZZ9K_RING_PERIOD_BYTES
-ZZ_HBDIV		= 25		;server calls per heartbeat
 
 ZZ_CACRF_CLEARD		= $0800
 
@@ -155,13 +152,9 @@ ZST_FIN			= 3		;everything fed, wait until the card played it
 		UBYTE	zv_live			;lease held
 		UBYTE	zv_dead			;lease lost
 		UBYTE	zv_armed		;card interrupt enabled
-		UBYTE	zv_srv			;interrupt server added
-		UBYTE	zv_hbdiv		;counter of the interrupt server
 		UBYTE	zv_diag			;ZZ9000_DIAG: ZZ_DIAG_* switches
-		STRUCT	zv_pad1,2
+		STRUCT	zv_pad1,4
 		STRUCT	zv_mem,(3*3+1)*4	;memory list for WHDLoad
-		STRUCT	zv_int,IS_SIZE		;interrupt server
-		STRUCT	zv_pad2,2
 		LABEL	zv_SIZEOF
 
 	IFLT VARS_SIZEOF-zv_SIZEOF
@@ -181,7 +174,6 @@ ZZ_GETEXEC	MACRO
 	;and ENV:ZZ9K_WA_* files switch parts of the driver off, see README.md
 ZZ_REG_PRINT		= $f0
 ZZ_DIAG_NORESUME	= 0		;waud_resume does not enable the card interrupt
-ZZ_DIAG_NOSRV		= 1		;no interrupt server
 ZZ_DIAG_NOIRQ		= 2		;waud_irq returns at once
 ZZ_DIAG_NOARM		= 3		;the card interrupt is never enabled
 ZZ_DBG		MACRO
@@ -354,7 +346,7 @@ zz9000_init	movem.l	d2-d7/a2-a6,-(a7)
 		move.l	d4,(zf_req+16,a4)	;slot
 		move.l	#ZZ9K_IDENTITY_MEDIA,(zf_req+20,a4)
 		move.l	#128,(zf_req+24,a4)	;gain, 128 = unity
-		move.l	#ZZ9K_ACQ_SOURCE_RATE,(zf_req+28,a4)
+		move.l	#ZZ9K_ACQ_SOURCE_RATE|ZZ9K_ACQ_IDLE_PAUSED,(zf_req+28,a4)
 		move.l	#ZZ_SRCRATE,(zf_req+32,a4)
 		bsr	zzi_call
 		tst.l	d0
@@ -365,7 +357,10 @@ zz9000_init	movem.l	d2-d7/a2-a6,-(a7)
 		bls	.slot
 		move.l	d3,(zf_args,a4)
 		lea	(zz9000_t_busy,pc),a0
-		lea	(zf_args,a4),a1
+		cmp.l	#4,d3			;ZZ9K_STATUS_BAD_REQUEST
+		bne	.busy
+		lea	(zz9000_t_noidle,pc),a0
+.busy		lea	(zf_args,a4),a1
 		bra	.fail_lib
 
 	;check the grant, reply payload at +16:
@@ -448,7 +443,6 @@ zz9000_init	movem.l	d2-d7/a2-a6,-(a7)
 		move.l	#ZZ9K_RING_PAUSED,(zv_pflags,a3)
 		moveq	#1,d0
 		move.l	d0,(zv_hb,a3)
-		move.b	#ZZ_HBDIV,(zv_hbdiv,a3)
 		st	(zv_live,a3)
 
 	;memory for WHDLoad, uncached and serialized: registers, ring, control
@@ -478,26 +472,6 @@ zz9000_init	movem.l	d2-d7/a2-a6,-(a7)
 		move.l	a2,a6
 		bsr	zzi_flush
 
-	;vertical blank server, keeps the heartbeat alive while the operating
-	;system is active
-	IFD ZZ9000_DIAG
-		btst	#ZZ_DIAG_NOSRV,(zv_diag,a3)
-		bne	.nosrv
-	ENDC
-		move.l	a2,a6
-		lea	(zv_int,a3),a1
-		move.b	#NT_INTERRUPT,(LN_TYPE,a1)
-		clr.b	(LN_PRI,a1)
-		lea	(zz9000_name,pc),a0
-		move.l	a0,(LN_NAME,a1)
-		move.l	a3,(IS_DATA,a1)
-		lea	(zz9000_server,pc),a0
-		move.l	a0,(IS_CODE,a1)
-		moveq	#INTB_VERTB,d0
-		jsr	(_LVOAddIntServer,a6)
-		st	(zv_srv,a3)
-		ZZ_DBG	'V'
-.nosrv
 		move.l	(zv_slot,a3),(zf_args,a4)
 		move.l	(zv_gen,a3),(zf_args+4,a4)
 		move.l	(zv_cap,a3),(zf_args+8,a4)
@@ -585,7 +559,7 @@ zzi_flush	move.l	(zv_ctrl,a3),a0
 		rts
 
 ;----------------------------------------
-; stop the interrupt server, release the lease and close the library
+; release the lease and close the library
 ; IN:	-
 ; OUT:	-
 
@@ -596,15 +570,8 @@ zz9000_exit	movem.l	d2-d7/a2-a6,-(a7)
 		ZZ_GETEXEC a2
 		ZZ_DBG	'X'
 		bsr	zzi_disarm
-		sf	(zv_live,a3)		;the server does nothing from now on
-		tst.b	(zv_srv,a3)
-		beq	.nosrv
-		move.l	a2,a6
-		lea	(zv_int,a3),a1
-		moveq	#INTB_VERTB,d0
-		jsr	(_LVORemIntServer,a6)
-		sf	(zv_srv,a3)
-.nosrv		move.l	(zv_zz9k,a3),d0
+		sf	(zv_live,a3)
+		move.l	(zv_zz9k,a3),d0
 		beq	.nolib
 		move.l	d0,a6
 		move.l	(zv_slot,a3),d0
@@ -632,29 +599,6 @@ zz9000_exit	movem.l	d2-d7/a2-a6,-(a7)
 		clr.l	(zv_zz9k,a3)
 .nolib		lea	(zf_SIZEOF,a7),a7
 		movem.l	(a7)+,d2-d7/a2-a6
-		rts
-
-;----------------------------------------
-; interrupt server of the vertical blank, called by exec while the
-; operating system is active
-; IN:	a1 = APTR vars
-;	a6 = APTR exec
-; OUT:	d0 = 0, the chain continues
-
-zz9000_server	tst.b	(zv_live,a1)
-		beq	.rts
-		tst.b	(zv_dead,a1)
-		bne	.rts
-		subq.b	#1,(zv_hbdiv,a1)
-		bne	.rts
-		move.b	#ZZ_HBDIV,(zv_hbdiv,a1)
-		move.l	a3,-(a7)
-		move.l	a1,a3
-		ZZ_DBGL	's'
-		bsr	zzi_publish
-		bsr	zzi_flush
-		move.l	(a7)+,a3
-.rts		moveq	#0,d0
 		rts
 
 ;----------------------------------------
@@ -750,6 +694,7 @@ zz9000_suspend	move.l	a3,-(a7)
 		addq.l	#1,(zv_st_susp,a3)
 		ZZ_DBG	'S'
 		bsr	zzi_disarm
+		bsr	zzi_pause
 		move.l	(a7)+,a3
 		rts
 
@@ -762,9 +707,26 @@ zz9000_resume	move.l	a3,-(a7)
 		bne	.skip
 	ENDC
 		bsr	zzi_arm
-.skip
-		move.l	(a7)+,a3
+.skip		tst.b	(zv_state,a3)
+		beq	.end
+		tst.b	(zv_dead,a3)
+		bne	.end
+		clr.l	(zv_pflags,a3)		;playing: unpaused again
+		bsr	zzi_publish
+.end		move.l	(a7)+,a3
 		rts
+
+;----------------------------------------
+; pause the lease for the time the operating system is active, so that the
+; firmware does not wait for a heartbeat
+; IN:	a3 = APTR vars
+; OUT:	d0/a0 destroyed
+
+zzi_pause	tst.b	(zv_dead,a3)
+		bne	.rts
+		move.l	#ZZ9K_RING_PAUSED,(zv_pflags,a3)
+		bsr	zzi_publish
+.rts		rts
 
 ;----------------------------------------
 ; set volume
@@ -1358,7 +1320,7 @@ zzi_dbghexl	tst.l	(zv_dbgcnt,a3)
 		movem.l	(a7)+,d0-d2
 .e		rts
 
-	;ENV:ZZ9K_WA_NORESUME, _NOSRV, _NOIRQ, _NOARM switch parts off
+	;ENV:ZZ9K_WA_NORESUME, _NOIRQ, _NOARM switch parts off
 zzi_envflags	movem.l	d0-d1/a0-a1,-(a7)
 		move.l	#300,(zv_dbgcnt,a3)
 		lea	(zz9000_e_noresume,pc),a0
@@ -1366,12 +1328,7 @@ zzi_envflags	movem.l	d0-d1/a0-a1,-(a7)
 		tst.l	d0
 		beq	.1
 		bset	#ZZ_DIAG_NORESUME,(zv_diag,a3)
-.1		lea	(zz9000_e_nosrv,pc),a0
-		bsr	zzi_envflag
-		tst.l	d0
-		beq	.2
-		bset	#ZZ_DIAG_NOSRV,(zv_diag,a3)
-.2		lea	(zz9000_e_noirq,pc),a0
+.1		lea	(zz9000_e_noirq,pc),a0
 		bsr	zzi_envflag
 		tst.l	d0
 		beq	.3
@@ -1418,7 +1375,6 @@ zzi_envflag	movem.l	d2-d4/a6,-(a7)
 		rts
 
 zz9000_e_noresume	dc.b	"ENV:ZZ9K_WA_NORESUME",0
-zz9000_e_nosrv		dc.b	"ENV:ZZ9K_WA_NOSRV",0
 zz9000_e_noirq		dc.b	"ENV:ZZ9K_WA_NOIRQ",0
 zz9000_e_noarm		dc.b	"ENV:ZZ9K_WA_NOARM",0
 zz9000_t_diag		dc.b	"audio: ZZ9000AX: diagnostic build, switches %ld",0
@@ -1442,6 +1398,7 @@ zz9000_t_oldlib		dc.b	"audio: ZZ9000AX: zz9k.library 2.%ld is too old, 2.44 is r
 zz9000_t_nofabric	dc.b	"audio: ZZ9000AX: the firmware has no audio fabric",0
 zz9000_t_norate		dc.b	"audio: ZZ9000AX: the audio fabric has no source rate leases",0
 zz9000_t_busy		dc.b	"audio: ZZ9000AX: no free direct ring lease, status %ld",0
+zz9000_t_noidle		dc.b	"audio: ZZ9000AX: the firmware refuses a lease with IDLE_PAUSED (status %ld), update the firmware",0
 zz9000_t_badgrant	dc.b	"audio: ZZ9000AX: unusable lease: slot %ld generation %ld ring $%lx capacity %ld control $%lx",0
 zz9000_t_ok		dc.b	"audio: ZZ9000AX: lease slot %ld generation %ld ring capacity %ld at $%lx, control at $%lx",0
 zz9000_t_stat		dc.b	"audio: ZZ9000AX: tracks %ld, refused %ld, interrupts %ld, suspend %ld, resume %ld, lease %s (firmware status %ld)",0

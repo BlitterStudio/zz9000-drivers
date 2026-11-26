@@ -22,8 +22,11 @@ that allows it.
 - A ZZ9000 on Zorro III. Zorro II is not supported.
 - Firmware that advertises the audio fabric with source-rate leases
   (`SDK_CAP_AUDIO_FABRIC`, `SDK_SERVICE_FLAG_AUDIO_FABRIC` and
-  `SDK_SERVICE_FLAG_AUDIO_FABRIC_RATE`), and `zz9k.library` 2.44 or newer,
-  both from the same release as the drivers.
+  `SDK_SERVICE_FLAG_AUDIO_FABRIC_RATE`) that also accepts the acquire flag
+  `SDK_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED` (bit 2, see `docs/audio-fabric.md`
+  in zz9000-firmware; there is no service flag for it, firmware without it
+  answers `BAD_REQUEST` and the driver reports no hardware), and
+  `zz9k.library` 2.44 or newer, both from the same release as the drivers.
 - INT2 mode of the card: `ENV:ZZ9K_INT2` or `int2 = on` in `ZZ9000.CFG`, as for
   AHI. WHDLoad calls the plugin from the level 2 interrupt only, and the card
   interrupt has to arrive there. In INT6 mode the driver reports no hardware
@@ -133,16 +136,22 @@ converted from unsigned.
 ### Heartbeat
 
 The firmware revokes a lease whose heartbeat token has not changed for 2000 ms.
-The heartbeat is published on every card interrupt, which covers the time WHDLoad
-has the operating system off. While the operating system is active (WHDLoad
-loads a track or a file) `waud_irq` is not called, so `waud_init` adds an
-interrupt server on the vertical blank to exec. It publishes the unchanged
-producer line with a new heartbeat about every 500 ms and flushes the data cache
-for the control line. `waud_suspend` and `waud_exit` disable the card interrupt,
-`waud_resume` and `waud_play` enable it. The server is removed in `waud_exit`.
+`waud_irq` publishes a new heartbeat on every card interrupt. While WHDLoad has
+the operating system active (it loads a track or a file) the plugin is not
+called, and the driver leaves nothing in the operating system that could run
+instead: no interrupt server, no task, no interrupt. (An exec vertical blank
+server that did this made the machine reset on a 68060 with WHDLoad 21.0 beta;
+the reason was not found.) The lease is acquired with `IDLE_PAUSED`, which
+suspends the firmware's timeout while the producer line carries `PAUSED`. The
+line is `PAUSED` from `waud_init` until the first track, after `waud_stop`,
+after a finished track once the card has played it, and from `waud_suspend`
+until `waud_resume`. `waud_resume` clears it only while a track is playing.
+So the timeout runs only while a track plays and the level 2 interrupt is
+served. `waud_suspend` and `waud_exit` disable the card interrupt, `waud_resume`
+and `waud_play` enable it.
 
 When the firmware has revoked the lease anyway (the level 2 interrupt masked for
-2 s or longer, or a fault), the driver sees a generation or status change in
+2 s or longer while a track plays, or a fault), the driver sees a generation or status change in
 the firmware line, ends the track like a finished one and refuses further
 tracks. The plugin cannot take a new lease, because that needs the mailbox and
 the operating system. WHDLoad has to be started again. The trace file says
@@ -157,7 +166,10 @@ the operating system. WHDLoad has to be started again. The trace file says
 - The first sound comes after the preroll of the firmware (23040 bytes) and the
   fill of the ring, which I estimate at 200 ms; it has not been measured.
 - Playing needs the level 2 interrupt and the card interrupt together. A program
-  that masks `INTB_PORTS` for longer than 2 s loses the lease.
+  that masks `INTB_PORTS` for longer than 2 s while a track plays loses the lease.
+  A paused lease (idle, stopped, or while WHDLoad has the operating system
+  active) has no timeout. If WHDLoad stops without `waud_exit` (a crash), a
+  paused lease holds its slot until the next Amiga reset.
 - Mono, 8 bit and a volume below `$7fff` are converted by the CPU, about 130
   cycles per frame. That is around 40% of a 14 MHz 68020 and little on a 68040
   or 68060. 16 bit stereo at full volume is copied.
@@ -221,10 +233,10 @@ Keys of the test Slave, and what to check:
 | `q` | WHDLoad ends and releases the lease. `zz9k-fabriclease` of the firmware SDK is a proof client that takes a slot and plays a tone: while WHDLoad runs it finds slot 1 taken, after `q` it plays. |
 
 Let track 1 play for 10 s or more without keys: the lease must stay (the trace
-file shows `lease intact`), and the sound must not break up. The trace file
-also shows whether WHDLoad calls `waud_resume` before the first track: if
-`resume` is 0 at the end of a run in which the card interrupt worked, the
-heartbeat before the first track depended on the interrupt server only.
+file shows `lease intact`), and the sound must not break up. Idle time
+before the first track is covered by the paused lease, so it does not matter
+whether WHDLoad calls `waud_resume` before it; the `resume` count in the trace
+file tells whether it does.
 
 ## Diagnostic build
 
@@ -234,21 +246,18 @@ driver stops on a card. It behaves like the normal plugin and adds:
 - progress codes: characters written to `REG_ZZ_PRINT_CHR` (`0xF0`), which the
   firmware prints on its UART between its own lines. The register lies in the
   page that `waud_mem` gives to WHDLoad. `C` card found and INT2 mode, `Z`
-  `zz9k.library` open, `L` lease taken, `V` interrupt server added, `O` init
-  done; `R` `waud_resume`, `S` `waud_suspend`, `v` `waud_volume`, `P`
+  `zz9k.library` open, `L` lease taken, `O` init done; `R` `waud_resume`, `S` `waud_suspend`, `v` `waud_volume`, `P`
   `waud_play`, `T` `waud_stop`, `X` `waud_exit`, `+` the card interrupt is about
   to be enabled (written directly after it). In the level 2 routine, for the
   first 300 codes only: `i` entry, the card status word as four hex digits and a
-  blank, `a` acknowledged, `c` reading the credit line, `p` publishing, `e` end,
-  and `s` for the vertical blank server. The last character before a reset is
+  blank, `a` acknowledged, `c` reading the credit line, `p` publishing and `e` end. The last character before a reset is
   the place to look at.
 - files in `ENV:` that switch parts off, checked in `waud_init`: `ZZ9K_WA_NORESUME`
-  (`waud_resume` does not enable the card interrupt), `ZZ9K_WA_NOSRV` (no
-  vertical blank server), `ZZ9K_WA_NOIRQ` (`waud_irq` returns at once; use it
+  (`waud_resume` does not enable the card interrupt), `ZZ9K_WA_NOIRQ` (`waud_irq` returns at once; use it
   with NORESUME, otherwise nothing acknowledges the card), `ZZ9K_WA_NOARM` (the
   card interrupt is never enabled). `echo "" >ENV:ZZ9K_WA_NOARM` creates one;
-  the trace file shows the switches as a number (1 = NORESUME, 2 = NOSRV,
-  4 = NOIRQ, 8 = NOARM).
+  the trace file shows the switches as a number (1 = NORESUME, 4 = NOIRQ,
+  8 = NOARM).
 
 ## Host test
 
@@ -269,8 +278,9 @@ the consumption by the fill-ahead. It checks:
   sequence of tracks, tracks shorter than the preroll and than one period;
 - the WAV parser with valid, odd and damaged files, and the files written by
   `tools/make-test-tracks.py`;
-- heartbeat while the operating system is active with and without the server,
-  loss of the lease by status and by generation, a torn firmware line, a
+- that the driver leaves no interrupt server in exec, a lease that stays paused
+  with no heartbeat for 10 s while the operating system is active or before the
+  first track, loss of the lease by status and by generation, a torn firmware line, a
   stalled consumer, interrupts that are not the card's;
 - that every entry point keeps `d2-d7` and `a2-a6`.
 - that, after init, the driver touches only the pages of the board that it has
