@@ -448,8 +448,20 @@ static void set_lib(u8 *base, int ver, int rev)
     base[ctl[C_LIB_REV] + 1] = rev;
 }
 
+static int os_back;                   /* WHDLoad has given the OS back */
+static int hw_enabled;                /* what the last write to the register said */
+static u16 hw16(void);
+
 static void os_dispatch(u32 id, u32 *regs)
 {
+    /* With the OS back, its PORTS chain does not know the vblank interrupt
+     * of the card; if the card still raises it the machine hangs in the
+     * interrupt. Before the driver does anything that needs the OS, the
+     * card interrupt must be off. */
+    if (os_back && id != ID_TRACE)
+        CHECK(hw16() == 0x80,
+              "OS call %u with the card interrupt enabled (word %04x)", id,
+              hw16());
     switch (id) {
     case ID_TRACE:
         os_trace((const char *)(uintptr_t)regs[2],
@@ -667,11 +679,11 @@ static void world_setup(void)
 
 static int t_ms;
 static int irq_period = 20;           /* 50 Hz, 17 is about 60 Hz */
-static int hw_enabled;                /* what the last write to the register said */
 static int finished_count;
 static int irq_count;
 static int os_active;                 /* operating system active: no irq */
 static int irq_ack_errors;
+
 
 static u16 hw16(void)
 {
@@ -703,8 +715,9 @@ static void tick_ms(void)
         set_hw16(0x0004);
         r = call(C_IRQ, 0, 0, NULL);
         irq_count++;
-        if (hw16() != 0x48)
+        if (hw16() != 0x48 && hw16() != 0x80)   /* 0x80: nothing left, disabled */
             irq_ack_errors++;
+        note_hw();
         if (r & WAUDIRQF_FINISHED)
             finished_count++;
         CHECK((r & ~1u) == 0, "irq result %x", r);
@@ -746,6 +759,7 @@ static int fresh(void)
 {
     config_default();
     t_ms = 0;
+    os_back = 0;
     irq_period = 20;
     hw_enabled = 0;
     finished_count = irq_count = irq_ack_errors = 0;
@@ -788,8 +802,10 @@ static void drv_volume(u32 v)
 
 static void drv_exit(void)
 {
+    os_back = 1;
     call(C_EXIT, 0, 0, NULL);
     note_hw();
+    os_back = 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1047,6 +1063,8 @@ static void play_and_check(const char *what, const struct wav *w, u32 vol,
     CHECK(V8(V_STATE) == ST_IDLE && be32(L->ctrl + 20) == 1,
           "%s: not paused after the card played everything (state %u)", what,
           V8(V_STATE));
+    CHECK(!hw_enabled && hw16() == 0x80 && V8(V_ARMED) == 0,
+          "%s: the card interrupt is still enabled when nothing is left", what);
     free(exp);
 }
 
@@ -1318,7 +1336,7 @@ static void test_loop_stop(void)
     flags_line = be32(L->ctrl + 20);
     CHECK(flags_line == 1, "paused after stop, flags %u", flags_line);
     CHECK(V8(V_STATE) == ST_IDLE && V8(V_FINPEND) == 0, "stop state");
-    CHECK(hw_enabled, "the card interrupt keeps running after stop");
+    CHECK(!hw_enabled && hw16() == 0x80, "stop disables the card interrupt");
     run_ms(2000);
     CHECK(V32(V_WRLO) == w_stop, "written after stop");
     CHECK(finished_count == 0, "stop must not report the end");
@@ -1553,6 +1571,7 @@ static void test_os_active(void)
     drv_resume();
     CHECK(hw_enabled && hw16() == 0x82, "resume enables the card interrupt");
     CHECK(be32(L->ctrl + 20) == 0, "resume unpauses a playing lease");
+    CHECK(V8(V_ARMED) != 0, "armed while playing");
     run_until_finished(MAXTIME);
     run_ms(1500);
     CHECK(L->revoked == 0 && V8(V_DEAD) == 0, "lease intact");
@@ -1571,6 +1590,7 @@ static void test_os_active(void)
     CHECK(L->revoked == 0, "idle lease revoked in %d", L->revoked);
     drv_resume();
     CHECK(be32(L->ctrl + 20) == 1, "resume while idle stays paused");
+    CHECK(!hw_enabled && hw16() == 0, "resume while idle leaves the card interrupt alone");
     run_ms(5000);
     CHECK(L->revoked == 0, "idle lease after resume revoked in %d", L->revoked);
     drv_play(w.data, w.len, 0);
@@ -1716,6 +1736,51 @@ static void test_irq_filter(void)
     free(w.data);
 }
 
+/* WHDLoad quits: the orders in which it may call the plugin. The card
+ * interrupt must be off before the operating system is back. */
+static void test_quit_order(void)
+{
+    struct wav w = simple_wav(2, 16, 44100 * 4);
+    struct wav s = simple_wav(2, 16, 500);
+    int v;
+
+    for (v = 0; v < 8; v++) {
+        if (!fresh())
+            return;
+        if (v != 0)
+            drv_play(v == 7 ? s.data : w.data, v == 7 ? s.len : w.len, v == 4);
+        run_ms(v == 7 ? 600 : 700);
+        if (v == 1 || v == 3 || v == 4) {
+            drv_stop();
+            CHECK(!hw_enabled && hw16() == 0x80, "variant %d: stop", v);
+        }
+        if (v == 2 || v == 3) {
+            drv_suspend();
+            CHECK(!hw_enabled && hw16() == 0x80, "variant %d: suspend", v);
+        }
+        if (v == 5) {
+            drv_suspend();
+            drv_resume();       /* resumed and quit while playing */
+            CHECK(hw_enabled, "variant %d: resumed", v);
+        }
+        if (v == 6) {
+            drv_stop();
+            drv_suspend();
+            drv_resume();
+            CHECK(!hw_enabled, "variant %d: resume of a stopped lease", v);
+        }
+        /* v 0: idle; 2, 5: playing at quit, exit alone has to cope; 7: a
+         * short track that has finished and drained */
+        drv_exit();
+        CHECK(hw16() == 0x80 && !hw_enabled && V8(V_ARMED) == 0,
+              "variant %d: card interrupt after exit", v);
+        CHECK(released[1] == 1 && closes[2] == 1 && traced("lease"),
+              "variant %d: exit did not finish", v);
+    }
+    free(w.data);
+    free(s.data);
+}
+
 static void test_exit_midtrack(void)
 {
     struct wav w = simple_wav(2, 16, 44100 * 3);
@@ -1829,6 +1894,7 @@ int main(int argc, char **argv)
     test_torn_and_stall();
     test_irq_filter();
     test_exit_midtrack();
+    test_quit_order();
     for (i = 2; i < argc; i++)
         test_file(argv[i]);
 

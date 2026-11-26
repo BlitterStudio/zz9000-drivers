@@ -147,8 +147,15 @@ line is `PAUSED` from `waud_init` until the first track, after `waud_stop`,
 after a finished track once the card has played it, and from `waud_suspend`
 until `waud_resume`. `waud_resume` clears it only while a track is playing.
 So the timeout runs only while a track plays and the level 2 interrupt is
-served. `waud_suspend` and `waud_exit` disable the card interrupt, `waud_resume`
-and `waud_play` enable it.
+served. The card interrupt is enabled only while a track is
+playing: `waud_play` enables it, `waud_resume` enables it only if a track is
+playing, and `waud_stop`, `waud_suspend`, the end of a track once the card has
+played it, and `waud_exit` (before anything else) disable it. WHDLoad gives the
+operating system back after `waud_stop`, and the PORTS chain of the operating
+system does not know the vblank interrupt of the card: left enabled it would
+raise level 2 interrupts that nothing acknowledges. With 21.0 beta build 7269
+the first version of this driver left it enabled after a stop, and quitting
+ended on a black screen.
 
 When the firmware has revoked the lease anyway (the level 2 interrupt masked for
 2 s or longer while a track plays, or a fault), the driver sees a generation or status change in
@@ -248,7 +255,8 @@ driver stops on a card. It behaves like the normal plugin and adds:
   page that `waud_mem` gives to WHDLoad. `C` card found and INT2 mode, `Z`
   `zz9k.library` open, `L` lease taken, `O` init done; `R` `waud_resume`, `S` `waud_suspend`, `v` `waud_volume`, `P`
   `waud_play`, `T` `waud_stop`, `X` `waud_exit`, `+` the card interrupt is about
-  to be enabled (written directly after it). In the level 2 routine, for the
+  to be enabled (written directly after it); in `waud_exit`, `D` card interrupt
+  disabled, `E` lease released, `F` library closed. In the level 2 routine, for the
   first 300 codes only: `i` entry, the card status word as four hex digits and a
   blank, `a` acknowledged, `c` reading the credit line, `p` publishing and `e` end. The last character before a reset is
   the place to look at.
@@ -278,6 +286,9 @@ the consumption by the fill-ahead. It checks:
   sequence of tracks, tracks shorter than the preroll and than one period;
 - the WAV parser with valid, odd and damaged files, and the files written by
   `tools/make-test-tracks.py`;
+- the order of calls when WHDLoad quits (a track playing, stopped, suspended,
+  resumed, finished): the card interrupt is disabled before the driver does
+  anything that needs the operating system;
 - that the driver leaves no interrupt server in exec, a lease that stays paused
   with no heartbeat for 10 s while the operating system is active or before the
   first track, loss of the lease by status and by generation, a torn firmware line, a

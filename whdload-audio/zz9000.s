@@ -24,6 +24,12 @@
 ; reported to WHDLoad as non cachable serialized memory, so the driver does
 ; not need any cache operation while the operating system is off.
 ;
+; The card interrupt is enabled only while a track is playing (waud_play,
+; waud_resume of a playing track) and disabled by waud_stop, waud_suspend,
+; at the end of a track once the card has played it, and by waud_exit before
+; anything else. WHDLoad gives the operating system back after waud_stop, and
+; its PORTS chain does not know the vblank interrupt of the card.
+;
 ; The driver leaves nothing in the operating system behind waud_init: no
 ; interrupt server, no task, no interrupt. While WHDLoad has the operating
 ; system active (loading files) waud_irq is not called, so nothing publishes
@@ -570,6 +576,7 @@ zz9000_exit	movem.l	d2-d7/a2-a6,-(a7)
 		ZZ_GETEXEC a2
 		ZZ_DBG	'X'
 		bsr	zzi_disarm
+		ZZ_DBG	'D'
 		sf	(zv_live,a3)
 		move.l	(zv_zz9k,a3),d0
 		beq	.nolib
@@ -577,6 +584,7 @@ zz9000_exit	movem.l	d2-d7/a2-a6,-(a7)
 		move.l	(zv_slot,a3),d0
 		move.l	(zv_gen,a3),d1
 		bsr	zzi_release
+		ZZ_DBG	'E'
 		moveq	#0,d0
 		move.b	(zv_dead,a3),d0
 		move.l	(zv_st_tracks,a3),(zf_args,a4)
@@ -597,6 +605,7 @@ zz9000_exit	movem.l	d2-d7/a2-a6,-(a7)
 		move.l	a2,a6
 		jsr	(_LVOCloseLibrary,a6)
 		clr.l	(zv_zz9k,a3)
+		ZZ_DBG	'F'
 .nolib		lea	(zf_SIZEOF,a7),a7
 		movem.l	(a7)+,d2-d7/a2-a6
 		rts
@@ -706,6 +715,8 @@ zz9000_resume	move.l	a3,-(a7)
 		btst	#ZZ_DIAG_NORESUME,(zv_diag,a3)
 		bne	.skip
 	ENDC
+		tst.b	(zv_state,a3)
+		beq	.skip			;idle: no card interrupt
 		bsr	zzi_arm
 .skip		tst.b	(zv_state,a3)
 		beq	.end
@@ -758,6 +769,7 @@ zz9000_stop	movem.l	d0/a0/a3,-(a7)
 		clr.b	(zv_state,a3)
 		clr.b	(zv_finpend,a3)
 		clr.l	(zv_pad,a3)
+		bsr	zzi_disarm		;nothing to feed: no card interrupt
 		tst.b	(zv_dead,a3)
 		bne	.end
 		move.l	#ZZ9K_RING_PAUSED,(zv_pflags,a3)
@@ -826,9 +838,14 @@ zz9000_irq	movem.l	d2-d7/a2-a3,-(a7)
 		bsr	zzi_service
 		ZZ_DBGL	'e'
 .fin		tst.b	(zv_finpend,a3)
-		beq	.end
+		beq	.idle
 		clr.b	(zv_finpend,a3)
 		moveq	#WAUDIRQF_FINISHED,d7
+.idle		tst.b	(zv_state,a3)		;nothing left to feed: the card
+		bne	.end			;interrupt is not needed
+		tst.b	(zv_armed,a3)
+		beq	.end
+		bsr	zzi_disarm
 .end		move.l	d7,d0
 		movem.l	(a7)+,d2-d7/a2-a3
 		rts
