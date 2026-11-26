@@ -24,6 +24,12 @@
 ; reported to WHDLoad as non cachable serialized memory, so the driver does
 ; not need any cache operation while the operating system is off.
 ;
+; Whenever the driver stops feeding (state idle) and gives up the card
+; interrupt, the producer line says PAUSED first: after waud_stop, a refused
+; track (also one that replaces a playing track), waud_suspend, and at the
+; end of a track once the card has played it. Only a paused lease has no
+; heartbeat timeout.
+;
 ; The card interrupt is enabled only while a track is playing (waud_play,
 ; waud_resume of a playing track) and disabled by waud_stop, waud_suspend,
 ; at the end of a track once the card has played it, and by waud_exit before
@@ -806,6 +812,7 @@ zz9000_play	movem.l	d2-d7/a2-a3,-(a7)
 	;not playable, the next interrupt reports the end
 .refuse		addq.l	#1,(zv_st_refused,a3)
 		st	(zv_finpend,a3)
+		bsr	zzi_pause		;a playing track is replaced: paused
 		bsr	zzi_arm
 .end		movem.l	(a7)+,d2-d7/a2-a3
 		rts

@@ -1444,6 +1444,66 @@ static void expect_refused(const char *what, const struct wav *w, u32 len)
     CHECK(lease[1].outlen == 0, "%s: audio played", what);
 }
 
+/* A refused track leaves the lease paused: with the card interrupt off
+ * nothing publishes a heartbeat, and only a paused lease has no timeout. */
+static void test_refusal_pauses(void)
+{
+    struct wavopt o;
+    struct wav good = simple_wav(2, 16, 44100 * 3);
+    struct wav shortw = simple_wav(2, 16, 4410);
+    struct wav bad;
+    struct lease *L;
+    size_t before;
+
+    wavopt_default(&o, 2, 16, 1000);
+    o.rate = 48000;
+    bad = make_wav(&o);
+
+    /* an unsupported track replaces a playing one */
+    if (!fresh())
+        return;
+    drv_play(good.data, good.len, 0);
+    L = L1();
+    run_ms(700);
+    CHECK(be32(L->ctrl + 20) == 0, "playing is unpaused");
+    drv_play(bad.data, bad.len, 0);
+    CHECK(be32(L->ctrl + 20) == 1, "a refused track pauses the lease");
+    run_ms(200);
+    CHECK(finished_count == 1 && !hw_enabled, "refusal reported, interrupt off");
+    run_ms(10000);
+    CHECK(L->revoked == 0 && V8(V_DEAD) == 0, "lease revoked after a refusal: %d",
+          L->revoked);
+    before = L->outlen;
+    drv_play(shortw.data, shortw.len, 0);
+    run_until_finished(MAXTIME);
+    run_ms(1500);
+    CHECK(L->revoked == 0 && L->outlen > before, "a valid track plays after the refusal");
+    drv_exit();
+
+    /* an unsupported track straight after a finished one (the callback of
+     * the sequence), then 10 s idle and a valid track */
+    if (!fresh())
+        return;
+    drv_play(shortw.data, shortw.len, 0);
+    L = L1();
+    run_until_finished(MAXTIME);
+    drv_play(bad.data, bad.len, 0);
+    CHECK(be32(L->ctrl + 20) == 1, "refused after a finished track: paused");
+    run_ms(10000);
+    CHECK(finished_count == 2, "refusal reported (%d)", finished_count);
+    CHECK(L->revoked == 0 && V8(V_DEAD) == 0, "lease revoked after 10 s idle: %d",
+          L->revoked);
+    before = L->outlen;
+    drv_play(shortw.data, shortw.len, 0);
+    run_until_finished(MAXTIME);
+    run_ms(1500);
+    CHECK(L->revoked == 0 && L->outlen > before, "a valid track plays after 10 s idle");
+    drv_exit();
+    free(good.data);
+    free(shortw.data);
+    free(bad.data);
+}
+
 static void test_parser(void)
 {
     struct wavopt o;
@@ -1888,6 +1948,7 @@ int main(int argc, char **argv)
     test_sequence_and_replace();
     test_short();
     test_parser();
+    test_refusal_pauses();
     test_os_active();
     test_dead_midtrack();
     test_generation();
