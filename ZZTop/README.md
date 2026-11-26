@@ -174,13 +174,14 @@ Scenes is an advanced child page under Audio. It edits the active scene.
 |---|---|
 | Scene | **Scene** selector and **Name**, up to 16 characters |
 | Master | **Output lowpass** (`1..23900` Hz), **Volume**, **Pre-gain**, and **Pan** (`0..100`, where `50` is centre) |
-| Separation | **Separation** (`0..100` percent) for the whole card output, Paula and AX alike: `100` is full stereo, `0` is mono, and about `70` suits headphones. It is not part of a scene, it needs firmware with stereo separation, and Save keeps it as `audio_separation` |
+| Separation | **Separation** (`0..100` percent) for all card output, Paula and AX alike: `100` is full stereo, `0` is mono, and about `70` suits headphones. It is not part of a scene and Save keeps it as `audio_separation`. The slider is disabled when the firmware does not report stereo separation in its audio control state |
 | Equaliser (Hz) | Ten bands: `31`, `63`, `125`, `250`, `500`, `1k`, `2k`, `4k`, `8k`, and `16k`; the middle position is flat |
 | Card calibration | **Paula clean ceiling** and **AX clean ceiling**, each `1..4095` |
 
-Volume, pre-gain, pan, and equaliser controls update while being dragged.
-Output lowpass is applied after release. Changing either calibration value
-blocks other audio edits until the card acknowledges the paired calibration.
+Volume, pre-gain, pan, separation, and equaliser controls update while being
+dragged. Output lowpass is applied after release. Changing either calibration
+value blocks other audio edits until the card acknowledges the paired
+calibration.
 
 ## System
 
