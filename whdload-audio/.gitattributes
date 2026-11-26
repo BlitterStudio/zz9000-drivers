@@ -1,0 +1,4 @@
+# Sources and scripts are LF in the working copy too (assembled on Linux).
+*.s text eol=lf
+WINSTALLS_REF text eol=lf
+.gitignore text eol=lf

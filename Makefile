@@ -5,7 +5,7 @@ AMIGA_DOCKER = ./tools/amiga-docker.sh
 .PHONY: all build-all package-local check-release quality rtg-tests mhi-tests \
 	net-tests ahi-voice-tests ahi-lifecycle-test rtg zztop zzscanlines zzgamma zzdebugout zzfwupdate \
 	usb-poseidon sd-boot net ZZNetStats mhi ahi ahi-duplextest ahi-voicetest ZZDiag ZZCapture sdk \
-	amissl
+	amissl whdload-audio whdload-audio-tests
 
 all: build-all
 
@@ -40,6 +40,14 @@ ahi-voice-tests:
 # The driver's library vectors, init() and AllocAudio under vamos, no card.
 ahi-lifecycle-test:
 	./tools/ahi-lifecycle-test.sh
+
+# WHDLoad.Audio with the ZZ9000AX driver; fetches the winstalls plugin source.
+whdload-audio:
+	AMIGA_IMAGE="$(AMIGA_IMAGE)" ./whdload-audio/build.sh
+
+# Host test of that driver under qemu-m68k.
+whdload-audio-tests:
+	AMIGA_IMAGE="$(AMIGA_IMAGE)" ./whdload-audio/tests/run-tests.sh
 
 rtg:
 	AMIGA_IMAGE="$(AMIGA_IMAGE)" $(AMIGA_DOCKER) rtg ./build.sh
