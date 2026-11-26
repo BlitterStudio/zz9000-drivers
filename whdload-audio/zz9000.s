@@ -9,11 +9,11 @@
 ; included by WHDLoad.Audio.asm (see build.sh), the variables are located at
 ; _vars which has a size of VARS_SIZEOF
 ;
-; The driver plays WAV files (PCM, 8 or 16 bit, mono or stereo, 44100 Hz)
-; through the audio fabric of the ZZ9000 firmware. It holds a direct-ring
-; lease while WHDLoad runs: waud_init acquires a 44100 Hz stereo
-; S16LE lease, waud_exit releases it. The firmware converts the lease to its
-; 48 kHz output. The card is told to raise its vblank interrupt, which
+; The driver takes one direct-ring lease while WHDLoad runs. Firmware with
+; codec rings decodes MP3, FLAC and Ogg Vorbis; WAV is converted here to
+; 44100 Hz stereo S16LE. Older firmware gets the same PCM over a source-rate
+; lease. Firmware converts the source to its 48 kHz output. The card is told
+; to raise its vblank interrupt, which
 ; reaches the level 2 interrupt (INT2 mode of the card, ENV:ZZ9K_INT2 or
 ; int2 = on in ZZ9000.CFG), and waud_irq then
 ;   - acknowledges the card interrupt,
@@ -30,10 +30,9 @@
 ; end of a track once the card has played it. Only a paused lease has no
 ; heartbeat timeout.
 ;
-; The card interrupt is enabled only while a track is playing (waud_play,
-; waud_resume of a playing track) and disabled by waud_stop, waud_suspend,
-; at the end of a track once the card has played it, and by waud_exit before
-; anything else. WHDLoad gives the operating system back after waud_stop, and
+; The card interrupt is enabled while a track is active, or for one interrupt
+; to report a refusal. waud_stop, waud_suspend, IRQ completion and waud_exit
+; disable it. WHDLoad gives the operating system back after waud_stop, and
 ; its PORTS chain does not know the vblank interrupt of the card.
 ;
 ; The driver leaves nothing in the operating system behind waud_init: no
@@ -98,10 +97,44 @@ ZZ9K_IDENTITY_MEDIA	= 2
 ZZ9K_ACQ_SOURCE_RATE	= 1
 ZZ9K_ACQ_IDLE_PAUSED	= 4		;no heartbeat timeout while PAUSED
 ZZ9K_CONTRACT_SOURCE_RATE = 2		;stereo S16LE at the source rate
+ZZ9K_ACQ_CODEC		= 8
+ZZ9K_CONTRACT_CODEC	= 8
 ZZ9K_RING_PERIOD_BYTES	= 3840
 ZZ9K_RING_PERIOD_US	= 20000
 ZZ9K_RING_CONTROL_SIZE	= 128
 ZZ9K_RING_PAUSED	= 1		;producer line flag
+
+	;codec ring extension of the producer and firmware lines (BE32)
+ZZ_P_STREAM		= 24		;marker serial, 0 until first marker
+ZZ_P_CODEC		= 28
+ZZ_P_STARTHI		= 32
+ZZ_P_STARTLO		= 36
+ZZ_P_STREAMFLAGS	= 40
+ZZ_P_GAIN		= 48		;offset 44 (PCM rate) stays zero: 44100
+ZZ_F_STREAM		= 20
+ZZ_F_DECODE		= 24
+ZZ_F_ERROR		= 28
+ZZ_STREAM_APPEND	= 1
+ZZ_STREAM_END		= 2
+ZZ_DECODE_DRAINED	= 2
+ZZ_DECODE_ERROR		= 3
+ZCODEC_NONE		= -1
+ZCODEC_WAV		= 0		;raw stereo S16LE in the ring
+ZCODEC_MP3		= 1
+ZCODEC_FLAC		= 2
+ZCODEC_VORBIS		= 3
+
+	;last refusal, kept until the OS can write a trace
+ZRS_UNKNOWN		= 1
+ZRS_OPUS		= 2
+ZRS_OGG			= 3
+ZRS_ASF			= 4
+ZRS_MP4			= 5
+ZRS_AAC			= 6
+ZRS_WAV			= 7
+ZRS_NO_CODEC		= 8
+ZRS_LEASE		= 9
+ZZ_MPEGSCAN		= 4096		;look past padding after an ID3v2 tag only
 
 ZZ_SRCRATE		= 44100		;rate of the lease and of the tracks
 ZZ_PERIOD		= ZZ_SRCRATE/50*4	;bytes of one 20 ms source period
@@ -145,10 +178,10 @@ ZST_FIN			= 3		;everything fed, wait until the card played it
 		ULONG	zv_phase		;write cursor mod ZZ_PERIOD
 		ULONG	zv_vol			;volume 0..$7fff
 		ULONG	zv_pflg			;WHDLAUDF_* of the track
-		APTR	zv_start		;first sample of the track
-		APTR	zv_ptr			;next sample to feed
-		ULONG	zv_left			;frames left in the track
-		ULONG	zv_total		;frames of the track
+		APTR	zv_start		;first sample (WAV) or byte (compressed)
+		APTR	zv_ptr			;next sample or byte to feed
+		ULONG	zv_left			;frames (WAV) or bytes (compressed) left
+		ULONG	zv_total		;frames or bytes in the track
 		ULONG	zv_pad			;bytes of silence left
 		ULONG	zv_deadstat		;firmware status of the lost lease
 		ULONG	zv_st_tracks		;statistics, traced on exit
@@ -157,6 +190,16 @@ ZST_FIN			= 3		;everything fed, wait until the card played it
 		ULONG	zv_st_susp
 		ULONG	zv_st_resume
 		ULONG	zv_dbgcnt		;ZZ9000_DIAG: progress codes left
+		ULONG	zv_stream		;current marker serial
+		ULONG	zv_codec		;current marker codec
+		ULONG	zv_starthi		;cursor at the marker boundary
+		ULONG	zv_startlo
+		ULONG	zv_streamflags		;APPEND, END
+		ULONG	zv_seen			;last firmware stream serial read
+		ULONG	zv_decode		;last decode state read
+		ULONG	zv_error		;decode error read with the state
+		ULONG	zv_last_error		;last track decoder error, for exit trace
+		ULONG	zv_refusal		;ZRS_*, for exit trace
 		UBYTE	zv_fmt			;0 s16 stereo, 1 s16 mono, 2 u8 stereo, 3 u8 mono
 		UBYTE	zv_shift		;log2 of the bytes of a frame
 		UBYTE	zv_state		;ZST_*
@@ -165,7 +208,8 @@ ZST_FIN			= 3		;everything fed, wait until the card played it
 		UBYTE	zv_dead			;lease lost
 		UBYTE	zv_armed		;card interrupt enabled
 		UBYTE	zv_diag			;ZZ9000_DIAG: ZZ_DIAG_* switches
-		STRUCT	zv_pad1,4
+		UBYTE	zv_codecmode		;codec lease rather than legacy PCM lease
+		STRUCT	zv_pad1,3
 		STRUCT	zv_mem,(3*3+1)*4	;memory list for WHDLoad
 		LABEL	zv_SIZEOF
 
@@ -208,7 +252,7 @@ ZZ_DBGL		MACRO
 	CNOP 0,4
 zz9000_driver	dc.l	zz9000_name
 		dc.l	zz9000_init
-		dc.l	zz9000_exts
+zz9000_driver_exts dc.l	zz9000_exts
 		dc.l	_vars+zv_mem
 		dc.l	zz9000_exit
 		dc.l	zz9000_play
@@ -351,18 +395,29 @@ zz9000_init	movem.l	d2-d7/a2-a6,-(a7)
 		btst	#ZZ9K_SFB_FABRIC_RATE,d0
 		beq	.fail_lib
 
-	;acquire the lease, slot 1 and then slot 2
+	;try a codec lease first; BAD_REQUEST means try a PCM lease in that slot
+		moveq	#ZZ9K_ACQ_CODEC|ZZ9K_ACQ_IDLE_PAUSED,d5
 		moveq	#1,d4			;D4 = slot
 .slot		move	#ZZ9K_OP_RING_ACQUIRE,d0
 		bsr	zzi_req
 		move.l	d4,(zf_req+16,a4)	;slot
 		move.l	#ZZ9K_IDENTITY_MEDIA,(zf_req+20,a4)
 		move.l	#128,(zf_req+24,a4)	;gain, 128 = unity
-		move.l	#ZZ9K_ACQ_SOURCE_RATE|ZZ9K_ACQ_IDLE_PAUSED,(zf_req+28,a4)
+		move.l	d5,(zf_req+28,a4)
+		btst	#0,d5			;SOURCE_RATE
+		beq	.call
 		move.l	#ZZ_SRCRATE,(zf_req+32,a4)
+.call
 		bsr	zzi_call
 		tst.l	d0
 		beq	.acquired
+		cmp.l	#4,d0			;ZZ9K_STATUS_BAD_REQUEST
+		bne	.nextslot
+		btst	#3,d5			;CODEC
+		beq	.nextslot
+		moveq	#ZZ9K_ACQ_SOURCE_RATE|ZZ9K_ACQ_IDLE_PAUSED,d5
+		bra	.slot
+.nextslot
 		move.l	d0,d3			;D3 = last status
 		addq	#1,d4
 		cmp	#2,d4
@@ -379,7 +434,9 @@ zz9000_init	movem.l	d2-d7/a2-a6,-(a7)
 	;slot 0, generation 4, ring_offset 8, ring_capacity 12, control_offset 16,
 	;period_bytes 20, period_us 24, sample_contract 28, gain 32, slot_count 36,
 	;flags 40, source_rate 44
-.acquired	move.l	(zf_rep+16+4,a4),d3	;D3 = generation
+.acquired	btst	#3,d5			;CODEC
+		sne	(zv_codecmode,a3)
+		move.l	(zf_rep+16+4,a4),d3	;D3 = generation
 		move.l	(zf_rep+16,a4),d4	;D4 = slot
 		move.l	(zf_rep+16+8,a4),d5	;D5 = ring offset
 		move.l	(zf_rep+16+12,a4),d6	;D6 = capacity
@@ -395,10 +452,19 @@ zz9000_init	movem.l	d2-d7/a2-a6,-(a7)
 		bne	.badgrant
 		cmp.l	#ZZ9K_RING_PERIOD_US,(zf_rep+16+24,a4)
 		bne	.badgrant
+		tst.b	(zv_codecmode,a3)
+		beq	.pcmgrant
+		cmp.l	#ZZ9K_CONTRACT_CODEC,(zf_rep+16+28,a4)
+		bne	.badgrant
+		tst.l	(zf_rep+16+44,a4)
+		bne	.badgrant
+		bra	.capacity
+.pcmgrant
 		cmp.l	#ZZ9K_CONTRACT_SOURCE_RATE,(zf_rep+16+28,a4)
 		bne	.badgrant
 		cmp.l	#ZZ_SRCRATE,(zf_rep+16+44,a4)
 		bne	.badgrant
+.capacity
 		cmp.l	#ZZ_RINGMIN,d6
 		blo	.badgrant
 		cmp.l	#$100000,d6
@@ -456,6 +522,12 @@ zz9000_init	movem.l	d2-d7/a2-a6,-(a7)
 		moveq	#1,d0
 		move.l	d0,(zv_hb,a3)
 		st	(zv_live,a3)
+		lea	(zz9000_exts,pc),a0
+		tst.b	(zv_codecmode,a3)
+		beq	.setexts
+		lea	(zz9000_codecexts,pc),a0
+.setexts	lea	(zz9000_driver_exts,pc),a1
+		move.l	a0,(a1)			;plugin copies this pointer after init
 
 	;memory for WHDLoad, uncached and serialized: registers, ring, control
 		lea	(zv_mem,a3),a0
@@ -607,6 +679,23 @@ zz9000_exit	movem.l	d2-d7/a2-a6,-(a7)
 		lea	(zz9000_t_stat,pc),a0
 		lea	(zf_args,a4),a1
 		bsr	_trace
+		move.l	(zv_refusal,a3),d0
+		beq	.decode
+		add.w	d0,d0
+		lea	(zz9000_refusals,pc),a0
+		move.w	(-2,a0,d0.w),d0
+		lea	(a0,d0.w),a0
+		move.l	a0,(zf_args,a4)
+		lea	(zz9000_t_refused,pc),a0
+		lea	(zf_args,a4),a1
+		bsr	_trace
+.decode		move.l	(zv_last_error,a3),d0
+		beq	.close
+		move.l	d0,(zf_args,a4)
+		lea	(zz9000_t_decode,pc),a0
+		lea	(zf_args,a4),a1
+		bsr	_trace
+.close
 		move.l	(zv_zz9k,a3),a1
 		move.l	a2,a6
 		jsr	(_LVOCloseLibrary,a6)
@@ -618,7 +707,7 @@ zz9000_exit	movem.l	d2-d7/a2-a6,-(a7)
 
 ;----------------------------------------
 ; publish the producer line: sequence odd, generation, write cursor,
-; heartbeat, flags, sequence even
+; heartbeat, flags, stream marker, sequence even
 ; IN:	a3 = APTR vars
 ; OUT:	d0/a0 destroyed
 
@@ -634,6 +723,13 @@ zzi_publish	move.l	(zv_ctrl,a3),a0
 		addq.l	#1,(zv_hb,a3)
 		move.l	(zv_hb,a3),(16,a0)
 		move.l	(zv_pflags,a3),(20,a0)
+		move.l	(zv_stream,a3),(ZZ_P_STREAM,a0)
+		move.l	(zv_codec,a3),(ZZ_P_CODEC,a0)
+		move.l	(zv_starthi,a3),(ZZ_P_STARTHI,a0)
+		move.l	(zv_startlo,a3),(ZZ_P_STARTLO,a0)
+		move.l	(zv_streamflags,a3),(ZZ_P_STREAMFLAGS,a0)
+		; Stream gain is for compressed periods only. WAV was scaled by zzi_write.
+		move.l	(zv_vol,a3),(ZZ_P_GAIN,a0)
 		move.l	(zv_seq,a3),(a0)	;sequence even, stable
 		rts
 
@@ -646,7 +742,7 @@ zzi_publish	move.l	(zv_ctrl,a3),a0
 ;	zv_dead is set if the lease is lost
 ;	a0 destroyed
 
-zzi_credit	movem.l	d2-d4,-(a7)
+zzi_credit	movem.l	d2-d7,-(a7)
 		move.l	(zv_ctrl,a3),a0
 		lea	(64,a0),a0
 		moveq	#3,d4			;attempts
@@ -656,6 +752,9 @@ zzi_credit	movem.l	d2-d4,-(a7)
 		move.l	(4,a0),d3		;generation
 		move.l	(12,a0),d0		;consumed cursor, low word
 		move.l	(16,a0),d1		;status
+		move.l	(ZZ_F_STREAM,a0),d5
+		move.l	(ZZ_F_DECODE,a0),d6
+		move.l	(ZZ_F_ERROR,a0),d7
 		cmp.l	(a0),d2
 		beq	.stable
 .again		dbf	d4,.try
@@ -665,6 +764,9 @@ zzi_credit	movem.l	d2-d4,-(a7)
 		bne	.lost
 		tst.l	d1
 		bne	.lost
+		move.l	d5,(zv_seen,a3)
+		move.l	d6,(zv_decode,a3)
+		move.l	d7,(zv_error,a3)
 		bra	.end			;d1 = 0
 .lost		st	(zv_dead,a3)
 		move.l	d1,(zv_deadstat,a3)
@@ -673,7 +775,7 @@ zzi_credit	movem.l	d2-d4,-(a7)
 		st	(zv_finpend,a3)		;tell WHDLoad that the track ended
 .lost2		clr.b	(zv_state,a3)
 		moveq	#-1,d1
-.end		movem.l	(a7)+,d2-d4
+.end		movem.l	(a7)+,d2-d7
 		rts
 
 ;----------------------------------------
@@ -722,8 +824,10 @@ zz9000_resume	move.l	a3,-(a7)
 		bne	.skip
 	ENDC
 		tst.b	(zv_state,a3)
+		bne	.arm
+		tst.b	(zv_finpend,a3)
 		beq	.skip			;idle: no card interrupt
-		bsr	zzi_arm
+.arm		bsr	zzi_arm
 .skip		tst.b	(zv_state,a3)
 		beq	.end
 		tst.b	(zv_dead,a3)
@@ -774,14 +878,31 @@ zz9000_stop	movem.l	d0/a0/a3,-(a7)
 		ZZ_DBG	'T'
 		clr.b	(zv_state,a3)
 		clr.b	(zv_finpend,a3)
-		clr.l	(zv_pad,a3)
 		bsr	zzi_disarm		;nothing to feed: no card interrupt
-		tst.b	(zv_dead,a3)
-		bne	.end
-		move.l	#ZZ9K_RING_PAUSED,(zv_pflags,a3)
-		bsr	zzi_publish
+		bsr	zzi_flushtrack
 .end		movem.l	(a7)+,d0/a0/a3
 		rts
+
+; Set a marker at the current write cursor. The caller publishes it along
+; with the cursor on the producer line. Skip serial zero on wrap.
+; IN: d0 = codec, d1 = stream flags, a3 = vars
+
+zzi_marker	addq.l	#1,(zv_stream,a3)
+		bne	.serial
+		addq.l	#1,(zv_stream,a3)
+.serial		move.l	d0,(zv_codec,a3)
+		move.l	d1,(zv_streamflags,a3)
+		move.l	(zv_wrhi,a3),(zv_starthi,a3)
+		move.l	(zv_wrlo,a3),(zv_startlo,a3)
+		rts
+
+zzi_flushtrack	tst.b	(zv_dead,a3)
+		bne	.rts
+		moveq	#ZCODEC_NONE,d0
+		moveq	#0,d1
+		bsr	zzi_marker
+		bra	zzi_pause
+.rts		rts
 
 ;----------------------------------------
 ; start playing a track
@@ -798,21 +919,58 @@ zz9000_play	movem.l	d2-d7/a2-a3,-(a7)
 		clr.l	(zv_pad,a3)
 		move.l	d1,(zv_pflg,a3)
 		tst.b	(zv_dead,a3)
-		bne	.refuse
+		bne	.dead
+		move.l	a0,a2
+		move.l	d0,d2			;file length
+		bsr	zzi_detect
+		tst.l	d0
+		bmi	.refuse
+		beq	.wav
+		tst.b	(zv_codecmode,a3)
+		beq	.nocodec
+		move.l	a1,d1
+		sub.l	a2,d1			;skip a tag or padding
+		sub.l	d1,d2
+		move.l	a1,(zv_start,a3)
+		move.l	a1,(zv_ptr,a3)
+		move.l	d2,(zv_total,a3)
+		move.l	d2,(zv_left,a3)
+		bra	.start
+.wav		move.l	a2,a0
+		move.l	d2,d0
 		bsr	zzi_parse
 		tst.l	d0
-		bne	.refuse
+		bne	.badwav
+
+	;The PCM kernels require an aligned destination. The compressed feed
+	;leaves room for these discarded bytes even with the ring nearly full.
+		move.l	(zv_off,a3),d1
+		neg.l	d1
+		and.l	#3,d1
+		beq	.start
+		move.l	d1,d0
+		bsr	zzi_advance		;gap is below the new start, never read
+		moveq	#ZCODEC_WAV,d0
+.start		moveq	#0,d1
+		bsr	zzi_marker		;flush previous bytes and start this track
 		addq.l	#1,(zv_st_tracks,a3)
 		clr.l	(zv_pflags,a3)		;unpaused
 		move.b	#ZST_PLAY,(zv_state,a3)
+		bsr	zzi_service		;prime the ring before enabling the IRQ
 		bsr	zzi_arm
-		bsr	zzi_service
 		bra	.end
 
 	;not playable, the next interrupt reports the end
-.refuse		addq.l	#1,(zv_st_refused,a3)
+.dead		moveq	#-ZRS_LEASE,d0
+		bra	.refuse
+.nocodec	moveq	#-ZRS_NO_CODEC,d0
+		bra	.refuse
+.badwav		moveq	#-ZRS_WAV,d0
+.refuse		neg.l	d0
+		move.l	d0,(zv_refusal,a3)
+		addq.l	#1,(zv_st_refused,a3)
 		st	(zv_finpend,a3)
-		bsr	zzi_pause		;a playing track is replaced: paused
+		bsr	zzi_flushtrack		;a playing track is replaced: discard it
 		bsr	zzi_arm
 .end		movem.l	(a7)+,d2-d7/a2-a3
 		rts
@@ -878,6 +1036,8 @@ zzi_service	movem.l	d2-d7/a2,-(a7)
 		moveq	#0,d0
 		move.b	(zv_state,a3),d0
 		beq	.publish		;ZST_IDLE
+		tst.b	(zv_codecmode,a3)
+		bne	.codec
 		cmp.b	#ZST_FIN,d0
 		beq	.fin
 		bsr	zzi_budget		;D4 = frames
@@ -922,19 +1082,147 @@ zzi_service	movem.l	d2-d7/a2,-(a7)
 		sub.l	d0,(zv_pad,a3)
 		bne	.publish
 .paddone	move.b	#ZST_FIN,(zv_state,a3)
+		tst.l	(zv_seen,a3)
+		bne	.publish		;firmware with flush waits for drain
 		st	(zv_finpend,a3)
 		bra	.publish
 
 	;everything is written, pause the lease when the card played it all
 .fin		tst.l	d3
 		bne	.publish
+		tst.l	(zv_seen,a3)
+		beq	.paused			;old firmware: FINISHED already sent
+		st	(zv_finpend,a3)
+.paused
 		move.l	#ZZ9K_RING_PAUSED,(zv_pflags,a3)
 		clr.b	(zv_state,a3)
+		bra	.publish
+
+.codec		bsr	zzi_codec_service
 
 .publish	ZZ_DBGL	'p'
 		bsr	zzi_publish
 .out		movem.l	(a7)+,d2-d7/a2
 		rts
+
+;----------------------------------------
+; Feed a codec lease. d3 is the number of bytes still in the ring, based
+; on actual credits even for a newly flushed stream: don't overwrite bytes
+; the firmware may still be reading before it accepts the marker.
+
+zzi_codec_service
+		move.l	(zv_stream,a3),d0
+		cmp.l	(zv_seen,a3),d0
+		bne	.feed			;the firmware line describes an older stream
+		cmp.l	#ZZ_DECODE_ERROR,(zv_decode,a3)
+		beq	.error
+		cmp.l	#ZZ_DECODE_DRAINED,(zv_decode,a3)
+		beq	.finished
+.feed		cmp.b	#ZST_FIN,(zv_state,a3)
+		beq	.rts			;EOS published, now wait for the card
+		;D6 = unused feed budget in frames or bytes
+		tst.l	(zv_codec,a3)
+		beq	.pcm
+
+	;Compressed data is byte granular. Leave a few bytes free so that a
+	;subsequent PCM start can be aligned without waiting for a credit.
+		move.l	(zv_cap,a3),d6
+		subq.l	#3,d6
+		sub.l	d3,d6
+		bls	.rts
+		cmp.l	#ZZ_CALLMAX,d6
+		bls	.bounded
+		move.l	#ZZ_CALLMAX,d6
+		bra	.bounded
+.pcm		bsr	zzi_budget
+		move.l	d4,d6
+.bounded	move.l	(zv_left,a3),d5
+		beq	.eof
+		tst.l	d6
+		beq	.rts
+		cmp.l	d5,d6
+		bhs	.write
+		move.l	d6,d5
+.write		sub.l	d5,d6
+		tst.l	(zv_codec,a3)
+		beq	.pcmwrite
+		bsr	zzi_copybytes
+		bra	.check
+.pcmwrite	moveq	#1,d7
+		bsr	zzi_write
+.check		tst.l	(zv_left,a3)
+		bne	.rts
+.eof		btst	#WHDLAUDB_LOOP,(zv_pflg+3,a3)
+		bne	.loop
+		or.l	#ZZ_STREAM_END,(zv_streamflags,a3)
+		move.b	#ZST_FIN,(zv_state,a3)
+		rts
+.loop		move.l	(zv_stream,a3),d0
+		cmp.l	(zv_seen,a3),d0
+		bne	.rts			;cannot replace an unlatched boundary
+		move.l	(zv_codec,a3),d0
+		moveq	#ZZ_STREAM_APPEND,d1
+		bsr	zzi_marker
+		move.l	(zv_start,a3),(zv_ptr,a3)
+		move.l	(zv_total,a3),(zv_left,a3)
+		bra	.bounded		;prime the repetition with the same budget
+.rts		rts
+
+.error		move.l	(zv_error,a3),(zv_last_error,a3)
+.finished	move.l	#ZZ9K_RING_PAUSED,(zv_pflags,a3)
+		clr.b	(zv_state,a3)
+		st	(zv_finpend,a3)
+		rts
+
+;----------------------------------------
+; Copy d5 compressed bytes, in at most two parts across the ring boundary.
+; The ring is uncached: use long stores when both addresses are aligned.
+
+zzi_copybytes	move.l	d5,d4
+		move.l	(zv_ptr,a3),a0
+.part		move.l	(zv_off,a3),d0
+		move.l	(zv_ring,a3),a1
+		add.l	d0,a1
+		move.l	(zv_cap,a3),d2
+		sub.l	d0,d2
+		cmp.l	d4,d2
+		bls	.have
+		move.l	d4,d2
+.have		move.l	d2,d3
+		move.l	a0,d0
+		move.l	a1,d1
+		or.l	d1,d0
+		and.l	#3,d0
+		bne	.tail
+		lsr.w	#2,d3
+		bra	.lcount
+.long		move.l	(a0)+,(a1)+
+.lcount		dbf	d3,.long
+		move.l	d2,d3
+		and.w	#3,d3
+.tail		bra	.bcount
+.byte		move.b	(a0)+,(a1)+
+.bcount		dbf	d3,.byte
+		move.l	d2,d0
+		bsr	zzi_advance
+		sub.l	d2,d4
+		bne	.part
+		move.l	a0,(zv_ptr,a3)
+		sub.l	d5,(zv_left,a3)
+		rts
+
+; Add d0 bytes to the ring position and the monotonic write cursor.
+; d1 destroyed.
+zzi_advance	move.l	(zv_off,a3),d1
+		add.l	d0,d1
+		cmp.l	(zv_cap,a3),d1
+		blo	.off
+		sub.l	(zv_cap,a3),d1
+.off		move.l	d1,(zv_off,a3)
+		add.l	d0,(zv_wrlo,a3)
+		bcc	.rts
+		addq.l	#1,(zv_wrhi,a3)
+.rts		rts
 
 ;----------------------------------------
 ; frames to write: fill the ring up to ZZ_LEAD bytes in front of the
@@ -972,9 +1260,16 @@ zzi_calcpad	moveq	#0,d0
 		beq	.nophase
 		move.l	#ZZ_PERIOD,d0
 		sub.l	d1,d0
-.nophase	tst.l	d2
+.nophase	tst.l	(zv_seen,a3)
+		beq	.legacy
+		move.l	d2,d1
+		sub.l	(zv_startlo,a3),d1
+		bgt	.set			;already consumed data from this stream
+		bra	.written
+.legacy		tst.l	d2
 		bne	.set
-		move.l	(zv_wrlo,a3),d1		;nothing consumed, the lead is all written
+.written	move.l	(zv_wrlo,a3),d1
+		sub.l	(zv_startlo,a3),d1	;preroll must follow the new marker
 		add.l	d0,d1
 		cmp.l	#ZZ_PREROLL,d1
 		bhs	.set
@@ -1017,22 +1312,17 @@ zzi_write	movem.l	d2-d6/a0-a2,-(a7)
 		move.l	a0,(zv_ptr,a3)
 		move.l	d5,d0
 		lsl.l	#2,d0			;bytes
-		move.l	(zv_off,a3),d1
-		add.l	d0,d1
-		cmp.l	(zv_cap,a3),d1
-		blo	.off
-		sub.l	(zv_cap,a3),d1
-.off		move.l	d1,(zv_off,a3)
-		add.l	d0,(zv_wrlo,a3)
-		bcc	.cursor
-		addq.l	#1,(zv_wrhi,a3)
-.cursor		move.l	(zv_phase,a3),d1
+		bsr	zzi_advance
+		tst.b	(zv_codecmode,a3)
+		bne	.data
+		move.l	(zv_phase,a3),d1
 		add.l	d0,d1
 .phase		cmp.l	#ZZ_PERIOD,d1
 		blo	.phased
 		sub.l	#ZZ_PERIOD,d1
 		bra	.phase
 .phased		move.l	d1,(zv_phase,a3)
+.data
 		tst.l	d7
 		beq	.nodata
 		sub.l	d5,(zv_left,a3)
@@ -1301,6 +1591,203 @@ zzi_le16	moveq	#0,d0
 		rts
 
 ;----------------------------------------
+; read a big endian long byte by byte, the address may be odd
+; IN:	a0 = APTR value
+; OUT:	d0 = ULONG value
+
+zzi_be32	moveq	#0,d0
+		move.b	(a0),d0
+		lsl.l	#8,d0
+		move.b	(1,a0),d0
+		lsl.l	#8,d0
+		move.b	(2,a0),d0
+		lsl.l	#8,d0
+		move.b	(3,a0),d0
+		rts
+
+;----------------------------------------
+; find out what a track file is, by its first bytes and not by its name
+; IN:	a0 = APTR file
+;	d0 = ULONG length
+; OUT:	d0 = LONG codec, ZCODEC_WAV, ZCODEC_MP3, ZCODEC_FLAC or ZCODEC_VORBIS;
+;	   or -ZRS_* when the file is not played
+;	a1 = APTR first byte to give to the decoder: behind ID3v2 tags and, for
+;	   MPEG audio, at the first frame header
+;	d1 destroyed
+
+zzi_detect	movem.l	d2-d4/a2,-(a7)
+		move.l	a0,a2			;A2 = position
+		move.l	d0,d2			;D2 = bytes left
+		move.l	d2,d4			;original file length
+		move.l	a0,a1
+		cmp.l	#12,d2
+		blo	.id3
+		bsr	zzi_be32
+		cmp.l	#$52494646,d0		;RIFF
+		bne	.id3
+		lea	(8,a2),a0
+		bsr	zzi_be32
+		cmp.l	#$57415645,d0		;WAVE
+		bne	.unknown
+		moveq	#ZCODEC_WAV,d0
+		bra	.ret
+
+	;ID3v2 tags: "ID3", version, revision, flags, size as four 7 bit bytes
+	;(the size does not count the header, nor the footer if flag 4 is set)
+.id3		cmp.l	#10,d2
+		blo	.magic
+		move.l	a2,a0
+		bsr	zzi_be32
+		and.l	#$ffffff00,d0
+		cmp.l	#$49443300,d0		;"ID3"
+		bne	.magic
+		cmp.b	#4,(3,a2)		;ID3v2.2 through 2.4
+		bhi	.unknown
+		cmp.b	#2,(3,a2)
+		blo	.unknown
+		moveq	#0,d1
+		moveq	#3,d3
+		lea	(6,a2),a0
+.size		move.b	(a0)+,d0
+		bmi	.unknown
+		lsl.l	#7,d1
+		or.b	d0,d1
+		dbf	d3,.size
+		add.l	#10,d1
+		cmp.b	#4,(3,a2)		;only v2.4 defines a footer
+		bne	.nofooter
+		btst	#4,(5,a2)
+		beq	.nofooter
+		add.l	#10,d1
+.nofooter	cmp.l	d2,d1
+		bhs	.unknown		;the tag is the whole file
+		add.l	d1,a2
+		sub.l	d1,d2
+		;Do not scan arbitrary payload or an unbounded chain of tags.
+
+.magic		move.l	a2,a1
+		cmp.l	#4,d2
+		blo	.unknown
+		move.l	a2,a0
+		bsr	zzi_be32
+		cmp.l	#$664c6143,d0		;"fLaC"
+		beq	.flac
+		cmp.l	#$4f676753,d0		;"OggS"
+		beq	.ogg
+		cmp.l	#$3026b275,d0		;ASF header GUID, wma
+		beq	.asf
+		cmp.l	#12,d2
+		blo	.mpeg
+		lea	(4,a2),a0
+		bsr	zzi_be32
+		cmp.l	#$66747970,d0		;"ftyp", mp4 and m4a
+		beq	.mp4
+
+	;MPEG audio: a frame header is $ffe, version, layer, protection,
+	;bitrate index, sample rate index; the first frame may follow some
+	;padding behind a tag. ADTS (aac) has layer 0 in the same place.
+.mpeg		cmp.b	#$ff,(a2)
+		bne	.scan0
+		move.b	(1,a2),d0
+		and.b	#$f6,d0
+		cmp.b	#$f0,d0
+		beq	.aac
+.scan0		;Allow only zero padding after a verified ID3 tag.
+		cmp.l	d2,d4
+		beq	.try
+		move.l	d2,d3
+		cmp.l	#ZZ_MPEGSCAN,d3
+		bls	.padsz
+		move.l	#ZZ_MPEGSCAN,d3
+.padsz		subq.l	#4,d3
+		bra	.padcount
+.pad0		tst.b	(a1)
+		bne	.try
+		addq.l	#1,a1
+.padcount	dbf	d3,.pad0
+		bra	.unknown
+.try		cmp.b	#$ff,(a1)
+		bne	.unknown
+		move.b	(1,a1),d0
+		move.b	d0,d1
+		and.b	#$e0,d1
+		cmp.b	#$e0,d1			;sync
+		bne	.unknown
+		move.b	d0,d1
+		lsr.b	#3,d1
+		and.b	#3,d1
+		cmp.b	#1,d1			;version 1 is reserved
+		beq	.unknown
+		and.b	#6,d0
+		cmp.b	#2,d0			;Layer III (MP3)
+		bne	.unknown
+		move.b	(2,a1),d0
+		lsr.b	#4,d0
+		cmp.b	#15,d0			;bitrate index 15 is invalid
+		beq	.unknown
+		move.b	(2,a1),d0
+		and.b	#$0c,d0
+		cmp.b	#$0c,d0			;sample rate index 3 is invalid
+		beq	.unknown
+		moveq	#ZCODEC_MP3,d0
+		bra	.ret
+
+.flac		moveq	#ZCODEC_FLAC,d0
+		bra	.ret
+
+	;an Ogg page: "OggS", version, flags, granule (8), serial (4), page
+	;number (4), checksum (4), segment count, segment table; the first
+	;packet of the first page names the codec
+.ogg		cmp.l	#28,d2
+		blo	.unknown
+		tst.b	(4,a2)			;revision 0
+		bne	.unknown
+		cmp.b	#8,(27,a2)		;first segment can hold the ID
+		blo	.unknown
+		moveq	#0,d3
+		move.b	(26,a2),d3		;segments
+		beq	.unknown
+		add.w	#27,d3
+		moveq	#8,d1
+		add.l	d3,d1			;header and the first 8 bytes
+		cmp.l	d2,d1
+		bhi	.unknown
+		lea	(a2,d3.w),a0		;first packet
+		bsr	zzi_be32
+		cmp.l	#$4f707573,d0		;"Opus"
+		beq	.opus
+		cmp.l	#$01766f72,d0		;1, "vor"
+		bne	.oggother
+		lea	(a2,d3.w),a0
+		cmp.b	#'b',(4,a0)		;"bis"
+		bne	.oggother
+		cmp.b	#'i',(5,a0)
+		bne	.oggother
+		cmp.b	#'s',(6,a0)
+		bne	.oggother
+		moveq	#ZCODEC_VORBIS,d0
+		bra	.ret
+.opus
+		lea	(4,a2,d3.w),a0
+		bsr	zzi_be32
+		cmp.l	#$48656164,d0		;"Head"
+		bne	.oggother
+		moveq	#-ZRS_OPUS,d0
+		bra	.ret
+.oggother	moveq	#-ZRS_OGG,d0
+		bra	.ret
+
+.asf		moveq	#-ZRS_ASF,d0
+		bra	.ret
+.mp4		moveq	#-ZRS_MP4,d0
+		bra	.ret
+.aac		moveq	#-ZRS_AAC,d0
+		bra	.ret
+.unknown	moveq	#-ZRS_UNKNOWN,d0
+.ret		movem.l	(a7)+,d2-d4/a2
+		rts
+
+;----------------------------------------
 	IFD ZZ9000_DIAG
 ; progress codes
 ; IN:	a3 = APTR vars
@@ -1407,6 +1894,7 @@ zz9000_t_diag		dc.b	"audio: ZZ9000AX: diagnostic build, switches %ld",0
 
 zz9000_name		dc.b	"ZZ9000AX",0
 zz9000_exts		dc.b	"wav",0,0
+zz9000_codecexts	dc.b	"flac",0,"wav",0,"mp3",0,"ogg",0,0
 zz9000_n_expansion	dc.b	"expansion.library",0
 zz9000_n_dos		dc.b	"dos.library",0
 zz9000_n_zz9k		dc.b	"zz9k.library",0
@@ -1426,4 +1914,22 @@ zz9000_t_noidle		dc.b	"audio: ZZ9000AX: the firmware refuses a lease with IDLE_P
 zz9000_t_badgrant	dc.b	"audio: ZZ9000AX: unusable lease: slot %ld generation %ld ring $%lx capacity %ld control $%lx",0
 zz9000_t_ok		dc.b	"audio: ZZ9000AX: lease slot %ld generation %ld ring capacity %ld at $%lx, control at $%lx",0
 zz9000_t_stat		dc.b	"audio: ZZ9000AX: tracks %ld, refused %ld, interrupts %ld, suspend %ld, resume %ld, lease %s (firmware status %ld)",0
+zz9000_t_refused	dc.b	"audio: ZZ9000AX: last track refusal: %s",0
+zz9000_t_decode		dc.b	"audio: ZZ9000AX: last codec decode error %ld",0
+	EVEN
+zz9000_refusals
+		dc.w	.unknown-zz9000_refusals,.opus-zz9000_refusals
+		dc.w	.ogg-zz9000_refusals,.asf-zz9000_refusals
+		dc.w	.mp4-zz9000_refusals,.aac-zz9000_refusals
+		dc.w	.wav-zz9000_refusals,.codec-zz9000_refusals
+		dc.w	.lease-zz9000_refusals
+.unknown	dc.b	"unknown file format",0
+.opus		dc.b	"Ogg Opus is not supported",0
+.ogg		dc.b	"Ogg file does not contain Vorbis",0
+.asf		dc.b	"ASF/WMA is not supported",0
+.mp4		dc.b	"MP4/M4A is not supported",0
+.aac		dc.b	"AAC is not supported",0
+.wav		dc.b	"invalid or unsupported WAV",0
+.codec		dc.b	"firmware has no codec ring",0
+.lease		dc.b	"lease lost",0
 	EVEN
