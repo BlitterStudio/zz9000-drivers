@@ -27,6 +27,9 @@ that allows it.
   in zz9000-firmware; there is no service flag for it, firmware without it
   answers `BAD_REQUEST` and the driver reports no hardware), and
   `zz9k.library` 2.44 or newer, both from the same release as the drivers.
+- For FLAC, MP3 and Ogg Vorbis, firmware that accepts
+  `ZZ9K_AUDIO_RING_ACQUIRE_FLAG_CODEC` (bit 3). Firmware that refuses this
+  flag can still play WAV over a source-rate lease.
 - INT2 mode of the card: `ENV:ZZ9K_INT2` or `int2 = on` in `ZZ9000.CFG`, as for
   AHI. WHDLoad calls the plugin from the level 2 interrupt only, and the card
   interrupt has to arrive there. In INT6 mode the driver reports no hardware
@@ -34,8 +37,18 @@ that allows it.
 
 ## Track files
 
-The tracks are named `track01.wav` to `track99.wav` in the `Audio/K` directory.
-The driver plays WAV files with these properties:
+Name the files `track01.<ext>` to `track99.<ext>` in the `Audio/K`
+directory. With codec-ring firmware, WHDLoad checks `flac`, `wav`, `mp3`
+and `ogg` in that order for each track number and uses the first file it
+finds. It does not try another extension if that file cannot be played.
+On older firmware, WHDLoad only looks for `wav`.
+
+The driver checks the file header. It accepts native FLAC, MPEG Layer III
+(including files with an ID3v2 tag), and Ogg Vorbis. These are decoded on
+the card. AAC, M4A, WMA and Ogg Opus are not available through the codec
+ring, and the plugin does not decode them on the Amiga.
+
+The driver converts WAV on the Amiga. It accepts:
 
 | Property | Accepted |
 |---|---|
@@ -46,17 +59,13 @@ The driver plays WAV files with these properties:
 
 Chunks other than `fmt ` and `data` are skipped, the `fmt ` chunk has to come
 first, and a data size that is wrong or `0xffffffff` (a stream written to a
-pipe) is cut to the size of the file. Any other file is refused: playing it
-reports the end of the track at the next card interrupt and nothing is heard. The trace file
-shows how many tracks were refused.
+pipe) is cut to the size of the file. An unsupported file is skipped and the
+last refusal is recorded in the trace. If the card reports a decode error, the
+track ends and the lease stays open for the next track.
 
-MP3, Ogg, FLAC, AAC and the other formats the AmiGUS decodes are not played.
-WHDLoad passes the file in Amiga memory to the plugin, and the plugin runs in
-the level 2 interrupt with the operating system off. The decoders of the card
-are reached through the mailbox of `zz9k.library`, which needs the operating
-system, and decoding on the 68k is too slow. Convert the tracks to WAV, for
-example with `ffmpeg -i in.mp3 -ar 44100 -ac 2 -c:a pcm_s16le track01.wav`.
-A CD track is 10 MB per minute as 16 bit stereo.
+To convert a file for WAV playback, run
+`ffmpeg -i in.mp3 -ar 44100 -ac 2 -c:a pcm_s16le track01.wav`.
+A CD track takes about 10 MB per minute as 16 bit stereo WAV.
 
 ## Build
 
@@ -83,21 +92,18 @@ the plugin in the directory of WHDLoad.
 
 What I would offer Wepl for `WHDLoad.Audio`: `zz9000.s` as a third driver file
 (relicensed to Public Domain if that is what the project needs), and the two
-lines that add it to `WHDLoad.Audio.asm`. Two things the interface does not
-give a driver, and that this one works around: a call when the operating
-system is active (the lease of the card needs a heartbeat while WHDLoad loads
-files), and the track format in the plugin call, so that a plugin could refuse
-a file before it is played.
+lines that add it to `WHDLoad.Audio.asm`. The interface does not pass the
+track's file extension, so the driver reads the file's header.
 
 ## How it plays
 
-`waud_init`, with the operating system active, finds the card, checks the
-requirements above and takes a direct-ring lease of the audio fabric:
-`ZZ9K_OP_AUDIO_RING_ACQUIRE` for a 44100 Hz stereo S16LE source (flag
-`SOURCE_RATE`), slot 1 and then slot 2. The firmware converts the lease to its
-48 kHz output, so the driver does not resample. The lease, the ring and the
-control block are held until `waud_exit`, which releases the lease with its
-generation. The ring and the control block go into `waud_mem` as non cachable
+`waud_init`, with the operating system active, finds the card and takes a
+direct-ring lease. It tries `ZZ9K_OP_AUDIO_RING_ACQUIRE` with `CODEC` and
+`IDLE_PAUSED`, slot 1 and then slot 2. On `BAD_REQUEST` for `CODEC` it
+retries with a 44100 Hz stereo S16LE `SOURCE_RATE` lease and lists only WAV.
+One lease serves all tracks until `waud_exit` releases it with its
+generation. The firmware converts the source to its 48 kHz output.
+The ring and the control block go into `waud_mem` as non cachable
 serialized memory, so the driver needs no cache operation while WHDLoad has the
 operating system off. WHDLoad maps those pages and the first 4 KiB of the card
 (its registers) that way. The AHI driver and the SDK client helpers call
@@ -105,33 +111,38 @@ operating system off. WHDLoad maps those pages and the first 4 KiB of the card
 line instead, because AmigaOS may map the board cachable; the firmware reads
 the ring as a non-coherent producer and invalidates before it copies.
 
-`waud_play` reads the WAV header and starts feeding. The card is told to raise
-its vblank interrupt (`ZZ_REG_CONFIG` write `0x82`, acknowledged with `0x48`),
-because the audio interrupt of the card is not available while the fabric owns
-the output. `waud_irq` runs for every level 2 interrupt and only reports the end of a
-track, unless the vblank bit of the card is set. For each card interrupt it
+`waud_play` identifies the format, publishes a start marker with the codec
+and byte cursor, and primes the ring. The card raises its vblank interrupt
+(`ZZ_REG_CONFIG` write `0x82`, acknowledged with `0x48`), because the
+audio interrupt is not available while the fabric owns the output.
+`waud_irq` runs on level 2 and checks for the card's vblank bit before
+servicing the lease. For each card interrupt it
 
 1. acknowledges the card interrupt,
 2. reads the firmware line of the control block (consumed cursor, generation,
-   status) under its seqlock,
-3. copies the next frames of the track into the ring, converted to stereo S16LE
-   with the volume applied, until 12 periods of 20 ms (240 ms, at most 3 periods
-   per call) are ahead of the consumed cursor, and
-4. publishes the producer line with the new write cursor and a new heartbeat.
+   status and decode state) under its seqlock,
+3. copies the next bytes of the file, or converts WAV frames to stereo S16LE,
+   within the ring credit and a limit of 10,584 bytes per call, and
+4. publishes the new write cursor and heartbeat, marking the final bytes
+   as end of stream on a codec lease.
 
-At the end of a track the last 20 ms period is completed with silence, because
-the firmware consumes whole source periods only, and a track shorter than the
-preroll of the firmware (23040 bytes, about 130 ms) is extended until the card
-starts to play.
-Then `waud_irq` returns `WAUDIRQF_FINISHED`. That is when the last frame has
-been written, up to 240 ms before it is heard. `WHDLAUDF_LOOP` restarts the
-track from its first frame without a gap. WHDLoad plays the next track of a
-sequence by calling `waud_play` from the interrupt, and that track follows the
-previous one in the ring.
+On a codec lease, `waud_irq` returns `WAUDIRQF_FINISHED` after the card
+reports the matching stream drained, or reports a decode error. A loop starts a
+new copy of the stream without discarding the end of the previous copy. The
+last partial period may be padded before the next repetition. Stop and track
+replacement discard the old stream and its queued audio; suspend pauses it
+in place.
 
-Volume is applied by the driver as `(sample * volume) >> 15`, with a plain
+On a plain source-rate lease, the driver pads a WAV track to a full 20 ms
+source period, or to the firmware's preroll if the track is shorter. WAV
+loops repeat the samples without padding. On older firmware that ignores
+stream markers, `WAUDIRQF_FINISHED` is sent when all frames are written,
+before the old audio has drained.
+
+For WAV, the driver applies volume as `(sample * volume) >> 15`, with a plain
 copy at `$7fff` for 16 bit stereo. Mono is written to both channels, 8 bit is
-converted from unsigned. The stereo separation of the card (ZZTop setting,
+converted from unsigned. The card applies volume for compressed tracks. The
+stereo separation of the card (ZZTop setting,
 `audio_separation`) is a DSP stage behind the mixer that joins Paula and the
 playback of the card, so it applies to these tracks as well.
 
@@ -168,12 +179,11 @@ the operating system. WHDLoad has to be started again. The trace file says
 
 ### Limits
 
-- A stop or a new track does not cut the audio at once. What the card has been
-  given plays first: the audio fabric queues up to 6 periods (120 ms) in front of
-  the output, and the driver keeps up to 12 periods in the ring. A new track
-  follows the old one after at most about 240 ms.
-- The first sound comes after the preroll of the firmware (23040 bytes) and the
-  fill of the ring, which I estimate at 200 ms; it has not been measured.
+- On firmware that recognizes stream markers, stop or a new track discards
+  queued audio for the old track. Firmware without marker support can still
+  play up to about 240 ms of the old track.
+- The first sound follows the card's output fill. Plain PCM leases also
+  require a 23040-byte preroll.
 - Playing needs the level 2 interrupt and the card interrupt together. A program
   that masks `INTB_PORTS` for longer than 2 s while a track plays loses the lease.
   A paused lease (idle, stopped, or while WHDLoad has the operating system
@@ -182,8 +192,8 @@ the operating system. WHDLoad has to be started again. The trace file says
 - Mono, 8 bit and a volume below `$7fff` are converted by the CPU, about 130
   cycles per frame. That is around 40% of a 14 MHz 68020 and little on a 68040
   or 68060. 16 bit stereo at full volume is copied.
-- 44.1 kHz only. Other rates would need their own lease, which cannot be taken
-  with the operating system off.
+- WAV is limited to 44.1 kHz. The firmware resamples compressed tracks from
+  the decoded rate to 48 kHz.
 - The lease occupies one of the two direct-ring slots for as long as WHDLoad
   runs, and `zz9k.library` stays open.
 - The firmware admits two producers that convert (the pump and the two leases
@@ -204,9 +214,13 @@ took (slot, generation, ring capacity and addresses). At exit:
 audio: ZZ9000AX: tracks 4, refused 1, interrupts 1520, suspend 3, resume 3, lease intact (firmware status 0)
 ```
 
-`refused` counts tracks that were not WAV files in the format above,
-`interrupts` the vblank interrupts of the card that reached the plugin.
-`suspend` and `resume` count the calls of WHDLoad.
+`refused` counts files the driver could not play, and `interrupts` counts
+the card vblank interrupts that reached the plugin. `suspend` and `resume`
+count the calls from WHDLoad. If the driver refused a file or the card
+reported a decode error, the trace also shows the last refusal reason or
+decode error code. See the codec ring section in
+[`docs/audio-fabric.md`](https://github.com/BlitterStudio/zz9000-firmware/blob/master/docs/audio-fabric.md)
+for the firmware error codes.
 
 ## Test on a card
 
@@ -222,13 +236,17 @@ audio: ZZ9000AX: tracks 4, refused 1, interrupts 1520, suspend 3, resume 3, leas
    `ZZ9000.CFG`, and use matching firmware and `zz9k.library` 2.44 or newer.
 5. Start `WHDLoad audio.slave Audio=cdda Trace` from a shell, with Preload if
    the tracks should play in sequence.
+6. With codec-ring firmware, convert copies of the sample tracks to FLAC,
+   MP3 and Ogg Vorbis. Remove any higher-priority copies of the same track
+   before testing MP3 or Ogg Vorbis. Try a loop and switch between compressed
+   and WAV tracks without stopping in between.
 
 Keys of the test Slave, and what to check:
 
 | Key | Check |
 |---|---|
 | `1` | Track 1 starts after a fraction of a second, a steady 440 Hz tone. The status line shows track 1 on the main loop and in the vertical blank. |
-| `space` | The tone stops within about a quarter of a second. |
+| `space` | The tone stops. With stream-marker firmware, the queued part of the track is discarded. |
 | `2`, `3` | The tone is in the left, then in the right channel only. |
 | `l`, then `4` | The 1 kHz beep repeats without a gap. |
 | `5` | A short click. The command returns, the callback count rises. |
@@ -236,7 +254,7 @@ Keys of the test Slave, and what to check:
 | `8` | Nothing is heard, the callback count rises at once (48000 Hz is refused). |
 | `9`, cursor up and down | The tone gets louder in steps, the cursor keys change the volume smoothly down to silence. |
 | `c` several times, then `1` | Tracks 1, 2, ... play in sequence when the tracks are cached; the callback count rises once, after the last one. |
-| `o` | The Slave saves a file, WHDLoad switches the operating system on. The sound stops after about a quarter of a second and continues afterwards. The lease stays: the trace file at the end shows `lease intact` and `suspend` and `resume` both counted. |
+| `o` | The Slave saves a file, WHDLoad switches the operating system on. The sound pauses and continues afterwards. The trace file at the end shows `lease intact` and `suspend` and `resume` both counted. |
 | `h` | The level 2 interrupt is masked for 2 s. The sound stops. The lease timeout of the firmware is 2000 ms, so the lease may be revoked; the trace file then shows `lease lost (firmware status 1)`. |
 | `s` | The status call returns the track number while playing. |
 | `q` | WHDLoad ends and releases the lease. `zz9k-fabriclease` of the firmware SDK is a proof client that takes a slot and plays a tone: while WHDLoad runs it finds slot 1 taken, after `q` it plays. |
@@ -276,8 +294,9 @@ blob and runs it under qemu-m68k together with `tests/zz9000_audio_test.c`.
 The C program provides exec, `expansion.library`, `dos.library`,
 `zz9k.library` and a model of the lease in the firmware: seqlock reads of the
 producer line, generation, write cursor distance, the 2000 ms heartbeat
-timeout, the preroll, consumption in whole 20 ms periods and credits that trail
-the consumption by the fill-ahead. It checks:
+timeout, PCM consumption in 20 ms periods, and a codec ring with byte
+credits and a separate drain delay. The model checks compressed bytes and
+markers without decoding the audio. It covers:
 
 - every refusal path of `waud_init` and the cleanup after it, the memory list,
   the driver table and the first publication of the producer line;
@@ -288,6 +307,9 @@ the consumption by the fill-ahead. It checks:
   sequence of tracks, tracks shorter than the preroll and than one period;
 - the WAV parser with valid, odd and damaged files, and the files written by
   `tools/make-test-tracks.py`;
+- codec negotiation and extension order, MP3, FLAC and Vorbis bytes across
+  ring wrap, EOS and drain, a looping stream, stop and replacement into WAV,
+  corrupt file recovery, and refusal of Ogg Opus and unknown files;
 - the order of calls when WHDLoad quits (a track playing, stopped, suspended,
   resumed, finished): the card interrupt is disabled before the driver does
   anything that needs the operating system;

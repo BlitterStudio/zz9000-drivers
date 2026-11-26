@@ -22,7 +22,7 @@ shared-memory layout before SDK services are exposed.
 | [ZZCapture](ZZCapture/README.md) | Native-video timing observation and experimental A4000/C28 capture diagnostics. |
 | [aar-run](https://github.com/BlitterStudio/aar/blob/main/client/run/README.md) | Shell and Workbench launcher for trusted ARM apps, built in the aar repository and shipped with the SDK runtime; each app instance gets its own claim. |
 | [ZZ9000AX audio](ahi/README.md) | `zz9000ax.audio`, its AudioModes (software mixing, and hardware mixing of up to 32 channels on the card), and `mhizz9000.library` for PCM playback, recording, and hardware MP3 decoding. |
-| [WHDLoad audio](whdload-audio/README.md) | The ZZ9000AX driver for `WHDLoad.Audio`, which lets WHDLoad 21 play the CD-DA tracks of CDTV and CD32 games from WAV files through the audio fabric of the card. Built from source, not part of the installer. |
+| [WHDLoad audio](whdload-audio/README.md) | The ZZ9000AX driver for `WHDLoad.Audio` plays CDTV and CD32 tracks in WHDLoad 21: WAV, plus FLAC, MP3 and Ogg Vorbis with codec-ring firmware. Built from source, not part of the installer. |
 | [Poseidon USB](usb-poseidon/README.md) | `zzusbhw.device` for the external Poseidon 4.5 USB stack. |
 | [SD-card boot](sd-boot/README.md) | `zzsd.device` in `BOOT.bin`, which boots an HDF file from the FAT-formatted microSD card. |
 | [ZZTop](ZZTop/README.md) | The `ZZTop` control panel. |

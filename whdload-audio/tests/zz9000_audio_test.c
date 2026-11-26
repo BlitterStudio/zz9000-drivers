@@ -63,6 +63,16 @@ enum { ID_TRACE, ID_OPENLIB, ID_CLOSELIB, ID_ADDINT, ID_REMINT, ID_CACHE,
 #define ST_PAD      2
 #define ST_FIN      3
 
+enum { ACQ_PCM = 5, ACQ_CODEC = 12 };
+enum { P_STREAM = 24, P_CODEC = 28, P_START = 32, P_STREAM_FLAGS = 40,
+       P_GAIN = 48, F_STREAM = 20, F_DECODE = 24, F_ERROR = 28,
+       F_RATE = 32, F_CHANNELS = 36 };
+enum { CODEC_PCM, CODEC_MP3, CODEC_FLAC, CODEC_VORBIS };
+#define CODEC_NONE UINT32_MAX
+enum { STREAM_APPEND = 1, STREAM_END = 2 };
+enum { DECODE_IDLE, DECODE_RUNNING, DECODE_DRAINED, DECODE_ERROR };
+enum { ERROR_CORRUPT = 4 };
+
 static u8 *blob;
 static u32 *ctl;
 static u8 *vars;
@@ -129,6 +139,8 @@ struct config {
     int slot_status[3];       /* status of the acquire per slot */
     int bad_grant;            /* see fw_call */
     int old_firmware;         /* no IDLE_PAUSED flag: BAD_REQUEST */
+    int codec_firmware;       /* codec ring acquire is supported */
+    int pcm_markers;          /* plain PCM acquire with marker support */
 };
 
 static struct config cfg;
@@ -155,6 +167,10 @@ struct lease {
     size_t outlen, outcap;
     u32 fw_status;
     u32 hb_changes;
+    int codec_mode;
+    u32 stream_seq, stream_codec, decode, decode_error, gain;
+    u64 stream_start, drain_tick;
+    unsigned starts, flushes, appends;
 };
 
 static struct lease lease[3];
@@ -172,6 +188,7 @@ static int cache_calls;
 static u32 cache_last_addr;
 static char tracelog[64][400];
 static int ntrace;
+static int os_forbidden;
 
 static void os_trace(const char *fmt, const u32 *args)
 {
@@ -241,6 +258,11 @@ static void fw_publish(struct lease *L)
     put32(f + 8, (u32)(L->credited >> 32));
     put32(f + 12, (u32)L->credited);
     put32(f + 16, L->fw_status);
+    put32(f + F_STREAM, L->stream_seq);
+    put32(f + F_DECODE, L->decode);
+    put32(f + F_ERROR, L->decode_error);
+    put32(f + F_RATE, L->decode != DECODE_IDLE ? 44100 : 0);
+    put32(f + F_CHANNELS, L->decode != DECODE_IDLE ? 2 : 0);
     put32(f, seq);
 }
 
@@ -252,11 +274,88 @@ static void fw_revoke(struct lease *L, u32 status)
     L->revoked = (int)status;
 }
 
+static void consume_ring(struct lease *L, u32 n)
+{
+    u32 off = (u32)(L->consumed % L->cap);
+    u32 first = L->cap - off;
+
+    if (first > n)
+        first = n;
+    lease_out(L, L->ring + off, first);
+    if (first < n)
+        lease_out(L, L->ring, n - first);
+    L->consumed += n;
+}
+
+static u64 stream_start(const u8 *c)
+{
+    return ((u64)be32(c + P_START) << 32) | be32(c + P_START + 4);
+}
+
+static void fw_marker(struct lease *L, u32 seq, u32 codec, u64 start)
+{
+    L->stream_seq = seq;
+    L->stream_codec = codec;
+    L->stream_start = start;
+    L->consumed = L->credited = start;
+    L->decode = codec == CODEC_NONE ? DECODE_IDLE : DECODE_RUNNING;
+    L->decode_error = 0;
+    L->drain_tick = 0;
+}
+
+/* Model byte credits separately from the output tail. The captured data
+ * proves byte order and boundaries; the model does not decode real files. */
+static void fw_codec_tick(struct lease *L, u32 seq, u32 codec, u64 start,
+                          u32 stream_flags, u32 gain)
+{
+    u64 end = L->W;
+    int append = seq != L->stream_seq && (stream_flags & STREAM_APPEND);
+    int eof = (stream_flags & STREAM_END) != 0;
+
+    L->gain = gain;
+    if (append) {
+        end = start;
+        eof = 1;
+    }
+    if (!L->paused && !L->stall && L->decode == DECODE_RUNNING) {
+        u64 n = end - L->consumed;
+        u32 budget = L->stream_codec == CODEC_PCM ? PERIOD : 2048;
+
+        if (n > budget)
+            n = budget;
+        if (n)
+            consume_ring(L, (u32)n);
+        if (L->consumed == end && eof) {
+            /* Drain after file input has been copied out of the ring. */
+            if (!L->drain_tick)
+                L->drain_tick = L->tick + 3;
+            if (L->tick >= L->drain_tick) {
+                /* A signature-only FLAC simulates an empty/corrupt file. */
+                if (L->stream_codec == CODEC_FLAC && end - L->stream_start < 8) {
+                    if (append)
+                        L->stream_seq = seq;
+                    L->decode_error = ERROR_CORRUPT;
+                    L->decode = DECODE_ERROR;
+                } else if (append) {
+                    L->appends++;
+                    fw_marker(L, seq, codec, start);
+                } else {
+                    L->decode = DECODE_DRAINED;
+                }
+            }
+        }
+    }
+    L->credited = L->consumed;
+    fw_publish(L);
+}
+
 /* one 20 ms tick of the compositor for a lease */
 static void fw_tick(struct lease *L)
 {
     u8 *c;
     u32 seq1, seq2, gen, flags, hb;
+    u32 stream_seq = 0, codec = CODEC_NONE, stream_flags = 0, gain = 0;
+    u64 start = 0;
     u64 W;
 
     if (!L->active)
@@ -271,11 +370,34 @@ static void fw_tick(struct lease *L)
         W = ((u64)be32(c + 8) << 32) | be32(c + 12);
         hb = be32(c + 16);
         flags = be32(c + 20);
+        stream_seq = be32(c + P_STREAM);
+        codec = be32(c + P_CODEC);
+        start = stream_start(c);
+        stream_flags = be32(c + P_STREAM_FLAGS);
+        gain = be32(c + P_GAIN);
         seq2 = be32(c);
         if (seq1 == seq2 && gen == L->gen) {
             if (W < L->W || W < L->credited || W - L->credited > L->cap) {
                 fw_revoke(L, 2);
                 return;
+            }
+            if ((L->codec_mode || cfg.pcm_markers) && stream_seq &&
+                stream_seq != L->stream_seq) {
+                if (start < L->consumed || start > W ||
+                    stream_flags & ~(STREAM_APPEND | STREAM_END)) {
+                    fw_revoke(L, 2);
+                    return;
+                }
+                if (!(stream_flags & STREAM_APPEND)) {
+                    if (L->stream_seq)
+                        L->flushes++;
+                    if (codec != CODEC_NONE)
+                        L->starts++;
+                    fw_marker(L, stream_seq, codec, start);
+                    for (unsigned i = 0; i < 8; i++)
+                        L->hist[i] = start;
+                    fw_publish(L);
+                }
             }
             if (flags & ~1u) {
                 L->age++;
@@ -307,21 +429,17 @@ static void fw_tick(struct lease *L)
         fw_revoke(L, 1);
         return;
     }
+    if (L->codec_mode) {
+        fw_codec_tick(L, stream_seq, codec, start, stream_flags, gain);
+        return;
+    }
     if (!L->live && !L->paused && L->W - L->credited >= PREROLL)
         L->live = 1;
     if (L->live && !L->stall) {
         if (L->paused) {
             L->silent_ticks++;
         } else if (L->W - L->consumed >= PERIOD) {
-            u32 off = (u32)(L->consumed % L->cap);
-            u32 first = L->cap - off;
-
-            if (first > PERIOD)
-                first = PERIOD;
-            lease_out(L, L->ring + off, first);
-            if (first < PERIOD)
-                lease_out(L, L->ring, PERIOD - first);
-            L->consumed += PERIOD;
+            consume_ring(L, PERIOD);
         } else {
             if (L->underruns < 256)
                 L->uev[L->underruns] = L->consumed;
@@ -366,14 +484,16 @@ static u32 fw_call(u8 *req, u8 *rep)
         u32 slot = be32(pl);
         struct lease *L;
         u32 ring_off, ctrl_off, cap = RING_CAP;
+        u32 flags = be32(pl + 12);
 
         acquire_calls++;
         CHECK(be32(pl + 4) == 2, "identity %u", be32(pl + 4));
         CHECK(be32(pl + 8) == 128, "gain %u", be32(pl + 8));
-        CHECK(be32(pl + 12) == 5, "acquire flags %u", be32(pl + 12));
-        if (cfg.old_firmware)
+        CHECK(flags == ACQ_PCM || flags == ACQ_CODEC, "acquire flags %u", flags);
+        CHECK(be32(pl + 16) == (flags == ACQ_CODEC ? 0u : 44100u),
+              "rate %u", be32(pl + 16));
+        if (cfg.old_firmware || (flags == ACQ_CODEC && !cfg.codec_firmware))
             return 4;
-        CHECK(be32(pl + 16) == 44100, "rate %u", be32(pl + 16));
         if (slot < 1 || slot > 2)
             return 4;
         if (cfg.slot_status[slot])
@@ -389,7 +509,8 @@ static u32 fw_call(u8 *req, u8 *rep)
         L->ring = board + ring_off;
         L->ctrl = board + ctrl_off;
         L->cap = cap;
-        L->idle_paused = (be32(pl + 12) & 4) != 0;
+        L->idle_paused = (flags & 4) != 0;
+        L->codec_mode = flags == ACQ_CODEC;
         memset(L->ring, 0, cap);
         memset(L->ctrl, 0, 128);
         fw_publish(L);
@@ -400,11 +521,11 @@ static u32 fw_call(u8 *req, u8 *rep)
         put32(rp + 16, ctrl_off);
         put32(rp + 20, 3840);
         put32(rp + 24, 20000);
-        put32(rp + 28, 2);
+        put32(rp + 28, L->codec_mode ? 8 : 2);
         put32(rp + 32, 128);
         put32(rp + 36, 2);
         put32(rp + 40, 0);
-        put32(rp + 44, 44100);
+        put32(rp + 44, L->codec_mode ? 0 : 44100);
         switch (cfg.bad_grant) {
         case 1: put32(rp + 4, 0); break;                    /* generation 0 */
         case 2: put32(rp + 28, 1); break;                   /* contract */
@@ -454,6 +575,7 @@ static u16 hw16(void);
 
 static void os_dispatch(u32 id, u32 *regs)
 {
+    CHECK(!os_forbidden, "OS call %u from track playback", id);
     /* With the OS back, its PORTS chain does not know the vblank interrupt
      * of the card; if the card still raises it the machine hangs in the
      * interrupt. Before the driver does anything that needs the OS, the
@@ -592,8 +714,10 @@ static u32 call(int idx, u32 d0, u32 d1, const void *a0)
 
     if (map_board && idx != C_INIT && idx != C_EXIT)
         board_map(1);
+    os_forbidden = idx != C_INIT && idx != C_EXIT;
     r = chk((void *)(uintptr_t)(a32(blob) + ctl[idx]), d0, d1, (void *)a0,
             &bad);
+    os_forbidden = 0;
     if (map_board && idx != C_INIT && idx != C_EXIT)
         board_map(0);
     CHECK(bad == 0, "entry %d changed registers, mask %x", idx, bad);
@@ -755,9 +879,11 @@ static struct lease *L1(void)
     return &lease[V32(V_SLOT)];
 }
 
-static int fresh(void)
+static int fresh_mode(int codec_mode, int pcm_markers)
 {
     config_default();
+    cfg.codec_firmware = codec_mode;
+    cfg.pcm_markers = pcm_markers;
     t_ms = 0;
     os_back = 0;
     irq_period = 20;
@@ -769,6 +895,11 @@ static int fresh(void)
         return 0;
     }
     return 1;
+}
+
+static int fresh(void)
+{
+    return fresh_mode(0, 0);
 }
 
 static void drv_play(const u8 *data, u32 len, u32 flags)
@@ -1003,6 +1134,312 @@ static void check_stream(const char *what, const u8 *exp, size_t explen,
     }
 }
 
+static const u8 *driver_extensions(void)
+{
+    const u32 *tab = (const u32 *)(blob + ctl[C_DRIVER]);
+    /* In the flat harness the unmodified table has offsets. waud_init
+     * may install a relocated pointer before the plugin copies the table. */
+    return tab[2] < 65536u ? blob + tab[2] : addr(tab[2]);
+}
+
+static int fresh_codec(void)
+{
+    if (!fresh_mode(1, 0))
+        return 0;
+    CHECK(L1()->codec_mode, "firmware supports codec rings but none was acquired");
+    return L1()->codec_mode;
+}
+
+static void test_codec_negotiate(void)
+{
+    static const u8 exts[] = "flac\0wav\0mp3\0ogg\0";
+    static const u8 wav[] = "wav\0";
+    static const u8 flac[] __attribute__((aligned(4))) = "fLaC";
+
+    if (!fresh_mode(1, 0))
+        return;
+    CHECK(L1()->codec_mode && acquire_calls == 1, "did not acquire a codec ring");
+    CHECK(!memcmp(driver_extensions(), exts, sizeof(exts)), "codec extension order");
+    drv_exit();
+    CHECK(release_calls == 1, "one lease released");
+
+    if (!fresh_mode(0, 0))
+        return;
+    CHECK(!L1()->codec_mode && acquire_calls == 2, "codec BAD_REQUEST fallback");
+    CHECK(!memcmp(driver_extensions(), wav, sizeof(wav)), "only WAV advertised");
+    drv_play(flac, sizeof(flac) - 1, 0);
+    run_until_finished(100);
+    CHECK(V32(V_WRLO) == 0 && L1()->paused, "compressed file on plain PCM lease");
+    drv_exit();
+    CHECK(traced("firmware has no codec ring"), "fallback refusal trace");
+}
+
+/* Only the real file signatures matter to the driver. The model consumes
+ * the remainder at a fixed rate and checks it byte for byte. */
+static u8 *codec_file(u32 codec, u32 n, int tagged)
+{
+    static const u8 mp3[] = { 0xff, 0xfb, 0x90, 0x64 };
+    static const u8 id3[] = { 'I','D','3', 4, 0, 0, 0, 0, 0, 5, 1, 2, 3, 4, 5 };
+    u32 prefix = tagged ? sizeof(id3) : 0;
+    u8 *f = malloc(prefix + n);
+    u8 *data = f + prefix;
+
+    for (u32 i = 0; i < n; i++)
+        data[i] = lcg();
+    if (tagged)
+        memcpy(f, id3, sizeof(id3));
+    if (codec == CODEC_MP3) {
+        memcpy(data, mp3, sizeof(mp3));
+    } else if (codec == CODEC_FLAC) {
+        memcpy(data, "fLaC", 4);
+    } else {
+        memset(data, 0, 28);
+        memcpy(data, "OggS", 4);
+        data[5] = 2;                    /* beginning of stream */
+        data[26] = 1;                   /* one 30-byte packet */
+        data[27] = 30;
+        memcpy(data + 28, "\001vorbis", 7);
+    }
+    return f;
+}
+
+static void test_codec_formats(void)
+{
+    static const struct {
+        const char *name;
+        u32 codec;
+        int tagged;
+    } cases[] = {
+        { "MP3", CODEC_MP3, 0 },
+        { "ID3 MP3", CODEC_MP3, 1 },
+        { "FLAC", CODEC_FLAC, 0 },
+        { "Ogg Vorbis", CODEC_VORBIS, 0 }
+    };
+
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        struct lease *L;
+        u32 n = RING_CAP + 5075;
+        u32 skip = cases[i].tagged ? 15 : 0;
+        u8 *f;
+
+        if (!fresh_codec())
+            return;
+        L = L1();
+        f = codec_file(cases[i].codec, n, cases[i].tagged);
+        drv_play(f, n + skip, 0);
+        CHECK(be32(L->ctrl + P_STREAM) && stream_start(L->ctrl) == 0 &&
+              be32(L->ctrl + P_CODEC) == cases[i].codec &&
+              be32(L->ctrl + P_STREAM_FLAGS) == 0, "%s: start marker", cases[i].name);
+        CHECK(V32(V_WRLO) > 0 && V32(V_WRLO) <= CALLMAX, "%s: prime", cases[i].name);
+        L->stall = 1;
+        run_ms(500);
+        CHECK(L->W <= L->cap && L->W >= L->cap - 4 && !L->revoked,
+              "%s: credit backpressure", cases[i].name);
+        L->stall = 0;
+        drv_volume(0x3000);
+        run_ms(40);
+        CHECK(L->gain == 0x3000, "%s: volume during playback", cases[i].name);
+        drv_suspend();
+        run_ms(20);
+        size_t at_pause = L->outlen;
+        os_active = 1;
+        run_ms(10000);
+        CHECK(!L->revoked && !hw_enabled && L->paused && L->outlen == at_pause,
+              "%s: suspend", cases[i].name);
+        os_active = 0;
+        drv_resume();
+        while (L->outlen < n && !finished_count && t_ms < 15000)
+            tick_ms();
+        CHECK(!finished_count && L->outlen == n && L->decode == DECODE_RUNNING &&
+              be32(L->ctrl + P_STREAM_FLAGS) == STREAM_END,
+              "%s: EOS sent before drain, no early FINISHED", cases[i].name);
+        run_until_finished(200);
+        CHECK(L->decode == DECODE_DRAINED && !hw_enabled &&
+              be32(L->ctrl + 20) == 1, "%s: drained and idle", cases[i].name);
+        check_stream(cases[i].name, f + skip, n, 0, L);
+        CHECK(L->outlen == n && L->appends == 0, "%s: exact input length", cases[i].name);
+        drv_exit();
+        free(f);
+    }
+}
+
+static void test_codec_loop(void)
+{
+    struct lease *L;
+    u32 n = 4097;
+    u8 *f;
+    size_t i;
+
+    if (!fresh_codec())
+        return;
+    L = L1();
+    f = codec_file(CODEC_MP3, n, 0);
+    drv_play(f, n, WHDLAUDF_LOOP);
+    run_ms(650);
+    CHECK(!finished_count && L->appends >= 3 && L->starts == 1 &&
+          !L->revoked && hw_enabled, "loop appends without flushing");
+    for (i = 0; i < L->outlen && f[i % n] == L->out[i]; i++)
+        ;
+    CHECK(i == L->outlen && i > 3 * n, "loop byte boundary at %zu", i);
+    drv_stop();
+    run_ms(100);
+    CHECK(!finished_count && L->flushes == 1 && L->paused && !hw_enabled &&
+          L->decode == DECODE_IDLE, "stop a looping track");
+    drv_exit();
+    free(f);
+}
+
+static void test_codec_switch(void)
+{
+    for (int stop_first = 0; stop_first < 2; stop_first++) {
+        struct lease *L;
+        struct wav w;
+        size_t prior;
+        u32 n = RING_CAP + 9001;
+        u32 wr;
+        u8 *f, *pcm;
+
+        if (!fresh_codec())
+            return;
+        L = L1();
+        f = codec_file(CODEC_FLAC, n, 0);
+        w = simple_wav(1, 8, 113);
+        drv_play(f, n, 0);
+        run_ms(40);
+        prior = L->outlen;
+        CHECK(prior > 0 && prior < V32(V_WRLO), "unconsumed data before flush");
+        /* Saturate the ring at an odd cursor while still mid-track. */
+        L->stall = 1;
+        run_ms(400);
+        wr = V32(V_WRLO);
+        CHECK((wr & 3) != 0 && wr < n, "odd compressed write cursor");
+        if (stop_first) {
+            drv_stop();
+            run_ms(40);
+            CHECK(L->consumed == wr && L->stream_codec == CODEC_NONE &&
+                  L->paused && !hw_enabled, "stop marker drops queued data");
+        }
+        L->stall = 0;
+        drv_play(w.data, w.len, 0);
+        CHECK(stream_start(L->ctrl) == ((wr + 3u) & ~3u) &&
+              be32(L->ctrl + P_CODEC) == CODEC_PCM, "aligned PCM start marker");
+        run_until_finished(300);
+        pcm = expected(&w, VOL_FULL, 0);
+        check_stream("PCM after compressed track", pcm, 4 * w.frames, prior, L);
+        CHECK(L->outlen == prior + 4 * w.frames && L->starts == 2 &&
+              L->flushes == 1u + stop_first && finished_count == 1 &&
+              !L->revoked, "only new WAV played through, no padding in the feed");
+        drv_exit();
+        free(pcm);
+        free(w.data);
+        free(f);
+    }
+}
+
+static void test_pcm_flush(void)
+{
+    struct wav w;
+    struct lease *L;
+    size_t prior;
+    u8 *pcm;
+
+    if (!fresh_mode(0, 1))
+        return;
+    L = L1();
+    w = simple_wav(2, 16, 44100);
+    drv_play(w.data, w.len, 0);
+    run_ms(300);
+    prior = L->outlen;
+    drv_stop();
+    run_ms(40);
+    CHECK(L->outlen == prior && L->credited == V32(V_WRLO),
+          "plain PCM flush credits skip queued bytes");
+    drv_play(w.data, w.len, 0);
+    run_until_finished(2000);
+    pcm = expected(&w, VOL_FULL, 0);
+    check_stream("plain PCM after stop", pcm, 4 * w.frames, prior, L);
+    CHECK(L->starts == 2 && L->flushes == 2 && L->credited == L->W && !L->revoked,
+          "plain PCM marker support waits for drain");
+    drv_exit();
+    free(pcm);
+
+    /* The firmware never saw the first marker. The replacement still
+     * needs its own preroll, excluding bytes the marker will discard. */
+    if (!fresh_mode(0, 1)) {
+        free(w.data);
+        return;
+    }
+    L = L1();
+    struct wav short_wav = simple_wav(1, 16, 113);
+    drv_play(w.data, w.len, 0);
+    drv_play(short_wav.data, short_wav.len, 0);
+    run_until_finished(1500);
+    pcm = expected(&short_wav, VOL_FULL, 0);
+    check_stream("short PCM replacement before first tick", pcm,
+                 4 * short_wav.frames, 0, L);
+    CHECK(L->starts == 1 && L->credited == L->W && !L->revoked,
+          "short PCM replacement has preroll and drains");
+    drv_exit();
+    free(pcm);
+    free(short_wav.data);
+    free(w.data);
+}
+
+static void test_codec_error_and_refusal(void)
+{
+    static const u8 corrupt[] __attribute__((aligned(4))) = "fLaC";
+    static const u8 unknown[] __attribute__((aligned(4))) = { 0, 0, 0xff, 0xfb, 0x90, 0 };
+    struct lease *L;
+    u8 *opus;
+
+    if (!fresh_codec())
+        return;
+    L = L1();
+    opus = codec_file(CODEC_VORBIS, 200, 0);
+    memcpy(opus + 28, "OpusHead", 8);
+    drv_play(opus, 200, 0);
+    run_until_finished(100);
+    CHECK(L->starts == 0 && V32(V_WRLO) == 0 && L->paused && !hw_enabled,
+          "Opus refused before writing");
+    drv_exit();
+    CHECK(traced("Ogg Opus"), "Opus trace");
+    free(opus);
+
+    if (!fresh_codec())
+        return;
+    L = L1();
+    drv_play(unknown, sizeof(unknown), 0);
+    run_until_finished(100);
+    CHECK(L->starts == 0 && L->paused && !hw_enabled, "unknown file refused");
+    drv_exit();
+    CHECK(traced("unknown file format"), "unknown file refusal traced");
+
+    for (u32 flags = 0; flags <= WHDLAUDF_LOOP; flags++) {
+        u8 *f;
+        size_t before;
+        if (!fresh_codec())
+            return;
+        L = L1();
+        drv_play(corrupt, sizeof(corrupt) - 1, flags);
+        run_until_finished(300);
+        CHECK(L->decode == DECODE_ERROR && L->decode_error == ERROR_CORRUPT &&
+              !hw_enabled && be32(L->ctrl + 20) == 1, "corrupt track finished");
+        run_ms(4000);
+        CHECK(!L->revoked && L->active && finished_count == 1,
+              "decode error preserved the paused lease");
+        f = codec_file(CODEC_FLAC, 105, 0);
+        before = L->outlen;
+        drv_play(f, 105, 0);
+        run_until_finished(300);
+        CHECK(L->decode == DECODE_DRAINED && finished_count == 2,
+              "next file on the same lease after error");
+        check_stream("after error", f, 105, before, L);
+        drv_exit();
+        CHECK(traced("codec decode error 4"), "codec error traced at exit");
+        free(f);
+    }
+}
+
 static void check_zero(const char *what, size_t from, size_t to,
                        const struct lease *L)
 {
@@ -1143,6 +1580,7 @@ static void test_init(void)
           "trace %s", tracelog[0]);
 
     config_default();
+    cfg.codec_firmware = 1;
     cfg.slot_status[1] = 2;
     CHECK(do_init() == 0, "slot 2 after slot 1 busy");
     CHECK(V32(V_SLOT) == 2 && acquire_calls == 2, "slot %u", V32(V_SLOT));
@@ -1203,8 +1641,7 @@ static void test_init(void)
           tab[9] == ctl[C_VOLUME] && tab[10] == ctl[C_IRQ],
           "driver table order");
     CHECK(tab[3] == ctl[C_VARS] + ctl[V_MEM], "memory list pointer");
-    CHECK(!strcmp((char *)blob + tab[2], "wav") && blob[tab[2] + 4] == 0,
-          "extensions");
+    CHECK(!memcmp(driver_extensions(), "wav\0", 5), "legacy extensions");
     CHECK(!strcmp((char *)blob + tab[0], "ZZ9000AX"), "name");
     CHECK(ctl[V_SIZEOF] <= ctl[V_VARSIZE], "variables %u of %u bytes",
           ctl[V_SIZEOF], ctl[V_VARSIZE]);
@@ -1956,6 +2393,12 @@ int main(int argc, char **argv)
     test_irq_filter();
     test_exit_midtrack();
     test_quit_order();
+    test_codec_negotiate();
+    test_codec_formats();
+    test_codec_loop();
+    test_codec_switch();
+    test_pcm_flush();
+    test_codec_error_and_refusal();
     for (i = 2; i < argc; i++)
         test_file(argv[i]);
 
