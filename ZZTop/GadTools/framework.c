@@ -150,6 +150,19 @@ static void vertical_metrics(UWORD tier)
 		max_word(5, gt_layout.font_y / 2);
 }
 
+/* Rows the tallest page declares in its gt_page initialiser (at least the
+ * classic ten); every page shares the window, so the body is sized for it. */
+static UWORD body_rows(void)
+{
+	UWORD rows = 10;
+	UWORD page;
+
+	for (page = 0; page < GT_PAGE_COUNT; page++)
+		if (gt_pages[page]->rows > rows)
+			rows = gt_pages[page]->rows;
+	return rows;
+}
+
 /* Measure the fixed shell against content rather than the full public screen. */
 static void measure_layout(UWORD tier)
 {
@@ -169,7 +182,8 @@ static void measure_layout(UWORD tier)
 	gt_layout.page_width = (WORD)(gt_layout.width - sidebar_width - 12);
 	gt_layout.body_top = (WORD)(gt_layout.border_top +
 		(minimal_layout ? 0 : gt_layout.row_step * 2));
-	gt_layout.body_bottom = (WORD)(gt_layout.body_top + gt_layout.row_step * 10);
+	gt_layout.body_bottom = (WORD)(gt_layout.body_top +
+		gt_layout.row_step * (WORD)body_rows());
 	status_bottom = (WORD)(gt_layout.body_bottom + gt_layout.section_gap + gt_layout.row_height);
 	gt_layout.height = (WORD)(status_bottom + (minimal_layout ? 2 : 4) - gt_layout.border_top);
 	gt_layout.page_height = (WORD)(gt_layout.body_bottom - gt_layout.border_top);
