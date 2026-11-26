@@ -21,9 +21,9 @@ that allows it.
   with a movable VBR, so a 68010 or newer.
 - A ZZ9000 on Zorro III. Zorro II is not supported.
 - Firmware that advertises the audio fabric with source-rate leases
-  (`SDK_CAP_AUDIO_FABRIC`, `SDK_SERVICE_FLAG_AUDIO_FABRIC` and
-  `SDK_SERVICE_FLAG_AUDIO_FABRIC_RATE`) that also accepts the acquire flag
-  `SDK_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED` (bit 2, see `docs/audio-fabric.md`
+  (`ZZ9K_CAP_AUDIO_FABRIC`, `ZZ9K_SERVICE_FLAG_AUDIO_FABRIC` and
+  `ZZ9K_SERVICE_FLAG_AUDIO_FABRIC_RATE`) that also accepts the acquire flag
+  `ZZ9K_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED` (bit 2, see `docs/audio-fabric.md`
   in zz9000-firmware; there is no service flag for it, firmware without it
   answers `BAD_REQUEST` and the driver reports no hardware), and
   `zz9k.library` 2.44 or newer, both from the same release as the drivers.
@@ -93,7 +93,7 @@ a file before it is played.
 
 `waud_init`, with the operating system active, finds the card, checks the
 requirements above and takes a direct-ring lease of the audio fabric:
-`SDK_OP_AUDIO_RING_ACQUIRE` for a 44100 Hz stereo S16LE source (flag
+`ZZ9K_OP_AUDIO_RING_ACQUIRE` for a 44100 Hz stereo S16LE source (flag
 `SOURCE_RATE`), slot 1 and then slot 2. The firmware converts the lease to its
 48 kHz output, so the driver does not resample. The lease, the ring and the
 control block are held until `waud_exit`, which releases the lease with its
@@ -131,7 +131,9 @@ previous one in the ring.
 
 Volume is applied by the driver as `(sample * volume) >> 15`, with a plain
 copy at `$7fff` for 16 bit stereo. Mono is written to both channels, 8 bit is
-converted from unsigned.
+converted from unsigned. The stereo separation of the card (ZZTop setting,
+`audio_separation`) is a DSP stage behind the mixer that joins Paula and the
+playback of the card, so it applies to these tracks as well.
 
 ### Heartbeat
 
@@ -194,9 +196,9 @@ the operating system. WHDLoad has to be started again. The trace file says
 With the WHDLoad option `Trace` the plugin writes messages to the trace file
 during init and exit. At init, `audio: ZZ9000AX: ...` names why the driver was
 not used (no card, Zorro II, INT2 mode missing, `zz9k.library` missing or older
-than 2.44, no audio fabric or no source rate leases in the firmware, no free
-lease, or an unusable grant) or the lease it took (slot, generation, ring
-capacity and addresses). At exit:
+than 2.44, no audio fabric or no source rate leases in the firmware, a firmware
+that refuses `IDLE_PAUSED`, no free lease, or an unusable grant) or the lease it
+took (slot, generation, ring capacity and addresses). At exit:
 
 ```
 audio: ZZ9000AX: tracks 4, refused 1, interrupts 1520, suspend 3, resume 3, lease intact (firmware status 0)
