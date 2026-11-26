@@ -16,7 +16,7 @@ The drivers release includes selected end-user components built from the [`sdk/`
 | `zz9k-cryptobench` | `C:` | Crypto-offload benchmark. |
 | `zz9k-archive` | `C:` | Archive listing, test, and extraction tool, including LHA/LZH paths where firmware supports them. |
 | `aar-run` and `aar-run.info` | `C:` | Reference launcher for trusted ARM apps: it serves an app's files, console, display, audio and input. Its manual installs as `aar-run.guide`. |
-| `ZZPlay` and `ZZPlay.info` | `SYS:Utilities/ZZ9000/` by default | Workbench media player for MPEG-1/2, WebM and animated WebP video and MP3, FLAC and Ogg Vorbis audio, with an ARexx port for scripts. The installer lets you select the parent drawer. |
+| `ZZPlay` and `ZZPlay.info` | `SYS:Utilities/ZZ9000/` by default | Workbench media player for MPEG-1/2 (Program and Transport Streams), WebM and animated WebP video and MP3, FLAC and Ogg Vorbis audio, with an ARexx port for scripts. The installer lets you select the parent drawer. |
 
 ## Build and package
 
@@ -67,7 +67,7 @@ Current generation-2 2 MiB and 4 MiB Zorro II layouts provide a shared 16 KiB CP
 | `zz9k-picture.datatype` | Limited | Limited | Input staging is capped at 24 KiB and output tiles at 32 KiB. The accelerated path requires allocations that fit the remaining window. |
 | `zz9k-archive` streamed decode, test, and extract | Yes | Yes | Input and output share `min(48 KiB, host window)`. A 16 KiB profile starts with 8 KiB chunks and retries a failed pair allocation down to 4 KiB. |
 | Accelerated `amissl.library` | Yes | Yes | Hardware algorithms need a 32-byte host-window probe. Scratch buffers are 16-byte aligned and grow to the requested size. |
-| ZZPlay MPEG Program Stream video/PIP | No | No | Current code accepts only an acknowledged generation-1 PIP layout. A legacy 4 MiB pool of 224 KiB fits 352x288 YUY2 (202,752 bytes) and rejects 640x360 (460,800 bytes). |
+| ZZPlay MPEG Program Stream and Transport Stream video/PIP | No | No | Current code accepts only an acknowledged generation-1 PIP layout. A legacy 4 MiB pool of 224 KiB fits 352x288 YUY2 (202,752 bytes) and rejects 640x360 (460,800 bytes). |
 | `zz9k-inflate`, `zz9k-mp3`, crypto diagnostics, `zz9k-smoke`, and plain `zz9k-jpeg <file>` | No | No | These paths use a legacy default shared allocation. On Zorro II, use adapted clients or `zz9k-jpeg --fb`. |
 
 The host window is shared across clients. Keep firmware, bitstream, SDK payloads, and drivers in one release set. Run `zz9k-info` after boot, confirm that the aperture is active and the layout is acknowledged, then inspect the host-window counters when clients run together.
